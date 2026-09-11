@@ -12,3 +12,6 @@ navidog-core.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 sqlx.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

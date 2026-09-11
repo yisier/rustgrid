@@ -53,8 +53,9 @@ impl Driver for MysqlDriver {
 
 fn map_connect_error(error: sqlx::Error) -> Error {
     if let sqlx::Error::Database(database_error) = &error
-        && let Some(code) = database_error.code()
-        && matches!(code.as_ref(), "1044" | "1045" | "1698")
+        && let Some(mysql_error) =
+            database_error.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
+        && matches!(mysql_error.number(), 1044 | 1045 | 1698)
     {
         return Error::Authentication(error.to_string());
     }

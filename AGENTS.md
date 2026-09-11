@@ -32,6 +32,10 @@ not a later refactor.
 - `cargo check --workspace` / `cargo build`
 - `cargo run -p navidog-app` (produced binary is `navidog`)
 - `cargo test --workspace`
+- Live MySQL integration test (ignored by default): set `NAVIDOG_MYSQL_PASSWORD` (and
+  optionally `NAVIDOG_MYSQL_HOST`/`PORT`/`USER`/`DATABASE`), then
+  `cargo test -p navidog-mysql -- --ignored`. It exercises connect, catalog listing, paging,
+  and the auth-failure mapping against a real server.
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo fmt --all`
 - No `DATABASE_URL` or sqlx offline cache: queries use the **runtime** API (`sqlx::query`,
@@ -75,6 +79,10 @@ above are what make them cheap later — do not build the features early.
 
 ## Gotchas
 
+- `navidog-mysql::map_connect_error` flags authentication failures as
+  `navidog_core::Error::Authentication` by checking `MySqlDatabaseError::number()`
+  (1044/1045/1698) — **not** `DatabaseError::code()`, which returns the SQLSTATE (e.g.
+  `28000`). The app keys its password prompt off this variant.
 - `navidog-mysql::decode_cell` uses sqlx's **checked** `try_get` (which enforces
   `Type::compatible`) for every known type, then falls back to `try_get_unchecked::<Vec<u8>>`
   + UTF-8 for text-encoded types (DECIMAL, JSON) and raw bytes otherwise. Do not reorder to
