@@ -1361,35 +1361,50 @@ impl Render for AppView {
 
 fn render_titlebar() -> impl IntoElement {
     div()
-        .id("titlebar")
         .flex()
         .flex_row()
         .items_center()
-        .justify_between()
         .w_full()
         .h(px(32.0))
         .flex_none()
         .bg(rgb(0x323233))
         .border_b_1()
         .border_color(rgb(0x3c3c3c))
-        .window_control_area(WindowControlArea::Drag)
-        .child(div().px_3().child(t!("app.title").to_string()))
+        .child(
+            div()
+                .id("titlebar-drag")
+                .flex()
+                .flex_row()
+                .items_center()
+                .flex_1()
+                .h_full()
+                .px_3()
+                .window_control_area(WindowControlArea::Drag)
+                .child(t!("app.title").to_string()),
+        )
         .child(
             div()
                 .flex()
                 .flex_row()
                 .items_center()
-                .child(titlebar_button("titlebar-min", "—", WindowControlArea::Min))
-                .child(titlebar_button("titlebar-max", "□", WindowControlArea::Max))
-                .child(titlebar_button(
-                    "titlebar-close",
-                    "✕",
-                    WindowControlArea::Close,
-                )),
+                .h_full()
+                .child(titlebar_button("titlebar-min", "—", |window, _cx| {
+                    window.minimize_window();
+                }))
+                .child(titlebar_button("titlebar-max", "□", |window, _cx| {
+                    window.zoom_window();
+                }))
+                .child(titlebar_button("titlebar-close", "✕", |window, _cx| {
+                    window.remove_window();
+                })),
         )
 }
 
-fn titlebar_button(id: &'static str, label: &str, area: WindowControlArea) -> impl IntoElement {
+fn titlebar_button(
+    id: &'static str,
+    label: &str,
+    action: impl Fn(&mut Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
     div()
         .id(id)
         .flex()
@@ -1398,6 +1413,6 @@ fn titlebar_button(id: &'static str, label: &str, area: WindowControlArea) -> im
         .w(px(40.0))
         .h_full()
         .cursor_pointer()
-        .window_control_area(area)
+        .on_click(move |_event, window, cx| action(window, cx))
         .child(label.to_string())
 }
