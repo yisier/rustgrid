@@ -1,0 +1,41 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/navidog-core",
+    "crates/navidog-mysql",
+    "crates/navidog-config",
+    "crates/navidog-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/yisier/navidog"
+authors = ["yisier"]
+
+[workspace.dependencies]
+navidog-core = { path = "crates/navidog-core" }
+navidog-mysql = { path = "crates/navidog-mysql" }
+navidog-config = { path = "crates/navidog-config" }
+
+async-trait = "0.1"
+chrono = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "mysql", "tls-rustls-ring", "chrono"] }
+rust-i18n = "4"
+directories = "6"
+gpui = "0.2"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

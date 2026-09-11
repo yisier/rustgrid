@@ -1,0 +1,7 @@
+_version: 1
+app.title: "Navidog"
+app.ready: "Ready"
+sidebar.connections: "Connections"
+sidebar.drivers: "Drivers"
+sidebar.no_connections: "No connections yet"
+content.no_table_selected: "Select a table to view its data"

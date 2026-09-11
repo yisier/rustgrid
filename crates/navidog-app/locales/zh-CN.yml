@@ -1,0 +1,7 @@
+_version: 1
+app.title: "Navidog"
+app.ready: "就绪"
+sidebar.connections: "连接"
+sidebar.drivers: "驱动"
+sidebar.no_connections: "暂无连接"
+content.no_table_selected: "请选择要查看数据的表"
