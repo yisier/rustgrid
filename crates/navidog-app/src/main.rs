@@ -46,7 +46,7 @@ fn main() {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
                     title: Some(t!("app.title").to_string().into()),
-                    appears_transparent: false,
+                    appears_transparent: true,
                     ..Default::default()
                 }),
                 ..Default::default()

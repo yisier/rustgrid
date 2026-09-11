@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    Context, FocusHandle, KeyDownEvent, Render, ScrollHandle, SharedString, Window, div,
-    prelude::*, px, rgb, rgba,
+    Context, FocusHandle, KeyDownEvent, Render, ScrollHandle, SharedString, Window,
+    WindowControlArea, div, prelude::*, px, rgb, rgba,
 };
 use navidog_config::ConfigStore;
 use navidog_core::{Connection, ConnectionConfig, DriverRegistry, Error, PageRequest};
@@ -1328,15 +1328,24 @@ impl Render for AppView {
             self.password_focus_pending = false;
         }
 
+        let body = div()
+            .flex()
+            .flex_row()
+            .flex_1()
+            .w_full()
+            .overflow_hidden()
+            .child(self.render_sidebar(cx))
+            .child(self.render_content(cx));
+
         let mut root = div()
             .relative()
             .flex()
-            .flex_row()
+            .flex_col()
             .size_full()
             .bg(rgb(0x1e1e1e))
             .text_color(rgb(0xd4d4d4))
-            .child(self.render_sidebar(cx))
-            .child(self.render_content(cx));
+            .child(render_titlebar())
+            .child(body);
 
         if let Some(form) = self.form.as_ref() {
             root = root.child(self.render_dialog(form, window, cx));
@@ -1348,4 +1357,47 @@ impl Render for AppView {
 
         root
     }
+}
+
+fn render_titlebar() -> impl IntoElement {
+    div()
+        .id("titlebar")
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .w_full()
+        .h(px(32.0))
+        .flex_none()
+        .bg(rgb(0x323233))
+        .border_b_1()
+        .border_color(rgb(0x3c3c3c))
+        .window_control_area(WindowControlArea::Drag)
+        .child(div().px_3().child(t!("app.title").to_string()))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .child(titlebar_button("titlebar-min", "—", WindowControlArea::Min))
+                .child(titlebar_button("titlebar-max", "□", WindowControlArea::Max))
+                .child(titlebar_button(
+                    "titlebar-close",
+                    "✕",
+                    WindowControlArea::Close,
+                )),
+        )
+}
+
+fn titlebar_button(id: &'static str, label: &str, area: WindowControlArea) -> impl IntoElement {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(40.0))
+        .h_full()
+        .cursor_pointer()
+        .window_control_area(area)
+        .child(label.to_string())
 }
