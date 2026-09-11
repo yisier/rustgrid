@@ -10,7 +10,9 @@ mod session;
 
 use std::sync::Arc;
 
-use gpui::{AppContext, Application, Bounds, WindowBounds, WindowOptions, px, size};
+use gpui::{
+    AppContext, Application, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size,
+};
 use navidog_core::DriverRegistry;
 
 use crate::app::AppView;
@@ -42,6 +44,11 @@ fn main() {
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(TitlebarOptions {
+                    title: Some(t!("app.title").to_string().into()),
+                    appears_transparent: false,
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             move |_window, cx| {
