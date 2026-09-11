@@ -56,6 +56,7 @@ pub struct AppView {
     connections: Vec<ConnectionNode>,
     grid: Option<GridState>,
     form: Option<ConnectionForm>,
+    editing: Option<usize>,
     form_focus: FormFocus,
     page_size: u64,
     sidebar_scroll: ScrollHandle,
@@ -89,6 +90,7 @@ impl AppView {
             connections,
             grid: None,
             form: None,
+            editing: None,
             form_focus: FormFocus {
                 name: cx.focus_handle(),
                 host: cx.focus_handle(),
@@ -130,6 +132,74 @@ impl AppView {
         {
             node.expanded = !node.expanded;
         }
+    }
+
+    fn open_new_form(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.editing = None;
+        self.form = Some(ConnectionForm::default());
+        window.focus(&self.form_focus.name);
+        cx.notify();
+    }
+
+    fn open_edit_form(&mut self, index: usize, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let (profile, password) = match self.connections.get(index) {
+            Some(node) => (node.profile.clone(), node.password.clone()),
+            None => return,
+        };
+
+        self.editing = Some(index);
+        self.form = Some(ConnectionForm::from_profile(&profile, password));
+        window.focus(&self.form_focus.name);
+        cx.notify();
+    }
+
+    fn delete_connection(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        if index >= self.connections.len() {
+            return;
+        }
+
+        self.disconnect(index, cx);
+        self.connections.remove(index);
+        self.grid = None;
+
+        if let Some(editing) = self.editing {
+            match editing.cmp(&index) {
+                std::cmp::Ordering::Equal => {
+                    self.editing = None;
+                    self.form = None;
+                }
+                std::cmp::Ordering::Greater => self.editing = Some(editing - 1),
+                std::cmp::Ordering::Less => {}
+            }
+        }
+
+        let profiles: Vec<_> = self
+            .connections
+            .iter()
+            .map(|node| node.profile.clone())
+            .collect();
+        let _ = self.config.save_profiles(&profiles);
+
+        cx.notify();
+    }
+
+    fn cycle_page_size(&mut self, cx: &mut Context<'_, Self>) {
+        const SIZES: [u64; 4] = [50, 100, 200, 500];
+
+        if let Some(grid) = self.grid.as_mut() {
+            let position = SIZES
+                .iter()
+                .position(|size| *size == grid.page_size)
+                .unwrap_or(1);
+            grid.page_size = SIZES[(position + 1) % SIZES.len()];
+            grid.page_index = 0;
+        }
+
+        if let Some(size) = self.grid.as_ref().map(|grid| grid.page_size) {
+            self.page_size = size;
+        }
+
+        self.load_page(cx);
     }
 
     fn connect(&mut self, index: usize, cx: &mut Context<'_, Self>) {
@@ -450,20 +520,34 @@ impl AppView {
             return;
         };
 
-        let profile = form.to_profile();
         let password = if form.password.is_empty() {
             None
         } else {
             Some(form.password.clone())
         };
 
-        self.connections.push(ConnectionNode {
-            profile,
-            password,
-            status: ConnectionStatus::Disconnected,
-            databases: Loadable::Idle,
-            expanded: false,
-        });
+        let index = match self.editing.take() {
+            Some(index) => {
+                if let Some(node) = self.connections.get_mut(index) {
+                    let mut profile = form.to_profile();
+                    profile.id = node.profile.id.clone();
+                    node.profile = profile;
+                    node.password = password;
+                }
+                self.disconnect(index, cx);
+                index
+            }
+            None => {
+                self.connections.push(ConnectionNode {
+                    profile: form.to_profile(),
+                    password,
+                    status: ConnectionStatus::Disconnected,
+                    databases: Loadable::Idle,
+                    expanded: false,
+                });
+                self.connections.len() - 1
+            }
+        };
 
         let profiles: Vec<_> = self
             .connections
@@ -472,7 +556,6 @@ impl AppView {
             .collect();
         let _ = self.config.save_profiles(&profiles);
 
-        let index = self.connections.len() - 1;
         self.connect(index, cx);
         cx.notify();
     }
@@ -537,9 +620,7 @@ impl AppView {
                             .rounded_md()
                             .bg(rgb(0x3a3d41))
                             .on_click(cx.listener(|this, _event, window, cx| {
-                                this.form = Some(ConnectionForm::default());
-                                window.focus(&this.form_focus.name);
-                                cx.notify();
+                                this.open_new_form(window, cx);
                             }))
                             .child(t!("sidebar.new_connection").to_string()),
                     ),
@@ -581,39 +662,37 @@ impl AppView {
             _ => t!("connection.connect").to_string(),
         };
 
-        let row = div()
+        let line = div()
             .id(SharedString::from(format!("conn-{index}")))
             .flex()
             .flex_row()
             .items_center()
-            .justify_between()
             .gap_1()
             .px_1()
             .py_1()
             .rounded_md()
             .cursor_pointer()
+            .overflow_hidden()
             .on_click(cx.listener(move |this, _event, _window, _cx| this.toggle_expand(index)))
             .child(
                 div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_1()
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .w(px(8.0))
-                            .h(px(8.0))
-                            .flex_none()
-                            .rounded_full()
-                            .bg(rgb(dot)),
-                    )
-                    .child(div().overflow_hidden().child(node.profile.name.clone())),
+                    .w(px(8.0))
+                    .h(px(8.0))
+                    .flex_none()
+                    .rounded_full()
+                    .bg(rgb(dot)),
             )
+            .child(div().overflow_hidden().child(node.profile.name.clone()));
+
+        let actions = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .px_1()
             .child(
                 div()
                     .id(SharedString::from(format!("conn-btn-{index}")))
-                    .flex_none()
                     .px_2()
                     .py_1()
                     .rounded_md()
@@ -623,7 +702,35 @@ impl AppView {
                         this.toggle_connection(index, cx);
                     }))
                     .child(button_label),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("conn-edit-{index}")))
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(0x3a3d41))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _event, window, cx| {
+                        this.open_edit_form(index, window, cx);
+                    }))
+                    .child(t!("connection.edit").to_string()),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("conn-del-{index}")))
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(0x3a3d41))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.delete_connection(index, cx);
+                    }))
+                    .child(t!("connection.delete").to_string()),
             );
+
+        let top = div().flex().flex_col().child(line).child(actions);
 
         let mut sub = div().flex().flex_col().pl_4();
 
@@ -648,7 +755,7 @@ impl AppView {
             }
         }
 
-        div().flex().flex_col().gap_1().child(row).child(sub)
+        div().flex().flex_col().gap_1().child(top).child(sub)
     }
 
     fn render_database(
@@ -865,6 +972,19 @@ impl AppView {
                             .bg(rgb(0x3a3d41))
                             .on_click(cx.listener(|this, _event, _window, cx| this.refresh(cx)))
                             .child(t!("grid.refresh").to_string()),
+                    )
+                    .child(
+                        div()
+                            .id("grid-page-size")
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .bg(rgb(0x3a3d41))
+                            .on_click(
+                                cx.listener(|this, _event, _window, cx| this.cycle_page_size(cx)),
+                            )
+                            .child(format!("{}: {}", t!("grid.page_size"), grid.page_size)),
                     ),
             )
     }
@@ -875,6 +995,12 @@ impl AppView {
         window: &Window,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
+        let title = if self.editing.is_some() {
+            t!("form.edit_title")
+        } else {
+            t!("form.title")
+        };
+
         div()
             .absolute()
             .inset_0()
@@ -892,7 +1018,7 @@ impl AppView {
                     .p_4()
                     .rounded_md()
                     .bg(rgb(0x2d2d30))
-                    .child(div().text_xl().child(t!("form.title").to_string()))
+                    .child(div().text_xl().child(title.to_string()))
                     .child(self.render_field(
                         FormField::Name,
                         t!("form.name").to_string(),

@@ -53,6 +53,17 @@ impl Default for ConnectionForm {
 }
 
 impl ConnectionForm {
+    pub fn from_profile(profile: &ConnectionProfile, password: Option<String>) -> Self {
+        Self {
+            name: profile.name.clone(),
+            host: profile.host.clone(),
+            port: profile.port.to_string(),
+            username: profile.username.clone(),
+            password: password.unwrap_or_default(),
+            database: profile.database.clone().unwrap_or_default(),
+        }
+    }
+
     pub fn value(&self, field: FormField) -> &str {
         match field {
             FormField::Name => &self.name,
