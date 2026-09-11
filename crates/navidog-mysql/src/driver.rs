@@ -45,8 +45,19 @@ impl Driver for MysqlDriver {
             .max_connections(5)
             .connect_with(options)
             .await
-            .map_err(|error| Error::Connection(error.to_string()))?;
+            .map_err(map_connect_error)?;
 
         Ok(Box::new(MysqlConnection::new(pool)))
     }
+}
+
+fn map_connect_error(error: sqlx::Error) -> Error {
+    if let sqlx::Error::Database(database_error) = &error
+        && let Some(code) = database_error.code()
+        && matches!(code.as_ref(), "1044" | "1045" | "1698")
+    {
+        return Error::Authentication(error.to_string());
+    }
+
+    Error::Connection(error.to_string())
 }

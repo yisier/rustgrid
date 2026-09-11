@@ -49,6 +49,11 @@ impl FormFocus {
     }
 }
 
+struct PasswordPrompt {
+    index: usize,
+    password: String,
+}
+
 pub struct AppView {
     registry: Arc<DriverRegistry>,
     config: Arc<ConfigStore>,
@@ -57,6 +62,9 @@ pub struct AppView {
     grid: Option<GridState>,
     form: Option<ConnectionForm>,
     editing: Option<usize>,
+    password_prompt: Option<PasswordPrompt>,
+    password_focus: FocusHandle,
+    password_focus_pending: bool,
     form_focus: FormFocus,
     page_size: u64,
     sidebar_scroll: ScrollHandle,
@@ -91,6 +99,9 @@ impl AppView {
             grid: None,
             form: None,
             editing: None,
+            password_prompt: None,
+            password_focus: cx.focus_handle(),
+            password_focus_pending: false,
             form_focus: FormFocus {
                 name: cx.focus_handle(),
                 host: cx.focus_handle(),
@@ -253,8 +264,19 @@ impl AppView {
                         view.load_databases(index, cx);
                     }
                     Err(error) => {
+                        let authentication = matches!(&error, Error::Authentication(_));
+                        let message = error.to_string();
+
                         if let Some(node) = view.connections.get_mut(index) {
-                            node.status = ConnectionStatus::Failed(error.to_string());
+                            node.status = ConnectionStatus::Failed(message);
+                        }
+
+                        if authentication {
+                            view.password_prompt = Some(PasswordPrompt {
+                                index,
+                                password: String::new(),
+                            });
+                            view.password_focus_pending = true;
                         }
                     }
                 }
@@ -579,6 +601,57 @@ impl AppView {
             FormAction::FocusPrev => window.focus(self.form_focus.previous(field)),
         }
 
+        cx.notify();
+    }
+
+    fn password_key(&mut self, event: &KeyDownEvent, cx: &mut Context<'_, Self>) {
+        let mut submit = false;
+
+        if let Some(prompt) = self.password_prompt.as_mut() {
+            let keystroke = &event.keystroke;
+            if keystroke.modifiers.control || keystroke.modifiers.platform {
+                return;
+            }
+
+            match keystroke.key.as_str() {
+                "backspace" => {
+                    prompt.password.pop();
+                }
+                "space" => prompt.password.push(' '),
+                "enter" => submit = true,
+                _ => {
+                    if let Some(text) = keystroke.key_char.as_ref() {
+                        prompt.password.push_str(text);
+                    }
+                }
+            }
+        }
+
+        if submit {
+            self.submit_password(cx);
+        }
+
+        cx.notify();
+    }
+
+    fn submit_password(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(prompt) = self.password_prompt.take() else {
+            return;
+        };
+
+        let index = prompt.index;
+        let password = if prompt.password.is_empty() {
+            None
+        } else {
+            Some(prompt.password)
+        };
+
+        if let Some(node) = self.connections.get_mut(index) {
+            node.password = password;
+            node.status = ConnectionStatus::Disconnected;
+        }
+
+        self.connect(index, cx);
         cx.notify();
     }
 
@@ -989,6 +1062,102 @@ impl AppView {
             )
     }
 
+    fn render_password_prompt(
+        &self,
+        prompt: &PasswordPrompt,
+        window: &Window,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
+        let name = self
+            .connections
+            .get(prompt.index)
+            .map(|node| node.profile.name.clone())
+            .unwrap_or_default();
+        let title = format!("{}: {}", t!("password.title"), name);
+        let masked = "*".repeat(prompt.password.chars().count());
+        let shown = if self.password_focus.is_focused(window) {
+            format!("{masked}|")
+        } else {
+            masked
+        };
+        let focus_handle = self.password_focus.clone();
+
+        div()
+            .absolute()
+            .inset_0()
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x00000099))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .w(px(360.0))
+                    .p_4()
+                    .rounded_md()
+                    .bg(rgb(0x2d2d30))
+                    .child(div().text_xl().child(title))
+                    .child(
+                        div()
+                            .id("password-field")
+                            .track_focus(&self.password_focus)
+                            .cursor_text()
+                            .on_key_down(cx.listener(|this, event, _window, cx| {
+                                this.password_key(event, cx);
+                            }))
+                            .on_click(cx.listener(move |_this, _event, window, _cx| {
+                                window.focus(&focus_handle);
+                            }))
+                            .h(px(28.0))
+                            .flex()
+                            .items_center()
+                            .px_2()
+                            .rounded_md()
+                            .bg(rgb(0x1e1e1e))
+                            .border_1()
+                            .border_color(rgb(0x3c3c3c))
+                            .child(shown),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id("password-cancel")
+                                    .cursor_pointer()
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(rgb(0x3a3d41))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.password_prompt = None;
+                                        cx.notify();
+                                    }))
+                                    .child(t!("form.cancel").to_string()),
+                            )
+                            .child(
+                                div()
+                                    .id("password-ok")
+                                    .cursor_pointer()
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(rgb(0x0e639c))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.submit_password(cx);
+                                    }))
+                                    .child(t!("form.ok").to_string()),
+                            ),
+                    ),
+            )
+    }
+
     fn render_dialog(
         &self,
         form: &ConnectionForm,
@@ -1154,6 +1323,11 @@ impl AppView {
 
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        if self.password_focus_pending {
+            window.focus(&self.password_focus);
+            self.password_focus_pending = false;
+        }
+
         let mut root = div()
             .relative()
             .flex()
@@ -1166,6 +1340,10 @@ impl Render for AppView {
 
         if let Some(form) = self.form.as_ref() {
             root = root.child(self.render_dialog(form, window, cx));
+        }
+
+        if let Some(prompt) = self.password_prompt.as_ref() {
+            root = root.child(self.render_password_prompt(prompt, window, cx));
         }
 
         root

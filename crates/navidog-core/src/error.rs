@@ -8,6 +8,9 @@ pub enum Error {
     #[error("connection failed: {0}")]
     Connection(String),
 
+    #[error("authentication failed: {0}")]
+    Authentication(String),
+
     #[error("query failed: {0}")]
     Query(String),
 
