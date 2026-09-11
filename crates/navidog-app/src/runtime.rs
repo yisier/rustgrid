@@ -1,3 +1,5 @@
+use std::future::Future;
+
 pub struct Runtime {
     inner: tokio::runtime::Runtime,
 }
@@ -17,8 +19,11 @@ impl Runtime {
         Self { inner }
     }
 
-    #[allow(dead_code)]
-    pub fn handle(&self) -> tokio::runtime::Handle {
-        self.inner.handle().clone()
+    pub fn spawn<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.inner.handle().spawn(future)
     }
 }

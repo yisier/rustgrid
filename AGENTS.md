@@ -11,7 +11,8 @@ not a later refactor.
   **No sqlx / GPUI / OS dependencies here.**
 - `crates/navidog-mysql` — the only compiled-in driver; implements the core traits with sqlx.
 - `crates/navidog-config` — versioned profile storage in the OS config dir (`connections.json`).
-- `crates/navidog-app` — GPUI binary `navidog` (`src/main.rs`), UI in `src/app.rs`, locale
+- `crates/navidog-app` — GPUI binary `navidog`: `src/app.rs` (view/render), `src/session.rs`
+  (UI state), `src/form.rs` (connection form), `src/runtime.rs` (tokio bridge), locale
   files in `locales/`.
 - The root `Cargo.toml` owns all versions under `[workspace.dependencies]`; member crates use
   `<dep>.workspace = true`. Add new dependencies there, not inline in a member.
@@ -82,6 +83,9 @@ above are what make them cheap later — do not build the features early.
 - sqlx 0.9's `sqlx::query` only accepts `&'static str` (the `SqlSafeStr` bound). A
   dynamically built query must be wrapped: `sqlx::query(sqlx::AssertSqlSafe(sql))`. Keep
   identifiers escaped (`quote_identifier`) and use bind parameters for all values.
+- DB work is tokio-based but gpui's executor is not tokio. Inside `cx.spawn`, run sqlx
+  futures through `Runtime::spawn` and `.await` the returned `JoinHandle` (see
+  `app.rs`). Awaiting sqlx directly in a gpui task panics with "there is no reactor running".
 - **Windows needs a linker and a C compiler** (sqlx's `ring`). Install MSVC Build Tools for
   the default `x86_64-pc-windows-msvc` toolchain, or use the GNU toolchain with MinGW-w64 on
   `PATH` (`RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-gnu`,
