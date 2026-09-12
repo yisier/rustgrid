@@ -1,6 +1,5 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use gpui::KeyDownEvent;
 use navidog_core::{ConnectionProfile, DriverId};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -22,20 +21,13 @@ pub const FORM_FIELDS: [FormField; 6] = [
     FormField::Database,
 ];
 
-pub enum FormAction {
-    Changed,
-    Submit,
-    FocusNext,
-    FocusPrev,
-    Ignore,
-}
-
 pub struct ConnectionForm {
     pub name: String,
     pub host: String,
     pub port: String,
     pub username: String,
     pub password: String,
+    pub save_password: bool,
     pub database: String,
 }
 
@@ -47,19 +39,25 @@ impl Default for ConnectionForm {
             port: "3306".to_string(),
             username: "root".to_string(),
             password: String::new(),
+            save_password: true,
             database: String::new(),
         }
     }
 }
 
 impl ConnectionForm {
-    pub fn from_profile(profile: &ConnectionProfile, password: Option<String>) -> Self {
+    pub fn from_profile(
+        profile: &ConnectionProfile,
+        password: Option<String>,
+        password_saved: bool,
+    ) -> Self {
         Self {
             name: profile.name.clone(),
             host: profile.host.clone(),
             port: profile.port.to_string(),
             username: profile.username.clone(),
             password: password.unwrap_or_default(),
+            save_password: password_saved,
             database: profile.database.clone().unwrap_or_default(),
         }
     }
@@ -75,48 +73,15 @@ impl ConnectionForm {
         }
     }
 
-    pub fn value_mut(&mut self, field: FormField) -> &mut String {
-        match field {
+    pub fn set_value(&mut self, field: FormField, value: String) {
+        *match field {
             FormField::Name => &mut self.name,
             FormField::Host => &mut self.host,
             FormField::Port => &mut self.port,
             FormField::Username => &mut self.username,
             FormField::Password => &mut self.password,
             FormField::Database => &mut self.database,
-        }
-    }
-
-    pub fn apply_key(&mut self, field: FormField, event: &KeyDownEvent) -> FormAction {
-        let keystroke = &event.keystroke;
-        if keystroke.modifiers.control || keystroke.modifiers.platform {
-            return FormAction::Ignore;
-        }
-
-        match keystroke.key.as_str() {
-            "backspace" => {
-                self.value_mut(field).pop();
-                FormAction::Changed
-            }
-            "space" => {
-                self.value_mut(field).push(' ');
-                FormAction::Changed
-            }
-            "enter" => FormAction::Submit,
-            "tab" => {
-                if keystroke.modifiers.shift {
-                    FormAction::FocusPrev
-                } else {
-                    FormAction::FocusNext
-                }
-            }
-            _ => match keystroke.key_char.as_ref() {
-                Some(text) => {
-                    self.value_mut(field).push_str(text);
-                    FormAction::Changed
-                }
-                None => FormAction::Ignore,
-            },
-        }
+        } = value;
     }
 
     pub fn to_profile(&self) -> ConnectionProfile {

@@ -10,10 +10,13 @@ not a later refactor.
   (`CellValue`, `ConnectionProfile`, `TablePage`, ...), `Error`, `DriverRegistry`.
   **No sqlx / GPUI / OS dependencies here.**
 - `crates/navidog-mysql` — the only compiled-in driver; implements the core traits with sqlx.
-- `crates/navidog-config` — versioned profile storage in the OS config dir (`connections.json`).
-- `crates/navidog-app` — GPUI binary `navidog`: `src/app.rs` (view/render), `src/session.rs`
-  (UI state), `src/form.rs` (connection form), `src/runtime.rs` (tokio bridge), locale
-  files in `locales/`.
+- `crates/navidog-config` — versioned settings/profiles plus encrypted secret storage in the
+  OS config dir (`connections.json`, `settings.json`, `secrets.json`).
+- `crates/navidog-app` — GPUI binary `navidog`: `src/app.rs` (the entire view/render layer,
+  including the custom titlebar, toolbar, dialogs and context menus), `src/session.rs`
+  (UI state), `src/form.rs` (connection form), `src/theme.rs` (light/dark palettes),
+  `src/assets.rs` (embedded asset loader for `assets/`), `src/runtime.rs` (tokio bridge),
+  locales in `locales/`.
 - The root `Cargo.toml` owns all versions under `[workspace.dependencies]`; member crates use
   `<dep>.workspace = true`. Add new dependencies there, not inline in a member.
 
@@ -26,6 +29,7 @@ not a later refactor.
 - MySQL: **sqlx 0.9**, `default-features = false`, only features
   `runtime-tokio`, `mysql`, `tls-rustls-ring`, `chrono`.
 - i18n: **rust-i18n 4**. Config dir: **directories 6**.
+- Stored secrets: **chacha20poly1305 0.11** + **base64 0.22** (XChaCha20-Poly1305).
 
 ## Commands
 
@@ -55,8 +59,49 @@ touching UI code.
 - **Internationalization.** Route every user-facing string through `t!`. Keys live in
   `crates/navidog-app/locales/{en,zh-CN}.yml` and must be added to **all** locale files.
   `t!` returns `Cow<'_, str>`; call `.to_string()` before handing it to a gpui element.
-- **Config storage.** Use `navidog_config::ConfigStore`; bump `CURRENT_VERSION` and extend
-  `migrate()` when the on-disk schema changes.
+- **Config storage.** Use `navidog_config::ConfigStore`. It owns three files under the OS
+  config dir: `connections.json` (`CURRENT_VERSION`), `settings.json` (`SETTINGS_VERSION`),
+  and encrypted `secrets.json` + `secret.key`. Bump the matching version and extend `migrate()`
+  when a schema changes. **Passwords never live in a profile** — they are keyed by profile
+  `id` and stored encrypted (see Gotchas).
+
+## UI conventions
+
+- **Windows classic desktop look.** The frame is drawn entirely by the app in the style of a
+  classic Win32/Navicat window: a custom 32px titlebar (`render_titlebar` / `titlebar_button`),
+  a menu bar, a command toolbar, then the connection tree + content pane. The native titlebar
+  is suppressed (`TitlebarOptions { appears_transparent: true }` in `main.rs`); dragging uses
+  `WindowControlArea::Drag`, and min/max/close call `window.minimize_window()`,
+  `window.zoom_window()`, `window.remove_window()`. Keep metrics square and compact — do not
+  introduce rounded/modern widgets.
+- **Colors come from `Theme`** (`src/theme.rs`), resolved from `ThemeSetting` +
+  `window.appearance()` on every `render`. Add new colors to **both** `Theme::light()` and
+  `Theme::dark()` and reference them as `rgb(theme.field)`; don't hardcode palette values in
+  `app.rs` (the one-off dialog-close hover reds are legacy exceptions).
+- **Icons are embedded assets.** Register every new SVG in `Assets::load` (`src/assets.rs`) and
+  load it with `svg().path("icons/foo.svg")`; bitmaps use
+  `img(ImageSource::Resource(Resource::Embedded("logo.png".into())))`. An unregistered path
+  fails to load silently.
+- **Buttons are unified.** Every button must go through `AppView::win_button` (or
+  `AppView::dialog_button`) with a `ButtonKind` (`Normal`, `Default`, `Selected`, `Disabled`)
+  to keep the Windows/Navicat look: square corners, `button_bg` fill, a 1px border
+  (`button_border`, or `button_default_border` for the default/selected button), `theme.text`,
+  and a hover of `button_hover_bg` + accent border. Do **not** hand-roll one-off button `div`s,
+  rounded corners, or solid `primary` fills. Confirm buttons use `ButtonKind::Default`; toggles
+  such as theme/language use `ButtonKind::Selected`.
+- **Dialogs are app-drawn overlays, not native windows.** A modal is an `absolute inset-0`
+  overlay (`bg(rgba(theme.overlay))`) wrapping a centered frame: a 30px titlebar with an icon +
+  title + `dialog_close_button`, a `dialog_face` body, and a right-aligned button row. Tabs are
+  plain square buttons (active: `dialog_face` bg + top/left/right border only, so it merges with
+  the page; inactive: `button_bg` + full border). Inputs/combos stay `input_bg`.
+- **Toolbar/tab items are flat, not push buttons.** The main toolbar
+  (`AppView::render_main_tab`) and the object toolbar (`AppView::toolbar_item`) are borderless
+  icon+label items with a hover highlight and thin `toolbar_separator`s between them — do
+  **not** style them with `win_button` or borders. `win_button` is for dialog push buttons only.
+- Keep dialog controls compact: 12px text, ~24px-high buttons, square text fields.
+- Embed bitmap images with `img(ImageSource::Resource(Resource::Embedded("name".into())))`.
+  Calling `img("name")` treats the bare filename as a **URI** and fails with
+  `Failed to load asset ... loading image asset from "name"`.
 
 ## Dependency policy
 
@@ -65,17 +110,20 @@ touching UI code.
 - Verify a crate's maturity before adopting it — prefer widely used, actively maintained crates.
 - Keep the dependency tree small (see Gotchas).
 
-## Scope — phase 1 (do not exceed)
+## Scope (do not exceed)
 
-Strictly follow Navicat's UI layout. Only these features:
+Strictly follow Navicat's UI layout. Implemented today:
 
-1. Database connection management (create connection, connect/disconnect)
-2. List all databases of the connected MySQL server
-3. Per database, list all tables and views
-4. Show a selected table's data in a grid/table view with **pagination** — display only, **no editing** yet
+1. Connection management: create/edit/delete, connect/disconnect, password prompt
+2. Enumerate databases; create/edit/delete a database (charset + collation) and edit defaults
+3. Per database, list tables and views
+4. Show a selected table's data in a grid with **pagination** — display only, **no editing** yet
 
-Do not implement other database engines yet or edit-in-grid functionality. The abstractions
-above are what make them cheap later — do not build the features early.
+Still out of scope: editing data in the grid, a second database engine, and the disabled
+placeholder UI (the `Functions`/`Users`/`Queries`/`Backups` main tabs and the
+`Design/New/Delete Table`, `Import/Export` toolbar buttons are deliberate stubs — leave them
+disabled unless asked). The abstractions above are what make more engines cheap later — do not
+build those features early.
 
 ## Gotchas
 
@@ -91,15 +139,25 @@ above are what make them cheap later — do not build the features early.
 - sqlx 0.9's `sqlx::query` only accepts `&'static str` (the `SqlSafeStr` bound). A
   dynamically built query must be wrapped: `sqlx::query(sqlx::AssertSqlSafe(sql))`. Keep
   identifiers escaped (`quote_identifier`) and use bind parameters for all values.
+- MySQL DDL (`CREATE`/`DROP`/`ALTER DATABASE`) **must** run through the text protocol:
+  `sqlx::raw_sql(sqlx::AssertSqlSafe(sql)).execute(&pool)`. Using `sqlx::query` prepares the
+  statement and MySQL rejects it with `1295 ... not supported in the prepared statement
+  protocol yet`. Reserve `sqlx::query` for parameterized DML/`SELECT`.
 - DB work is tokio-based but gpui's executor is not tokio. Inside `cx.spawn`, run sqlx
   futures through `Runtime::spawn` and `.await` the returned `JoinHandle` (see
   `app.rs`). Awaiting sqlx directly in a gpui task panics with "there is no reactor running".
-- **Windows needs a linker and a C compiler** (sqlx's `ring`). Install MSVC Build Tools for
-  the default `x86_64-pc-windows-msvc` toolchain, or use the GNU toolchain with MinGW-w64 on
-  `PATH` (`RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-gnu`,
-  `CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=gcc`, `CC=gcc`).
-- Keep gpui usage close to the verified shape in `crates/navidog-app/src/app.rs`
-  (`Application::new().run`, `cx.open_window`, `impl Render`).
+- Stored passwords are encrypted with XChaCha20-Poly1305 (`navidog-config/src/secrets.rs`);
+  `secrets.json` holds ciphertext keyed by profile `id` and `secret.key` holds the key. The
+  profile JSON must stay password-free (a test asserts the plaintext never hits disk).
+- **Windows needs a linker and a C compiler** (sqlx's `ring`). On this machine the MSVC
+  `link.exe` is **not** installed, so always build with the GNU toolchain by prepending
+  `RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-gnu`,
+  `CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=gcc`, `CC=gcc` (MinGW-w64 `gcc` is on `PATH`).
+  A plain `cargo build` fails with `linker link.exe not found`. With the GNU toolchain the
+  host *is* the GNU target, so the binary lands at `target/debug/navidog.exe` (not under a
+  triple-named subdirectory).
+- Keep gpui usage close to the verified shape in `crates/navidog-app/src/app.rs` /
+  `main.rs` (`Application::new().with_assets(Assets).run`, `cx.open_window`, `impl Render`).
 - **Cross-platform** (Windows/macOS/Linux). Avoid OS-only APIs; gate platform-specific code
   behind `#[cfg(target_os = ...)]`; watch per-OS native deps (e.g. Linux system libraries).
 - **Small install size is a hard requirement.** The release profile already sets `lto`,

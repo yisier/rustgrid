@@ -29,5 +29,29 @@ pub trait Connection: Send + Sync {
     async fn fetch_page(&self, database: &str, table: &str, page: PageRequest)
     -> Result<TablePage>;
 
+    async fn create_database(&self, name: &str) -> Result<()>;
+
+    async fn drop_database(&self, name: &str) -> Result<()>;
+
+    async fn database_defaults(&self, name: &str) -> Result<(String, String)>;
+
+    async fn character_sets(&self) -> Result<Vec<String>>;
+
+    async fn collations(&self) -> Result<Vec<String>>;
+
+    async fn alter_database_defaults(
+        &self,
+        name: &str,
+        charset: Option<&str>,
+        collation: Option<&str>,
+    ) -> Result<()>;
+
+    fn alter_database_sql(
+        &self,
+        name: &str,
+        charset: Option<&str>,
+        collation: Option<&str>,
+    ) -> String;
+
     async fn close(&self) -> Result<()>;
 }

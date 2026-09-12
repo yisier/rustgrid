@@ -4,9 +4,11 @@ extern crate rust_i18n;
 rust_i18n::i18n!("locales", fallback = "en");
 
 mod app;
+mod assets;
 mod form;
 mod runtime;
 mod session;
+mod theme;
 
 use std::sync::Arc;
 
@@ -16,6 +18,7 @@ use gpui::{
 use navidog_core::DriverRegistry;
 
 use crate::app::AppView;
+use crate::assets::Assets;
 use crate::runtime::Runtime;
 
 fn main() {
@@ -35,7 +38,10 @@ fn main() {
     );
     let runtime = Arc::new(Runtime::new());
 
-    Application::new().run(move |cx| {
+    let settings = config.load_settings().unwrap_or_default();
+    rust_i18n::set_locale(settings.language.locale());
+
+    Application::new().with_assets(Assets).run(move |cx| {
         let bounds = Bounds::centered(None, size(px(1100.0), px(720.0)), cx);
         let registry = registry.clone();
         let config = config.clone();

@@ -33,6 +33,8 @@ sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio",
 rust-i18n = "4"
 directories = "6"
 gpui = "0.2"
+chacha20poly1305 = "0.11"
+base64 = "0.22"
 
 [profile.release]
 opt-level = "z"
