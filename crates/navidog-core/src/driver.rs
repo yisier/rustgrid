@@ -2,7 +2,8 @@ use async_trait::async_trait;
 
 use crate::error::Result;
 use crate::model::{
-    ColumnInfo, ConnectionConfig, DatabaseInfo, DriverId, PageRequest, TableInfo, TablePage,
+    ColumnInfo, ConnectionConfig, DatabaseInfo, DriverId, PageRequest, RowUpdate, TableInfo,
+    TablePage,
 };
 
 #[async_trait]
@@ -28,6 +29,8 @@ pub trait Connection: Send + Sync {
 
     async fn fetch_page(&self, database: &str, table: &str, page: PageRequest)
     -> Result<TablePage>;
+
+    async fn update_rows(&self, database: &str, table: &str, updates: &[RowUpdate]) -> Result<()>;
 
     async fn create_database(&self, name: &str) -> Result<()>;
 

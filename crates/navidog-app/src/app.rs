@@ -3,21 +3,23 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::{Datelike, NaiveDate, NaiveDateTime, Timelike};
+
 use gpui::{
     AnyElement, App, BoxShadow, ClickEvent, ClipboardItem, Context, Div, FocusHandle, FontWeight,
-    HighlightStyle, ImageSource, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Point, Render, Resource, ScrollHandle, SharedString, Stateful,
-    StyledText, Svg, TextLayout, Window, WindowControlArea, deferred, div, img, prelude::*, px,
-    rgb, rgba, svg,
+    HighlightStyle, ImageSource, KeyDownEvent, ListHorizontalSizingBehavior, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Resource, ScrollHandle,
+    SharedString, Stateful, StyledText, Subscription, Svg, TextLayout, UniformListScrollHandle,
+    Window, WindowControlArea, deferred, div, img, prelude::*, px, rgb, rgba, svg, uniform_list,
 };
 use navidog_config::{AppSettings, ConfigStore, LanguageSetting, ThemeSetting};
-use navidog_core::{Connection, ConnectionConfig, DriverRegistry, Error, PageRequest};
+use navidog_core::{Connection, ConnectionConfig, DriverRegistry, Error, PageRequest, RowUpdate};
 
 use crate::form::{ConnectionForm, FORM_FIELDS, FormField};
 use crate::runtime::Runtime;
 use crate::session::{
-    Category, CategoryExpansion, ConnectionNode, ConnectionStatus, DatabaseNode, GridState,
-    Loadable,
+    Category, CategoryExpansion, CellSelection, ConnectionNode, ConnectionStatus, DatabaseNode,
+    GridState, Loadable, compute_column_widths,
 };
 use crate::theme::Theme;
 
@@ -116,6 +118,26 @@ struct ObjectList {
     selected: Option<String>,
 }
 
+struct CellEditor {
+    row: usize,
+    col: usize,
+    cells: Vec<(usize, usize)>,
+    value: String,
+}
+
+struct DatePicker {
+    row: usize,
+    col: usize,
+    cells: Vec<(usize, usize)>,
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+    has_time: bool,
+}
+
 #[derive(Clone, Copy, Default)]
 struct FieldSelection {
     anchor: usize,
@@ -158,13 +180,19 @@ const MAIN_TABS: [(MainTab, &str, &str); 6] = [
 const PANEL_WIDTH: f32 = 620.0;
 const FIELD_LABEL_WIDTH: f32 = 96.0;
 const FIELD_TEXT_LEFT: f32 = 16.0 + FIELD_LABEL_WIDTH + 8.0 + 8.0;
+const OBJECT_ROW_HEIGHT: f32 = 20.0;
+const OBJECT_BOTTOM_MARGIN: f32 = 20.0;
+const GRID_ROW_HEIGHT: f32 = 24.0;
+const GRID_COLUMN_WIDTH: f32 = 120.0;
 
 pub struct AppView {
     registry: Arc<DriverRegistry>,
     config: Arc<ConfigStore>,
     runtime: Arc<Runtime>,
     connections: Vec<ConnectionNode>,
-    grid: Option<GridState>,
+    grids: Vec<GridState>,
+    active_grid: Option<usize>,
+    next_grid_id: u64,
     form: Option<ConnectionForm>,
     editing: Option<usize>,
     test_status: TestStatus,
@@ -195,7 +223,22 @@ pub struct AppView {
     form_focus: FormFocus,
     page_size: u64,
     sidebar_scroll: ScrollHandle,
-    grid_scroll: ScrollHandle,
+    grid_hscroll: ScrollHandle,
+    grid_list_scroll: UniformListScrollHandle,
+    object_scroll: ScrollHandle,
+    page_input: String,
+    page_input_focus: FocusHandle,
+    page_input_focused: bool,
+    object_search: String,
+    object_search_focus: FocusHandle,
+    object_search_focused: bool,
+    grid_focus: FocusHandle,
+    selecting_cells: bool,
+    cell_editor: Option<CellEditor>,
+    cell_editor_focus: FocusHandle,
+    cell_editor_focused: bool,
+    date_picker: Option<DatePicker>,
+    window_bounds_subscription: Option<Subscription>,
     theme_setting: ThemeSetting,
     theme: Theme,
     language: LanguageSetting,
@@ -238,7 +281,9 @@ impl AppView {
             config,
             runtime,
             connections,
-            grid: None,
+            grids: Vec::new(),
+            active_grid: None,
+            next_grid_id: 0,
             form: None,
             editing: None,
             test_status: TestStatus::Idle,
@@ -274,9 +319,24 @@ impl AppView {
                 password: cx.focus_handle(),
                 database: cx.focus_handle(),
             },
-            page_size: 100,
+            page_size: 1000,
             sidebar_scroll: ScrollHandle::new(),
-            grid_scroll: ScrollHandle::new(),
+            grid_hscroll: ScrollHandle::new(),
+            grid_list_scroll: UniformListScrollHandle::new(),
+            object_scroll: ScrollHandle::new(),
+            page_input: "1".to_string(),
+            page_input_focus: cx.focus_handle(),
+            page_input_focused: false,
+            object_search: String::new(),
+            object_search_focus: cx.focus_handle(),
+            object_search_focused: false,
+            grid_focus: cx.focus_handle(),
+            selecting_cells: false,
+            cell_editor: None,
+            cell_editor_focus: cx.focus_handle(),
+            cell_editor_focused: false,
+            date_picker: None,
+            window_bounds_subscription: None,
             theme_setting,
             theme: Theme::dark(),
             language,
@@ -404,7 +464,6 @@ impl AppView {
 
         self.disconnect(index, cx);
         self.connections.remove(index);
-        self.grid = None;
 
         if let Some(editing) = self.editing {
             match editing.cmp(&index) {
@@ -443,22 +502,27 @@ impl AppView {
     }
 
     fn cycle_page_size(&mut self, cx: &mut Context<'_, Self>) {
-        const SIZES: [u64; 4] = [50, 100, 200, 500];
+        const SIZES: [u64; 4] = [100, 500, 1000, 5000];
 
-        if let Some(grid) = self.grid.as_mut() {
+        let Some(id) = self.active_grid_id() else {
+            return;
+        };
+        let mut size = None;
+        if let Some(grid) = self.grids.iter_mut().find(|grid| grid.id == id) {
             let position = SIZES
                 .iter()
                 .position(|size| *size == grid.page_size)
-                .unwrap_or(1);
+                .unwrap_or(2);
             grid.page_size = SIZES[(position + 1) % SIZES.len()];
             grid.page_index = 0;
+            size = Some(grid.page_size);
         }
-
-        if let Some(size) = self.grid.as_ref().map(|grid| grid.page_size) {
+        if let Some(size) = size {
             self.page_size = size;
         }
 
-        self.load_page(cx);
+        self.sync_page_input();
+        self.load_page(id, cx);
     }
 
     fn connect(&mut self, index: usize, cx: &mut Context<'_, Self>) {
@@ -545,6 +609,7 @@ impl AppView {
         }
 
         if let Some(connection) = connection {
+            self.close_connection_grids(&connection);
             let runtime = self.runtime.clone();
             cx.spawn(async move |_this, _cx| {
                 let _ = runtime.spawn(async move { connection.close().await }).await;
@@ -655,6 +720,8 @@ impl AppView {
                 category,
                 selected: None,
             });
+            self.object_search.clear();
+            self.active_grid = None;
         }
 
         cx.notify();
@@ -693,6 +760,8 @@ impl AppView {
             category,
             selected: None,
         });
+        self.object_search.clear();
+        self.active_grid = None;
         match category {
             Category::Tables => self.main_tab = MainTab::Tables,
             Category::Views => self.main_tab = MainTab::Views,
@@ -748,6 +817,16 @@ impl AppView {
                     };
                 }
                 cx.notify();
+                // The object list's scroll extents are only known after the
+                // frame's paint, so schedule one more frame to reveal the
+                // horizontal scrollbar without waiting for a hover/resize.
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(32))
+                        .await;
+                    let _ = this.update(cx, |_, cx| cx.notify());
+                })
+                .detach();
             });
         })
         .detach();
@@ -758,36 +837,107 @@ impl AppView {
         connection_index: usize,
         database: String,
         table: String,
+        is_view: bool,
         cx: &mut Context<'_, Self>,
     ) {
         let Some(connection) = self.connection_arc(connection_index) else {
             return;
         };
 
-        self.object_list = None;
-        self.grid = Some(GridState {
+        if let Some(index) = self.grids.iter().position(|grid| {
+            grid.database == database
+                && grid.table == table
+                && Arc::ptr_eq(&grid.connection, &connection)
+        }) {
+            self.activate_grid(Some(index), cx);
+            return;
+        }
+
+        let connection_name = self
+            .connections
+            .get(connection_index)
+            .map(|node| node.profile.name.clone())
+            .unwrap_or_default();
+        let id = self.next_grid_id;
+        self.next_grid_id += 1;
+
+        self.grids.push(GridState {
+            id,
             connection,
+            connection_name,
             database,
             table,
+            is_view,
             page_index: 0,
             page_size: self.page_size,
             loading: false,
             error: None,
             columns: Vec::new(),
-            rows: Vec::new(),
+            rows: Arc::new(Vec::new()),
+            column_widths: Vec::new(),
             total_rows: None,
+            selection: None,
+            edits: BTreeMap::new(),
         });
+        self.active_grid = Some(self.grids.len() - 1);
+        self.sync_page_input();
 
-        self.load_page(cx);
+        self.load_page(id, cx);
     }
 
-    fn load_page(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(grid) = self.grid.as_mut() else {
+    fn activate_grid(&mut self, index: Option<usize>, cx: &mut Context<'_, Self>) {
+        self.active_grid = index;
+        self.selecting_cells = false;
+        self.cell_editor = None;
+        self.date_picker = None;
+        self.sync_page_input();
+        cx.notify();
+    }
+
+    fn active_grid_id(&self) -> Option<u64> {
+        self.active_grid
+            .and_then(|index| self.grids.get(index))
+            .map(|grid| grid.id)
+    }
+
+    fn close_grid(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        if index >= self.grids.len() {
+            return;
+        }
+        self.grids.remove(index);
+        match self.active_grid {
+            Some(active) if active == index => {
+                self.active_grid = if self.grids.is_empty() {
+                    None
+                } else {
+                    Some(index.min(self.grids.len() - 1))
+                };
+            }
+            Some(active) if active > index => self.active_grid = Some(active - 1),
+            _ => {}
+        }
+        self.sync_page_input();
+        cx.notify();
+    }
+
+    fn close_connection_grids(&mut self, connection: &Arc<dyn Connection>) {
+        let active_id = self.active_grid_id();
+        self.grids
+            .retain(|grid| !Arc::ptr_eq(&grid.connection, connection));
+        self.active_grid =
+            active_id.and_then(|id| self.grids.iter().position(|grid| grid.id == id));
+        self.sync_page_input();
+    }
+
+    fn load_page(&mut self, id: u64, cx: &mut Context<'_, Self>) {
+        let Some(grid) = self.grids.iter_mut().find(|grid| grid.id == id) else {
             return;
         };
 
         grid.loading = true;
         grid.error = None;
+        grid.selection = None;
+        grid.edits.clear();
 
         let connection = grid.connection.clone();
         let database = grid.database.clone();
@@ -795,6 +945,9 @@ impl AppView {
         let page_index = grid.page_index;
         let page_size = grid.page_size;
 
+        self.selecting_cells = false;
+        self.cell_editor = None;
+        self.date_picker = None;
         cx.notify();
 
         let runtime = self.runtime.clone();
@@ -812,14 +965,17 @@ impl AppView {
             };
 
             let _ = this.update(cx, |view, cx| {
-                if let Some(grid) = view.grid.as_mut() {
+                if let Some(grid) = view.grids.iter_mut().find(|grid| grid.id == id) {
                     grid.loading = false;
                     match result {
                         Ok(page) => {
+                            grid.column_widths = compute_column_widths(&page.columns, &page.rows);
                             grid.columns = page.columns;
-                            grid.rows = page.rows;
+                            grid.rows = Arc::new(page.rows);
                             grid.total_rows = page.total_rows;
                             grid.error = None;
+                            view.grid_list_scroll = UniformListScrollHandle::new();
+                            view.grid_hscroll.set_offset(Point::default());
                         }
                         Err(error) => {
                             grid.error = Some(error.to_string());
@@ -833,23 +989,563 @@ impl AppView {
     }
 
     fn next_page(&mut self, cx: &mut Context<'_, Self>) {
-        if let Some(grid) = self.grid.as_mut()
+        let Some(id) = self.active_grid_id() else {
+            return;
+        };
+        if let Some(grid) = self.grids.iter_mut().find(|grid| grid.id == id)
             && grid.has_next()
         {
             grid.page_index += 1;
         }
-        self.load_page(cx);
+        self.sync_page_input();
+        self.load_page(id, cx);
     }
 
     fn prev_page(&mut self, cx: &mut Context<'_, Self>) {
-        if let Some(grid) = self.grid.as_mut() {
+        let Some(id) = self.active_grid_id() else {
+            return;
+        };
+        if let Some(grid) = self.grids.iter_mut().find(|grid| grid.id == id) {
             grid.page_index = grid.page_index.saturating_sub(1);
         }
-        self.load_page(cx);
+        self.sync_page_input();
+        self.load_page(id, cx);
+    }
+
+    fn first_page(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(id) = self.active_grid_id() else {
+            return;
+        };
+        if let Some(grid) = self.grids.iter_mut().find(|grid| grid.id == id) {
+            grid.page_index = 0;
+        }
+        self.sync_page_input();
+        self.load_page(id, cx);
+    }
+
+    fn last_page(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(id) = self.active_grid_id() else {
+            return;
+        };
+        if let Some(grid) = self.grids.iter_mut().find(|grid| grid.id == id)
+            && let Some(last) = grid.last_page()
+        {
+            grid.page_index = last;
+        }
+        self.sync_page_input();
+        self.load_page(id, cx);
+    }
+
+    fn sync_page_input(&mut self) {
+        let page = self
+            .active_grid
+            .and_then(|index| self.grids.get(index))
+            .map(|grid| grid.page_index + 1)
+            .unwrap_or(1);
+        self.page_input = page.to_string();
+    }
+
+    fn commit_page_input(&mut self, cx: &mut Context<'_, Self>) {
+        let requested = self.page_input.trim().parse::<u64>().unwrap_or(1).max(1);
+        let Some(id) = self.active_grid_id() else {
+            return;
+        };
+        if let Some(grid) = self.grids.iter_mut().find(|grid| grid.id == id) {
+            let target = match grid.last_page() {
+                Some(last) => (requested - 1).min(last),
+                None => requested - 1,
+            };
+            grid.page_index = target;
+        }
+        self.sync_page_input();
+        self.load_page(id, cx);
+    }
+
+    fn page_input_key(&mut self, event: &KeyDownEvent, cx: &mut Context<'_, Self>) {
+        let keystroke = &event.keystroke;
+        if keystroke.modifiers.control || keystroke.modifiers.platform {
+            return;
+        }
+
+        match keystroke.key.as_str() {
+            "backspace" => {
+                self.page_input.pop();
+            }
+            "enter" => {
+                self.commit_page_input(cx);
+                return;
+            }
+            "escape" => {
+                self.sync_page_input();
+            }
+            _ => {
+                if let Some(text) = keystroke.key_char.as_ref()
+                    && text.chars().all(|character| character.is_ascii_digit())
+                {
+                    self.page_input.push_str(text);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn object_search_key(&mut self, event: &KeyDownEvent, cx: &mut Context<'_, Self>) {
+        let keystroke = &event.keystroke;
+        if keystroke.modifiers.control || keystroke.modifiers.platform {
+            return;
+        }
+
+        match keystroke.key.as_str() {
+            "backspace" => {
+                self.object_search.pop();
+            }
+            "escape" => {
+                self.object_search.clear();
+            }
+            "enter" => {}
+            _ => {
+                if let Some(text) = keystroke.key_char.as_ref()
+                    && !text.chars().any(char::is_control)
+                {
+                    self.object_search.push_str(text);
+                }
+            }
+        }
+        cx.notify();
     }
 
     fn refresh(&mut self, cx: &mut Context<'_, Self>) {
-        self.load_page(cx);
+        if let Some(id) = self.active_grid_id() {
+            self.load_page(id, cx);
+        }
+    }
+
+    fn grid_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.cell_editor.is_some() {
+            self.commit_editor(cx);
+        }
+        self.date_picker = None;
+
+        let Some((row, col)) = self.cell_at(event.position) else {
+            return;
+        };
+        if event.click_count >= 2 {
+            self.begin_edit((row, col), None, window, cx);
+            return;
+        }
+        if let Some(index) = self.active_grid
+            && let Some(grid) = self.grids.get_mut(index)
+        {
+            grid.selection = Some(CellSelection::new(row, col));
+        }
+        self.selecting_cells = true;
+        window.focus(&self.grid_focus);
+        cx.notify();
+    }
+
+    fn grid_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<'_, Self>) {
+        if !self.selecting_cells || event.pressed_button != Some(MouseButton::Left) {
+            return;
+        }
+        let Some((row, col)) = self.cell_at(event.position) else {
+            return;
+        };
+        if let Some(index) = self.active_grid
+            && let Some(grid) = self.grids.get_mut(index)
+            && let Some(selection) = grid.selection.as_mut()
+        {
+            selection.cursor = (row, col);
+        }
+        cx.notify();
+    }
+
+    fn cell_at(&self, position: Point<Pixels>) -> Option<(usize, usize)> {
+        let index = self.active_grid?;
+        let grid = self.grids.get(index)?;
+        if grid.rows.is_empty() {
+            return None;
+        }
+        let handle = self.grid_list_scroll.0.borrow().base_handle.clone();
+        let bounds = handle.bounds();
+        if bounds.size.width <= px(0.0) || bounds.size.height <= px(0.0) {
+            return None;
+        }
+        let local_x = f32::from(position.x) - f32::from(bounds.left());
+        let local_y =
+            f32::from(position.y) - f32::from(bounds.top()) - f32::from(handle.offset().y);
+        if local_x < 0.0 || local_y < 0.0 {
+            return None;
+        }
+        let row = (local_y / GRID_ROW_HEIGHT).floor() as usize;
+        if row >= grid.rows.len() {
+            return None;
+        }
+        let mut accumulated = 0.0f32;
+        for (col, width) in grid.column_widths.iter().enumerate() {
+            if local_x < accumulated + width {
+                return Some((row, col));
+            }
+            accumulated += width;
+        }
+        None
+    }
+
+    fn grid_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<'_, Self>) {
+        if self.cell_editor.is_some() || self.date_picker.is_some() {
+            return;
+        }
+        let keystroke = &event.keystroke;
+        if keystroke.modifiers.control || keystroke.modifiers.platform {
+            return;
+        }
+        let Some(index) = self.active_grid else {
+            return;
+        };
+        let Some((row, col)) = self
+            .grids
+            .get(index)
+            .and_then(|grid| grid.selection)
+            .map(|s| s.cursor)
+        else {
+            return;
+        };
+
+        match keystroke.key.as_str() {
+            "up" | "down" | "left" | "right" => {
+                let (row_count, col_count) = {
+                    let grid = &self.grids[index];
+                    (grid.rows.len(), grid.columns.len())
+                };
+                if row_count == 0 || col_count == 0 {
+                    return;
+                }
+                let (mut new_row, mut new_col) = (row, col);
+                match keystroke.key.as_str() {
+                    "up" => new_row = new_row.saturating_sub(1),
+                    "down" => new_row = (new_row + 1).min(row_count - 1),
+                    "left" => new_col = new_col.saturating_sub(1),
+                    "right" => new_col = (new_col + 1).min(col_count - 1),
+                    _ => {}
+                }
+                if let Some(grid) = self.grids.get_mut(index) {
+                    grid.selection = Some(CellSelection::new(new_row, new_col));
+                }
+                cx.notify();
+            }
+            "enter" => self.begin_edit((row, col), None, window, cx),
+            _ => {
+                if let Some(text) = keystroke.key_char.as_ref()
+                    && let Some(character) = text.chars().next()
+                    && !character.is_control()
+                {
+                    self.begin_edit((row, col), Some(character), window, cx);
+                }
+            }
+        }
+    }
+
+    fn begin_edit(
+        &mut self,
+        cell: (usize, usize),
+        initial: Option<char>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(index) = self.active_grid else {
+            return;
+        };
+        let (row, col) = cell;
+        let (value, is_temporal, cells) = {
+            let Some(grid) = self.grids.get(index) else {
+                return;
+            };
+            if row >= grid.rows.len() || col >= grid.columns.len() {
+                return;
+            }
+            let value = grid
+                .edits
+                .get(&(row, col))
+                .cloned()
+                .flatten()
+                .unwrap_or_else(|| grid.rows[row][col].as_edit_string());
+            let is_temporal = is_temporal_type(&grid.columns[col].data_type);
+            let cells = grid
+                .selection
+                .filter(|selection| selection.contains(row, col))
+                .map(|selection| selection.cells())
+                .unwrap_or_else(|| vec![(row, col)]);
+            (value, is_temporal, cells)
+        };
+
+        if is_temporal {
+            self.open_date_picker(index, row, col, cells, &value, cx);
+            return;
+        }
+
+        let value = match initial {
+            Some(character) => character.to_string(),
+            None => value,
+        };
+        self.cell_editor = Some(CellEditor {
+            row,
+            col,
+            cells,
+            value,
+        });
+        window.focus(&self.cell_editor_focus);
+        cx.notify();
+    }
+
+    fn open_date_picker(
+        &mut self,
+        index: usize,
+        row: usize,
+        col: usize,
+        cells: Vec<(usize, usize)>,
+        value: &str,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(grid) = self.grids.get(index) else {
+            return;
+        };
+        let data_type = grid.columns[col].data_type.to_ascii_lowercase();
+        let has_time = data_type.contains("datetime") || data_type.contains("timestamp");
+        let base = parse_datetime(value).unwrap_or_else(|| chrono::Local::now().naive_local());
+        self.date_picker = Some(DatePicker {
+            row,
+            col,
+            cells,
+            year: base.year(),
+            month: base.month(),
+            day: base.day(),
+            hour: base.hour(),
+            minute: base.minute(),
+            second: base.second(),
+            has_time,
+        });
+        self.cell_editor = None;
+        cx.notify();
+    }
+
+    fn editor_key(&mut self, event: &KeyDownEvent, cx: &mut Context<'_, Self>) {
+        let keystroke = &event.keystroke;
+        if keystroke.modifiers.control || keystroke.modifiers.platform {
+            return;
+        }
+        match keystroke.key.as_str() {
+            "backspace" => {
+                if let Some(editor) = self.cell_editor.as_mut() {
+                    editor.value.pop();
+                }
+            }
+            "enter" => {
+                self.commit_editor(cx);
+                return;
+            }
+            "escape" => {
+                self.cancel_editor(cx);
+                return;
+            }
+            _ => {
+                if let Some(text) = keystroke.key_char.as_ref()
+                    && !text.chars().any(char::is_control)
+                    && let Some(editor) = self.cell_editor.as_mut()
+                {
+                    editor.value.push_str(text);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn commit_editor(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(editor) = self.cell_editor.take() else {
+            return;
+        };
+        if let Some(index) = self.active_grid
+            && let Some(grid) = self.grids.get_mut(index)
+        {
+            for (row, col) in editor.cells {
+                grid.edits.insert((row, col), Some(editor.value.clone()));
+            }
+        }
+        cx.notify();
+    }
+
+    fn cancel_editor(&mut self, cx: &mut Context<'_, Self>) {
+        self.cell_editor = None;
+        cx.notify();
+    }
+
+    fn date_picker_shift_month(&mut self, delta: i32, cx: &mut Context<'_, Self>) {
+        if let Some(picker) = self.date_picker.as_mut() {
+            let mut month = picker.month as i32 + delta;
+            let mut year = picker.year;
+            while month < 1 {
+                month += 12;
+                year -= 1;
+            }
+            while month > 12 {
+                month -= 12;
+                year += 1;
+            }
+            picker.month = month as u32;
+            picker.year = year;
+            picker.day = picker.day.min(days_in_month(year, picker.month));
+        }
+        cx.notify();
+    }
+
+    fn date_picker_select_day(&mut self, day: u32, cx: &mut Context<'_, Self>) {
+        if let Some(picker) = self.date_picker.as_mut() {
+            picker.day = day;
+        }
+        cx.notify();
+    }
+
+    fn date_picker_shift_time(&mut self, field: usize, delta: i32, cx: &mut Context<'_, Self>) {
+        if let Some(picker) = self.date_picker.as_mut() {
+            match field {
+                0 => picker.hour = wrap_unit(picker.hour, delta, 24),
+                1 => picker.minute = wrap_unit(picker.minute, delta, 60),
+                _ => picker.second = wrap_unit(picker.second, delta, 60),
+            }
+        }
+        cx.notify();
+    }
+
+    fn date_picker_today(&mut self, cx: &mut Context<'_, Self>) {
+        let now = chrono::Local::now().naive_local();
+        if let Some(picker) = self.date_picker.as_mut() {
+            picker.year = now.year();
+            picker.month = now.month();
+            picker.day = now.day();
+            picker.hour = now.hour();
+            picker.minute = now.minute();
+            picker.second = now.second();
+        }
+        cx.notify();
+    }
+
+    fn date_picker_ok(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(picker) = self.date_picker.take() else {
+            return;
+        };
+        let value = if picker.has_time {
+            format!(
+                "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                picker.year, picker.month, picker.day, picker.hour, picker.minute, picker.second
+            )
+        } else {
+            format!("{:04}-{:02}-{:02}", picker.year, picker.month, picker.day)
+        };
+        if let Some(index) = self.active_grid
+            && let Some(grid) = self.grids.get_mut(index)
+        {
+            for (row, col) in picker.cells {
+                grid.edits.insert((row, col), Some(value.clone()));
+            }
+        }
+        cx.notify();
+    }
+
+    fn date_picker_cancel(&mut self, cx: &mut Context<'_, Self>) {
+        self.date_picker = None;
+        cx.notify();
+    }
+
+    fn commit_edits(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(index) = self.active_grid else {
+            return;
+        };
+        let Some(grid) = self.grids.get(index) else {
+            return;
+        };
+        if grid.edits.is_empty() {
+            return;
+        }
+
+        let primary_keys: Vec<usize> = grid
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(_, column)| column.primary_key)
+            .map(|(index, _)| index)
+            .collect();
+        let key_columns: Vec<usize> = if primary_keys.is_empty() {
+            (0..grid.columns.len()).collect()
+        } else {
+            primary_keys
+        };
+
+        let mut by_row: BTreeMap<usize, Vec<(usize, Option<String>)>> = BTreeMap::new();
+        for (&(row, col), value) in &grid.edits {
+            by_row.entry(row).or_default().push((col, value.clone()));
+        }
+
+        let mut updates = Vec::new();
+        for (row, cells) in by_row {
+            let Some(row_values) = grid.rows.get(row) else {
+                continue;
+            };
+            let set = cells
+                .into_iter()
+                .map(|(col, value)| (grid.columns[col].name.clone(), value))
+                .collect();
+            let keys = key_columns
+                .iter()
+                .filter_map(|&col| {
+                    row_values
+                        .get(col)
+                        .map(|value| (grid.columns[col].name.clone(), value.as_edit_string()))
+                })
+                .collect();
+            updates.push(RowUpdate { set, keys });
+        }
+
+        let connection = grid.connection.clone();
+        let database = grid.database.clone();
+        let table = grid.table.clone();
+        let id = grid.id;
+        let runtime = self.runtime.clone();
+
+        cx.spawn(async move |this, cx| {
+            let result = match runtime
+                .spawn(async move { connection.update_rows(&database, &table, &updates).await })
+                .await
+            {
+                Ok(inner) => inner,
+                Err(error) => Err(Error::other(error)),
+            };
+
+            let _ = this.update(cx, |view, cx| match result {
+                Ok(()) => view.load_page(id, cx),
+                Err(error) => {
+                    if let Some(grid) = view.grids.iter_mut().find(|grid| grid.id == id) {
+                        grid.error = Some(error.to_string());
+                    }
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn cancel_edits(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(index) = self.active_grid
+            && let Some(grid) = self.grids.get_mut(index)
+        {
+            grid.edits.clear();
+            grid.selection = None;
+        }
+        self.cell_editor = None;
+        self.date_picker = None;
+        cx.notify();
     }
 
     fn save_form(&mut self, cx: &mut Context<'_, Self>) {
@@ -1492,15 +2188,6 @@ impl AppView {
         body.child(sub)
     }
 
-    fn action_button(
-        &self,
-        id: impl Into<SharedString>,
-        label: String,
-        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    ) -> impl IntoElement {
-        self.win_button(id, label, ButtonKind::Normal, on_click)
-    }
-
     fn render_database(
         &self,
         connection_index: usize,
@@ -1741,6 +2428,7 @@ impl AppView {
                     connection_index,
                     database_name.clone(),
                     table_name.clone(),
+                    is_view,
                     cx,
                 );
             }))
@@ -1767,36 +2455,187 @@ impl AppView {
 
     fn render_content(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
-        let open_enabled = self
-            .object_list
-            .as_ref()
-            .map(|list| list.selected.is_some())
-            .unwrap_or(false);
 
-        let body: AnyElement = if let Some(list) = self.object_list.as_ref() {
-            self.render_object_body(list, cx).into_any_element()
-        } else if let Some(grid) = self.grid.as_ref() {
-            self.render_grid(grid, cx).into_any_element()
-        } else {
-            div().into_any_element()
-        };
-
-        div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .h_full()
-            .overflow_hidden()
-            .bg(rgb(theme.editor_bg))
-            .child(self.render_object_header())
-            .child(self.render_object_toolbar(open_enabled, cx))
-            .child(
+        let body: AnyElement =
+            if let Some(grid) = self.active_grid.and_then(|index| self.grids.get(index)) {
+                self.render_grid(grid, cx).into_any_element()
+            } else if let Some(list) = self.object_list.as_ref() {
+                let open_enabled = list.selected.is_some();
                 div()
                     .flex()
                     .flex_col()
                     .flex_1()
                     .overflow_hidden()
-                    .child(body),
+                    .child(self.render_object_toolbar(open_enabled, cx))
+                    .child(self.render_object_body(list, cx))
+                    .into_any_element()
+            } else {
+                div().into_any_element()
+            };
+
+        let has_tabs = self.object_list.is_some() || !self.grids.is_empty();
+        let mut content = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .h_full()
+            .overflow_hidden()
+            .bg(rgb(theme.editor_bg));
+        if has_tabs {
+            content = content.child(self.render_tab_bar(cx));
+        }
+        content.child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .overflow_hidden()
+                .child(body),
+        )
+    }
+
+    fn render_tab_bar(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let theme = self.theme;
+
+        let mut bar = div()
+            .flex()
+            .flex_row()
+            .items_end()
+            .gap_1()
+            .px_1()
+            .pt_1()
+            .h(px(30.0))
+            .flex_none()
+            .bg(rgb(theme.toolbar_bg))
+            .overflow_hidden();
+
+        bar = bar.child(self.render_object_tab(self.active_grid.is_none(), cx));
+        for (index, grid) in self.grids.iter().enumerate() {
+            bar =
+                bar.child(self.render_table_tab(index, grid, self.active_grid == Some(index), cx));
+        }
+        bar
+    }
+
+    fn render_object_tab(&self, active: bool, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let theme = self.theme;
+
+        div()
+            .id("tab-object")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .h_full()
+            .px_2()
+            .cursor_pointer()
+            .text_size(px(12.0))
+            .when(active, |style| {
+                style
+                    .bg(rgb(theme.editor_bg))
+                    .border_t_1()
+                    .border_l_1()
+                    .border_r_1()
+                    .border_color(rgb(theme.border))
+            })
+            .when(!active, |style| {
+                style
+                    .bg(rgb(theme.button_bg))
+                    .border_1()
+                    .border_color(rgb(theme.border))
+            })
+            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            .on_click(cx.listener(|this, _event, _window, cx| {
+                this.activate_grid(None, cx);
+            }))
+            .child(tree_icon("icons/tables.svg", theme.icon_tables))
+            .child(t!("object.header").to_string())
+    }
+
+    fn render_table_tab(
+        &self,
+        index: usize,
+        grid: &GridState,
+        active: bool,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
+        let theme = self.theme;
+        let kind = t!(if grid.is_view {
+            "common.view"
+        } else {
+            "common.table"
+        })
+        .to_string();
+        let title = format!(
+            "{} @{} ({}) - {}",
+            grid.table, grid.database, grid.connection_name, kind
+        );
+        let icon = if grid.is_view {
+            "icons/views.svg"
+        } else {
+            "icons/tables.svg"
+        };
+        let icon_color = if grid.is_view {
+            theme.icon_view
+        } else {
+            theme.icon_table
+        };
+        let tab_id = SharedString::from(format!("tab-{}", grid.id));
+        let close_id = SharedString::from(format!("tab-close-{}", grid.id));
+
+        div()
+            .id(tab_id)
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .h_full()
+            .px_2()
+            .cursor_pointer()
+            .text_size(px(12.0))
+            .when(active, |style| {
+                style
+                    .bg(rgb(theme.editor_bg))
+                    .border_t_1()
+                    .border_l_1()
+                    .border_r_1()
+                    .border_color(rgb(theme.border))
+            })
+            .when(!active, |style| {
+                style
+                    .bg(rgb(theme.button_bg))
+                    .border_1()
+                    .border_color(rgb(theme.border))
+            })
+            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                if index < this.grids.len() {
+                    this.activate_grid(Some(index), cx);
+                }
+            }))
+            .child(tree_icon(icon, icon_color))
+            .child(
+                div()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .max_w(px(240.0))
+                    .child(title),
+            )
+            .child(
+                div()
+                    .id(close_id)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(16.0))
+                    .h(px(16.0))
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(rgb(theme.button_hover_bg)))
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        cx.stop_propagation();
+                        this.close_grid(index, cx);
+                    }))
+                    .child("✕"),
             )
     }
 
@@ -1953,19 +2792,9 @@ impl AppView {
             list.category = category;
             list.selected = None;
         }
+        self.object_search.clear();
+        self.active_grid = None;
         cx.notify();
-    }
-
-    fn render_object_header(&self) -> impl IntoElement {
-        let theme = self.theme;
-        div()
-            .px_2()
-            .py_1()
-            .text_size(px(12.0))
-            .bg(rgb(theme.header_bg))
-            .border_b_1()
-            .border_color(rgb(theme.border))
-            .child(t!("object.header").to_string())
     }
 
     fn render_object_toolbar(
@@ -1978,58 +2807,147 @@ impl AppView {
             .flex()
             .flex_row()
             .items_center()
+            .justify_between()
+            .gap_2()
             .px_2()
             .py_1()
             .bg(rgb(theme.toolbar_bg))
             .border_b_1()
             .border_color(rgb(theme.border))
-            .child(self.toolbar_item(
-                "obj-open",
-                "icons/tables.svg",
-                t!("object.open_table").to_string(),
-                open_enabled,
-                cx.listener(|this, _event, _window, cx| this.open_selected_object(cx)),
-            ))
-            .child(toolbar_separator(theme))
-            .child(self.toolbar_item(
-                "obj-design",
-                "icons/design_table.svg",
-                t!("object.design_table").to_string(),
-                false,
-                |_, _, _| {},
-            ))
-            .child(toolbar_separator(theme))
-            .child(self.toolbar_item(
-                "obj-new",
-                "icons/new_table.svg",
-                t!("object.new_table").to_string(),
-                false,
-                |_, _, _| {},
-            ))
-            .child(toolbar_separator(theme))
-            .child(self.toolbar_item(
-                "obj-delete",
-                "icons/delete_table.svg",
-                t!("object.delete_table").to_string(),
-                false,
-                |_, _, _| {},
-            ))
-            .child(toolbar_separator(theme))
-            .child(self.toolbar_item(
-                "obj-import",
-                "icons/import.svg",
-                t!("object.import_wizard").to_string(),
-                false,
-                |_, _, _| {},
-            ))
-            .child(toolbar_separator(theme))
-            .child(self.toolbar_item(
-                "obj-export",
-                "icons/export.svg",
-                t!("object.export_wizard").to_string(),
-                false,
-                |_, _, _| {},
-            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .child(self.toolbar_item(
+                        "obj-open",
+                        "icons/tables.svg",
+                        t!("object.open_table").to_string(),
+                        open_enabled,
+                        cx.listener(|this, _event, _window, cx| this.open_selected_object(cx)),
+                    ))
+                    .child(toolbar_separator(theme))
+                    .child(self.toolbar_item(
+                        "obj-design",
+                        "icons/design_table.svg",
+                        t!("object.design_table").to_string(),
+                        false,
+                        |_, _, _| {},
+                    ))
+                    .child(toolbar_separator(theme))
+                    .child(self.toolbar_item(
+                        "obj-new",
+                        "icons/new_table.svg",
+                        t!("object.new_table").to_string(),
+                        false,
+                        |_, _, _| {},
+                    ))
+                    .child(toolbar_separator(theme))
+                    .child(self.toolbar_item(
+                        "obj-delete",
+                        "icons/delete_table.svg",
+                        t!("object.delete_table").to_string(),
+                        false,
+                        |_, _, _| {},
+                    ))
+                    .child(toolbar_separator(theme))
+                    .child(self.toolbar_item(
+                        "obj-import",
+                        "icons/import.svg",
+                        t!("object.import_wizard").to_string(),
+                        false,
+                        |_, _, _| {},
+                    ))
+                    .child(toolbar_separator(theme))
+                    .child(self.toolbar_item(
+                        "obj-export",
+                        "icons/export.svg",
+                        t!("object.export_wizard").to_string(),
+                        false,
+                        |_, _, _| {},
+                    )),
+            )
+            .child(self.render_object_search(cx))
+    }
+
+    fn render_object_search(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let theme = self.theme;
+        let has_text = !self.object_search.is_empty();
+        let mut field = div()
+            .id("object-search")
+            .track_focus(&self.object_search_focus)
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .w(px(220.0))
+            .h(px(24.0))
+            .px_2()
+            .bg(rgb(theme.input_bg))
+            .border_1()
+            .border_color(rgb(theme.border))
+            .cursor_text()
+            .on_key_down(cx.listener(|this, event, _window, cx| this.object_search_key(event, cx)))
+            .on_click(cx.listener(|this, _event, window, cx| {
+                window.focus(&this.object_search_focus);
+                cx.notify();
+            }))
+            .child(
+                svg()
+                    .path("icons/search.svg")
+                    .w(px(13.0))
+                    .h(px(13.0))
+                    .flex_none()
+                    .text_color(rgb(theme.text_muted)),
+            );
+        let caret = self.object_search_focused && self.caret_visible;
+        if has_text {
+            field = field.child(div().flex_1().overflow_hidden().whitespace_nowrap().child(
+                format!("{}{}", self.object_search, if caret { "|" } else { "" }),
+            ));
+        } else {
+            field = field.child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_row()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .child(if caret { "|" } else { "" })
+                    .child(
+                        div()
+                            .text_color(rgb(theme.text_muted))
+                            .child(t!("object.search").to_string()),
+                    ),
+            );
+        }
+        if has_text {
+            field = field.child(
+                div()
+                    .id("object-search-clear")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(14.0))
+                    .h(px(14.0))
+                    .flex_none()
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(rgb(theme.button_hover_bg)))
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.object_search.clear();
+                        cx.notify();
+                    }))
+                    .child(
+                        svg()
+                            .path("icons/cross.svg")
+                            .w(px(10.0))
+                            .h(px(10.0))
+                            .flex_none()
+                            .text_color(rgb(theme.text_muted)),
+                    ),
+            );
+        }
+        field
     }
 
     fn render_object_body(
@@ -2078,27 +2996,135 @@ impl AppView {
                                 .child(t!("common.empty").to_string())
                                 .into_any_element(),
                             Some(want_view) => {
-                                let mut flow = div().flex().flex_row().flex_wrap().gap_0p5().p_2();
+                                let rows = self.object_rows_per_column();
+                                let query = self.object_search.trim().to_lowercase();
+                                let mut columns =
+                                    div().flex().flex_row().items_start().gap_1().p_1();
+                                let mut column = div().flex().flex_col();
+                                let mut count = 0usize;
                                 for table in tables.iter().filter(|table| {
                                     matches!(table.kind, navidog_core::ObjectKind::View)
                                         == want_view
+                                        && (query.is_empty()
+                                            || table.name.to_lowercase().contains(&query))
                                 }) {
-                                    flow = flow.child(self.render_object_item(list, table, cx));
+                                    if count == rows {
+                                        columns = columns.child(column);
+                                        column = div().flex().flex_col();
+                                        count = 0;
+                                    }
+                                    column = column.child(self.render_object_item(list, table, cx));
+                                    count += 1;
                                 }
-                                flow.into_any_element()
+                                if count > 0 {
+                                    columns = columns.child(column);
+                                }
+                                columns.into_any_element()
                             }
                         }
                     }
                 },
             };
 
-        div()
+        let scroller = div()
             .id("object-scroll")
             .flex()
             .flex_col()
+            .items_start()
             .flex_1()
-            .overflow_scroll()
-            .child(body)
+            .min_w(px(0.0))
+            .overflow_x_scroll()
+            .track_scroll(&self.object_scroll)
+            .child(body);
+
+        let mut container = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w(px(0.0))
+            .overflow_hidden()
+            .child(scroller);
+        if self.object_scroll.max_offset().width > px(0.0) {
+            container = container.child(self.render_object_hscrollbar(cx));
+        }
+        container
+    }
+
+    fn object_rows_per_column(&self) -> usize {
+        let viewport = f32::from(self.object_scroll.bounds().size.height);
+        if viewport <= 0.0 {
+            return 30;
+        }
+        let rows = ((viewport - OBJECT_BOTTOM_MARGIN) / OBJECT_ROW_HEIGHT).floor() as usize;
+        rows.max(1)
+    }
+
+    fn render_object_hscrollbar(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let theme = self.theme;
+        let bounds = self.object_scroll.bounds();
+        let viewport = f32::from(bounds.size.width);
+        let max = f32::from(self.object_scroll.max_offset().width);
+        let scroll = -f32::from(self.object_scroll.offset().x);
+        let content = (viewport + max).max(1.0);
+        let thumb_w = (viewport * viewport / content).clamp(24.0, viewport.max(24.0));
+        let travel = (viewport - thumb_w).max(0.0);
+        let thumb_x = if max > 0.0 {
+            (scroll / max) * travel
+        } else {
+            0.0
+        };
+
+        div()
+            .id("object-hscrollbar")
+            .relative()
+            .flex_none()
+            .w_full()
+            .h(px(14.0))
+            .bg(rgb(theme.toolbar_bg))
+            .border_t_1()
+            .border_color(rgb(theme.border))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                    this.scroll_object_to(event.position.x, cx);
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                if event.pressed_button == Some(MouseButton::Left) {
+                    this.scroll_object_to(event.position.x, cx);
+                }
+            }))
+            .child(
+                div()
+                    .absolute()
+                    .left(px(thumb_x))
+                    .top(px(1.0))
+                    .w(px(thumb_w))
+                    .h(px(12.0))
+                    .bg(rgb(theme.button_border)),
+            )
+    }
+
+    fn scroll_object_to(&self, mouse_x: Pixels, cx: &mut Context<'_, Self>) {
+        let bounds = self.object_scroll.bounds();
+        let viewport = f32::from(bounds.size.width);
+        let max = f32::from(self.object_scroll.max_offset().width);
+        if viewport <= 0.0 || max <= 0.0 {
+            return;
+        }
+        let content = viewport + max;
+        let thumb_w = (viewport * viewport / content).clamp(24.0, viewport);
+        let travel = viewport - thumb_w;
+        if travel <= 0.0 {
+            return;
+        }
+        let relative = f32::from(mouse_x) - f32::from(bounds.left());
+        let thumb_x = (relative - thumb_w / 2.0).clamp(0.0, travel);
+        let scroll = thumb_x / travel * max;
+        let y = self.object_scroll.offset().y;
+        self.object_scroll.set_offset(Point::new(px(-scroll), y));
+        cx.notify();
     }
 
     fn render_object_item(
@@ -2125,7 +3151,7 @@ impl AppView {
             .items_center()
             .gap_1()
             .w(px(220.0))
-            .h(px(22.0))
+            .h(px(OBJECT_ROW_HEIGHT))
             .px_1()
             .rounded_sm()
             .cursor_pointer()
@@ -2177,7 +3203,8 @@ impl AppView {
         let Some(database) = self.database_name(connection_index, database_index) else {
             return;
         };
-        self.select_table(connection_index, database, name, cx);
+        let is_view = list.category == Category::Views;
+        self.select_table(connection_index, database, name, is_view, cx);
     }
 
     fn close_database(
@@ -3236,14 +4263,26 @@ impl AppView {
 
     fn render_grid(&self, grid: &GridState, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
-        let mut header = div().flex().flex_row().bg(rgb(theme.header_bg));
-        for column in &grid.columns {
+        let widths: Vec<f32> = if grid.column_widths.is_empty() {
+            grid.columns.iter().map(|_| GRID_COLUMN_WIDTH).collect()
+        } else {
+            grid.column_widths.clone()
+        };
+        let content_width: f32 = widths.iter().sum::<f32>().max(1.0);
+
+        let mut header = div().flex().flex_row().flex_none().bg(rgb(theme.header_bg));
+        for (index, column) in grid.columns.iter().enumerate() {
+            let width = widths.get(index).copied().unwrap_or(GRID_COLUMN_WIDTH);
             header = header.child(
                 div()
-                    .w(px(160.0))
+                    .flex()
+                    .items_center()
+                    .h(px(GRID_ROW_HEIGHT))
+                    .w(px(width))
                     .flex_none()
                     .px_2()
-                    .py_1()
+                    .whitespace_nowrap()
+                    .overflow_hidden()
                     .font_weight(FontWeight::SEMIBOLD)
                     .border_r_1()
                     .border_color(rgb(theme.border))
@@ -3251,77 +4290,343 @@ impl AppView {
             );
         }
 
-        let mut rows = div().flex().flex_col();
-        for (row_index, row) in grid.rows.iter().enumerate() {
-            let background = if row_index % 2 == 1 {
-                rgb(theme.row_alt_bg)
-            } else {
-                rgb(theme.editor_bg)
-            };
-            let mut row_element = div().flex().flex_row().bg(background);
-            for cell in row {
-                row_element = row_element.child(
-                    div()
-                        .w(px(160.0))
-                        .flex_none()
-                        .px_2()
-                        .py_1()
-                        .overflow_hidden()
-                        .child(cell.as_display()),
-                );
-            }
-            rows = rows.child(row_element);
-        }
+        let selection = grid.selection;
+        let edits = grid.edits.clone();
+        let rows = grid.rows.clone();
+        let widths = Arc::new(widths);
+        let list = uniform_list(
+            SharedString::from(format!("grid-rows-{}", grid.id)),
+            rows.len(),
+            move |range, _window, _cx| {
+                range
+                    .map(|row_index| {
+                        let row = &rows[row_index];
+                        let base_background = if row_index % 2 == 1 {
+                            theme.row_alt_bg
+                        } else {
+                            theme.editor_bg
+                        };
+                        let mut row_element = div()
+                            .flex()
+                            .flex_row()
+                            .bg(rgb(base_background))
+                            .h(px(GRID_ROW_HEIGHT));
+                        for (index, cell) in row.iter().enumerate() {
+                            let width = widths.get(index).copied().unwrap_or(GRID_COLUMN_WIDTH);
+                            let selected = selection
+                                .is_some_and(|selection| selection.contains(row_index, index));
+                            let edited = edits.get(&(row_index, index));
+                            let cell_background = if selected {
+                                theme.tree_selected_bg
+                            } else if edited.is_some() {
+                                theme.cell_edit_bg
+                            } else {
+                                base_background
+                            };
+                            let display = match edited {
+                                Some(Some(value)) => value.clone(),
+                                Some(None) => "NULL".to_string(),
+                                None => cell.as_display(),
+                            };
+                            let mut cell_element = div()
+                                .flex()
+                                .items_center()
+                                .h(px(GRID_ROW_HEIGHT))
+                                .w(px(width))
+                                .flex_none()
+                                .px_2()
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .bg(rgb(cell_background));
+                            if selected {
+                                cell_element =
+                                    cell_element.text_color(rgb(theme.tree_selected_text));
+                            }
+                            row_element = row_element.child(cell_element.child(display));
+                        }
+                        row_element
+                    })
+                    .collect::<Vec<_>>()
+            },
+        )
+        .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::FitList)
+        .track_scroll(self.grid_list_scroll.clone())
+        .flex_1()
+        .min_h(px(0.0))
+        .track_focus(&self.grid_focus)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                this.grid_mouse_down(event, window, cx);
+            }),
+        )
+        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+            this.grid_mouse_move(event, cx);
+        }))
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(|this, _event, _window, cx| {
+                this.selecting_cells = false;
+                cx.notify();
+            }),
+        )
+        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            this.grid_key(event, window, cx);
+        }));
 
         let table = div()
-            .id("grid-scroll")
+            .id("grid-hscroll")
             .flex_1()
-            .w_full()
-            .overflow_scroll()
-            .track_scroll(&self.grid_scroll)
-            .child(div().flex().flex_col().child(header).child(rows));
+            .min_h(px(0.0))
+            .min_w(px(0.0))
+            .overflow_hidden()
+            .track_scroll(&self.grid_hscroll)
+            .child(
+                div()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .h_full()
+                    .w(px(content_width))
+                    .child(header)
+                    .child(list)
+                    .child(self.render_cell_editor(cx))
+                    .child(self.render_date_picker(cx)),
+            );
 
         div()
             .flex()
             .flex_col()
             .size_full()
-            .child(self.render_toolbar(grid, cx))
-            .child(table)
-    }
-
-    fn render_toolbar(&self, grid: &GridState, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let theme = self.theme;
-        let title = format!("{}.{}", grid.database, grid.table);
-        let page_label = format!("{} {}", t!("grid.page"), grid.page_index + 1);
-        let total = match grid.total_rows {
-            Some(total) => format!("{}: {}", t!("content.rows"), total),
-            None => String::new(),
-        };
-
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .gap_3()
-            .px_2()
-            .py_1()
-            .bg(rgb(theme.toolbar_bg))
-            .border_b_1()
-            .border_color(rgb(theme.border))
+            .child(self.render_grid_toolbar())
             .child(
                 div()
                     .flex()
                     .flex_row()
-                    .items_center()
-                    .gap_3()
+                    .flex_1()
+                    .min_h(px(0.0))
                     .child(
                         div()
-                            .text_size(px(13.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(title),
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .min_h(px(0.0))
+                            .child(table)
+                            .child(self.render_grid_hscrollbar(cx)),
                     )
-                    .child(div().text_color(rgb(theme.text_muted)).child(total)),
+                    .child(self.render_grid_vscrollbar(cx)),
+            )
+            .child(self.render_grid_controls(grid, cx))
+            .child(self.render_grid_status(grid))
+    }
+
+    fn render_cell_editor(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let Some(editor) = self.cell_editor.as_ref() else {
+            return div().into_any_element();
+        };
+        let Some(index) = self.active_grid else {
+            return div().into_any_element();
+        };
+        let Some(grid) = self.grids.get(index) else {
+            return div().into_any_element();
+        };
+        let width = grid
+            .column_widths
+            .get(editor.col)
+            .copied()
+            .unwrap_or(GRID_COLUMN_WIDTH)
+            .max(80.0);
+        let left: f32 = grid.column_widths.iter().take(editor.col).sum();
+        let offset_y = f32::from(self.grid_list_scroll.0.borrow().base_handle.offset().y);
+        let top = GRID_ROW_HEIGHT + editor.row as f32 * GRID_ROW_HEIGHT + offset_y;
+        let theme = self.theme;
+        let caret = if self.cell_editor_focused && self.caret_visible {
+            "|"
+        } else {
+            ""
+        };
+
+        div()
+            .id("cell-editor")
+            .absolute()
+            .left(px(left))
+            .top(px(top))
+            .w(px(width))
+            .h(px(GRID_ROW_HEIGHT))
+            .track_focus(&self.cell_editor_focus)
+            .flex()
+            .items_center()
+            .px_2()
+            .bg(rgb(theme.input_bg))
+            .border_1()
+            .border_color(rgb(theme.primary))
+            .text_size(px(12.0))
+            .on_key_down(cx.listener(|this, event, _window, cx| this.editor_key(event, cx)))
+            .child(format!("{}{}", editor.value, caret))
+            .into_any_element()
+    }
+
+    fn render_date_picker(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let Some(picker) = self.date_picker.as_ref() else {
+            return div().into_any_element();
+        };
+        let Some(index) = self.active_grid else {
+            return div().into_any_element();
+        };
+        let Some(grid) = self.grids.get(index) else {
+            return div().into_any_element();
+        };
+        let theme = self.theme;
+        let width = 232.0f32;
+        let content_width: f32 = grid.column_widths.iter().sum();
+        let cell_left: f32 = grid.column_widths.iter().take(picker.col).sum();
+        let left = cell_left.min((content_width - width).max(0.0)).max(0.0);
+        let handle = self.grid_list_scroll.0.borrow().base_handle.clone();
+        let offset_y = f32::from(handle.offset().y);
+        let viewport_h = f32::from(handle.bounds().size.height);
+        let cell_top = GRID_ROW_HEIGHT + picker.row as f32 * GRID_ROW_HEIGHT + offset_y;
+        let popup_h = if picker.has_time { 296.0 } else { 264.0 };
+        let top = if cell_top + GRID_ROW_HEIGHT + popup_h > GRID_ROW_HEIGHT + viewport_h {
+            (cell_top - popup_h).max(GRID_ROW_HEIGHT)
+        } else {
+            cell_top + GRID_ROW_HEIGHT
+        };
+
+        let title = t!("grid.year_month", year = picker.year, month = picker.month).to_string();
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .id("date-prev")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(20.0))
+                    .h(px(20.0))
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.date_picker_shift_month(-1, cx);
+                    }))
+                    .child("‹"),
+            )
+            .child(div().text_size(px(12.0)).child(title))
+            .child(
+                div()
+                    .id("date-next")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(20.0))
+                    .h(px(20.0))
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.date_picker_shift_month(1, cx);
+                    }))
+                    .child("›"),
+            );
+
+        let first_weekday = NaiveDate::from_ymd_opt(picker.year, picker.month, 1)
+            .map(|date| date.weekday().num_days_from_monday() as i32)
+            .unwrap_or(0);
+        let days = days_in_month(picker.year, picker.month) as i32;
+        let now = chrono::Local::now().naive_local();
+
+        let mut weekdays = div().flex().flex_row();
+        for label in weekday_labels() {
+            weekdays = weekdays.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(28.0))
+                    .h(px(18.0))
+                    .text_size(px(10.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(label),
+            );
+        }
+
+        let mut calendar = div().flex().flex_col().items_center().child(weekdays);
+        for week in 0..6 {
+            let mut row = div().flex().flex_row();
+            for weekday in 0..7 {
+                let day_number = week * 7 + weekday - first_weekday;
+                if day_number < 0 || day_number >= days {
+                    row = row.child(div().w(px(28.0)).h(px(22.0)));
+                    continue;
+                }
+                let day = day_number as u32 + 1;
+                let is_selected = day == picker.day;
+                let is_today =
+                    now.year() == picker.year && now.month() == picker.month && now.day() == day;
+                row = row.child(
+                    div()
+                        .id(SharedString::from(format!("date-day-{day}")))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .w(px(28.0))
+                        .h(px(22.0))
+                        .text_size(px(11.0))
+                        .cursor_pointer()
+                        .when(is_selected, |style| {
+                            style.bg(rgb(theme.primary)).text_color(rgb(0xffffff))
+                        })
+                        .when(!is_selected && is_today, |style| {
+                            style.border_1().border_color(rgb(theme.primary))
+                        })
+                        .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                            this.date_picker_select_day(day, cx);
+                        }))
+                        .child(day.to_string()),
+                );
+            }
+            calendar = calendar.child(row);
+        }
+
+        let mut time_row = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_center()
+            .gap_1();
+        if picker.has_time {
+            time_row = time_row
+                .child(self.time_spinner("date-hour", picker.hour, 0, cx))
+                .child(":")
+                .child(self.time_spinner("date-minute", picker.minute, 1, cx))
+                .child(":")
+                .child(self.time_spinner("date-second", picker.second, 2, cx));
+        }
+
+        let footer = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .id("date-today")
+                    .text_size(px(11.0))
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.date_picker_today(cx);
+                    }))
+                    .child(format!(
+                        "{}: {}/{}/{}",
+                        t!("grid.today"),
+                        now.year(),
+                        now.month(),
+                        now.day()
+                    )),
             )
             .child(
                 div()
@@ -3329,28 +4634,585 @@ impl AppView {
                     .flex_row()
                     .items_center()
                     .gap_2()
-                    .child(self.action_button(
-                        "grid-prev",
-                        t!("grid.prev").to_string(),
-                        cx.listener(|this, _event, _window, cx| this.prev_page(cx)),
+                    .child(self.dialog_button(
+                        "date-cancel",
+                        t!("form.cancel").to_string(),
+                        false,
+                        cx.listener(|this, _event, _window, cx| this.date_picker_cancel(cx)),
                     ))
-                    .child(div().child(page_label))
-                    .child(self.action_button(
-                        "grid-next",
-                        t!("grid.next").to_string(),
-                        cx.listener(|this, _event, _window, cx| this.next_page(cx)),
+                    .child(self.dialog_button(
+                        "date-ok",
+                        t!("form.ok").to_string(),
+                        true,
+                        cx.listener(|this, _event, _window, cx| this.date_picker_ok(cx)),
+                    )),
+            );
+
+        div()
+            .id("date-picker")
+            .absolute()
+            .left(px(left))
+            .top(px(top))
+            .w(px(width))
+            .p_2()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .bg(rgb(theme.dialog_bg))
+            .border_1()
+            .border_color(rgb(theme.text_muted))
+            .child(header)
+            .child(calendar)
+            .child(time_row)
+            .child(footer)
+            .into_any_element()
+    }
+
+    fn time_spinner(
+        &self,
+        id_prefix: &str,
+        value: u32,
+        field: usize,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
+        let theme = self.theme;
+        div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .child(
+                div()
+                    .id(SharedString::from(format!("{id_prefix}-up")))
+                    .cursor_pointer()
+                    .text_size(px(8.0))
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.date_picker_shift_time(field, 1, cx);
+                    }))
+                    .child("▲"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(28.0))
+                    .h(px(18.0))
+                    .bg(rgb(theme.input_bg))
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .text_size(px(11.0))
+                    .child(format!("{value:02}")),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("{id_prefix}-down")))
+                    .cursor_pointer()
+                    .text_size(px(8.0))
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.date_picker_shift_time(field, -1, cx);
+                    }))
+                    .child("▼"),
+            )
+    }
+
+    fn render_grid_vscrollbar(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let theme = self.theme;
+        let handle = self.grid_list_scroll.0.borrow().base_handle.clone();
+        let viewport = f32::from(handle.bounds().size.height);
+        let max = f32::from(handle.max_offset().height);
+        let scroll = -f32::from(handle.offset().y);
+        let content = (viewport + max).max(1.0);
+        let thumb_h = if viewport > 0.0 {
+            (viewport * viewport / content).clamp(24.0, viewport)
+        } else {
+            24.0
+        };
+        let travel = (viewport - thumb_h).max(0.0);
+        let thumb_y = if max > 0.0 {
+            (scroll / max) * travel
+        } else {
+            0.0
+        };
+
+        div()
+            .id("grid-vscrollbar")
+            .relative()
+            .flex_none()
+            .w(px(14.0))
+            .h_full()
+            .bg(rgb(theme.toolbar_bg))
+            .border_l_1()
+            .border_color(rgb(theme.border))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                    this.scroll_grid_v_to(event.position.y, cx);
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                if event.pressed_button == Some(MouseButton::Left) {
+                    this.scroll_grid_v_to(event.position.y, cx);
+                }
+            }))
+            .child(
+                div()
+                    .absolute()
+                    .left(px(1.0))
+                    .top(px(thumb_y))
+                    .w(px(12.0))
+                    .h(px(thumb_h))
+                    .bg(rgb(theme.button_border)),
+            )
+    }
+
+    fn render_grid_hscrollbar(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let theme = self.theme;
+        let viewport = f32::from(self.grid_hscroll.bounds().size.width);
+        let max = f32::from(self.grid_hscroll.max_offset().width);
+        let scroll = -f32::from(self.grid_hscroll.offset().x);
+        let content = (viewport + max).max(1.0);
+        let thumb_w = if viewport > 0.0 {
+            (viewport * viewport / content).clamp(24.0, viewport)
+        } else {
+            24.0
+        };
+        let travel = (viewport - thumb_w).max(0.0);
+        let thumb_x = if max > 0.0 {
+            (scroll / max) * travel
+        } else {
+            0.0
+        };
+
+        div()
+            .id("grid-hscrollbar")
+            .relative()
+            .flex_none()
+            .w_full()
+            .h(px(14.0))
+            .bg(rgb(theme.toolbar_bg))
+            .border_t_1()
+            .border_color(rgb(theme.border))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                    this.scroll_grid_h_to(event.position.x, cx);
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                if event.pressed_button == Some(MouseButton::Left) {
+                    this.scroll_grid_h_to(event.position.x, cx);
+                }
+            }))
+            .child(
+                div()
+                    .absolute()
+                    .left(px(thumb_x))
+                    .top(px(1.0))
+                    .w(px(thumb_w))
+                    .h(px(12.0))
+                    .bg(rgb(theme.button_border)),
+            )
+    }
+
+    fn scroll_grid_v_to(&self, mouse_y: Pixels, cx: &mut Context<'_, Self>) {
+        let handle = self.grid_list_scroll.0.borrow().base_handle.clone();
+        let bounds = handle.bounds();
+        let viewport = f32::from(bounds.size.height);
+        let max = f32::from(handle.max_offset().height);
+        if viewport <= 0.0 || max <= 0.0 {
+            return;
+        }
+        let content = viewport + max;
+        let thumb_h = (viewport * viewport / content).clamp(24.0, viewport);
+        let travel = viewport - thumb_h;
+        if travel <= 0.0 {
+            return;
+        }
+        let relative = f32::from(mouse_y) - f32::from(bounds.top());
+        let thumb_y = (relative - thumb_h / 2.0).clamp(0.0, travel);
+        let scroll = thumb_y / travel * max;
+        let x = handle.offset().x;
+        handle.set_offset(Point::new(x, px(-scroll)));
+        cx.notify();
+    }
+
+    fn scroll_grid_h_to(&self, mouse_x: Pixels, cx: &mut Context<'_, Self>) {
+        let viewport = f32::from(self.grid_hscroll.bounds().size.width);
+        let max = f32::from(self.grid_hscroll.max_offset().width);
+        if viewport <= 0.0 || max <= 0.0 {
+            return;
+        }
+        let content = viewport + max;
+        let thumb_w = (viewport * viewport / content).clamp(24.0, viewport);
+        let travel = viewport - thumb_w;
+        if travel <= 0.0 {
+            return;
+        }
+        let relative = f32::from(mouse_x) - f32::from(self.grid_hscroll.bounds().left());
+        let thumb_x = (relative - thumb_w / 2.0).clamp(0.0, travel);
+        let scroll = thumb_x / travel * max;
+        let y = self.grid_hscroll.offset().y;
+        self.grid_hscroll.set_offset(Point::new(px(-scroll), y));
+        cx.notify();
+    }
+
+    fn render_grid_toolbar(&self) -> impl IntoElement {
+        let theme = self.theme;
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .px_1()
+            .h(px(28.0))
+            .flex_none()
+            .bg(rgb(theme.toolbar_bg))
+            .border_b_1()
+            .border_color(rgb(theme.border))
+            .child(self.grid_tool_button(
+                "grid-begin",
+                "icons/transaction.svg",
+                t!("grid.begin_transaction").to_string(),
+                theme.text,
+                true,
+                true,
+                |_, _, _| {},
+            ))
+            .child(self.grid_tool_button(
+                "grid-text",
+                "icons/text.svg",
+                t!("grid.text").to_string(),
+                theme.text,
+                true,
+                true,
+                |_, _, _| {},
+            ))
+            .child(self.grid_tool_button(
+                "grid-filter",
+                "icons/filter.svg",
+                t!("grid.filter").to_string(),
+                theme.text,
+                true,
+                false,
+                |_, _, _| {},
+            ))
+            .child(self.grid_tool_button(
+                "grid-sort",
+                "icons/sort.svg",
+                t!("grid.sort").to_string(),
+                theme.text,
+                true,
+                false,
+                |_, _, _| {},
+            ))
+            .child(self.grid_tool_button(
+                "grid-import",
+                "icons/import.svg",
+                t!("grid.import").to_string(),
+                theme.icon_views,
+                true,
+                false,
+                |_, _, _| {},
+            ))
+            .child(self.grid_tool_button(
+                "grid-export",
+                "icons/export.svg",
+                t!("grid.export").to_string(),
+                theme.icon_views,
+                true,
+                false,
+                |_, _, _| {},
+            ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn grid_tool_button(
+        &self,
+        id: &'static str,
+        icon: &'static str,
+        label: String,
+        color: u32,
+        enabled: bool,
+        has_arrow: bool,
+        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Stateful<Div> {
+        let theme = self.theme;
+        let mut item = div()
+            .id(id)
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .h(px(24.0))
+            .rounded_sm()
+            .text_size(px(12.0))
+            .text_color(rgb(color))
+            .when(enabled, move |style| {
+                style
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            })
+            .on_click(on_click)
+            .child(
+                svg()
+                    .path(icon)
+                    .w(px(16.0))
+                    .h(px(16.0))
+                    .flex_none()
+                    .text_color(rgb(color)),
+            )
+            .child(label);
+        if has_arrow {
+            item = item.child(
+                svg()
+                    .path("icons/chevron-down.svg")
+                    .w(px(10.0))
+                    .h(px(10.0))
+                    .flex_none()
+                    .text_color(rgb(theme.text_muted)),
+            );
+        }
+        item
+    }
+
+    fn render_grid_controls(
+        &self,
+        grid: &GridState,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
+        let theme = self.theme;
+        let last = grid.last_page();
+        let at_first = grid.page_index == 0;
+        let at_last = match last {
+            Some(last) => grid.page_index >= last,
+            None => !grid.has_next(),
+        };
+        let active = theme.text;
+        let muted = theme.text_muted;
+
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .px_2()
+            .h(px(30.0))
+            .flex_none()
+            .bg(rgb(theme.toolbar_bg))
+            .border_t_1()
+            .border_color(rgb(theme.border))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .child(self.grid_icon_button(
+                        "grid-add",
+                        "icons/plus.svg",
+                        theme.icon_connection,
+                        false,
+                        |_, _, _| {},
                     ))
-                    .child(self.action_button(
+                    .child(self.grid_icon_button(
+                        "grid-delete",
+                        "icons/minus.svg",
+                        theme.danger,
+                        false,
+                        |_, _, _| {},
+                    ))
+                    .child(self.grid_icon_button(
+                        "grid-commit",
+                        "icons/check.svg",
+                        theme.icon_connection,
+                        !grid.edits.is_empty(),
+                        cx.listener(|this, _event, _window, cx| this.commit_edits(cx)),
+                    ))
+                    .child(self.grid_icon_button(
+                        "grid-rollback",
+                        "icons/cross.svg",
+                        theme.danger,
+                        !grid.edits.is_empty(),
+                        cx.listener(|this, _event, _window, cx| this.cancel_edits(cx)),
+                    ))
+                    .child(self.grid_icon_button(
                         "grid-refresh",
-                        t!("grid.refresh").to_string(),
+                        "icons/refresh.svg",
+                        active,
+                        true,
                         cx.listener(|this, _event, _window, cx| this.refresh(cx)),
                     ))
-                    .child(self.action_button(
-                        "grid-page-size",
-                        format!("{}: {}", t!("grid.page_size"), grid.page_size),
+                    .child(self.grid_icon_button(
+                        "grid-stop",
+                        "icons/stop.svg",
+                        muted,
+                        false,
+                        |_, _, _| {},
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .child(self.grid_icon_button(
+                        "grid-first",
+                        "icons/first.svg",
+                        active,
+                        !at_first,
+                        cx.listener(|this, _event, _window, cx| this.first_page(cx)),
+                    ))
+                    .child(self.grid_icon_button(
+                        "grid-prev",
+                        "icons/prev.svg",
+                        active,
+                        !at_first,
+                        cx.listener(|this, _event, _window, cx| this.prev_page(cx)),
+                    ))
+                    .child(self.render_page_input(cx))
+                    .child(self.grid_icon_button(
+                        "grid-next",
+                        "icons/next.svg",
+                        active,
+                        !at_last,
+                        cx.listener(|this, _event, _window, cx| this.next_page(cx)),
+                    ))
+                    .child(self.grid_icon_button(
+                        "grid-last",
+                        "icons/last.svg",
+                        active,
+                        !at_last,
+                        cx.listener(|this, _event, _window, cx| this.last_page(cx)),
+                    ))
+                    .child(self.grid_icon_button(
+                        "grid-gear",
+                        "icons/gear.svg",
+                        muted,
+                        true,
                         cx.listener(|this, _event, _window, cx| this.cycle_page_size(cx)),
                     )),
             )
+    }
+
+    fn grid_icon_button(
+        &self,
+        id: &'static str,
+        icon: &'static str,
+        color: u32,
+        enabled: bool,
+        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Stateful<Div> {
+        let theme = self.theme;
+        let tint = if enabled { color } else { theme.text_muted };
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(24.0))
+            .h(px(22.0))
+            .rounded_sm()
+            .when(enabled, move |style| {
+                style
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            })
+            .on_click(on_click)
+            .child(
+                svg()
+                    .path(icon)
+                    .w(px(14.0))
+                    .h(px(14.0))
+                    .flex_none()
+                    .text_color(rgb(tint)),
+            )
+    }
+
+    fn render_page_input(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let theme = self.theme;
+        div()
+            .id("grid-page-input")
+            .track_focus(&self.page_input_focus)
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(52.0))
+            .h(px(22.0))
+            .bg(rgb(theme.input_bg))
+            .border_1()
+            .border_color(rgb(theme.border))
+            .text_size(px(12.0))
+            .cursor_text()
+            .on_key_down(cx.listener(|this, event, _window, cx| this.page_input_key(event, cx)))
+            .on_click(cx.listener(|this, _event, window, cx| {
+                window.focus(&this.page_input_focus);
+                cx.notify();
+            }))
+            .child(format!(
+                "{}{}",
+                self.page_input,
+                if self.page_input_focused && self.caret_visible {
+                    "|"
+                } else {
+                    ""
+                }
+            ))
+    }
+
+    fn render_grid_status(&self, grid: &GridState) -> impl IntoElement {
+        let theme = self.theme;
+        let total = grid.total_rows.unwrap_or(0);
+        let end = grid
+            .page_index
+            .saturating_mul(grid.page_size)
+            .saturating_add(grid.rows.len() as u64);
+        let info = t!(
+            "grid.page_info",
+            end = end,
+            total = total,
+            page = grid.page_index + 1
+        )
+        .to_string();
+        let message = match grid.selection {
+            Some(selection) => {
+                let (start_row, end_row) = selection.rows();
+                let (start_col, end_col) = selection.cols();
+                t!(
+                    "grid.selection_info",
+                    rows = end_row - start_row + 1,
+                    cols = end_col - start_col + 1
+                )
+                .to_string()
+            }
+            None => grid.sql(),
+        };
+
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_4()
+            .px_2()
+            .h(px(24.0))
+            .flex_none()
+            .bg(rgb(theme.toolbar_bg))
+            .border_t_1()
+            .border_color(rgb(theme.border))
+            .text_size(px(12.0))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .child(message),
+            )
+            .child(div().flex_none().child(info))
     }
 
     fn render_password_prompt(
@@ -4379,19 +6241,43 @@ impl Render for AppView {
         self.theme = Theme::resolve(self.theme_setting, window.appearance());
         let theme = self.theme;
 
+        // gpui does not re-run `render` when the window is resized, so the object list would
+        // keep its initial rows-per-column. Observe bounds and force a follow-up frame so the
+        // count is recomputed from the freshly measured scroll viewport.
+        if self.window_bounds_subscription.is_none() {
+            self.window_bounds_subscription =
+                Some(cx.observe_window_bounds(window, |_this, window, cx| {
+                    cx.notify();
+                    cx.on_next_frame(window, |_this, _window, cx| cx.notify());
+                }));
+        }
+
         if self.password_focus_pending {
             window.focus(&self.password_focus);
             self.password_focus_pending = false;
         }
 
-        if (self.form.is_some() || self.db_dialog.is_some()) && !self.caret_blink_running {
+        self.object_search_focused = self.object_search_focus.is_focused(window);
+        self.page_input_focused = self.page_input_focus.is_focused(window);
+        self.cell_editor_focused = self.cell_editor_focus.is_focused(window);
+
+        let text_field_active =
+            self.object_search_focused || self.page_input_focused || self.cell_editor_focused;
+        if (self.form.is_some() || self.db_dialog.is_some() || text_field_active)
+            && !self.caret_blink_running
+        {
             self.caret_blink_running = true;
             let executor = cx.background_executor().clone();
             cx.spawn(async move |this, cx| {
                 loop {
                     executor.timer(Duration::from_millis(530)).await;
                     let keep_going = this.update(cx, |view, cx| {
-                        if view.form.is_some() || view.db_dialog.is_some() {
+                        if view.form.is_some()
+                            || view.db_dialog.is_some()
+                            || view.object_search_focused
+                            || view.page_input_focused
+                            || view.cell_editor_focused
+                        {
                             view.caret_visible = !view.caret_visible;
                             cx.notify();
                             true
@@ -4568,4 +6454,61 @@ fn titlebar_button(
         .hover(move |style| style.bg(rgb(theme.button_hover_bg)))
         .on_click(move |_event, window, cx| action(window, cx))
         .child(label.to_string())
+}
+
+fn is_temporal_type(data_type: &str) -> bool {
+    let data_type = data_type.to_ascii_lowercase();
+    data_type == "date" || data_type == "datetime" || data_type == "timestamp"
+}
+
+fn parse_datetime(value: &str) -> Option<NaiveDateTime> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    for format in [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%dT%H:%M",
+    ] {
+        if let Ok(parsed) = NaiveDateTime::parse_from_str(value, format) {
+            return Some(parsed);
+        }
+    }
+    if let Ok(date) = NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        return date.and_hms_opt(0, 0, 0);
+    }
+    None
+}
+
+fn days_in_month(year: i32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if is_leap_year(year) {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 30,
+    }
+}
+
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+fn wrap_unit(value: u32, delta: i32, modulus: u32) -> u32 {
+    (value as i32 + delta).rem_euclid(modulus as i32) as u32
+}
+
+fn weekday_labels() -> [&'static str; 7] {
+    if rust_i18n::locale().starts_with("zh") {
+        ["一", "二", "三", "四", "五", "六", "日"]
+    } else {
+        ["M", "T", "W", "T", "F", "S", "S"]
+    }
 }

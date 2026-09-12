@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use navidog_core::{
     CellValue, ColumnInfo, Connection, DatabaseInfo, DriverId, Error, ObjectKind, PageRequest,
-    Result, TableInfo, TablePage,
+    Result, RowUpdate, TableInfo, TablePage,
 };
 use sqlx::mysql::MySqlRow;
 use sqlx::{MySqlPool, Row, ValueRef};
@@ -161,6 +161,61 @@ impl Connection for MysqlConnection {
             page_size: page.page_size,
             total_rows,
         })
+    }
+
+    async fn update_rows(&self, database: &str, table: &str, updates: &[RowUpdate]) -> Result<()> {
+        if updates.is_empty() {
+            return Ok(());
+        }
+
+        let qualified = format!("{}.{}", quote_identifier(database), quote_identifier(table));
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| Error::Query(error.to_string()))?;
+
+        for update in updates {
+            if update.set.is_empty() {
+                continue;
+            }
+
+            let set_clause = update
+                .set
+                .iter()
+                .map(|(column, _)| format!("{} = ?", quote_identifier(column)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let where_clause = if update.keys.is_empty() {
+                "1 = 1".to_string()
+            } else {
+                update
+                    .keys
+                    .iter()
+                    .map(|(column, _)| format!("{} = ?", quote_identifier(column)))
+                    .collect::<Vec<_>>()
+                    .join(" AND ")
+            };
+            let sql = format!("UPDATE {qualified} SET {set_clause} WHERE {where_clause}");
+
+            let mut query = sqlx::query(sqlx::AssertSqlSafe(sql));
+            for (_, value) in &update.set {
+                query = query.bind(value.clone());
+            }
+            for (_, value) in &update.keys {
+                query = query.bind(value.clone());
+            }
+            query
+                .execute(&mut *transaction)
+                .await
+                .map_err(|error| Error::Query(error.to_string()))?;
+        }
+
+        transaction
+            .commit()
+            .await
+            .map_err(|error| Error::Query(error.to_string()))?;
+        Ok(())
     }
 
     async fn create_database(&self, name: &str) -> Result<()> {

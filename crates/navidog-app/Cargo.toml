@@ -17,6 +17,11 @@ navidog-mysql.workspace = true
 navidog-config.workspace = true
 gpui.workspace = true
 rust-i18n.workspace = true
+chrono.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+raw-window-handle.workspace = true
+windows.workspace = true

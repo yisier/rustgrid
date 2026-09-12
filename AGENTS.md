@@ -33,8 +33,14 @@ not a later refactor.
 
 ## Commands
 
+- **After every code change, verify it compiles** before finishing: `cargo check -p navidog-app`
+  (or `cargo check --workspace`). Debug builds do not need the shader toolchain below.
 - `cargo check --workspace` / `cargo build`
 - `cargo run -p navidog-app` (produced binary is `navidog`)
+- Release build (`cargo build --release -p navidog-app`) additionally needs the fxc shim (see
+  Gotchas): build it once with
+  `gcc -O2 -o fxc.exe tools/fxc-shim/fxc.c -lkernel32`, then run cargo with
+  `GPUI_FXC_PATH=<abs path to fxc.exe>` (plus the GNU toolchain env vars below).
 - `cargo test --workspace`
 - Live MySQL integration test (ignored by default): set `NAVIDOG_MYSQL_PASSWORD` (and
   optionally `NAVIDOG_MYSQL_HOST`/`PORT`/`USER`/`DATABASE`), then
@@ -98,6 +104,15 @@ touching UI code.
   (`AppView::render_main_tab`) and the object toolbar (`AppView::toolbar_item`) are borderless
   icon+label items with a hover highlight and thin `toolbar_separator`s between them — do
   **not** style them with `win_button` or borders. `win_button` is for dialog push buttons only.
+- **The object list (Tables/Views) follows Navicat's layout.** It is column-major: items are
+  chunked into columns of `object_rows_per_column()` (derived from the scroll viewport height,
+  `OBJECT_ROW_HEIGHT` per row) so a column fills top-to-bottom and then wraps to the next column
+  to the right, and it scrolls **horizontally** (`overflow_x_scroll`), not vertically. The
+  number of rows per column therefore adapts to the window height. Do not switch it back to
+  `flex_row()`/`overflow_scroll()`. gpui 0.2 does **not** paint scrollbars for `overflow_*`
+  (it only scrolls and reserves space), so the list ships its own horizontal scrollbar
+  (`render_object_hscrollbar`, driven by `object_scroll`); keep it in sync when touching the
+  object list.
 - Keep dialog controls compact: 12px text, ~24px-high buttons, square text fields.
 - Embed bitmap images with `img(ImageSource::Resource(Resource::Embedded("name".into())))`.
   Calling `img("name")` treats the bare filename as a **URI** and fails with
@@ -158,6 +173,17 @@ build those features early.
   triple-named subdirectory).
 - Keep gpui usage close to the verified shape in `crates/navidog-app/src/app.rs` /
   `main.rs` (`Application::new().with_assets(Assets).run`, `cx.open_window`, `impl Render`).
+- **Window-edge resizing on Windows is app-owned.** gpui hides the OS titlebar, so its
+  `WM_NCCALCSIZE` leaves only a 1px frame and the titlebar's `WindowControlArea::Drag` claims
+  the top edge, making the window effectively unresizable. `src/win_resize.rs` installs a
+  `SetWindowSubclass` hook that answers `WM_NCHITTEST` with the real frame-metric resize codes
+  before gpui sees the message (`install(window)` is called from `open_window`). Do **not** edit
+  the crates.io copy of gpui under `~/.cargo/registry` to fix this — it is not reproducible.
+- gpui's build script only compiles HLSL when `debug_assertions` is **off** (release). It needs
+  the Windows SDK `fxc.exe`, which is **not** installed on this machine, so a plain release
+  build panics in `gpui/build.rs` with `Failed to find fxc.exe`. Debug builds compile shaders at
+  runtime via `D3DCompileFromFile` and are unaffected. Use `tools/fxc-shim` (speaks the fxc
+  subset gpui invokes; drives the system `d3dcompiler_47.dll`) via `GPUI_FXC_PATH` for release.
 - **Cross-platform** (Windows/macOS/Linux). Avoid OS-only APIs; gate platform-specific code
   behind `#[cfg(target_os = ...)]`; watch per-OS native deps (e.g. Linux system libraries).
 - **Small install size is a hard requirement.** The release profile already sets `lto`,

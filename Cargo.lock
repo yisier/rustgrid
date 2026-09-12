@@ -3623,14 +3623,17 @@ dependencies = [
 name = "navidog-app"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "gpui",
  "navidog-config",
  "navidog-core",
  "navidog-mysql",
+ "raw-window-handle",
  "rust-i18n",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "windows 0.61.3",
 ]
 
 [[package]]

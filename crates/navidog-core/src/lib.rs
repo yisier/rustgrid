@@ -7,6 +7,6 @@ pub use driver::{Connection, Driver};
 pub use error::{Error, Result};
 pub use model::{
     CellValue, ColumnInfo, ConnectionConfig, ConnectionProfile, DatabaseInfo, DriverId, ObjectKind,
-    PageRequest, TableInfo, TablePage,
+    PageRequest, RowUpdate, TableInfo, TablePage,
 };
 pub use registry::{DriverRegistry, DriverSource};

@@ -110,6 +110,13 @@ impl CellValue {
             }
         }
     }
+
+    pub fn as_edit_string(&self) -> String {
+        match self {
+            CellValue::Null => String::new(),
+            _ => self.as_display(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -138,4 +145,11 @@ pub struct TablePage {
     pub page: u64,
     pub page_size: u64,
     pub total_rows: Option<u64>,
+}
+
+/// A single-row update: `SET` assignments plus the key columns used in the `WHERE` clause.
+#[derive(Debug, Clone)]
+pub struct RowUpdate {
+    pub set: Vec<(String, Option<String>)>,
+    pub keys: Vec<(String, String)>,
 }

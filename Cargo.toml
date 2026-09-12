@@ -35,6 +35,14 @@ directories = "6"
 gpui = "0.2"
 chacha20poly1305 = "0.11"
 base64 = "0.22"
+raw-window-handle = "0.6"
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [profile.release]
 opt-level = "z"

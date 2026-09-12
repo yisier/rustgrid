@@ -9,6 +9,8 @@ mod form;
 mod runtime;
 mod session;
 mod theme;
+#[cfg(target_os = "windows")]
+mod win_resize;
 
 use std::sync::Arc;
 
@@ -58,6 +60,8 @@ fn main() {
                 ..Default::default()
             },
             move |_window, cx| {
+                #[cfg(target_os = "windows")]
+                win_resize::install(_window);
                 cx.new(|cx| AppView::new(registry.clone(), config.clone(), runtime.clone(), cx))
             },
         )
