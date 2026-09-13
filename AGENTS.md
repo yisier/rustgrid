@@ -123,6 +123,10 @@ touching UI code.
 - **Do not reinvent the wheel**: use mature, stable third-party crates for non-trivial
   functionality (connection helpers, UI widgets, config storage) instead of hand-rolling.
 - Verify a crate's maturity before adopting it — prefer widely used, actively maintained crates.
+- SQL language work uses `sqlparser` (lexer/parser/keyword list) and `sqlformat` (beautifier);
+  do not add a bespoke SQL lexer/formatter. Syntax highlighting maps `sqlparser` tokens to colors
+  (`sql.rs`), completion combines `sqlparser` keywords with loaded table names, and `Beautify SQL`
+  calls `sqlformat`.
 - Keep the dependency tree small (see Gotchas).
 
 ## Scope (do not exceed)
@@ -133,12 +137,16 @@ Strictly follow Navicat's UI layout. Implemented today:
 2. Enumerate databases; create/edit/delete a database (charset + collation) and edit defaults
 3. Per database, list tables and views
 4. Show a selected table's data in a grid with **pagination** — display only, **no editing** yet
+5. SQL query editor tabs (`New Query` button / `Queries` main tab): multi-line editor with SQL
+   syntax highlighting and keyword/table completion, `Beautify SQL`, run arbitrary SQL against a
+   chosen connection + database, `Explain`, and a result grid that reuses the table grid
+   (controls, scrollbars, status, and in-place editing when a single table can be inferred).
 
-Still out of scope: editing data in the grid, a second database engine, and the disabled
-placeholder UI (the `Functions`/`Users`/`Queries`/`Backups` main tabs and the
-`Design/New/Delete Table`, `Import/Export` toolbar buttons are deliberate stubs — leave them
-disabled unless asked). The abstractions above are what make more engines cheap later — do not
-build those features early.
+Still out of scope: a second database engine, and the disabled placeholder UI (the
+`Functions`/`Users`/`Backups` main tabs, the `Design/New/Delete Table`, `Import/Export` toolbar
+buttons, and the query editor's `Save`/`Query Builder`/`Snippets` items are deliberate stubs —
+leave them disabled unless asked). The abstractions above are what make more engines cheap later —
+do not build those features early.
 
 ## Gotchas
 
@@ -158,6 +166,19 @@ build those features early.
   `sqlx::raw_sql(sqlx::AssertSqlSafe(sql)).execute(&pool)`. Using `sqlx::query` prepares the
   statement and MySQL rejects it with `1295 ... not supported in the prepared statement
   protocol yet`. Reserve `sqlx::query` for parameterized DML/`SELECT`.
+- The query editor runs arbitrary SQL through `Connection::execute_query`
+  (`navidog-mysql`), which uses the text protocol on a **pinned pooled connection** (so `USE db`
+  and the statement share a session). Since MySQL cannot tell the caller whether a statement
+  returns rows ahead of time, `returns_result_set` classifies it by the leading keyword: that path
+  uses `raw_sql(..).fetch_all` (falling back to `prepare` for column metadata on a 0-row result),
+  everything else uses `raw_sql(..).execute` for `rows_affected`. Keep the keyword list in sync
+  when adding statements that produce result sets.
+- Query results are stored as ordinary `GridState` entries in `AppView::grids`, flagged by
+  `GridState::sql` being `Some` and `show_toolbar == false`; `QueryTab::grid_id` links back to
+  one. This is what lets the editor reuse `render_grid` (scrollbars, controls, status, editing).
+  Paging is client-side (`page_size = rows.len()`), and `load_page` re-runs the stored SQL via
+  `reload_query_grid`. Editing is enabled only when `sqlparser` infers a single-table `FROM`
+  (`sql::infer_single_table`).
 - DB work is tokio-based but gpui's executor is not tokio. Inside `cx.spawn`, run sqlx
   futures through `Runtime::spawn` and `.await` the returned `JoinHandle` (see
   `app.rs`). Awaiting sqlx directly in a gpui task panics with "there is no reactor running".

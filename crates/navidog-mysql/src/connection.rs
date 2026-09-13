@@ -2,10 +2,13 @@ use async_trait::async_trait;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use navidog_core::{
     CellValue, ColumnInfo, Connection, DatabaseInfo, DriverId, Error, ObjectKind, PageRequest,
-    Result, RowUpdate, TableInfo, TablePage,
+    QueryResult, Result, RowUpdate, TableInfo, TablePage,
 };
-use sqlx::mysql::MySqlRow;
-use sqlx::{MySqlPool, Row, ValueRef};
+use sqlx::mysql::{MySqlColumn, MySqlRow};
+use sqlx::{
+    AssertSqlSafe, Column, Executor, MySqlConnection, MySqlPool, Row, SqlSafeStr, Statement,
+    ValueRef,
+};
 
 pub struct MysqlConnection {
     pool: MySqlPool,
@@ -20,7 +23,7 @@ impl MysqlConnection {
         let row = sqlx::query(sqlx::AssertSqlSafe(sql))
             .fetch_one(&self.pool)
             .await
-            .map_err(|error| Error::Query(error.to_string()))?;
+            .map_err(map_query_error)?;
 
         if let Ok(value) = row.try_get::<i64, _>(0) {
             return Ok(value.max(0) as u64);
@@ -44,13 +47,11 @@ impl Connection for MysqlConnection {
         let rows = sqlx::query("SHOW DATABASES")
             .fetch_all(&self.pool)
             .await
-            .map_err(|error| Error::Query(error.to_string()))?;
+            .map_err(map_query_error)?;
 
         let mut databases = Vec::with_capacity(rows.len());
         for row in rows {
-            let name: String = row
-                .try_get(0)
-                .map_err(|error| Error::Query(error.to_string()))?;
+            let name: String = row.try_get(0).map_err(map_query_error)?;
             databases.push(DatabaseInfo { name });
         }
         Ok(databases)
@@ -66,16 +67,12 @@ impl Connection for MysqlConnection {
         .bind(database)
         .fetch_all(&self.pool)
         .await
-        .map_err(|error| Error::Query(error.to_string()))?;
+        .map_err(map_query_error)?;
 
         let mut tables = Vec::with_capacity(rows.len());
         for row in rows {
-            let name: String = row
-                .try_get(0)
-                .map_err(|error| Error::Query(error.to_string()))?;
-            let table_type: String = row
-                .try_get(1)
-                .map_err(|error| Error::Query(error.to_string()))?;
+            let name: String = row.try_get(0).map_err(map_query_error)?;
+            let table_type: String = row.try_get(1).map_err(map_query_error)?;
             let kind = if table_type.eq_ignore_ascii_case("VIEW") {
                 ObjectKind::View
             } else {
@@ -97,22 +94,14 @@ impl Connection for MysqlConnection {
         .bind(table)
         .fetch_all(&self.pool)
         .await
-        .map_err(|error| Error::Query(error.to_string()))?;
+        .map_err(map_query_error)?;
 
         let mut columns = Vec::with_capacity(rows.len());
         for row in rows {
-            let name: String = row
-                .try_get(0)
-                .map_err(|error| Error::Query(error.to_string()))?;
-            let data_type: String = row
-                .try_get(1)
-                .map_err(|error| Error::Query(error.to_string()))?;
-            let nullable: String = row
-                .try_get(2)
-                .map_err(|error| Error::Query(error.to_string()))?;
-            let key: String = row
-                .try_get(3)
-                .map_err(|error| Error::Query(error.to_string()))?;
+            let name: String = row.try_get(0).map_err(map_query_error)?;
+            let data_type: String = row.try_get(1).map_err(map_query_error)?;
+            let nullable: String = row.try_get(2).map_err(map_query_error)?;
+            let key: String = row.try_get(3).map_err(map_query_error)?;
             columns.push(ColumnInfo {
                 name,
                 data_type,
@@ -137,13 +126,16 @@ impl Connection for MysqlConnection {
             .await
             .ok();
 
-        let page_sql = format!("SELECT * FROM {qualified} LIMIT ? OFFSET ?");
+        let page_sql = format!(
+            "SELECT * FROM {qualified}{} LIMIT ? OFFSET ?",
+            order_clause(&page)
+        );
         let rows = sqlx::query(sqlx::AssertSqlSafe(page_sql))
             .bind(page.page_size as i64)
             .bind(page.offset() as i64)
             .fetch_all(&self.pool)
             .await
-            .map_err(|error| Error::Query(error.to_string()))?;
+            .map_err(map_query_error)?;
 
         let mut decoded = Vec::with_capacity(rows.len());
         for row in &rows {
@@ -169,11 +161,7 @@ impl Connection for MysqlConnection {
         }
 
         let qualified = format!("{}.{}", quote_identifier(database), quote_identifier(table));
-        let mut transaction = self
-            .pool
-            .begin()
-            .await
-            .map_err(|error| Error::Query(error.to_string()))?;
+        let mut transaction = self.pool.begin().await.map_err(map_query_error)?;
 
         for update in updates {
             if update.set.is_empty() {
@@ -208,14 +196,104 @@ impl Connection for MysqlConnection {
             query
                 .execute(&mut *transaction)
                 .await
-                .map_err(|error| Error::Query(error.to_string()))?;
+                .map_err(map_query_error)?;
         }
 
-        transaction
-            .commit()
-            .await
-            .map_err(|error| Error::Query(error.to_string()))?;
+        transaction.commit().await.map_err(map_query_error)?;
         Ok(())
+    }
+
+    async fn delete_rows(
+        &self,
+        database: &str,
+        table: &str,
+        keys: &[Vec<(String, String)>],
+    ) -> Result<()> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+
+        let qualified = format!("{}.{}", quote_identifier(database), quote_identifier(table));
+        let mut transaction = self.pool.begin().await.map_err(map_query_error)?;
+
+        for row_keys in keys {
+            if row_keys.is_empty() {
+                return Err(Error::Query("delete requires key columns".to_string()));
+            }
+            let where_clause = row_keys
+                .iter()
+                .map(|(column, _)| format!("{} = ?", quote_identifier(column)))
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            let sql = format!("DELETE FROM {qualified} WHERE {where_clause} LIMIT 1");
+
+            let mut query = sqlx::query(sqlx::AssertSqlSafe(sql));
+            for (_, value) in row_keys {
+                query = query.bind(value.clone());
+            }
+            query
+                .execute(&mut *transaction)
+                .await
+                .map_err(map_query_error)?;
+        }
+
+        transaction.commit().await.map_err(map_query_error)?;
+        Ok(())
+    }
+
+    async fn execute_query(&self, database: Option<&str>, sql: &str) -> Result<QueryResult> {
+        let mut connection = self.pool.acquire().await.map_err(map_query_error)?;
+
+        if let Some(database) = database {
+            let use_sql = format!("USE {}", quote_identifier(database));
+            sqlx::raw_sql(sqlx::AssertSqlSafe(use_sql))
+                .execute(&mut *connection)
+                .await
+                .map_err(map_query_error)?;
+        }
+
+        if returns_result_set(sql) {
+            let rows = sqlx::raw_sql(sqlx::AssertSqlSafe(sql.to_string()))
+                .fetch_all(&mut *connection)
+                .await
+                .map_err(map_query_error)?;
+
+            let columns = match rows.first() {
+                Some(first) => columns_from_row(first),
+                None => describe_columns(&mut connection, sql)
+                    .await
+                    .unwrap_or_default(),
+            };
+
+            let mut decoded = Vec::with_capacity(rows.len());
+            for row in &rows {
+                let mut values = Vec::with_capacity(columns.len());
+                for index in 0..columns.len() {
+                    values.push(decode_cell(row, index));
+                }
+                decoded.push(values);
+            }
+
+            Ok(QueryResult {
+                columns,
+                rows: decoded,
+                rows_affected: 0,
+                has_result_set: true,
+                last_insert_id: None,
+            })
+        } else {
+            let result = sqlx::raw_sql(sqlx::AssertSqlSafe(sql.to_string()))
+                .execute(&mut *connection)
+                .await
+                .map_err(map_query_error)?;
+            Ok(QueryResult {
+                columns: Vec::new(),
+                rows: Vec::new(),
+                rows_affected: result.rows_affected(),
+                has_result_set: false,
+                last_insert_id: Some(result.last_insert_id()).filter(|id| *id != 0),
+            })
+        }
     }
 
     async fn create_database(&self, name: &str) -> Result<()> {
@@ -223,7 +301,7 @@ impl Connection for MysqlConnection {
         sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
             .execute(&self.pool)
             .await
-            .map_err(|error| Error::Query(error.to_string()))?;
+            .map_err(map_query_error)?;
         Ok(())
     }
 
@@ -232,7 +310,7 @@ impl Connection for MysqlConnection {
         sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
             .execute(&self.pool)
             .await
-            .map_err(|error| Error::Query(error.to_string()))?;
+            .map_err(map_query_error)?;
         Ok(())
     }
 
@@ -245,14 +323,10 @@ impl Connection for MysqlConnection {
         .bind(name)
         .fetch_one(&self.pool)
         .await
-        .map_err(|error| Error::Query(error.to_string()))?;
+        .map_err(map_query_error)?;
 
-        let charset: String = row
-            .try_get(0)
-            .map_err(|error| Error::Query(error.to_string()))?;
-        let collation: String = row
-            .try_get(1)
-            .map_err(|error| Error::Query(error.to_string()))?;
+        let charset: String = row.try_get(0).map_err(map_query_error)?;
+        let collation: String = row.try_get(1).map_err(map_query_error)?;
         Ok((charset, collation))
     }
 
@@ -263,13 +337,10 @@ impl Connection for MysqlConnection {
         )
         .fetch_all(&self.pool)
         .await
-        .map_err(|error| Error::Query(error.to_string()))?;
+        .map_err(map_query_error)?;
 
         rows.iter()
-            .map(|row| {
-                row.try_get(0)
-                    .map_err(|error| Error::Query(error.to_string()))
-            })
+            .map(|row| row.try_get(0).map_err(map_query_error))
             .collect()
     }
 
@@ -280,13 +351,10 @@ impl Connection for MysqlConnection {
         )
         .fetch_all(&self.pool)
         .await
-        .map_err(|error| Error::Query(error.to_string()))?;
+        .map_err(map_query_error)?;
 
         rows.iter()
-            .map(|row| {
-                row.try_get(0)
-                    .map_err(|error| Error::Query(error.to_string()))
-            })
+            .map(|row| row.try_get(0).map_err(map_query_error))
             .collect()
     }
 
@@ -309,7 +377,7 @@ impl Connection for MysqlConnection {
         sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
             .execute(&self.pool)
             .await
-            .map_err(|error| Error::Query(error.to_string()))?;
+            .map_err(map_query_error)?;
         Ok(())
     }
 
@@ -344,6 +412,110 @@ impl Connection for MysqlConnection {
 
 fn quote_identifier(identifier: &str) -> String {
     format!("`{}`", identifier.replace('`', "``"))
+}
+
+/// Build the ` ORDER BY ...` fragment for a page request, or an empty string when unsorted.
+fn order_clause(page: &PageRequest) -> String {
+    if page.order_by.is_empty() {
+        return String::new();
+    }
+    let terms = page
+        .order_by
+        .iter()
+        .map(|sort| {
+            format!(
+                "{} {}",
+                quote_identifier(&sort.column),
+                if sort.descending { "DESC" } else { "ASC" }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(" ORDER BY {terms}")
+}
+
+/// Map a sqlx error to a Navicat-style message: `<code> - <message>` for MySQL server errors.
+fn map_query_error(error: sqlx::Error) -> Error {
+    if let sqlx::Error::Database(database_error) = &error
+        && let Some(mysql_error) =
+            database_error.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
+    {
+        return Error::Query(format!(
+            "{} - {}",
+            mysql_error.number(),
+            mysql_error.message()
+        ));
+    }
+    Error::Query(error.to_string())
+}
+
+fn columns_from_row(row: &MySqlRow) -> Vec<ColumnInfo> {
+    row.columns().iter().map(column_info).collect()
+}
+
+fn column_info(column: &MySqlColumn) -> ColumnInfo {
+    ColumnInfo {
+        name: column.name().to_string(),
+        data_type: column.type_info().to_string(),
+        nullable: true,
+        primary_key: false,
+    }
+}
+
+async fn describe_columns(connection: &mut MySqlConnection, sql: &str) -> Result<Vec<ColumnInfo>> {
+    let statement = connection
+        .prepare(AssertSqlSafe(sql.to_string()).into_sql_str())
+        .await
+        .map_err(map_query_error)?;
+    Ok(statement.columns().iter().map(column_info).collect())
+}
+
+/// Whether a statement is expected to produce a result set. MySQL has no way to know this
+/// up front on the text protocol, so the leading keyword decides which execution path is used.
+fn returns_result_set(sql: &str) -> bool {
+    let mut rest = sql;
+    loop {
+        rest = rest.trim_start();
+        if let Some(stripped) = rest.strip_prefix("--") {
+            rest = stripped
+                .split_once('\n')
+                .map(|(_, after)| after)
+                .unwrap_or("");
+        } else if let Some(stripped) = rest.strip_prefix('#') {
+            rest = stripped
+                .split_once('\n')
+                .map(|(_, after)| after)
+                .unwrap_or("");
+        } else if let Some(stripped) = rest.strip_prefix("/*") {
+            rest = stripped
+                .split_once("*/")
+                .map(|(_, after)| after)
+                .unwrap_or("");
+        } else {
+            break;
+        }
+    }
+
+    let keyword: String = rest
+        .chars()
+        .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
+        .collect();
+
+    matches!(
+        keyword.to_ascii_uppercase().as_str(),
+        "SELECT"
+            | "SHOW"
+            | "DESCRIBE"
+            | "DESC"
+            | "EXPLAIN"
+            | "WITH"
+            | "VALUES"
+            | "TABLE"
+            | "CALL"
+            | "ANALYZE"
+            | "CHECK"
+            | "HELP"
+    )
 }
 
 fn decode_cell(row: &MySqlRow, index: usize) -> CellValue {
@@ -390,5 +562,49 @@ fn decode_cell(row: &MySqlRow, index: usize) -> CellValue {
             Err(error) => CellValue::Bytes(error.into_bytes()),
         },
         Err(_) => CellValue::Null,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{order_clause, returns_result_set};
+    use navidog_core::{PageRequest, SortColumn};
+
+    #[test]
+    fn builds_order_by_from_sort_columns() {
+        let sorted = PageRequest::new(0, 10).with_order_by(vec![
+            SortColumn {
+                column: "id".to_string(),
+                descending: false,
+            },
+            SortColumn {
+                column: "select".to_string(),
+                descending: true,
+            },
+        ]);
+        assert_eq!(order_clause(&sorted), " ORDER BY `id` ASC, `select` DESC");
+    }
+
+    #[test]
+    fn order_by_is_empty_when_unsorted() {
+        assert_eq!(order_clause(&PageRequest::new(0, 10)), "");
+    }
+
+    #[test]
+    fn detects_result_set_statements() {
+        assert!(returns_result_set("SELECT 1"));
+        assert!(returns_result_set("  select * from t"));
+        assert!(returns_result_set("-- comment\nSELECT 1"));
+        assert!(returns_result_set("/* block */ SHOW TABLES"));
+        assert!(returns_result_set("# comment\nEXPLAIN SELECT 1"));
+        assert!(returns_result_set(
+            "WITH cte AS (SELECT 1) SELECT * FROM cte"
+        ));
+
+        assert!(!returns_result_set("UPDATE t SET a = 1"));
+        assert!(!returns_result_set("INSERT INTO t VALUES (1)"));
+        assert!(!returns_result_set("DELETE FROM t"));
+        assert!(!returns_result_set("CREATE TABLE t (a INT)"));
+        assert!(!returns_result_set("USE db"));
     }
 }

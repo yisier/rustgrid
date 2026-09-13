@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use navidog_core::{CellValue, ColumnInfo, Connection, ConnectionProfile, TableInfo};
+use navidog_core::{
+    CellValue, ColumnInfo, Connection, ConnectionProfile, QueryResult, SortColumn, TableInfo,
+};
 
 #[derive(Default)]
 pub enum Loadable<T> {
@@ -164,6 +166,67 @@ impl CellSelection {
     }
 }
 
+/// An open SQL editor tab. `sql` is the editable document; `caret` and `anchor` are byte
+/// offsets into it, so they can be matched against `TextLayout` indices directly.
+pub struct QueryTab {
+    pub id: u64,
+    pub connection_index: Option<usize>,
+    pub database: Option<String>,
+    pub sql: String,
+    pub caret: usize,
+    pub anchor: usize,
+    pub selecting: bool,
+    pub running: bool,
+    pub result: Loadable<QueryResult>,
+    /// The id of the grid in `AppView::grids` that shows this tab's result, if any.
+    pub grid_id: Option<u64>,
+}
+
+impl QueryTab {
+    pub fn new(id: u64) -> Self {
+        Self {
+            id,
+            connection_index: None,
+            database: None,
+            sql: String::new(),
+            caret: 0,
+            anchor: 0,
+            selecting: false,
+            running: false,
+            result: Loadable::Idle,
+            grid_id: None,
+        }
+    }
+
+    /// The byte range of the current selection, normalised to `start..end`.
+    pub fn selection(&self) -> (usize, usize) {
+        (self.anchor.min(self.caret), self.anchor.max(self.caret))
+    }
+}
+
+/// One undo step: the touched cells and their previous pending edit value
+/// (`None` means there was no pending edit for that cell).
+pub type EditAction = Vec<((usize, usize), Option<Option<String>>)>;
+
+/// One row of the sort criteria panel: which column, which direction, and whether it is
+/// currently part of the query's `ORDER BY`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SortRule {
+    pub column: String,
+    pub descending: bool,
+    pub enabled: bool,
+}
+
+impl SortRule {
+    pub fn new(column: impl Into<String>) -> Self {
+        Self {
+            column: column.into(),
+            descending: false,
+            enabled: true,
+        }
+    }
+}
+
 pub struct GridState {
     pub id: u64,
     pub connection: Arc<dyn Connection>,
@@ -181,6 +244,26 @@ pub struct GridState {
     pub total_rows: Option<u64>,
     pub selection: Option<CellSelection>,
     pub edits: BTreeMap<(usize, usize), Option<String>>,
+    /// Undo history: each entry restores the prior edit value (or lack thereof) for its cells.
+    pub undo: Vec<EditAction>,
+    /// `Some` when this grid presents an ad-hoc query result instead of a table page.
+    pub sql: Option<String>,
+    /// Whether the grid toolbar (transaction/filter/sort/...) is shown.
+    pub show_toolbar: bool,
+    /// Whether cells may be edited. Query grids only allow this with an inferred table.
+    pub editable: bool,
+    /// The `ORDER BY` applied to the table when pages are fetched.
+    pub sort_rules: Vec<SortRule>,
+    /// Whether the sort criteria panel is expanded below the toolbar.
+    pub sort_open: bool,
+    /// The panel's working copy of the rules while it is open; applied on `Apply`.
+    pub sort_draft: Vec<SortRule>,
+    /// The open column-list popup: which draft rule it edits plus the highlighted candidate.
+    pub sort_combo: Option<(usize, String)>,
+    /// The draft rule highlighted for reordering, if any.
+    pub sort_selected: Option<usize>,
+    /// Wall-clock execution time of the query that produced this grid, when it is a query result.
+    pub elapsed: Option<std::time::Duration>,
 }
 
 pub fn compute_column_widths(columns: &[ColumnInfo], rows: &[Vec<CellValue>]) -> Vec<f32> {
@@ -202,9 +285,13 @@ pub fn compute_column_widths(columns: &[ColumnInfo], rows: &[Vec<CellValue>]) ->
 
     widths
         .into_iter()
-        .map(|width| (width as f32 * 7.2 + 22.0).clamp(56.0, 240.0))
+        .map(|width| (width as f32 * 7.2 + 22.0 + SORT_BADGE_ALLOWANCE).clamp(56.0, 260.0))
         .collect()
 }
+
+/// Horizontal room the header reserves for its sort badge (icon + gap), so column names are
+/// not truncated when the badge is revealed.
+const SORT_BADGE_ALLOWANCE: f32 = 20.0;
 
 fn display_width(text: &str) -> usize {
     text.chars()
@@ -231,10 +318,40 @@ impl GridState {
     }
 
     pub fn sql(&self) -> String {
+        if let Some(sql) = &self.sql {
+            return sql.clone();
+        }
         let offset = self.page_index.saturating_mul(self.page_size);
-        format!(
-            "SELECT * FROM `{}`.`{}` LIMIT {},{}",
-            self.database, self.table, offset, self.page_size
-        )
+        let mut sql = format!("SELECT * FROM `{}`.`{}`", self.database, self.table);
+        let order = self
+            .sort_columns()
+            .into_iter()
+            .map(|sort| {
+                format!(
+                    "`{}` {}",
+                    sort.column,
+                    if sort.descending { "DESC" } else { "ASC" }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !order.is_empty() {
+            sql.push_str(" ORDER BY ");
+            sql.push_str(&order);
+        }
+        sql.push_str(&format!(" LIMIT {offset},{}", self.page_size));
+        sql
+    }
+
+    /// The enabled sort rules, in panel order, as an engine-agnostic `ORDER BY`.
+    pub fn sort_columns(&self) -> Vec<SortColumn> {
+        self.sort_rules
+            .iter()
+            .filter(|rule| rule.enabled && !rule.column.is_empty())
+            .map(|rule| SortColumn {
+                column: rule.column.clone(),
+                descending: rule.descending,
+            })
+            .collect()
     }
 }

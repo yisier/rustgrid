@@ -8,6 +8,7 @@ mod assets;
 mod form;
 mod runtime;
 mod session;
+mod sql;
 mod theme;
 #[cfg(target_os = "windows")]
 mod win_resize;

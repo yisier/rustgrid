@@ -15,8 +15,10 @@ pub struct Theme {
     pub dialog_face: u32,
     pub input_bg: u32,
     pub border: u32,
+    pub grid_line: u32,
     pub text: u32,
     pub text_muted: u32,
+    pub text_null: u32,
     pub button_bg: u32,
     pub button_hover_bg: u32,
     pub button_border: u32,
@@ -40,6 +42,10 @@ pub struct Theme {
     pub warning: u32,
     pub danger: u32,
     pub neutral: u32,
+    pub sql_keyword: u32,
+    pub sql_string: u32,
+    pub sql_number: u32,
+    pub sql_comment: u32,
 }
 
 impl Theme {
@@ -57,8 +63,10 @@ impl Theme {
             dialog_face: 0xf0f0f0,
             input_bg: 0xffffff,
             border: 0xd9d9d9,
+            grid_line: 0xe6e6e6,
             text: 0x1f1f1f,
             text_muted: 0x6b6b6b,
+            text_null: 0xb5b5b5,
             button_bg: 0xe6e6e6,
             button_hover_bg: 0xd6d6d6,
             button_border: 0xadadad,
@@ -82,6 +90,10 @@ impl Theme {
             warning: 0xb58900,
             danger: 0xd13438,
             neutral: 0x9a9a9a,
+            sql_keyword: 0x0033b3,
+            sql_string: 0x067d17,
+            sql_number: 0x1750eb,
+            sql_comment: 0x8c8c8c,
         }
     }
 
@@ -99,8 +111,10 @@ impl Theme {
             dialog_face: 0x252526,
             input_bg: 0x1e1e1e,
             border: 0x3c3c3c,
+            grid_line: 0x333333,
             text: 0xd4d4d4,
             text_muted: 0x8a8a8a,
+            text_null: 0x6f6f6f,
             button_bg: 0x3a3d41,
             button_hover_bg: 0x4a4d52,
             button_border: 0x555555,
@@ -124,6 +138,10 @@ impl Theme {
             warning: 0xdcdcaa,
             danger: 0xf14c4c,
             neutral: 0x808080,
+            sql_keyword: 0x569cd6,
+            sql_string: 0xce9178,
+            sql_number: 0xb5cea8,
+            sql_comment: 0x6a9955,
         }
     }
 

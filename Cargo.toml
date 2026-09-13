@@ -33,9 +33,12 @@ sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio",
 rust-i18n = "4"
 directories = "6"
 gpui = "0.2"
+sqlparser = "0.62"
+sqlformat = "0.5"
 chacha20poly1305 = "0.11"
 base64 = "0.22"
 raw-window-handle = "0.6"
+embed-resource = "3"
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
