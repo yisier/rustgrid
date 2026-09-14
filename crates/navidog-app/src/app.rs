@@ -299,8 +299,14 @@ pub struct AppView {
     page_size_focused: bool,
     sidebar_scroll: ScrollHandle,
     grid_hscroll: ScrollHandle,
+    /// Grab offset (cursor x - thumb left) while dragging the grid's horizontal scrollbar.
+    grid_hscroll_grab: Option<f32>,
     grid_list_scroll: UniformListScrollHandle,
+    /// Grab offset (cursor y - thumb top) while dragging the grid's vertical scrollbar.
+    grid_vscroll_grab: Option<f32>,
     object_scroll: ScrollHandle,
+    /// Grab offset (cursor x - thumb left) while dragging the object list's scrollbar.
+    object_hscroll_grab: Option<f32>,
     tab_scroll: ScrollHandle,
     page_input: String,
     page_input_focus: FocusHandle,
@@ -434,8 +440,11 @@ impl AppView {
             page_size_focused: false,
             sidebar_scroll: ScrollHandle::new(),
             grid_hscroll: ScrollHandle::new(),
+            grid_hscroll_grab: None,
             grid_list_scroll: UniformListScrollHandle::new(),
+            grid_vscroll_grab: None,
             object_scroll: ScrollHandle::new(),
+            object_hscroll_grab: None,
             tab_scroll: ScrollHandle::new(),
             page_input: "1".to_string(),
             page_input_focus: cx.focus_handle(),
@@ -5161,6 +5170,17 @@ impl AppView {
             .flex_1()
             .min_w(px(0.0))
             .overflow_hidden()
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                this.object_hscroll_drag(event, cx);
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                    if this.object_hscroll_grab.take().is_some() {
+                        cx.notify();
+                    }
+                }),
+            )
             .child(scroller);
         if self.object_scroll.max_offset().width > px(0.0) {
             container = container.child(self.render_object_hscrollbar(cx));
@@ -5183,9 +5203,7 @@ impl AppView {
         let viewport = f32::from(bounds.size.width);
         let max = f32::from(self.object_scroll.max_offset().width);
         let scroll = -f32::from(self.object_scroll.offset().x);
-        let content = (viewport + max).max(1.0);
-        let thumb_w = (viewport * viewport / content).clamp(24.0, viewport.max(24.0));
-        let travel = (viewport - thumb_w).max(0.0);
+        let (thumb_w, travel) = scrollbar_thumb(viewport, max);
         let thumb_x = if max > 0.0 {
             (scroll / max) * travel
         } else {
@@ -5205,14 +5223,9 @@ impl AppView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                    this.scroll_object_to(event.position.x, cx);
+                    this.object_hscroll_begin(event.position.x, cx);
                 }),
             )
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
-                if event.pressed_button == Some(MouseButton::Left) {
-                    this.scroll_object_to(event.position.x, cx);
-                }
-            }))
             .child(
                 div()
                     .absolute()
@@ -5224,21 +5237,47 @@ impl AppView {
             )
     }
 
-    fn scroll_object_to(&self, mouse_x: Pixels, cx: &mut Context<'_, Self>) {
+    fn object_hscroll_begin(&mut self, mouse_x: Pixels, cx: &mut Context<'_, Self>) {
         let bounds = self.object_scroll.bounds();
         let viewport = f32::from(bounds.size.width);
         let max = f32::from(self.object_scroll.max_offset().width);
-        if viewport <= 0.0 || max <= 0.0 {
-            return;
-        }
-        let content = viewport + max;
-        let thumb_w = (viewport * viewport / content).clamp(24.0, viewport);
-        let travel = viewport - thumb_w;
+        let (thumb_w, travel) = scrollbar_thumb(viewport, max);
         if travel <= 0.0 {
             return;
         }
+        let scroll = -f32::from(self.object_scroll.offset().x);
+        let thumb_x = (scroll / max) * travel;
         let relative = f32::from(mouse_x) - f32::from(bounds.left());
-        let thumb_x = (relative - thumb_w / 2.0).clamp(0.0, travel);
+        let grab = if relative >= thumb_x && relative <= thumb_x + thumb_w {
+            relative - thumb_x
+        } else {
+            thumb_w / 2.0
+        };
+        self.object_hscroll_grab = Some(grab);
+        self.object_hscroll_set(relative, grab, cx);
+    }
+
+    fn object_hscroll_drag(&mut self, event: &MouseMoveEvent, cx: &mut Context<'_, Self>) {
+        let Some(grab) = self.object_hscroll_grab else {
+            return;
+        };
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.object_hscroll_grab = None;
+            cx.notify();
+            return;
+        }
+        let relative = f32::from(event.position.x) - f32::from(self.object_scroll.bounds().left());
+        self.object_hscroll_set(relative, grab, cx);
+    }
+
+    fn object_hscroll_set(&self, relative: f32, grab: f32, cx: &mut Context<'_, Self>) {
+        let viewport = f32::from(self.object_scroll.bounds().size.width);
+        let max = f32::from(self.object_scroll.max_offset().width);
+        let (_, travel) = scrollbar_thumb(viewport, max);
+        if travel <= 0.0 {
+            return;
+        }
+        let thumb_x = (relative - grab).clamp(0.0, travel);
         let scroll = thumb_x / travel * max;
         let y = self.object_scroll.offset().y;
         self.object_scroll.set_offset(Point::new(px(-scroll), y));
@@ -7693,7 +7732,20 @@ impl AppView {
         {
             root = root.child(self.render_sort_combo_popup(grid, *rule, cx));
         }
-        root
+        root.on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+            this.grid_hscroll_drag(event, cx);
+            this.grid_vscroll_drag(event, cx);
+        }))
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                let h = this.grid_hscroll_grab.take().is_some();
+                let v = this.grid_vscroll_grab.take().is_some();
+                if h || v {
+                    cx.notify();
+                }
+            }),
+        )
     }
 
     fn render_cell_editor(&self, window: &Window, cx: &mut Context<'_, Self>) -> AnyElement {
@@ -8123,13 +8175,7 @@ impl AppView {
             return div().into_any_element();
         }
         let scroll = -f32::from(handle.offset().y);
-        let content = (viewport + max).max(1.0);
-        let thumb_h = if viewport > 0.0 {
-            (viewport * viewport / content).clamp(24.0, viewport)
-        } else {
-            24.0
-        };
-        let travel = (viewport - thumb_h).max(0.0);
+        let (thumb_h, travel) = scrollbar_thumb(viewport, max);
         let thumb_y = if max > 0.0 {
             (scroll / max) * travel
         } else {
@@ -8149,14 +8195,9 @@ impl AppView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                    this.scroll_grid_v_to(event.position.y, cx);
+                    this.grid_vscroll_begin(event.position.y, cx);
                 }),
             )
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
-                if event.pressed_button == Some(MouseButton::Left) {
-                    this.scroll_grid_v_to(event.position.y, cx);
-                }
-            }))
             .child(
                 div()
                     .absolute()
@@ -8177,13 +8218,7 @@ impl AppView {
             return div().into_any_element();
         }
         let scroll = -f32::from(self.grid_hscroll.offset().x);
-        let content = (viewport + max).max(1.0);
-        let thumb_w = if viewport > 0.0 {
-            (viewport * viewport / content).clamp(24.0, viewport)
-        } else {
-            24.0
-        };
-        let travel = (viewport - thumb_w).max(0.0);
+        let (thumb_w, travel) = scrollbar_thumb(viewport, max);
         let thumb_x = if max > 0.0 {
             (scroll / max) * travel
         } else {
@@ -8203,14 +8238,9 @@ impl AppView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                    this.scroll_grid_h_to(event.position.x, cx);
+                    this.grid_hscroll_begin(event.position.x, cx);
                 }),
             )
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
-                if event.pressed_button == Some(MouseButton::Left) {
-                    this.scroll_grid_h_to(event.position.x, cx);
-                }
-            }))
             .child(
                 div()
                     .absolute()
@@ -8223,45 +8253,99 @@ impl AppView {
             .into_any_element()
     }
 
-    fn scroll_grid_v_to(&self, mouse_y: Pixels, cx: &mut Context<'_, Self>) {
+    fn grid_hscroll_begin(&mut self, mouse_x: Pixels, cx: &mut Context<'_, Self>) {
+        let bounds = self.grid_hscroll.bounds();
+        let viewport = f32::from(bounds.size.width);
+        let max = f32::from(self.grid_hscroll.max_offset().width);
+        let (thumb_w, travel) = scrollbar_thumb(viewport, max);
+        if travel <= 0.0 {
+            return;
+        }
+        let scroll = -f32::from(self.grid_hscroll.offset().x);
+        let thumb_x = (scroll / max) * travel;
+        let relative = f32::from(mouse_x) - f32::from(bounds.left());
+        let grab = if relative >= thumb_x && relative <= thumb_x + thumb_w {
+            relative - thumb_x
+        } else {
+            thumb_w / 2.0
+        };
+        self.grid_hscroll_grab = Some(grab);
+        self.grid_hscroll_set(relative, grab, cx);
+    }
+
+    fn grid_hscroll_drag(&mut self, event: &MouseMoveEvent, cx: &mut Context<'_, Self>) {
+        let Some(grab) = self.grid_hscroll_grab else {
+            return;
+        };
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.grid_hscroll_grab = None;
+            cx.notify();
+            return;
+        }
+        let relative = f32::from(event.position.x) - f32::from(self.grid_hscroll.bounds().left());
+        self.grid_hscroll_set(relative, grab, cx);
+    }
+
+    fn grid_hscroll_set(&self, relative: f32, grab: f32, cx: &mut Context<'_, Self>) {
+        let viewport = f32::from(self.grid_hscroll.bounds().size.width);
+        let max = f32::from(self.grid_hscroll.max_offset().width);
+        let (_, travel) = scrollbar_thumb(viewport, max);
+        if travel <= 0.0 {
+            return;
+        }
+        let thumb_x = (relative - grab).clamp(0.0, travel);
+        let scroll = thumb_x / travel * max;
+        let y = self.grid_hscroll.offset().y;
+        self.grid_hscroll.set_offset(Point::new(px(-scroll), y));
+        cx.notify();
+    }
+
+    fn grid_vscroll_begin(&mut self, mouse_y: Pixels, cx: &mut Context<'_, Self>) {
         let handle = self.grid_list_scroll.0.borrow().base_handle.clone();
         let bounds = handle.bounds();
         let viewport = f32::from(bounds.size.height);
         let max = f32::from(handle.max_offset().height);
-        if viewport <= 0.0 || max <= 0.0 {
-            return;
-        }
-        let content = viewport + max;
-        let thumb_h = (viewport * viewport / content).clamp(24.0, viewport);
-        let travel = viewport - thumb_h;
+        let (thumb_h, travel) = scrollbar_thumb(viewport, max);
         if travel <= 0.0 {
             return;
         }
-        let relative = f32::from(mouse_y) - f32::from(bounds.top());
-        let thumb_y = (relative - thumb_h / 2.0).clamp(0.0, travel);
+        let scroll = -f32::from(handle.offset().y);
+        let thumb_y = (scroll / max) * travel;
+        let relative = f32::from(mouse_y) - f32::from(self.grid_hscroll.bounds().top());
+        let grab = if relative >= thumb_y && relative <= thumb_y + thumb_h {
+            relative - thumb_y
+        } else {
+            thumb_h / 2.0
+        };
+        self.grid_vscroll_grab = Some(grab);
+        self.grid_vscroll_set(relative, grab, cx);
+    }
+
+    fn grid_vscroll_drag(&mut self, event: &MouseMoveEvent, cx: &mut Context<'_, Self>) {
+        let Some(grab) = self.grid_vscroll_grab else {
+            return;
+        };
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.grid_vscroll_grab = None;
+            cx.notify();
+            return;
+        }
+        let relative = f32::from(event.position.y) - f32::from(self.grid_hscroll.bounds().top());
+        self.grid_vscroll_set(relative, grab, cx);
+    }
+
+    fn grid_vscroll_set(&self, relative: f32, grab: f32, cx: &mut Context<'_, Self>) {
+        let handle = self.grid_list_scroll.0.borrow().base_handle.clone();
+        let viewport = f32::from(handle.bounds().size.height);
+        let max = f32::from(handle.max_offset().height);
+        let (_, travel) = scrollbar_thumb(viewport, max);
+        if travel <= 0.0 {
+            return;
+        }
+        let thumb_y = (relative - grab).clamp(0.0, travel);
         let scroll = thumb_y / travel * max;
         let x = handle.offset().x;
         handle.set_offset(Point::new(x, px(-scroll)));
-        cx.notify();
-    }
-
-    fn scroll_grid_h_to(&self, mouse_x: Pixels, cx: &mut Context<'_, Self>) {
-        let viewport = f32::from(self.grid_hscroll.bounds().size.width);
-        let max = f32::from(self.grid_hscroll.max_offset().width);
-        if viewport <= 0.0 || max <= 0.0 {
-            return;
-        }
-        let content = viewport + max;
-        let thumb_w = (viewport * viewport / content).clamp(24.0, viewport);
-        let travel = viewport - thumb_w;
-        if travel <= 0.0 {
-            return;
-        }
-        let relative = f32::from(mouse_x) - f32::from(self.grid_hscroll.bounds().left());
-        let thumb_x = (relative - thumb_w / 2.0).clamp(0.0, travel);
-        let scroll = thumb_x / travel * max;
-        let y = self.grid_hscroll.offset().y;
-        self.grid_hscroll.set_offset(Point::new(px(-scroll), y));
         cx.notify();
     }
 
@@ -10389,6 +10473,17 @@ fn is_valid_identifier(name: &str) -> bool {
         && name
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+/// Thumb length and its travel range for a scrollbar track of `viewport` px showing
+/// `viewport + max` px of content.
+fn scrollbar_thumb(viewport: f32, max: f32) -> (f32, f32) {
+    if viewport <= 0.0 || max <= 0.0 {
+        return (24.0, 0.0);
+    }
+    let content = (viewport + max).max(1.0);
+    let thumb = (viewport * viewport / content).clamp(24.0, viewport.max(24.0));
+    (thumb, (viewport - thumb).max(0.0))
 }
 
 fn dialog_shadow() -> Vec<BoxShadow> {
