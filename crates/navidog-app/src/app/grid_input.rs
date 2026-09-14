@@ -1,6 +1,6 @@
 use super::*;
 
-impl AppView {
+impl GridView {
     pub(super) fn grid_mouse_down(
         &mut self,
         event: &MouseDownEvent,
@@ -21,42 +21,33 @@ impl AppView {
             }
             return;
         }
-        let Some(index) = self.active_grid else {
-            return;
-        };
-        let column_count = self
-            .grids
-            .get(index)
-            .map(|grid| grid.columns.len())
-            .unwrap_or(0);
-        if let Some(grid) = self.grids.get_mut(index) {
-            match hit {
-                GridHit::Gutter(row) => {
-                    if !grid.rows.is_empty() {
-                        grid.selection = Some(CellSelection {
-                            anchor: (row, 0),
-                            cursor: (row, column_count.saturating_sub(1)),
-                        });
-                    }
+        let column_count = self.state.columns.len();
+        match hit {
+            GridHit::Gutter(row) => {
+                if !self.state.rows.is_empty() {
+                    self.state.selection = Some(CellSelection {
+                        anchor: (row, 0),
+                        cursor: (row, column_count.saturating_sub(1)),
+                    });
                 }
-                GridHit::Cell(row, col) => {
-                    if event.modifiers.shift {
-                        if let Some(selection) = grid.selection {
-                            grid.selection = Some(CellSelection {
-                                anchor: selection.anchor,
-                                cursor: (row, col),
-                            });
-                        } else {
-                            grid.selection = Some(CellSelection::new(row, col));
-                        }
+            }
+            GridHit::Cell(row, col) => {
+                if event.modifiers.shift {
+                    if let Some(selection) = self.state.selection {
+                        self.state.selection = Some(CellSelection {
+                            anchor: selection.anchor,
+                            cursor: (row, col),
+                        });
                     } else {
-                        grid.selection = Some(CellSelection::new(row, col));
+                        self.state.selection = Some(CellSelection::new(row, col));
                     }
+                } else {
+                    self.state.selection = Some(CellSelection::new(row, col));
                 }
             }
         }
         self.selecting_cells = true;
-        window.focus(&self.grid_focus);
+        window.focus(&self.focus);
         cx.notify();
     }
 
@@ -67,15 +58,12 @@ impl AppView {
         let Some(hit) = self.grid_hit(event.position) else {
             return;
         };
-        if let Some(index) = self.active_grid
-            && let Some(grid) = self.grids.get_mut(index)
-            && let Some(selection) = grid.selection
-        {
+        if let Some(selection) = self.state.selection {
             let (start_row, _) = selection.rows();
-            grid.selection = Some(match hit {
+            self.state.selection = Some(match hit {
                 GridHit::Gutter(row) => CellSelection {
                     anchor: (start_row, 0),
-                    cursor: (row, grid.columns.len().saturating_sub(1)),
+                    cursor: (row, self.state.columns.len().saturating_sub(1)),
                 },
                 GridHit::Cell(row, col) => CellSelection {
                     anchor: selection.anchor,
@@ -94,21 +82,15 @@ impl AppView {
         delta: f32,
         cx: &mut Context<'_, Self>,
     ) -> bool {
-        let Some(index) = self.active_grid else {
+        let Some(selection) = self.state.selection else {
             return false;
         };
-        let Some(grid) = self.grids.get(index) else {
-            return false;
-        };
-        let Some(selection) = grid.selection else {
-            return false;
-        };
-        let handle = self.grid_list_scroll.0.borrow().base_handle.clone();
+        let handle = self.list_scroll.0.borrow().base_handle.clone();
         let bounds = handle.bounds();
         if !bounds.contains(&position) {
             return false;
         }
-        let rows = grid.rows.len();
+        let rows = self.state.rows.len();
         if rows == 0 {
             return false;
         }
@@ -118,12 +100,10 @@ impl AppView {
         } else {
             row = (row + 1).min(rows - 1);
         }
-        if let Some(grid) = self.grids.get_mut(index) {
-            grid.selection = Some(CellSelection {
-                anchor: (row, col),
-                cursor: (row, col),
-            });
-        }
+        self.state.selection = Some(CellSelection {
+            anchor: (row, col),
+            cursor: (row, col),
+        });
 
         let viewport_h = f32::from(bounds.size.height);
         let scroll = -f32::from(handle.offset().y);
@@ -131,11 +111,9 @@ impl AppView {
         let visible = (viewport_h / GRID_ROW_HEIGHT).floor().max(1.0) as usize;
         let last = first + visible.saturating_sub(1);
         if row < first {
-            self.grid_list_scroll
-                .scroll_to_item(row, ScrollStrategy::Top);
+            self.list_scroll.scroll_to_item(row, ScrollStrategy::Top);
         } else if row > last {
-            self.grid_list_scroll
-                .scroll_to_item(row, ScrollStrategy::Bottom);
+            self.list_scroll.scroll_to_item(row, ScrollStrategy::Bottom);
         }
 
         cx.notify();
@@ -143,12 +121,10 @@ impl AppView {
     }
 
     pub(super) fn grid_hit(&self, position: Point<Pixels>) -> Option<GridHit> {
-        let index = self.active_grid?;
-        let grid = self.grids.get(index)?;
-        if grid.rows.is_empty() {
+        if self.state.rows.is_empty() {
             return None;
         }
-        let handle = self.grid_list_scroll.0.borrow().base_handle.clone();
+        let handle = self.list_scroll.0.borrow().base_handle.clone();
         let bounds = handle.bounds();
         if bounds.size.width <= px(0.0) || bounds.size.height <= px(0.0) {
             return None;
@@ -160,14 +136,14 @@ impl AppView {
             return None;
         }
         let row = (local_y / GRID_ROW_HEIGHT).floor() as usize;
-        if row >= grid.rows.len() {
+        if row >= self.state.rows.len() {
             return None;
         }
         if local_x < GRID_GUTTER_WIDTH {
             return Some(GridHit::Gutter(row));
         }
         let mut accumulated = GRID_GUTTER_WIDTH;
-        for (col, width) in grid.column_widths.iter().enumerate() {
+        for (col, width) in self.state.column_widths.iter().enumerate() {
             if local_x < accumulated + width {
                 return Some(GridHit::Cell(row, col));
             }
@@ -192,24 +168,14 @@ impl AppView {
             }
             return;
         }
-        let Some(index) = self.active_grid else {
-            return;
-        };
-        let Some((row, col)) = self
-            .grids
-            .get(index)
-            .and_then(|grid| grid.selection)
-            .map(|s| s.cursor)
-        else {
+        let Some((row, col)) = self.state.selection.map(|s| s.cursor) else {
             return;
         };
 
         match keystroke.key.as_str() {
             "up" | "down" | "left" | "right" => {
-                let (row_count, col_count) = {
-                    let grid = &self.grids[index];
-                    (grid.rows.len(), grid.columns.len())
-                };
+                let row_count = self.state.rows.len();
+                let col_count = self.state.columns.len();
                 if row_count == 0 || col_count == 0 {
                     return;
                 }
@@ -221,9 +187,7 @@ impl AppView {
                     "right" => new_col = (new_col + 1).min(col_count - 1),
                     _ => {}
                 }
-                if let Some(grid) = self.grids.get_mut(index) {
-                    grid.selection = Some(CellSelection::new(new_row, new_col));
-                }
+                self.state.selection = Some(CellSelection::new(new_row, new_col));
                 cx.notify();
             }
             "delete" => self.set_selection_null(cx),
@@ -240,22 +204,16 @@ impl AppView {
     }
 
     pub(super) fn undo_edit(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(index) = self.active_grid else {
-            return;
-        };
-        let Some(grid) = self.grids.get_mut(index) else {
-            return;
-        };
-        let Some(action) = grid.undo.pop() else {
+        let Some(action) = self.state.undo.pop() else {
             return;
         };
         for ((row, col), previous) in action {
             match previous {
                 Some(value) => {
-                    grid.edits.insert((row, col), value);
+                    self.state.edits.insert((row, col), value);
                 }
                 None => {
-                    grid.edits.remove(&(row, col));
+                    self.state.edits.remove(&(row, col));
                 }
             }
         }
@@ -263,13 +221,8 @@ impl AppView {
     }
 
     pub(super) fn set_selection_null(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(index) = self.active_grid else {
-            return;
-        };
-        let Some(grid) = self.grids.get_mut(index) else {
-            return;
-        };
-        let cells = grid
+        let cells = self
+            .state
             .selection
             .map(|selection| selection.cells())
             .unwrap_or_default();
@@ -278,25 +231,25 @@ impl AppView {
         }
         let mut action = Vec::new();
         for (row, col) in cells {
-            if row >= grid.rows.len() || col >= grid.columns.len() {
+            if row >= self.state.rows.len() || col >= self.state.columns.len() {
                 continue;
             }
-            if !grid.edits.contains_key(&(row, col))
-                && matches!(grid.rows[row][col], CellValue::Null)
+            if !self.state.edits.contains_key(&(row, col))
+                && matches!(self.state.rows[row][col], CellValue::Null)
             {
                 continue;
             }
-            let previous = grid.edits.get(&(row, col)).cloned();
+            let previous = self.state.edits.get(&(row, col)).cloned();
             if previous == Some(None) {
                 continue;
             }
             action.push(((row, col), previous));
-            grid.edits.insert((row, col), None);
+            self.state.edits.insert((row, col), None);
         }
         if !action.is_empty() {
-            grid.undo.push(action);
-            if grid.undo.len() > 256 {
-                grid.undo.remove(0);
+            self.state.undo.push(action);
+            if self.state.undo.len() > 256 {
+                self.state.undo.remove(0);
             }
         }
         cx.notify();
@@ -309,31 +262,24 @@ impl AppView {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        let Some(index) = self.active_grid else {
-            return;
-        };
         let (row, col) = cell;
-        let (value, is_temporal, cells) = {
-            let Some(grid) = self.grids.get(index) else {
-                return;
-            };
-            if !grid.editable || row >= grid.rows.len() || col >= grid.columns.len() {
-                return;
-            }
-            let value = grid
-                .edits
-                .get(&(row, col))
-                .cloned()
-                .flatten()
-                .unwrap_or_else(|| grid.rows[row][col].as_edit_string());
-            let is_temporal = is_temporal_type(&grid.columns[col].data_type);
-            let cells = grid
-                .selection
-                .filter(|selection| selection.contains(row, col))
-                .map(|selection| selection.cells())
-                .unwrap_or_else(|| vec![(row, col)]);
-            (value, is_temporal, cells)
-        };
+        if !self.state.editable || row >= self.state.rows.len() || col >= self.state.columns.len() {
+            return;
+        }
+        let value = self
+            .state
+            .edits
+            .get(&(row, col))
+            .cloned()
+            .flatten()
+            .unwrap_or_else(|| self.state.rows[row][col].as_edit_string());
+        let is_temporal = is_temporal_type(&self.state.columns[col].data_type);
+        let cells = self
+            .state
+            .selection
+            .filter(|selection| selection.contains(row, col))
+            .map(|selection| selection.cells())
+            .unwrap_or_else(|| vec![(row, col)]);
 
         let value = match initial {
             Some(character) => character.to_string(),
@@ -355,23 +301,19 @@ impl AppView {
         self.cell_editor_focus_pending = true;
         window.focus(&self.cell_editor_focus);
         if is_temporal {
-            self.open_date_picker(index, row, col, &value, cx);
+            self.open_date_picker(row, col, &value, cx);
         }
         cx.notify();
     }
 
     pub(super) fn open_date_picker(
         &mut self,
-        index: usize,
         row: usize,
         col: usize,
         value: &str,
         cx: &mut Context<'_, Self>,
     ) {
-        let Some(grid) = self.grids.get(index) else {
-            return;
-        };
-        let data_type = grid.columns[col].data_type.to_ascii_lowercase();
+        let data_type = self.state.columns[col].data_type.to_ascii_lowercase();
         let has_time = data_type.contains("datetime") || data_type.contains("timestamp");
         let base = parse_datetime(value).unwrap_or_else(|| chrono::Local::now().naive_local());
         self.date_picker = Some(DatePicker {
@@ -627,19 +569,14 @@ impl AppView {
 
     pub(super) fn cell_editor_index_for_x(&self, value: &str, x: Pixels, window: &Window) -> usize {
         let char_count = value.chars().count();
-        let Some(index) = self.active_grid else {
-            return char_count;
-        };
-        let Some(grid) = self.grids.get(index) else {
-            return char_count;
-        };
         let col = self
             .cell_editor
             .as_ref()
             .map(|editor| editor.col)
             .unwrap_or(0);
-        let content_left = self.grid_list_scroll.0.borrow().base_handle.bounds().left();
-        let cell_left: f32 = GRID_GUTTER_WIDTH + grid.column_widths.iter().take(col).sum::<f32>();
+        let content_left = self.list_scroll.0.borrow().base_handle.bounds().left();
+        let cell_left: f32 =
+            GRID_GUTTER_WIDTH + self.state.column_widths.iter().take(col).sum::<f32>();
         let text_left = f32::from(content_left) + cell_left + 8.0;
         let relative = f32::from(x) - text_left;
         if char_count == 0 || relative <= 0.0 {
@@ -676,21 +613,15 @@ impl AppView {
         let Some(editor) = self.cell_editor.take() else {
             return;
         };
-        let Some(index) = self.active_grid else {
-            return;
-        };
-        let Some(grid) = self.grids.get_mut(index) else {
-            return;
-        };
         let mut action = Vec::new();
         for (row, col) in editor.cells {
-            if row >= grid.rows.len() || col >= grid.columns.len() {
+            if row >= self.state.rows.len() || col >= self.state.columns.len() {
                 continue;
             }
-            let previous = grid.edits.get(&(row, col)).cloned();
+            let previous = self.state.edits.get(&(row, col)).cloned();
             let original = match &previous {
                 Some(value) => value.clone(),
-                None => match &grid.rows[row][col] {
+                None => match &self.state.rows[row][col] {
                     CellValue::Null => None,
                     cell => Some(cell.as_edit_string()),
                 },
@@ -704,12 +635,12 @@ impl AppView {
                 continue;
             }
             action.push(((row, col), previous));
-            grid.edits.insert((row, col), desired);
+            self.state.edits.insert((row, col), desired);
         }
         if !action.is_empty() {
-            grid.undo.push(action);
-            if grid.undo.len() > 256 {
-                grid.undo.remove(0);
+            self.state.undo.push(action);
+            if self.state.undo.len() > 256 {
+                self.state.undo.remove(0);
             }
         }
         cx.notify();

@@ -1,11 +1,7 @@
 use super::*;
 
-impl AppView {
-    pub(super) fn render_grid_toolbar(
-        &self,
-        grid: &GridState,
-        cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
+impl GridView {
+    pub(super) fn render_grid_toolbar(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
         div()
             .flex()
@@ -54,7 +50,7 @@ impl AppView {
                 t!("grid.sort").to_string(),
                 theme.text,
                 true,
-                grid.sort_open,
+                self.state.sort_open,
                 false,
                 cx.listener(|this, _event, _window, cx| this.toggle_sort_panel(cx)),
             ))
@@ -133,11 +129,7 @@ impl AppView {
         item
     }
 
-    pub(super) fn render_sort_panel(
-        &self,
-        grid: &GridState,
-        cx: &mut Context<'_, Self>,
-    ) -> AnyElement {
+    pub(super) fn render_sort_panel(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
         let mut list = div()
             .id("sort-rule-list")
@@ -148,7 +140,7 @@ impl AppView {
             .max_h(px(150.0))
             .overflow_y_scroll();
 
-        if grid.sort_draft.is_empty() {
+        if self.state.sort_draft.is_empty() {
             list = list.child(
                 div()
                     .id("sort-add-hint")
@@ -173,8 +165,8 @@ impl AppView {
                     ),
             );
         } else {
-            for (index, rule) in grid.sort_draft.iter().enumerate() {
-                list = list.child(self.render_sort_rule(grid, index, rule, cx));
+            for (index, rule) in self.state.sort_draft.iter().enumerate() {
+                list = list.child(self.render_sort_rule(index, rule, cx));
             }
             list = list.child(
                 div()
@@ -245,13 +237,12 @@ impl AppView {
 
     pub(super) fn render_sort_rule(
         &self,
-        grid: &GridState,
         index: usize,
         rule: &SortRule,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let theme = self.theme;
-        let selected = grid.sort_selected == Some(index);
+        let selected = self.state.sort_selected == Some(index);
         let rule = rule.clone();
         div()
             .id(SharedString::from(format!("sort-rule-{index}")))
@@ -407,12 +398,11 @@ impl AppView {
 
     pub(super) fn render_sort_combo_popup(
         &self,
-        grid: &GridState,
         rule_index: usize,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let theme = self.theme;
-        let matches = self.sort_combo_matches(grid);
+        let matches = self.sort_combo_matches();
         let highlight = self
             .sort_combo_highlight
             .min(matches.len().saturating_sub(1));
@@ -454,7 +444,7 @@ impl AppView {
                         format!(
                             "{}{}",
                             filter,
-                            if self.sort_combo_focused && self.caret_visible {
+                            if self.sort_combo_focused && self.caret() {
                                 "|"
                             } else {
                                 ""
@@ -504,16 +494,18 @@ impl AppView {
             .justify_center()
             .gap_2()
             .py_1()
-            .child(self.dialog_button(
+            .child(ui::dialog_button(
                 "sort-combo-ok",
                 t!("form.ok").to_string(),
                 true,
+                theme,
                 cx.listener(|this, _event, _window, cx| this.sort_confirm_combo(cx)),
             ))
-            .child(self.dialog_button(
+            .child(ui::dialog_button(
                 "sort-combo-cancel",
                 t!("form.cancel").to_string(),
                 false,
+                theme,
                 cx.listener(|this, _event, _window, cx| this.sort_cancel_combo(cx)),
             ));
 
@@ -544,17 +536,13 @@ impl AppView {
             .into_any_element()
     }
 
-    pub(super) fn render_grid_controls(
-        &self,
-        grid: &GridState,
-        cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
+    pub(super) fn render_grid_controls(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
-        let last = grid.last_page();
-        let at_first = grid.page_index == 0;
+        let last = self.state.last_page();
+        let at_first = self.state.page_index == 0;
         let at_last = match last {
-            Some(last) => grid.page_index >= last,
-            None => !grid.has_next(),
+            Some(last) => self.state.page_index >= last,
+            None => !self.state.has_next(),
         };
         let active = theme.text;
         let muted = theme.text_muted;
@@ -587,21 +575,23 @@ impl AppView {
                         "grid-delete",
                         "icons/minus.svg",
                         theme.danger,
-                        grid.sql.is_none() && grid.selection.is_some() && !grid.rows.is_empty(),
+                        self.state.sql.is_none()
+                            && self.state.selection.is_some()
+                            && !self.state.rows.is_empty(),
                         cx.listener(|this, _event, _window, cx| this.open_delete_confirm(cx)),
                     ))
                     .child(self.grid_icon_button(
                         "grid-commit",
                         "icons/check.svg",
                         theme.icon_connection,
-                        !grid.edits.is_empty(),
+                        !self.state.edits.is_empty(),
                         cx.listener(|this, _event, _window, cx| this.commit_edits(cx)),
                     ))
                     .child(self.grid_icon_button(
                         "grid-rollback",
                         "icons/cross.svg",
                         theme.danger,
-                        !grid.edits.is_empty(),
+                        !self.state.edits.is_empty(),
                         cx.listener(|this, _event, _window, cx| this.cancel_edits(cx)),
                     ))
                     .child(self.grid_icon_button(
@@ -620,7 +610,7 @@ impl AppView {
                     )),
             );
 
-        if grid.sql.is_none() {
+        if self.state.sql.is_none() {
             controls = controls.child(
                 div()
                     .flex()
@@ -726,7 +716,7 @@ impl AppView {
             .child(format!(
                 "{}{}",
                 self.page_input,
-                if self.page_input_focused && self.caret_visible {
+                if self.page_input_focused && self.caret() {
                     "|"
                 } else {
                     ""
@@ -735,14 +725,11 @@ impl AppView {
     }
 
     /// The collapsible "Limit Records [n] records per page" bar, revealed by the gear button.
-    pub(super) fn render_record_limit_panel(
-        &self,
-        grid: &GridState,
-        cx: &mut Context<'_, Self>,
-    ) -> AnyElement {
+    pub(super) fn render_record_limit_panel(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
         let focused = self.page_size_focused;
-        let page_size = grid.page_size;
+        let page_size = self.state.page_size;
+        let limit_records = self.limit_records(cx);
         let value = if focused {
             self.page_size_input.clone()
         } else {
@@ -772,7 +759,7 @@ impl AppView {
                     .on_click(
                         cx.listener(|this, _event, _window, cx| this.toggle_limit_records(cx)),
                     )
-                    .child(checkbox_box(self.limit_records, theme))
+                    .child(checkbox_box(limit_records, theme))
                     .child(
                         div()
                             .text_size(px(12.0))
@@ -788,7 +775,7 @@ impl AppView {
                     .justify_center()
                     .w(px(64.0))
                     .h(px(20.0))
-                    .bg(rgb(if self.limit_records {
+                    .bg(rgb(if limit_records {
                         theme.input_bg
                     } else {
                         theme.dialog_face
@@ -811,7 +798,7 @@ impl AppView {
                                 .w(px(1.5))
                                 .h(px(13.0))
                                 .flex_none()
-                                .when(focused && self.caret_visible, move |caret| {
+                                .when(focused && self.caret(), move |caret| {
                                     caret.bg(rgb(theme.text))
                                 }),
                         ),
@@ -825,28 +812,29 @@ impl AppView {
             .into_any_element()
     }
 
-    pub(super) fn render_grid_status(&self, grid: &GridState) -> impl IntoElement {
+    pub(super) fn render_grid_status(&self) -> impl IntoElement {
         let theme = self.theme;
-        let total = grid.total_rows.unwrap_or(0);
-        let end = grid
+        let total = self.state.total_rows.unwrap_or(0);
+        let end = self
+            .state
             .page_index
-            .saturating_mul(grid.page_size)
-            .saturating_add(grid.rows.len() as u64);
+            .saturating_mul(self.state.page_size)
+            .saturating_add(self.state.rows.len() as u64);
         let info = t!(
             "grid.page_info",
             end = end,
             total = total,
-            page = grid.page_index + 1
+            page = self.state.page_index + 1
         )
         .to_string();
-        let timing = grid.elapsed.map(|elapsed| {
+        let timing = self.state.elapsed.map(|elapsed| {
             t!(
                 "grid.query_time",
                 seconds = format!("{:.3}", elapsed.as_secs_f64())
             )
             .to_string()
         });
-        let message = match grid.selection {
+        let message = match self.state.selection {
             Some(selection) => {
                 let (start_row, end_row) = selection.rows();
                 let (start_col, end_col) = selection.cols();
@@ -857,7 +845,7 @@ impl AppView {
                 )
                 .to_string()
             }
-            None => grid.sql(),
+            None => self.state.sql(),
         };
 
         div()
@@ -893,5 +881,12 @@ impl AppView {
                     })
                     .child(info),
             )
+    }
+
+    pub(super) fn limit_records(&self, cx: &Context<'_, Self>) -> bool {
+        self.app
+            .upgrade()
+            .map(|app| app.read(cx).limit_records)
+            .unwrap_or(true)
     }
 }

@@ -154,96 +154,6 @@ impl AppView {
         let _ = self.config.save_secrets(&secrets);
     }
 
-    pub(super) fn toggle_page_size_menu(&mut self, cx: &mut Context<'_, Self>) {
-        if self.page_size_menu_open {
-            self.page_size_menu_open = false;
-            cx.notify();
-            return;
-        }
-        let Some(id) = self.active_grid_id() else {
-            return;
-        };
-        let Some(grid) = self.grids.iter().find(|grid| grid.id == id) else {
-            return;
-        };
-        if grid.sql.is_some() {
-            return;
-        }
-        self.page_size_input = grid.page_size.to_string();
-        self.page_size_menu_open = true;
-        self.page_size_focus_pending = true;
-        cx.notify();
-    }
-
-    pub(super) fn toggle_limit_records(&mut self, cx: &mut Context<'_, Self>) {
-        self.limit_records = !self.limit_records;
-        cx.notify();
-    }
-
-    pub(super) fn page_size_key(&mut self, event: &KeyDownEvent, cx: &mut Context<'_, Self>) {
-        let keystroke = &event.keystroke;
-        if keystroke.modifiers.control || keystroke.modifiers.platform {
-            return;
-        }
-        match keystroke.key.as_str() {
-            "backspace" => {
-                self.page_size_input.pop();
-            }
-            "enter" => {
-                self.page_size_apply(cx);
-                return;
-            }
-            "escape" => {
-                let current = self
-                    .active_grid
-                    .and_then(|active| self.grids.get(active))
-                    .map(|grid| grid.page_size);
-                if let Some(current) = current {
-                    self.page_size_input = current.to_string();
-                }
-            }
-            "up" | "down" => {
-                let current = self.page_size_input.parse::<u64>().unwrap_or(1000);
-                let next = if keystroke.key == "up" {
-                    current.saturating_add(100)
-                } else {
-                    current.saturating_sub(100).max(1)
-                };
-                self.page_size_input = next.to_string();
-            }
-            _ => {
-                if let Some(text) = keystroke.key_char.as_ref()
-                    && text.chars().all(|character| character.is_ascii_digit())
-                {
-                    self.page_size_input.push_str(text);
-                }
-            }
-        }
-        cx.notify();
-    }
-
-    pub(super) fn page_size_apply(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(id) = self.active_grid_id() else {
-            return;
-        };
-        let requested = self.page_size_input.trim().parse::<u64>().unwrap_or(1000);
-        let size = if self.limit_records {
-            requested.clamp(1, NO_LIMIT_PAGE_SIZE)
-        } else {
-            NO_LIMIT_PAGE_SIZE
-        };
-        if let Some(grid) = self.grids.iter_mut().find(|grid| grid.id == id) {
-            if grid.sql.is_some() {
-                return;
-            }
-            grid.page_size = size;
-            grid.page_index = 0;
-        }
-        self.page_size = size;
-        self.sync_page_input();
-        self.load_page(id, cx);
-    }
-
     pub(super) fn connect(&mut self, index: usize, cx: &mut Context<'_, Self>) {
         let Some(profile) = self.connections.get(index).map(|node| node.profile.clone()) else {
             return;
@@ -328,7 +238,7 @@ impl AppView {
         }
 
         if let Some(connection) = connection {
-            self.close_connection_grids(&connection);
+            self.close_connection_grids(&connection, cx);
             let runtime = self.runtime.clone();
             cx.spawn(async move |_this, _cx| {
                 let _ = runtime.spawn(async move { connection.close().await }).await;
@@ -581,9 +491,10 @@ impl AppView {
         };
 
         if let Some(index) = self.grids.iter().position(|grid| {
-            grid.database == database
-                && grid.table == table
-                && Arc::ptr_eq(&grid.connection, &connection)
+            let grid = grid.read(cx);
+            grid.state.database == database
+                && grid.state.table == table
+                && Arc::ptr_eq(&grid.state.connection, &connection)
         }) {
             self.activate_grid(Some(index), cx);
             return;
@@ -597,7 +508,7 @@ impl AppView {
         let id = self.next_grid_id;
         self.next_grid_id += 1;
 
-        self.grids.push(GridState {
+        let state = GridState {
             id,
             connection,
             connection_name,
@@ -624,12 +535,16 @@ impl AppView {
             sort_combo: None,
             sort_selected: None,
             elapsed: None,
-        });
+        };
+        let app = cx.weak_entity();
+        let runtime = self.runtime.clone();
+        let theme = self.theme;
+        let entity = cx.new(|cx| GridView::new(state, app, runtime, theme, cx));
+        self.grids.push(entity.clone());
         self.active_grid = Some(self.grids.len() - 1);
-        self.page_size_menu_open = false;
-        self.sync_page_input();
+        entity.update(cx, |grid, cx| grid.load_page(cx));
 
-        self.load_page(id, cx);
+        cx.notify();
     }
 
     pub(super) fn activate_grid(&mut self, index: Option<usize>, cx: &mut Context<'_, Self>) {
@@ -637,11 +552,6 @@ impl AppView {
         self.active_query = None;
         self.query_combo = None;
         self.query_completion = None;
-        self.selecting_cells = false;
-        self.cell_editor = None;
-        self.date_picker = None;
-        self.page_size_menu_open = false;
-        self.sync_page_input();
         cx.notify();
     }
 }

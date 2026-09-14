@@ -4,7 +4,7 @@ impl AppView {
     pub(super) fn render_query_view(
         &self,
         query: &QueryTab,
-        window: &Window,
+        _window: &Window,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let theme = self.theme;
@@ -146,9 +146,12 @@ impl AppView {
             ));
 
         let editor = self.render_query_editor(query, cx).into_any_element();
-        let result_grid = query
-            .grid_id
-            .and_then(|id| self.grids.iter().find(|grid| grid.id == id));
+        let result_grid = query.grid_id.and_then(|id| {
+            self.grids
+                .iter()
+                .find(|grid| grid.read(cx).state.id == id)
+                .cloned()
+        });
         let has_result_panel = result_grid.is_some() || !matches!(query.result, Loadable::Idle);
         let body: AnyElement = if !has_result_panel {
             div()
@@ -160,7 +163,7 @@ impl AppView {
                 .into_any_element()
         } else {
             let result_body: AnyElement = match result_grid {
-                Some(grid) => self.render_grid(grid, window, cx).into_any_element(),
+                Some(grid) => grid.into_any_element(),
                 None => self.render_query_result(query, cx),
             };
             div()

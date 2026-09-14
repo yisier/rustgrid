@@ -477,6 +477,17 @@ impl Render for ObjectPane {
 
         let body = self.render_body(tables, &search, cx);
 
+        let scroller = div()
+            .id("object-scroll")
+            .flex()
+            .flex_col()
+            .items_start()
+            .flex_1()
+            .min_w(px(0.0))
+            .overflow_x_scroll()
+            .track_scroll(&self.scroll)
+            .child(body);
+
         let mut container = div()
             .flex()
             .flex_col()
@@ -495,7 +506,7 @@ impl Render for ObjectPane {
                     }
                 }),
             )
-            .child(body);
+            .child(scroller);
         if self.scroll.max_offset().width > px(0.0) {
             container = container.child(self.render_hscrollbar(cx));
         }

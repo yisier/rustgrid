@@ -1,6 +1,6 @@
 use super::*;
 
-impl AppView {
+impl GridView {
     pub(super) fn render_cell_editor(
         &self,
         window: &Window,
@@ -9,20 +9,21 @@ impl AppView {
         let Some(editor) = self.cell_editor.as_ref() else {
             return div().into_any_element();
         };
-        let Some(index) = self.active_grid else {
-            return div().into_any_element();
-        };
-        let Some(grid) = self.grids.get(index) else {
-            return div().into_any_element();
-        };
-        let width = grid
+        let width = self
+            .state
             .column_widths
             .get(editor.col)
             .copied()
             .unwrap_or(GRID_COLUMN_WIDTH)
             .max(80.0);
-        let left: f32 = GRID_GUTTER_WIDTH + grid.column_widths.iter().take(editor.col).sum::<f32>();
-        let offset_y = f32::from(self.grid_list_scroll.0.borrow().base_handle.offset().y);
+        let left: f32 = GRID_GUTTER_WIDTH
+            + self
+                .state
+                .column_widths
+                .iter()
+                .take(editor.col)
+                .sum::<f32>();
+        let offset_y = f32::from(self.list_scroll.0.borrow().base_handle.offset().y);
         let top = GRID_ROW_HEIGHT + editor.row as f32 * GRID_ROW_HEIGHT + offset_y;
         let theme = self.theme;
 
@@ -69,7 +70,7 @@ impl AppView {
             shown = shown.child(editor.value.clone());
         }
 
-        let caret_x = if focused && start >= end && self.caret_visible {
+        let caret_x = if focused && start >= end && self.caret() {
             let prefix: String = chars[..selection.cursor].iter().copied().collect();
             let run = window.text_style().to_run(prefix.len());
             let layout = window
@@ -177,19 +178,18 @@ impl AppView {
         let Some(picker) = self.date_picker.as_ref() else {
             return div().into_any_element();
         };
-        let Some(index) = self.active_grid else {
-            return div().into_any_element();
-        };
-        let Some(grid) = self.grids.get(index) else {
-            return div().into_any_element();
-        };
         let theme = self.theme;
         let width = 232.0f32;
-        let content_width: f32 = GRID_GUTTER_WIDTH + grid.column_widths.iter().sum::<f32>();
-        let cell_left: f32 =
-            GRID_GUTTER_WIDTH + grid.column_widths.iter().take(picker.col).sum::<f32>();
+        let content_width: f32 = GRID_GUTTER_WIDTH + self.state.column_widths.iter().sum::<f32>();
+        let cell_left: f32 = GRID_GUTTER_WIDTH
+            + self
+                .state
+                .column_widths
+                .iter()
+                .take(picker.col)
+                .sum::<f32>();
         let left = cell_left.min((content_width - width).max(0.0)).max(0.0);
-        let handle = self.grid_list_scroll.0.borrow().base_handle.clone();
+        let handle = self.list_scroll.0.borrow().base_handle.clone();
         let offset_y = f32::from(handle.offset().y);
         let viewport_h = f32::from(handle.bounds().size.height);
         let cell_top = GRID_ROW_HEIGHT + picker.row as f32 * GRID_ROW_HEIGHT + offset_y;
@@ -341,16 +341,18 @@ impl AppView {
                     .flex_row()
                     .items_center()
                     .gap_2()
-                    .child(self.dialog_button(
+                    .child(ui::dialog_button(
                         "date-cancel",
                         t!("form.cancel").to_string(),
                         false,
+                        theme,
                         cx.listener(|this, _event, _window, cx| this.date_picker_cancel(cx)),
                     ))
-                    .child(self.dialog_button(
+                    .child(ui::dialog_button(
                         "date-ok",
                         t!("form.ok").to_string(),
                         true,
+                        theme,
                         cx.listener(|this, _event, _window, cx| this.date_picker_ok(cx)),
                     )),
             );

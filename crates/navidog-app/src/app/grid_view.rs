@@ -1,17 +1,138 @@
 use super::*;
 
-impl AppView {
-    pub(super) fn render_grid(
-        &self,
-        grid: &GridState,
-        window: &Window,
+impl GridView {
+    pub(super) fn new(
+        state: GridState,
+        app: WeakEntity<AppView>,
+        runtime: Arc<Runtime>,
+        theme: Theme,
         cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
+    ) -> Self {
+        let page_input = (state.page_index + 1).to_string();
+        let page_size_input = state.page_size.to_string();
+        Self {
+            state,
+            app,
+            runtime,
+            theme,
+            hscroll: ScrollHandle::new(),
+            hscroll_grab: None,
+            list_scroll: UniformListScrollHandle::new(),
+            vscroll_grab: None,
+            focus: cx.focus_handle(),
+            selecting_cells: false,
+            cell_editor: None,
+            cell_editor_focus: cx.focus_handle(),
+            cell_editor_focused: false,
+            cell_editor_blur_subscription: None,
+            cell_editor_focus_pending: false,
+            date_picker: None,
+            sort_hover: None,
+            sort_combo_focus: cx.focus_handle(),
+            sort_combo_focus_pending: false,
+            sort_combo_focused: false,
+            sort_combo_filter: String::new(),
+            sort_combo_highlight: 0,
+            page_input,
+            page_input_focus: cx.focus_handle(),
+            page_input_focused: false,
+            page_size_menu_open: false,
+            page_size_input,
+            page_size_focus: cx.focus_handle(),
+            page_size_focus_pending: false,
+            page_size_focused: false,
+            caret_visible: true,
+            caret_blink_running: false,
+        }
+    }
+
+    /// Read the theme from `AppView`, keep focus flags and the caret blink in sync, and apply
+    /// any pending focus requests. Called at the top of `render`.
+    fn prepare_frame(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        if let Some(app) = self.app.upgrade() {
+            self.theme = app.read(cx).theme;
+        }
+        if self.cell_editor_focus_pending {
+            window.focus(&self.cell_editor_focus);
+            self.cell_editor_focus_pending = false;
+        }
+        if self.sort_combo_focus_pending {
+            window.focus(&self.sort_combo_focus);
+            self.sort_combo_focus_pending = false;
+        }
+        if self.page_size_focus_pending {
+            window.focus(&self.page_size_focus);
+            self.page_size_focus_pending = false;
+        }
+        if self.cell_editor_blur_subscription.is_none() {
+            self.cell_editor_blur_subscription =
+                Some(
+                    cx.on_blur(&self.cell_editor_focus, window, |this, _window, cx| {
+                        if this.cell_editor.is_some() {
+                            this.finish_cell_editor(cx);
+                        }
+                    }),
+                );
+        }
+        self.cell_editor_focused = self.cell_editor_focus.is_focused(window);
+        self.page_input_focused = self.page_input_focus.is_focused(window);
+        self.page_size_focused = self.page_size_focus.is_focused(window);
+        self.sort_combo_focused = self.sort_combo_focus.is_focused(window);
+        self.update_blink(cx);
+    }
+
+    fn has_focused_input(&self) -> bool {
+        self.cell_editor_focused
+            || self.sort_combo_focused
+            || self.page_input_focused
+            || self.page_size_focused
+    }
+
+    fn update_blink(&mut self, cx: &mut Context<'_, Self>) {
+        if !self.has_focused_input() || self.caret_blink_running {
+            return;
+        }
+        self.caret_blink_running = true;
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            loop {
+                executor.timer(Duration::from_millis(530)).await;
+                let keep_going = this.update(cx, |grid, cx| {
+                    if grid.has_focused_input() {
+                        grid.caret_visible = !grid.caret_visible;
+                        cx.notify();
+                        true
+                    } else {
+                        grid.caret_blink_running = false;
+                        grid.caret_visible = true;
+                        false
+                    }
+                });
+                if !matches!(keep_going, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(super) fn caret(&self) -> bool {
+        self.caret_visible
+    }
+}
+
+impl Render for GridView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        self.prepare_frame(window, cx);
         let theme = self.theme;
-        let widths: Vec<f32> = if grid.column_widths.is_empty() {
-            grid.columns.iter().map(|_| GRID_COLUMN_WIDTH).collect()
+        let widths: Vec<f32> = if self.state.column_widths.is_empty() {
+            self.state
+                .columns
+                .iter()
+                .map(|_| GRID_COLUMN_WIDTH)
+                .collect()
         } else {
-            grid.column_widths.clone()
+            self.state.column_widths.clone()
         };
         let content_width: f32 = (GRID_GUTTER_WIDTH + widths.iter().sum::<f32>()).max(1.0);
 
@@ -30,21 +151,21 @@ impl AppView {
                     .border_r_1()
                     .border_color(rgb(theme.grid_line)),
             );
-        for (index, column) in grid.columns.iter().enumerate() {
+        for (index, column) in self.state.columns.iter().enumerate() {
             let width = widths.get(index).copied().unwrap_or(GRID_COLUMN_WIDTH);
-            let sort_descending = grid
+            let sort_descending = self
+                .state
                 .sort_rules
                 .iter()
                 .find(|rule| rule.enabled && rule.column == column.name)
                 .map(|rule| rule.descending);
-            let selected_column = grid.selection.is_some_and(|selection| {
+            let selected_column = self.state.selection.is_some_and(|selection| {
                 let (start, end) = selection.cols();
                 index >= start && index <= end
             });
-            let hovered = self.sort_hover == Some((grid.id, index));
+            let hovered = self.sort_hover == Some(index);
             let revealed = hovered || selected_column;
             let sort_column = column.name.clone();
-            let grid_id = grid.id;
             let show_badge = revealed || sort_descending.is_some();
             let (sort_icon, sort_color) = match sort_descending {
                 Some(true) => ("icons/arrow-down.svg", theme.primary),
@@ -54,7 +175,7 @@ impl AppView {
             let mut slot = div()
                 .id(SharedString::from(format!(
                     "grid-sort-badge-{}-{}",
-                    grid.id, index
+                    self.state.id, index
                 )))
                 .flex()
                 .items_center()
@@ -84,7 +205,7 @@ impl AppView {
             let cell = div()
                 .id(SharedString::from(format!(
                     "grid-head-{}-{}",
-                    grid.id, index
+                    self.state.id, index
                 )))
                 .flex()
                 .items_center()
@@ -99,19 +220,15 @@ impl AppView {
                 .border_r_1()
                 .border_color(rgb(theme.grid_line))
                 .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
-                    this.set_sort_hover(grid_id, index, *hovered, cx);
+                    this.set_sort_hover(index, *hovered, cx);
                 }))
                 .on_click(cx.listener(move |this, _event, _window, cx| {
-                    if let Some(grid_index) = this.active_grid
-                        && let Some(grid) = this.grids.get_mut(grid_index)
-                    {
-                        let rows = grid.rows.len();
-                        if rows > 0 && index < grid.columns.len() {
-                            grid.selection = Some(CellSelection {
-                                anchor: (rows - 1, index),
-                                cursor: (0, index),
-                            });
-                        }
+                    let rows = this.state.rows.len();
+                    if rows > 0 && index < this.state.columns.len() {
+                        this.state.selection = Some(CellSelection {
+                            anchor: (rows - 1, index),
+                            cursor: (0, index),
+                        });
                     }
                     this.selecting_cells = false;
                     cx.notify();
@@ -127,9 +244,9 @@ impl AppView {
             header = header.child(cell);
         }
 
-        let selection = grid.selection;
-        let edits = grid.edits.clone();
-        let rows = grid.rows.clone();
+        let selection = self.state.selection;
+        let edits = self.state.edits.clone();
+        let rows = self.state.rows.clone();
         let column_count = widths.len();
         let editing_temporal = self
             .date_picker
@@ -142,7 +259,7 @@ impl AppView {
             .map(|editor| (editor.cells.clone(), editor.value.clone()));
         let widths = Arc::new(widths);
         let list = uniform_list(
-            SharedString::from(format!("grid-rows-{}", grid.id)),
+            SharedString::from(format!("grid-rows-{}", self.state.id)),
             rows.len(),
             move |range, _window, _cx| {
                 range
@@ -282,10 +399,10 @@ impl AppView {
             },
         )
         .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::FitList)
-        .track_scroll(self.grid_list_scroll.clone())
+        .track_scroll(self.list_scroll.clone())
         .flex_1()
         .min_h(px(0.0))
-        .track_focus(&self.grid_focus)
+        .track_focus(&self.focus)
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, event: &MouseDownEvent, window, cx| {
@@ -302,7 +419,7 @@ impl AppView {
             .min_h(px(0.0))
             .min_w(px(0.0))
             .overflow_hidden()
-            .track_scroll(&self.grid_hscroll)
+            .track_scroll(&self.hscroll)
             .child(
                 div()
                     .relative()
@@ -370,10 +487,10 @@ impl AppView {
             );
 
         let mut root = div().relative().flex().flex_col().size_full();
-        if grid.show_toolbar {
-            root = root.child(self.render_grid_toolbar(grid, cx));
-            if grid.sort_open {
-                root = root.child(self.render_sort_panel(grid, cx));
+        if self.state.show_toolbar {
+            root = root.child(self.render_grid_toolbar(cx));
+            if self.state.sort_open {
+                root = root.child(self.render_sort_panel(cx));
             }
         }
         root = root.child(
@@ -395,19 +512,19 @@ impl AppView {
                 .child(self.render_grid_vscrollbar(cx)),
         );
 
-        if grid.show_toolbar && self.page_size_menu_open {
-            root = root.child(self.render_record_limit_panel(grid, cx));
+        if self.state.show_toolbar && self.page_size_menu_open {
+            root = root.child(self.render_record_limit_panel(cx));
         }
 
         root = root
-            .child(self.render_grid_controls(grid, cx))
-            .child(self.render_grid_status(grid));
+            .child(self.render_grid_controls(cx))
+            .child(self.render_grid_status());
 
-        if grid.show_toolbar
-            && grid.sort_open
-            && let Some((rule, _)) = grid.sort_combo.as_ref()
+        if self.state.show_toolbar
+            && self.state.sort_open
+            && let Some((rule, _)) = self.state.sort_combo.as_ref()
         {
-            root = root.child(self.render_sort_combo_popup(grid, *rule, cx));
+            root = root.child(self.render_sort_combo_popup(*rule, cx));
         }
         root.on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
             this.grid_hscroll_drag(event, cx);
@@ -416,8 +533,8 @@ impl AppView {
         .on_mouse_up(
             MouseButton::Left,
             cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
-                let h = this.grid_hscroll_grab.take().is_some();
-                let v = this.grid_vscroll_grab.take().is_some();
+                let h = this.hscroll_grab.take().is_some();
+                let v = this.vscroll_grab.take().is_some();
                 if h || v {
                     cx.notify();
                 }

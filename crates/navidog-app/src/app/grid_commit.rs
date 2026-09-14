@@ -1,6 +1,6 @@
 use super::*;
 
-impl AppView {
+impl GridView {
     pub(super) fn date_picker_shift_month(&mut self, delta: i32, cx: &mut Context<'_, Self>) {
         if let Some(picker) = self.date_picker.as_mut() {
             let mut month = picker.month as i32 + delta;
@@ -73,17 +73,12 @@ impl AppView {
     }
 
     pub(super) fn commit_edits(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(index) = self.active_grid else {
-            return;
-        };
-        let Some(grid) = self.grids.get(index) else {
-            return;
-        };
-        if grid.edits.is_empty() {
+        if self.state.edits.is_empty() {
             return;
         }
 
-        let primary_keys: Vec<usize> = grid
+        let primary_keys: Vec<usize> = self
+            .state
             .columns
             .iter()
             .enumerate()
@@ -91,40 +86,39 @@ impl AppView {
             .map(|(index, _)| index)
             .collect();
         let key_columns: Vec<usize> = if primary_keys.is_empty() {
-            (0..grid.columns.len()).collect()
+            (0..self.state.columns.len()).collect()
         } else {
             primary_keys
         };
 
         let mut by_row: BTreeMap<usize, Vec<(usize, Option<String>)>> = BTreeMap::new();
-        for (&(row, col), value) in &grid.edits {
+        for (&(row, col), value) in &self.state.edits {
             by_row.entry(row).or_default().push((col, value.clone()));
         }
 
         let mut updates = Vec::new();
         for (row, cells) in by_row {
-            let Some(row_values) = grid.rows.get(row) else {
+            let Some(row_values) = self.state.rows.get(row) else {
                 continue;
             };
             let set = cells
                 .into_iter()
-                .map(|(col, value)| (grid.columns[col].name.clone(), value))
+                .map(|(col, value)| (self.state.columns[col].name.clone(), value))
                 .collect();
             let keys = key_columns
                 .iter()
                 .filter_map(|&col| {
                     row_values
                         .get(col)
-                        .map(|value| (grid.columns[col].name.clone(), value.as_edit_string()))
+                        .map(|value| (self.state.columns[col].name.clone(), value.as_edit_string()))
                 })
                 .collect();
             updates.push(RowUpdate { set, keys });
         }
 
-        let connection = grid.connection.clone();
-        let database = grid.database.clone();
-        let table = grid.table.clone();
-        let id = grid.id;
+        let connection = self.state.connection.clone();
+        let database = self.state.database.clone();
+        let table = self.state.table.clone();
         let runtime = self.runtime.clone();
 
         cx.spawn(async move |this, cx| {
@@ -136,17 +130,15 @@ impl AppView {
                 Err(error) => Err(Error::other(error)),
             };
 
-            let _ = this.update(cx, |view, cx| match result {
-                Ok(()) => view.load_page(id, cx),
+            let _ = this.update(cx, |grid, cx| match result {
+                Ok(()) => grid.load_page(cx),
                 Err(error) => {
                     let message = match error {
                         Error::Query(text) => text,
                         other => other.to_string(),
                     };
-                    if let Some(grid) = view.grids.iter_mut().find(|grid| grid.id == id) {
-                        grid.error = Some(message.clone());
-                    }
-                    view.error_dialog = Some(message);
+                    grid.state.error = Some(message.clone());
+                    grid.show_error(message, cx);
                     cx.notify();
                 }
             });
@@ -155,56 +147,40 @@ impl AppView {
     }
 
     pub(super) fn cancel_edits(&mut self, cx: &mut Context<'_, Self>) {
-        if let Some(index) = self.active_grid
-            && let Some(grid) = self.grids.get_mut(index)
-        {
-            grid.edits.clear();
-            grid.selection = None;
-        }
+        self.state.edits.clear();
+        self.state.selection = None;
         self.cell_editor = None;
         self.date_picker = None;
         cx.notify();
     }
 
     pub(super) fn open_delete_confirm(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(index) = self.active_grid else {
-            return;
-        };
-        let Some(grid) = self.grids.get(index) else {
-            return;
-        };
-        if grid.sql.is_some() {
+        if self.state.sql.is_some() {
             return;
         }
-        let Some(selection) = grid.selection else {
+        let Some(selection) = self.state.selection else {
             return;
         };
         let (start, end) = selection.rows();
-        let rows: Vec<usize> = (start..=end).filter(|row| *row < grid.rows.len()).collect();
+        let rows: Vec<usize> = (start..=end)
+            .filter(|row| *row < self.state.rows.len())
+            .collect();
         if rows.is_empty() {
             return;
         }
-        self.delete_confirm = Some(DeleteConfirm {
-            grid_id: grid.id,
-            rows,
-        });
-        cx.notify();
+        let grid_id = self.state.id;
+        if let Some(app) = self.app.upgrade() {
+            app.update(cx, |app, cx| {
+                app.delete_confirm = Some(DeleteConfirm { grid_id, rows });
+                cx.notify();
+            });
+        }
     }
 
-    pub(super) fn cancel_delete(&mut self, cx: &mut Context<'_, Self>) {
-        self.delete_confirm = None;
-        cx.notify();
-    }
-
-    pub(super) fn confirm_delete(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(confirm) = self.delete_confirm.take() else {
-            return;
-        };
-        let Some(grid) = self.grids.iter().find(|grid| grid.id == confirm.grid_id) else {
-            return;
-        };
-
-        let primary_keys: Vec<usize> = grid
+    /// Execute the confirmed row deletion for this grid, then reload the page.
+    pub(super) fn delete_rows(&mut self, rows: Vec<usize>, cx: &mut Context<'_, Self>) {
+        let primary_keys: Vec<usize> = self
+            .state
             .columns
             .iter()
             .enumerate()
@@ -212,14 +188,14 @@ impl AppView {
             .map(|(index, _)| index)
             .collect();
         let key_columns: Vec<usize> = if primary_keys.is_empty() {
-            (0..grid.columns.len()).collect()
+            (0..self.state.columns.len()).collect()
         } else {
             primary_keys
         };
 
         let mut keys = Vec::new();
-        for row in &confirm.rows {
-            let Some(values) = grid.rows.get(*row) else {
+        for row in &rows {
+            let Some(values) = self.state.rows.get(*row) else {
                 continue;
             };
             let row_keys: Vec<(String, String)> = key_columns
@@ -227,7 +203,7 @@ impl AppView {
                 .filter_map(|&col| {
                     values
                         .get(col)
-                        .map(|value| (grid.columns[col].name.clone(), value.as_edit_string()))
+                        .map(|value| (self.state.columns[col].name.clone(), value.as_edit_string()))
                 })
                 .collect();
             if !row_keys.is_empty() {
@@ -238,10 +214,9 @@ impl AppView {
             return;
         }
 
-        let connection = grid.connection.clone();
-        let database = grid.database.clone();
-        let table = grid.table.clone();
-        let id = grid.id;
+        let connection = self.state.connection.clone();
+        let database = self.state.database.clone();
+        let table = self.state.table.clone();
         let runtime = self.runtime.clone();
 
         cx.spawn(async move |this, cx| {
@@ -253,21 +228,29 @@ impl AppView {
                 Err(error) => Err(Error::other(error)),
             };
 
-            let _ = this.update(cx, |view, cx| match result {
-                Ok(()) => view.load_page(id, cx),
+            let _ = this.update(cx, |grid, cx| match result {
+                Ok(()) => grid.load_page(cx),
                 Err(error) => {
                     let message = match error {
                         Error::Query(text) => text,
                         other => other.to_string(),
                     };
-                    if let Some(grid) = view.grids.iter_mut().find(|grid| grid.id == id) {
-                        grid.error = Some(message.clone());
-                    }
-                    view.error_dialog = Some(message);
+                    grid.state.error = Some(message.clone());
+                    grid.show_error(message, cx);
                     cx.notify();
                 }
             });
         })
         .detach();
+    }
+
+    /// Surface a query error in the app-level error dialog.
+    fn show_error(&self, message: String, cx: &mut Context<'_, Self>) {
+        if let Some(app) = self.app.upgrade() {
+            app.update(cx, |app, cx| {
+                app.error_dialog = Some(message);
+                cx.notify();
+            });
+        }
     }
 }

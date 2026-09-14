@@ -51,7 +51,6 @@ impl AppView {
         self.active_grid = None;
         self.query_combo = None;
         self.query_completion = None;
-        self.page_size_menu_open = false;
         self.object_search.clear();
         self.notify_object_pane(cx);
         self.query_focus_pending = true;
@@ -65,14 +64,14 @@ impl AppView {
             .queries
             .get(index)
             .and_then(|tab| tab.grid_id)
-            .and_then(|id| self.grids.iter().position(|grid| grid.id == id));
+            .and_then(|id| {
+                self.grids
+                    .iter()
+                    .position(|grid| grid.read(cx).state.id == id)
+            });
         self.query_combo = None;
         self.query_completion = None;
-        self.selecting_cells = false;
-        self.cell_editor = None;
-        self.date_picker = None;
         self.query_focus_pending = true;
-        self.sync_page_input();
         cx.notify();
     }
 
@@ -80,10 +79,13 @@ impl AppView {
         if index >= self.queries.len() {
             return;
         }
-        let active_id = self.active_grid_id();
+        let active_id = self.active_grid_id(cx);
         let grid_id = self.queries.remove(index).grid_id;
         if let Some(id) = grid_id
-            && let Some(position) = self.grids.iter().position(|grid| grid.id == id)
+            && let Some(position) = self
+                .grids
+                .iter()
+                .position(|grid| grid.read(cx).state.id == id)
         {
             self.grids.remove(position);
         }
@@ -102,11 +104,20 @@ impl AppView {
             .active_query
             .and_then(|active| self.queries.get(active))
             .and_then(|tab| tab.grid_id)
-            .and_then(|id| self.grids.iter().position(|grid| grid.id == id))
-            .or_else(|| active_id.and_then(|id| self.grids.iter().position(|grid| grid.id == id)));
+            .and_then(|id| {
+                self.grids
+                    .iter()
+                    .position(|grid| grid.read(cx).state.id == id)
+            })
+            .or_else(|| {
+                active_id.and_then(|id| {
+                    self.grids
+                        .iter()
+                        .position(|grid| grid.read(cx).state.id == id)
+                })
+            });
         self.query_combo = None;
         self.query_completion = None;
-        self.sync_page_input();
         cx.notify();
     }
 
@@ -122,19 +133,22 @@ impl AppView {
         self.tab_menu = None;
         match target {
             TabTarget::Grid(keep) => {
-                let keep_id = self.grids.get(keep).map(|grid| grid.id);
+                let keep_id = self.grids.get(keep).map(|grid| grid.read(cx).state.id);
                 while !self.queries.is_empty() {
                     self.close_query(self.queries.len() - 1, cx);
                 }
                 let mut index = self.grids.len();
                 while index > 0 {
                     index -= 1;
-                    if Some(self.grids[index].id) != keep_id {
+                    if Some(self.grids[index].read(cx).state.id) != keep_id {
                         self.close_grid(index, cx);
                     }
                 }
                 if let Some(id) = keep_id
-                    && let Some(position) = self.grids.iter().position(|grid| grid.id == id)
+                    && let Some(position) = self
+                        .grids
+                        .iter()
+                        .position(|grid| grid.read(cx).state.id == id)
                 {
                     self.activate_grid(Some(position), cx);
                 }
@@ -274,7 +288,10 @@ impl AppView {
         let Some(connection) = tab.connection_index.and_then(|i| self.connection_arc(i)) else {
             let old = self.queries.get(index).and_then(|tab| tab.grid_id);
             if let Some(old) = old
-                && let Some(position) = self.grids.iter().position(|grid| grid.id == old)
+                && let Some(position) = self
+                    .grids
+                    .iter()
+                    .position(|grid| grid.read(cx).state.id == old)
             {
                 self.grids.remove(position);
             }
@@ -391,10 +408,13 @@ impl AppView {
         result: Result<QueryResult, Error>,
         cx: &mut Context<'_, Self>,
     ) {
-        let active_id = self.active_grid_id();
+        let active_id = self.active_grid_id(cx);
 
         if let Some(old) = self.queries.get(index).and_then(|tab| tab.grid_id)
-            && let Some(position) = self.grids.iter().position(|grid| grid.id == old)
+            && let Some(position) = self
+                .grids
+                .iter()
+                .position(|grid| grid.read(cx).state.id == old)
         {
             self.grids.remove(position);
         }
@@ -414,7 +434,7 @@ impl AppView {
                 let column_widths = compute_column_widths(&columns, &rows);
                 let id = self.next_grid_id;
                 self.next_grid_id += 1;
-                self.grids.push(GridState {
+                let state = GridState {
                     id,
                     connection,
                     connection_name,
@@ -441,7 +461,12 @@ impl AppView {
                     sort_combo: None,
                     sort_selected: None,
                     elapsed: Some(elapsed),
-                });
+                };
+                let app = cx.weak_entity();
+                let runtime = self.runtime.clone();
+                let theme = self.theme;
+                let entity = cx.new(|cx| GridView::new(state, app, runtime, theme, cx));
+                self.grids.push(entity);
                 let grid_index = self.grids.len() - 1;
                 if let Some(tab) = self.queries.get_mut(index) {
                     tab.running = false;
@@ -451,8 +476,11 @@ impl AppView {
                 if self.active_query == Some(index) {
                     self.active_grid = Some(grid_index);
                 } else {
-                    self.active_grid =
-                        active_id.and_then(|id| self.grids.iter().position(|grid| grid.id == id));
+                    self.active_grid = active_id.and_then(|id| {
+                        self.grids
+                            .iter()
+                            .position(|grid| grid.read(cx).state.id == id)
+                    });
                 }
             }
             Ok(query_result) => {
@@ -461,8 +489,11 @@ impl AppView {
                     tab.grid_id = None;
                     tab.result = Loadable::Loaded(query_result);
                 }
-                self.active_grid =
-                    active_id.and_then(|id| self.grids.iter().position(|grid| grid.id == id));
+                self.active_grid = active_id.and_then(|id| {
+                    self.grids
+                        .iter()
+                        .position(|grid| grid.read(cx).state.id == id)
+                });
             }
             Err(error) => {
                 if let Some(tab) = self.queries.get_mut(index) {
@@ -470,14 +501,14 @@ impl AppView {
                     tab.grid_id = None;
                     tab.result = Loadable::Failed(error.to_string());
                 }
-                self.active_grid =
-                    active_id.and_then(|id| self.grids.iter().position(|grid| grid.id == id));
+                self.active_grid = active_id.and_then(|id| {
+                    self.grids
+                        .iter()
+                        .position(|grid| grid.read(cx).state.id == id)
+                });
             }
         }
 
-        self.sync_page_input();
-        self.query_result_scroll = UniformListScrollHandle::new();
-        self.grid_hscroll.set_offset(Point::default());
         cx.notify();
     }
 

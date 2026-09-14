@@ -1,9 +1,9 @@
 use super::*;
 
-impl AppView {
+impl GridView {
     pub(super) fn render_grid_vscrollbar(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
-        let handle = self.grid_list_scroll.0.borrow().base_handle.clone();
+        let handle = self.list_scroll.0.borrow().base_handle.clone();
         let viewport = f32::from(handle.bounds().size.height);
         let max = f32::from(handle.max_offset().height);
         if max <= 0.0 {
@@ -29,12 +29,12 @@ impl AppView {
 
     pub(super) fn render_grid_hscrollbar(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
-        let viewport = f32::from(self.grid_hscroll.bounds().size.width);
-        let max = f32::from(self.grid_hscroll.max_offset().width);
+        let viewport = f32::from(self.hscroll.bounds().size.width);
+        let max = f32::from(self.hscroll.max_offset().width);
         if max <= 0.0 {
             return div().into_any_element();
         }
-        let scroll = -f32::from(self.grid_hscroll.offset().x);
+        let scroll = -f32::from(self.hscroll.offset().x);
         let (thumb_w, travel) = scrollbar_thumb(viewport, max);
         let thumb_x = if max > 0.0 {
             (scroll / max) * travel
@@ -53,14 +53,14 @@ impl AppView {
     }
 
     pub(super) fn grid_hscroll_begin(&mut self, mouse_x: Pixels, cx: &mut Context<'_, Self>) {
-        let bounds = self.grid_hscroll.bounds();
+        let bounds = self.hscroll.bounds();
         let viewport = f32::from(bounds.size.width);
-        let max = f32::from(self.grid_hscroll.max_offset().width);
+        let max = f32::from(self.hscroll.max_offset().width);
         let (thumb_w, travel) = scrollbar_thumb(viewport, max);
         if travel <= 0.0 {
             return;
         }
-        let scroll = -f32::from(self.grid_hscroll.offset().x);
+        let scroll = -f32::from(self.hscroll.offset().x);
         let thumb_x = (scroll / max) * travel;
         let relative = f32::from(mouse_x) - f32::from(bounds.left());
         let grab = if relative >= thumb_x && relative <= thumb_x + thumb_w {
@@ -68,39 +68,39 @@ impl AppView {
         } else {
             thumb_w / 2.0
         };
-        self.grid_hscroll_grab = Some(grab);
+        self.hscroll_grab = Some(grab);
         self.grid_hscroll_set(relative, grab, cx);
     }
 
     pub(super) fn grid_hscroll_drag(&mut self, event: &MouseMoveEvent, cx: &mut Context<'_, Self>) {
-        let Some(grab) = self.grid_hscroll_grab else {
+        let Some(grab) = self.hscroll_grab else {
             return;
         };
         if event.pressed_button != Some(MouseButton::Left) {
-            self.grid_hscroll_grab = None;
+            self.hscroll_grab = None;
             cx.notify();
             return;
         }
-        let relative = f32::from(event.position.x) - f32::from(self.grid_hscroll.bounds().left());
+        let relative = f32::from(event.position.x) - f32::from(self.hscroll.bounds().left());
         self.grid_hscroll_set(relative, grab, cx);
     }
 
     pub(super) fn grid_hscroll_set(&self, relative: f32, grab: f32, cx: &mut Context<'_, Self>) {
-        let viewport = f32::from(self.grid_hscroll.bounds().size.width);
-        let max = f32::from(self.grid_hscroll.max_offset().width);
+        let viewport = f32::from(self.hscroll.bounds().size.width);
+        let max = f32::from(self.hscroll.max_offset().width);
         let (_, travel) = scrollbar_thumb(viewport, max);
         if travel <= 0.0 {
             return;
         }
         let thumb_x = (relative - grab).clamp(0.0, travel);
         let scroll = thumb_x / travel * max;
-        let y = self.grid_hscroll.offset().y;
-        self.grid_hscroll.set_offset(Point::new(px(-scroll), y));
+        let y = self.hscroll.offset().y;
+        self.hscroll.set_offset(Point::new(px(-scroll), y));
         cx.notify();
     }
 
     pub(super) fn grid_vscroll_begin(&mut self, mouse_y: Pixels, cx: &mut Context<'_, Self>) {
-        let handle = self.grid_list_scroll.0.borrow().base_handle.clone();
+        let handle = self.list_scroll.0.borrow().base_handle.clone();
         let bounds = handle.bounds();
         let viewport = f32::from(bounds.size.height);
         let max = f32::from(handle.max_offset().height);
@@ -110,31 +110,31 @@ impl AppView {
         }
         let scroll = -f32::from(handle.offset().y);
         let thumb_y = (scroll / max) * travel;
-        let relative = f32::from(mouse_y) - f32::from(self.grid_hscroll.bounds().top());
+        let relative = f32::from(mouse_y) - f32::from(self.hscroll.bounds().top());
         let grab = if relative >= thumb_y && relative <= thumb_y + thumb_h {
             relative - thumb_y
         } else {
             thumb_h / 2.0
         };
-        self.grid_vscroll_grab = Some(grab);
+        self.vscroll_grab = Some(grab);
         self.grid_vscroll_set(relative, grab, cx);
     }
 
     pub(super) fn grid_vscroll_drag(&mut self, event: &MouseMoveEvent, cx: &mut Context<'_, Self>) {
-        let Some(grab) = self.grid_vscroll_grab else {
+        let Some(grab) = self.vscroll_grab else {
             return;
         };
         if event.pressed_button != Some(MouseButton::Left) {
-            self.grid_vscroll_grab = None;
+            self.vscroll_grab = None;
             cx.notify();
             return;
         }
-        let relative = f32::from(event.position.y) - f32::from(self.grid_hscroll.bounds().top());
+        let relative = f32::from(event.position.y) - f32::from(self.hscroll.bounds().top());
         self.grid_vscroll_set(relative, grab, cx);
     }
 
     pub(super) fn grid_vscroll_set(&self, relative: f32, grab: f32, cx: &mut Context<'_, Self>) {
-        let handle = self.grid_list_scroll.0.borrow().base_handle.clone();
+        let handle = self.list_scroll.0.borrow().base_handle.clone();
         let viewport = f32::from(handle.bounds().size.height);
         let max = f32::from(handle.max_offset().height);
         let (_, travel) = scrollbar_thumb(viewport, max);

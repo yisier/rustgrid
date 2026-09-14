@@ -19,9 +19,13 @@ not a later refactor.
   `grid_commit`, `grid_view`, `grid_cell`, `grid_scroll`, `grid_toolbar`, `dialogs`,
   `widgets`, `form`). New view code goes in the matching submodule, **not** `mod.rs`.
   `ui/` is the internal design system (buttons, dialogs, scrollbars, text fields, ...): put
-  shared chrome there, never one-off `div`s in feature code. `objects` owns the first child
-  view, `Entity<ObjectPane>` (the Tables/Views list); follow that pattern (child `Entity` with
-  `WeakEntity<AppView>` + `notify_*` invalidation) when a subtree gets large.
+  shared chrome there, never one-off `div`s in feature code. Several subtrees are child
+  `Entity` views wired through `WeakEntity<AppView>` + `notify_*` invalidation: the Tables/Views
+  object list (`ObjectPane`), the tab strip (`TabBar`), the connection tree (`TreePane`), and
+  each open grid (`GridView`, one entity per grid, owning its `GridState` and all grid
+  interaction state). Follow that pattern when a subtree gets large. App-level overlays that
+  must cover the whole window (delete confirm, error dialog) stay on `AppView` and are requested
+  by child views through the weak handle.
   Other files: `src/session.rs` (UI state), `src/form.rs` (connection form),
   `src/theme.rs` (light/dark palettes), `src/assets.rs` (embedded asset loader for
   `assets/`), `src/runtime.rs` (tokio bridge), locales in `locales/`.

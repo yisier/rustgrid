@@ -12,7 +12,7 @@ impl AppView {
             if let Some(query) = self.active_query.and_then(|index| self.queries.get(index)) {
                 self.render_query_view(query, window, cx).into_any_element()
             } else if let Some(grid) = self.active_grid.and_then(|index| self.grids.get(index)) {
-                self.render_grid(grid, window, cx).into_any_element()
+                grid.clone().into_any_element()
             } else if let Some(pane) = self.object_pane.clone() {
                 div()
                     .flex()
@@ -375,9 +375,12 @@ impl Render for TabBar {
                 .grids
                 .iter()
                 .enumerate()
-                .filter(|(_, grid)| grid.sql.is_none())
-                .map(|(index, grid)| {
-                    let kind = t!(if grid.is_view {
+                .filter_map(|(index, entity)| {
+                    let grid = entity.read(cx);
+                    if grid.state.sql.is_some() {
+                        return None;
+                    }
+                    let kind = t!(if grid.state.is_view {
                         "common.view"
                     } else {
                         "common.table"
@@ -385,9 +388,9 @@ impl Render for TabBar {
                     .to_string();
                     let title = format!(
                         "{} @{} ({}) - {}",
-                        grid.table, grid.database, grid.connection_name, kind
+                        grid.state.table, grid.state.database, grid.state.connection_name, kind
                     );
-                    (index, grid.id, title, grid.is_view)
+                    Some((index, grid.state.id, title, grid.state.is_view))
                 })
                 .collect();
             let query_tabs: Vec<(usize, u64)> = app

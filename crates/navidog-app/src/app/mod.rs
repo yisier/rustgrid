@@ -169,6 +169,52 @@ struct TreePane {
     theme: Theme,
 }
 
+/// A single open grid (a table page or a SQL result) as an isolated child view. Owns the grid
+/// data (`GridState`) and every piece of interaction state (scroll handles, cell editor, date
+/// picker, sort popup, page inputs), so grid-local interactions re-render only this view.
+///
+/// App-level overlays that must cover the whole window (delete confirmation, error dialog) stay
+/// on `AppView`; this view asks for them through `WeakEntity<AppView>`.
+struct GridView {
+    state: GridState,
+    app: WeakEntity<AppView>,
+    runtime: Arc<Runtime>,
+    theme: Theme,
+
+    hscroll: ScrollHandle,
+    hscroll_grab: Option<f32>,
+    list_scroll: UniformListScrollHandle,
+    vscroll_grab: Option<f32>,
+    focus: FocusHandle,
+    selecting_cells: bool,
+
+    cell_editor: Option<CellEditor>,
+    cell_editor_focus: FocusHandle,
+    cell_editor_focused: bool,
+    cell_editor_blur_subscription: Option<Subscription>,
+    cell_editor_focus_pending: bool,
+    date_picker: Option<DatePicker>,
+
+    sort_hover: Option<usize>,
+    sort_combo_focus: FocusHandle,
+    sort_combo_focus_pending: bool,
+    sort_combo_focused: bool,
+    sort_combo_filter: String,
+    sort_combo_highlight: usize,
+
+    page_input: String,
+    page_input_focus: FocusHandle,
+    page_input_focused: bool,
+    page_size_menu_open: bool,
+    page_size_input: String,
+    page_size_focus: FocusHandle,
+    page_size_focus_pending: bool,
+    page_size_focused: bool,
+
+    caret_visible: bool,
+    caret_blink_running: bool,
+}
+
 struct CellEditor {
     row: usize,
     col: usize,
@@ -268,7 +314,7 @@ pub struct AppView {
     config: Arc<ConfigStore>,
     runtime: Arc<Runtime>,
     connections: Vec<ConnectionNode>,
-    grids: Vec<GridState>,
+    grids: Vec<Entity<GridView>>,
     queries: Vec<QueryTab>,
     active_query: Option<usize>,
     next_query_id: u64,
@@ -325,49 +371,16 @@ pub struct AppView {
     password_focus_pending: bool,
     form_focus: FormFocus,
     page_size: u64,
-    /// The one-shot records-per-page popup opened from the grid's gear button. Deliberately
-    /// in-memory only, so a restart falls back to the default page size.
-    page_size_menu_open: bool,
-    page_size_input: String,
     limit_records: bool,
-    page_size_focus: FocusHandle,
-    page_size_focus_pending: bool,
-    page_size_focused: bool,
-    grid_hscroll: ScrollHandle,
-    /// Grab offset (cursor x - thumb left) while dragging the grid's horizontal scrollbar.
-    grid_hscroll_grab: Option<f32>,
-    grid_list_scroll: UniformListScrollHandle,
-    /// Grab offset (cursor y - thumb top) while dragging the grid's vertical scrollbar.
-    grid_vscroll_grab: Option<f32>,
-    page_input: String,
-    page_input_focus: FocusHandle,
-    page_input_focused: bool,
     object_search: String,
     object_search_focus: FocusHandle,
     object_search_focused: bool,
-    grid_focus: FocusHandle,
-    selecting_cells: bool,
-    cell_editor: Option<CellEditor>,
-    cell_editor_focus: FocusHandle,
-    cell_editor_focused: bool,
-    cell_editor_blur_subscription: Option<Subscription>,
-    cell_editor_focus_pending: bool,
-    date_picker: Option<DatePicker>,
     delete_confirm: Option<DeleteConfirm>,
     error_dialog: Option<String>,
     window_bounds_subscription: Option<Subscription>,
     theme_setting: ThemeSetting,
     theme: Theme,
     language: LanguageSetting,
-    /// The `(grid id, column index)` header cell the pointer is currently over, so its sort
-    /// badge can be revealed on hover.
-    sort_hover: Option<(u64, usize)>,
-    /// Focus/type-ahead state for the open sort column-list popup.
-    sort_combo_focus: FocusHandle,
-    sort_combo_focus_pending: bool,
-    sort_combo_focused: bool,
-    sort_combo_filter: String,
-    sort_combo_highlight: usize,
 }
 
 mod database;
@@ -490,42 +503,16 @@ impl AppView {
                 database: cx.focus_handle(),
             },
             page_size: 1000,
-            page_size_menu_open: false,
-            page_size_input: "1000".to_string(),
             limit_records: true,
-            page_size_focus: cx.focus_handle(),
-            page_size_focus_pending: false,
-            page_size_focused: false,
-            grid_hscroll: ScrollHandle::new(),
-            grid_hscroll_grab: None,
-            grid_list_scroll: UniformListScrollHandle::new(),
-            grid_vscroll_grab: None,
-            page_input: "1".to_string(),
-            page_input_focus: cx.focus_handle(),
-            page_input_focused: false,
             object_search: String::new(),
             object_search_focus: cx.focus_handle(),
             object_search_focused: false,
-            grid_focus: cx.focus_handle(),
-            selecting_cells: false,
-            cell_editor: None,
-            cell_editor_focus: cx.focus_handle(),
-            cell_editor_focused: false,
-            cell_editor_blur_subscription: None,
-            cell_editor_focus_pending: false,
-            date_picker: None,
             delete_confirm: None,
             error_dialog: None,
             window_bounds_subscription: None,
             theme_setting,
             theme: Theme::dark(),
             language,
-            sort_hover: None,
-            sort_combo_focus: cx.focus_handle(),
-            sort_combo_focus_pending: false,
-            sort_combo_focused: false,
-            sort_combo_filter: String::new(),
-            sort_combo_highlight: 0,
         }
     }
 
@@ -722,17 +709,6 @@ impl Render for AppView {
                 }));
         }
 
-        if self.cell_editor_blur_subscription.is_none() {
-            self.cell_editor_blur_subscription =
-                Some(
-                    cx.on_blur(&self.cell_editor_focus, window, |this, _window, cx| {
-                        if this.cell_editor.is_some() {
-                            this.finish_cell_editor(cx);
-                        }
-                    }),
-                );
-        }
-
         if self.password_focus_pending {
             window.focus(&self.password_focus);
             self.password_focus_pending = false;
@@ -743,34 +719,10 @@ impl Render for AppView {
             self.query_focus_pending = false;
         }
 
-        if self.cell_editor_focus_pending {
-            window.focus(&self.cell_editor_focus);
-            self.cell_editor_focus_pending = false;
-        }
-
-        if self.sort_combo_focus_pending {
-            window.focus(&self.sort_combo_focus);
-            self.sort_combo_focus_pending = false;
-        }
-
-        if self.page_size_focus_pending {
-            window.focus(&self.page_size_focus);
-            self.page_size_focus_pending = false;
-        }
-
         self.object_search_focused = self.object_search_focus.is_focused(window);
-        self.page_input_focused = self.page_input_focus.is_focused(window);
-        self.cell_editor_focused = self.cell_editor_focus.is_focused(window);
         self.query_editor_focused = self.query_focus.is_focused(window);
-        self.sort_combo_focused = self.sort_combo_focus.is_focused(window);
-        self.page_size_focused = self.page_size_focus.is_focused(window);
 
-        let text_field_active = self.object_search_focused
-            || self.page_input_focused
-            || self.cell_editor_focused
-            || self.query_editor_focused
-            || self.sort_combo_focused
-            || self.page_size_focused;
+        let text_field_active = self.object_search_focused || self.query_editor_focused;
         if (self.form.is_some() || self.db_dialog.is_some() || text_field_active)
             && !self.caret_blink_running
         {
@@ -783,11 +735,7 @@ impl Render for AppView {
                         if view.form.is_some()
                             || view.db_dialog.is_some()
                             || view.object_search_focused
-                            || view.page_input_focused
-                            || view.cell_editor_focused
                             || view.query_editor_focused
-                            || view.sort_combo_focused
-                            || view.page_size_focused
                         {
                             view.caret_visible = !view.caret_visible;
                             cx.notify();
