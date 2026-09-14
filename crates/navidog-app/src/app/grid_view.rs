@@ -1,0 +1,427 @@
+use super::*;
+
+impl AppView {
+    pub(super) fn render_grid(
+        &self,
+        grid: &GridState,
+        window: &Window,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
+        let theme = self.theme;
+        let widths: Vec<f32> = if grid.column_widths.is_empty() {
+            grid.columns.iter().map(|_| GRID_COLUMN_WIDTH).collect()
+        } else {
+            grid.column_widths.clone()
+        };
+        let content_width: f32 = (GRID_GUTTER_WIDTH + widths.iter().sum::<f32>()).max(1.0);
+
+        let mut header = div()
+            .flex()
+            .flex_row()
+            .flex_none()
+            .bg(rgb(theme.header_bg))
+            .border_b_1()
+            .border_color(rgb(theme.border))
+            .child(
+                div()
+                    .w(px(GRID_GUTTER_WIDTH))
+                    .h(px(GRID_ROW_HEIGHT))
+                    .flex_none()
+                    .border_r_1()
+                    .border_color(rgb(theme.grid_line)),
+            );
+        for (index, column) in grid.columns.iter().enumerate() {
+            let width = widths.get(index).copied().unwrap_or(GRID_COLUMN_WIDTH);
+            let sort_descending = grid
+                .sort_rules
+                .iter()
+                .find(|rule| rule.enabled && rule.column == column.name)
+                .map(|rule| rule.descending);
+            let selected_column = grid.selection.is_some_and(|selection| {
+                let (start, end) = selection.cols();
+                index >= start && index <= end
+            });
+            let hovered = self.sort_hover == Some((grid.id, index));
+            let revealed = hovered || selected_column;
+            let sort_column = column.name.clone();
+            let grid_id = grid.id;
+            let show_badge = revealed || sort_descending.is_some();
+            let (sort_icon, sort_color) = match sort_descending {
+                Some(true) => ("icons/arrow-down.svg", theme.primary),
+                Some(false) => ("icons/arrow-up.svg", theme.primary),
+                None => ("icons/sort-none.svg", theme.text_muted),
+            };
+            let mut slot = div()
+                .id(SharedString::from(format!(
+                    "grid-sort-badge-{}-{}",
+                    grid.id, index
+                )))
+                .flex()
+                .items_center()
+                .justify_center()
+                .w(px(13.0))
+                .h(px(13.0))
+                .ml_1()
+                .flex_none();
+            if show_badge {
+                slot = slot
+                    .cursor_pointer()
+                    .rounded_sm()
+                    .hover(move |style| style.bg(rgb(theme.tree_selected_bg)))
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        cx.stop_propagation();
+                        this.toggle_column_sort(sort_column.clone(), cx);
+                    }))
+                    .child(
+                        svg()
+                            .path(sort_icon)
+                            .w(px(8.0))
+                            .h(px(8.0))
+                            .flex_none()
+                            .text_color(rgb(sort_color)),
+                    );
+            }
+            let cell = div()
+                .id(SharedString::from(format!(
+                    "grid-head-{}-{}",
+                    grid.id, index
+                )))
+                .flex()
+                .items_center()
+                .h(px(GRID_ROW_HEIGHT))
+                .w(px(width))
+                .flex_none()
+                .px_2()
+                .whitespace_nowrap()
+                .overflow_hidden()
+                .cursor_pointer()
+                .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                .border_r_1()
+                .border_color(rgb(theme.grid_line))
+                .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
+                    this.set_sort_hover(grid_id, index, *hovered, cx);
+                }))
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    if let Some(grid_index) = this.active_grid
+                        && let Some(grid) = this.grids.get_mut(grid_index)
+                    {
+                        let rows = grid.rows.len();
+                        if rows > 0 && index < grid.columns.len() {
+                            grid.selection = Some(CellSelection {
+                                anchor: (rows - 1, index),
+                                cursor: (0, index),
+                            });
+                        }
+                    }
+                    this.selecting_cells = false;
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .child(column.name.clone()),
+                )
+                .child(slot);
+            header = header.child(cell);
+        }
+
+        let selection = grid.selection;
+        let edits = grid.edits.clone();
+        let rows = grid.rows.clone();
+        let column_count = widths.len();
+        let editing_temporal = self
+            .date_picker
+            .as_ref()
+            .map(|picker| (picker.row, picker.col));
+        let preview = self
+            .cell_editor
+            .as_ref()
+            .filter(|editor| editor.cells.len() > 1)
+            .map(|editor| (editor.cells.clone(), editor.value.clone()));
+        let widths = Arc::new(widths);
+        let list = uniform_list(
+            SharedString::from(format!("grid-rows-{}", grid.id)),
+            rows.len(),
+            move |range, _window, _cx| {
+                range
+                    .map(|row_index| {
+                        let row = &rows[row_index];
+                        let base_background = if row_index % 2 == 1 {
+                            theme.row_alt_bg
+                        } else {
+                            theme.editor_bg
+                        };
+                        let row_selected = selection.is_some_and(|selection| {
+                            let (start_row, end_row) = selection.rows();
+                            let (start_col, end_col) = selection.cols();
+                            row_index >= start_row
+                                && row_index <= end_row
+                                && start_col == 0
+                                && end_col + 1 == column_count
+                        });
+                        let current_row =
+                            selection.is_some_and(|selection| selection.cursor.0 == row_index);
+                        let mut row_element = div()
+                            .flex()
+                            .flex_row()
+                            .bg(rgb(base_background))
+                            .h(px(GRID_ROW_HEIGHT))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .h(px(GRID_ROW_HEIGHT))
+                                    .w(px(GRID_GUTTER_WIDTH))
+                                    .flex_none()
+                                    .bg(rgb(if row_selected {
+                                        theme.tree_selected_bg
+                                    } else {
+                                        base_background
+                                    }))
+                                    .border_r_1()
+                                    .border_color(rgb(theme.border))
+                                    .when(current_row, move |gutter| {
+                                        gutter.child(
+                                            svg()
+                                                .path("icons/row_marker.svg")
+                                                .w(px(7.0))
+                                                .h(px(7.0))
+                                                .flex_none()
+                                                .text_color(rgb(if row_selected {
+                                                    theme.tree_selected_text
+                                                } else {
+                                                    theme.primary
+                                                })),
+                                        )
+                                    }),
+                            );
+                        for (index, cell) in row.iter().enumerate() {
+                            let width = widths.get(index).copied().unwrap_or(GRID_COLUMN_WIDTH);
+                            let selected = selection
+                                .is_some_and(|selection| selection.contains(row_index, index));
+                            let edited = edits.get(&(row_index, index));
+                            let previewed = preview
+                                .as_ref()
+                                .filter(|(cells, _)| cells.contains(&(row_index, index)))
+                                .map(|(_, value)| value.clone());
+                            let cell_background = if selected {
+                                theme.tree_selected_bg
+                            } else if edited.is_some() || previewed.is_some() {
+                                theme.cell_edit_bg
+                            } else {
+                                base_background
+                            };
+                            let is_null = match (edited, &previewed) {
+                                (Some(Some(_)), _) | (_, Some(_)) => false,
+                                (Some(None), _) => true,
+                                (None, None) => matches!(cell, CellValue::Null),
+                            };
+                            let display = if let Some(value) = previewed {
+                                value
+                            } else {
+                                match edited {
+                                    Some(Some(value)) => value.clone(),
+                                    Some(None) => "(Null)".to_string(),
+                                    None => {
+                                        if is_null {
+                                            "(Null)".to_string()
+                                        } else {
+                                            cell.as_display()
+                                        }
+                                    }
+                                }
+                            };
+                            let mut cell_element = div()
+                                .flex()
+                                .items_center()
+                                .h(px(GRID_ROW_HEIGHT))
+                                .w(px(width))
+                                .flex_none()
+                                .px_2()
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .border_r_1()
+                                .border_b_1()
+                                .border_color(rgb(theme.grid_line))
+                                .bg(rgb(cell_background));
+                            if editing_temporal == Some((row_index, index)) {
+                                cell_element = cell_element.relative().pr(px(22.0)).child(
+                                    div()
+                                        .absolute()
+                                        .right(px(1.0))
+                                        .top(px(1.0))
+                                        .bottom(px(1.0))
+                                        .w(px(18.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .border_1()
+                                        .border_color(rgb(theme.button_border))
+                                        .bg(rgb(theme.button_bg))
+                                        .text_size(px(11.0))
+                                        .text_color(rgb(theme.text))
+                                        .child("…"),
+                                );
+                            }
+                            if selected {
+                                cell_element =
+                                    cell_element.text_color(rgb(theme.tree_selected_text));
+                            } else if is_null {
+                                cell_element = cell_element
+                                    .text_color(rgb(theme.text_null))
+                                    .font_weight(FontWeight::THIN);
+                            }
+                            row_element = row_element.child(cell_element.child(display));
+                        }
+                        row_element
+                    })
+                    .collect::<Vec<_>>()
+            },
+        )
+        .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::FitList)
+        .track_scroll(self.grid_list_scroll.clone())
+        .flex_1()
+        .min_h(px(0.0))
+        .track_focus(&self.grid_focus)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                this.grid_mouse_down(event, window, cx);
+            }),
+        )
+        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            this.grid_key(event, window, cx);
+        }));
+
+        let table = div()
+            .id("grid-hscroll")
+            .flex_1()
+            .min_h(px(0.0))
+            .min_w(px(0.0))
+            .overflow_hidden()
+            .track_scroll(&self.grid_hscroll)
+            .child(
+                div()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .h_full()
+                    .w(px(content_width))
+                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                        if this
+                            .cell_editor
+                            .as_ref()
+                            .is_some_and(|editor| editor.selecting)
+                        {
+                            this.cell_editor_drag(event, window, cx);
+                        } else {
+                            this.grid_mouse_move(event, cx);
+                        }
+                    }))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _event, _window, cx| {
+                            if let Some(editor) = this.cell_editor.as_mut() {
+                                editor.selecting = false;
+                            }
+                            this.selecting_cells = false;
+                            cx.notify();
+                        }),
+                    )
+                    .child(header)
+                    .child(list)
+                    .child(self.render_cell_editor(window, cx))
+                    .child(self.render_date_picker(cx))
+                    .child({
+                        let weak = cx.weak_entity();
+                        canvas(
+                            |_, _, _| {},
+                            move |bounds, _state, window, _cx| {
+                                window.on_mouse_event(
+                                    move |event: &ScrollWheelEvent, phase, _window, cx| {
+                                        if phase != DispatchPhase::Capture
+                                            || !bounds.contains(&event.position)
+                                        {
+                                            return;
+                                        }
+                                        let delta = match event.delta {
+                                            ScrollDelta::Lines(delta) => delta.y,
+                                            ScrollDelta::Pixels(delta) => f32::from(delta.y),
+                                        };
+                                        if delta == 0.0 {
+                                            return;
+                                        }
+                                        let position = event.position;
+                                        let _ = weak.update(cx, |this, cx| {
+                                            if this.scroll_grid_selection(position, delta, cx) {
+                                                cx.stop_propagation();
+                                            }
+                                        });
+                                    },
+                                );
+                            },
+                        )
+                        .absolute()
+                        .inset_0()
+                    }),
+            );
+
+        let mut root = div().relative().flex().flex_col().size_full();
+        if grid.show_toolbar {
+            root = root.child(self.render_grid_toolbar(grid, cx));
+            if grid.sort_open {
+                root = root.child(self.render_sort_panel(grid, cx));
+            }
+        }
+        root = root.child(
+            div()
+                .flex()
+                .flex_row()
+                .flex_1()
+                .min_h(px(0.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .min_h(px(0.0))
+                        .child(table)
+                        .child(self.render_grid_hscrollbar(cx)),
+                )
+                .child(self.render_grid_vscrollbar(cx)),
+        );
+
+        if grid.show_toolbar && self.page_size_menu_open {
+            root = root.child(self.render_record_limit_panel(grid, cx));
+        }
+
+        root = root
+            .child(self.render_grid_controls(grid, cx))
+            .child(self.render_grid_status(grid));
+
+        if grid.show_toolbar
+            && grid.sort_open
+            && let Some((rule, _)) = grid.sort_combo.as_ref()
+        {
+            root = root.child(self.render_sort_combo_popup(grid, *rule, cx));
+        }
+        root.on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+            this.grid_hscroll_drag(event, cx);
+            this.grid_vscroll_drag(event, cx);
+        }))
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                let h = this.grid_hscroll_grab.take().is_some();
+                let v = this.grid_vscroll_grab.take().is_some();
+                if h || v {
+                    cx.notify();
+                }
+            }),
+        )
+    }
+}

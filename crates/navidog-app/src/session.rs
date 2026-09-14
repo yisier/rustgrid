@@ -87,7 +87,7 @@ impl Category {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub struct CategoryExpansion {
     pub tables: bool,
     pub views: bool,

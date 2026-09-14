@@ -12,11 +12,19 @@ not a later refactor.
 - `crates/navidog-mysql` — the only compiled-in driver; implements the core traits with sqlx.
 - `crates/navidog-config` — versioned settings/profiles plus encrypted secret storage in the
   OS config dir (`connections.json`, `settings.json`, `secrets.json`).
-- `crates/navidog-app` — GPUI binary `navidog`: `src/app.rs` (the entire view/render layer,
-  including the custom titlebar, toolbar, dialogs and context menus), `src/session.rs`
-  (UI state), `src/form.rs` (connection form), `src/theme.rs` (light/dark palettes),
-  `src/assets.rs` (embedded asset loader for `assets/`), `src/runtime.rs` (tokio bridge),
-  locales in `locales/`.
+- `crates/navidog-app` — GPUI binary `navidog`: `src/app/` is the view/render layer, split
+  by feature (`mod.rs` holds `AppView`, its state, the `Render` entry, free helpers and
+  tests; the rest are `impl AppView` submodules: `tree`, `database`, `db_dialog`, `objects`,
+  `sidebar`, `tabs`, `toolbar`, `query`, `query_view`, `query_editor`, `grid`, `grid_input`,
+  `grid_commit`, `grid_view`, `grid_cell`, `grid_scroll`, `grid_toolbar`, `dialogs`,
+  `widgets`, `form`). New view code goes in the matching submodule, **not** `mod.rs`.
+  `ui/` is the internal design system (buttons, dialogs, scrollbars, text fields, ...): put
+  shared chrome there, never one-off `div`s in feature code. `objects` owns the first child
+  view, `Entity<ObjectPane>` (the Tables/Views list); follow that pattern (child `Entity` with
+  `WeakEntity<AppView>` + `notify_*` invalidation) when a subtree gets large.
+  Other files: `src/session.rs` (UI state), `src/form.rs` (connection form),
+  `src/theme.rs` (light/dark palettes), `src/assets.rs` (embedded asset loader for
+  `assets/`), `src/runtime.rs` (tokio bridge), locales in `locales/`.
 - The root `Cargo.toml` owns all versions under `[workspace.dependencies]`; member crates use
   `<dep>.workspace = true`. Add new dependencies there, not inline in a member.
 
@@ -128,6 +136,19 @@ touching UI code.
   (`sql.rs`), completion combines `sqlparser` keywords with loaded table names, and `Beautify SQL`
   calls `sqlformat`.
 - Keep the dependency tree small (see Gotchas).
+- **UI widget reference — `longbridge/gpui-kit`** (https://github.com/longbridge/gpui-kit,
+  formerly `gpui-component`, **Apache-2.0**). When a widget is non-trivial (date picker, text
+  input, virtualized table, dropdown, toast, tooltip, ...) **port the implementation from this
+  repo** instead of inventing it: restyle to the classic Win32/Navicat look and keep it under
+  `src/app/ui/`. Keep the upstream file's Apache-2.0 attribution/license notice on anything
+  copied verbatim.
+  Do **not** add it as a dependency: the current `gpui-kit` / `gpui-component 0.6` is built on
+  `gpui-pre` (a republished snapshot of Zed's GPUI), **not** the crates.io `gpui = "0.2"` this
+  workspace pins — adopting it would force a whole-app framework migration and break the
+  "use the published gpui 0.2 crate" rule. It also drags in heavy deps (`tree-sitter`, `reqwest`,
+  `resvg`, `ropey`, `markdown`, ...) and its modern shadcn look fights the required square
+  styling. (The older `gpui-component 0.5.x` line targets crates.io `gpui 0.2.2`, but is already
+  superseded and still heavy — use it only as a source to port from.)
 
 ## Scope (do not exceed)
 
