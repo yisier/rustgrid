@@ -77,6 +77,13 @@ impl AppView {
             .and_then(|index| self.connection_arc(index))
             .is_some();
         let run_enabled = has_connection && !query.running;
+        // One run button: it runs the selection when there is one, otherwise the whole editor.
+        let has_selection = query.caret != query.anchor;
+        let run_label = if has_selection {
+            t!("query.run_selected").to_string()
+        } else {
+            t!("query.run").to_string()
+        };
 
         let controls = div()
             .flex()
@@ -111,20 +118,13 @@ impl AppView {
             .child(self.query_tool_button(
                 "query-run",
                 "icons/run.svg",
-                t!("query.run").to_string(),
+                run_label,
                 theme.text,
                 theme.icon_connection,
                 run_enabled,
-                cx.listener(|this, _event, _window, cx| this.run_query(false, false, cx)),
-            ))
-            .child(self.query_tool_button(
-                "query-run-selected",
-                "icons/run.svg",
-                t!("query.run_selected").to_string(),
-                theme.text,
-                theme.icon_connection,
-                run_enabled,
-                cx.listener(|this, _event, _window, cx| this.run_query(false, true, cx)),
+                cx.listener(move |this, _event, _window, cx| {
+                    this.run_query(false, has_selection, cx)
+                }),
             ))
             .child(self.query_tool_button(
                 "query-stop",

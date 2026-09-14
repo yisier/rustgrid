@@ -40,7 +40,36 @@ impl AppView {
     pub(super) fn open_new_query(&mut self, cx: &mut Context<'_, Self>) {
         let connection_index = self.default_query_connection(cx);
         let database = connection_index.and_then(|index| self.default_query_database(index, cx));
+        self.open_query_with(connection_index, database, cx);
+    }
 
+    /// Open a query tab bound to a specific connection, defaulting to its current database.
+    pub(super) fn open_new_query_for_connection(
+        &mut self,
+        connection_index: usize,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let database = self.default_query_database(connection_index, cx);
+        self.open_query_with(Some(connection_index), database, cx);
+    }
+
+    /// Open a query tab for a specific database in the tree, selecting it up front.
+    pub(super) fn open_new_query_for_database(
+        &mut self,
+        connection_index: usize,
+        database_index: usize,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let database = self.database_name(connection_index, database_index);
+        self.open_query_with(Some(connection_index), database, cx);
+    }
+
+    fn open_query_with(
+        &mut self,
+        connection_index: Option<usize>,
+        database: Option<String>,
+        cx: &mut Context<'_, Self>,
+    ) {
         let id = self.next_query_id;
         self.next_query_id += 1;
         let mut tab = QueryTab::new(id);
@@ -460,6 +489,10 @@ impl AppView {
                     sort_draft: Vec::new(),
                     sort_combo: None,
                     sort_selected: None,
+                    filters: Vec::new(),
+                    filter_open: false,
+                    filter_draft: Vec::new(),
+                    filter_combo: None,
                     elapsed: Some(elapsed),
                 };
                 let app = cx.weak_entity();

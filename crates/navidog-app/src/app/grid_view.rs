@@ -33,6 +33,9 @@ impl GridView {
             sort_combo_focused: false,
             sort_combo_filter: String::new(),
             sort_combo_highlight: 0,
+            filter_value_focus: Vec::new(),
+            filter_value2_focus: Vec::new(),
+            filter_active: None,
             page_input,
             page_input_focus: cx.focus_handle(),
             page_input_focused: false,
@@ -489,6 +492,9 @@ impl Render for GridView {
         let mut root = div().relative().flex().flex_col().size_full();
         if self.state.show_toolbar {
             root = root.child(self.render_grid_toolbar(cx));
+            if self.state.filter_open {
+                root = root.child(self.render_filter_panel(cx));
+            }
             if self.state.sort_open {
                 root = root.child(self.render_sort_panel(cx));
             }

@@ -15,6 +15,16 @@ impl AppView {
             (form.to_profile(), password, password_saved)
         };
 
+        let duplicate =
+            self.connections.iter().enumerate().any(|(index, node)| {
+                Some(index) != self.editing && node.profile.name == profile.name
+            });
+        if duplicate {
+            self.test_status = TestStatus::Failed(t!("form.duplicate_name").to_string());
+            cx.notify();
+            return;
+        }
+
         if let Some(index) = self.editing.take() {
             if let Some(node) = self.connections.get_mut(index) {
                 let mut profile = profile;

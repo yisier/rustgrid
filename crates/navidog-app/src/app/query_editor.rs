@@ -93,6 +93,12 @@ impl AppView {
                     this.query_editor_mouse_down(event, window, cx);
                 }),
             )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    this.query_editor_context_menu(event, window, cx);
+                }),
+            )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
                 this.query_editor_mouse_move(event, cx);
             }))
@@ -347,7 +353,11 @@ impl AppView {
         window.focus(&self.query_focus);
         let position = self.query_editor_index_for_position(event.position);
         if let (Some(position), Some(tab)) = (position, self.queries.get_mut(index)) {
-            if event.modifiers.shift {
+            if event.click_count >= 2 {
+                let (start, end) = word_bounds(&tab.sql, position);
+                tab.anchor = start;
+                tab.caret = end;
+            } else if event.modifiers.shift {
                 tab.caret = position;
             } else {
                 tab.anchor = position;
@@ -599,6 +609,9 @@ impl AppView {
         }
 
         if let Some(tab) = self.queries.get_mut(index) {
+            if modified {
+                tab.undo.push((sql.clone(), tab.caret, tab.anchor));
+            }
             tab.sql = new_sql;
             tab.caret = new_caret;
             tab.anchor = new_anchor;
@@ -609,6 +622,121 @@ impl AppView {
             self.refresh_query_completion(false);
         }
         self.caret_visible = true;
+        cx.notify();
+    }
+
+    pub(super) fn query_editor_context_menu(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        window.focus(&self.query_focus);
+        self.context_menu = Some(ContextMenu {
+            target: ContextTarget::QueryEditor,
+            position: event.position,
+        });
+        cx.notify();
+    }
+
+    pub(super) fn query_editor_undo(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(index) = self.active_query else {
+            return;
+        };
+        if let Some(tab) = self.queries.get_mut(index)
+            && let Some((sql, caret, anchor)) = tab.undo.pop()
+        {
+            tab.sql = sql;
+            tab.caret = caret;
+            tab.anchor = anchor;
+            tab.selecting = false;
+        }
+        self.query_completion = None;
+        self.caret_visible = true;
+        cx.notify();
+    }
+
+    pub(super) fn query_editor_copy(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(index) = self.active_query else {
+            return;
+        };
+        let Some(tab) = self.queries.get(index) else {
+            return;
+        };
+        let (start, end) = tab.selection();
+        if start < end {
+            cx.write_to_clipboard(ClipboardItem::new_string(tab.sql[start..end].to_string()));
+        }
+    }
+
+    pub(super) fn query_editor_cut(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(index) = self.active_query else {
+            return;
+        };
+        let Some(tab) = self.queries.get(index) else {
+            return;
+        };
+        let (start, end) = tab.selection();
+        if start >= end {
+            return;
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(tab.sql[start..end].to_string()));
+        let sql = tab.sql.clone();
+        let caret = tab.caret;
+        let anchor = tab.anchor;
+        if let Some(tab) = self.queries.get_mut(index) {
+            tab.undo.push((sql, caret, anchor));
+            tab.sql.replace_range(start..end, "");
+            tab.caret = start;
+            tab.anchor = start;
+            tab.selecting = false;
+        }
+        self.query_completion = None;
+        self.caret_visible = true;
+        cx.notify();
+    }
+
+    pub(super) fn query_editor_paste(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(index) = self.active_query else {
+            return;
+        };
+        let Some(pasted) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+            return;
+        };
+        let pasted = pasted.replace("\r\n", "\n").replace('\r', "\n");
+        if pasted.is_empty() {
+            return;
+        }
+        let Some(tab) = self.queries.get(index) else {
+            return;
+        };
+        let (start, end) = tab.selection();
+        let sql = tab.sql.clone();
+        let caret = tab.caret;
+        let anchor = tab.anchor;
+        let new_caret = start + pasted.len();
+        if let Some(tab) = self.queries.get_mut(index) {
+            tab.undo.push((sql, caret, anchor));
+            tab.sql.replace_range(start..end, &pasted);
+            tab.caret = new_caret;
+            tab.anchor = new_caret;
+            tab.selecting = false;
+        }
+        self.query_completion = None;
+        self.caret_visible = true;
+        cx.notify();
+    }
+
+    pub(super) fn query_editor_select_all(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(index) = self.active_query else {
+            return;
+        };
+        if let Some(tab) = self.queries.get_mut(index) {
+            tab.anchor = 0;
+            tab.caret = tab.sql.len();
+            tab.selecting = false;
+        }
+        self.query_completion = None;
         cx.notify();
     }
 }

@@ -32,25 +32,7 @@ impl AppView {
 
     pub(super) fn open_new_form(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         self.editing = None;
-        self.form = Some(ConnectionForm::default());
-        self.test_status = TestStatus::Idle;
-        self.context_menu = None;
-        let name_len = self
-            .form
-            .as_ref()
-            .map(|form| form.name.chars().count())
-            .unwrap_or(0);
-        self.form_selection = FieldSelection {
-            anchor: name_len,
-            cursor: name_len,
-        };
-        self.form_selecting = false;
-        self.form_active_field = FormField::Name;
-        self.form_offset = Point::default();
-        self.form_dragging = false;
-        self.caret_visible = true;
-        window.focus(&self.form_focus.name);
-        cx.notify();
+        self.show_form(ConnectionForm::default(), window, cx);
     }
 
     pub(super) fn open_edit_form(
@@ -69,11 +51,40 @@ impl AppView {
         };
 
         self.editing = Some(index);
-        self.form = Some(ConnectionForm::from_profile(
-            &profile,
-            password,
-            password_saved,
-        ));
+        self.show_form(
+            ConnectionForm::from_profile(&profile, password, password_saved),
+            window,
+            cx,
+        );
+    }
+
+    /// Open the new-connection dialog pre-filled with an existing connection's settings. Saving
+    /// it creates a separate connection (name-uniqueness is validated on save).
+    pub(super) fn open_copy_form(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let (profile, password, password_saved) = match self.connections.get(index) {
+            Some(node) => (
+                node.profile.clone(),
+                node.password.clone(),
+                node.password_saved,
+            ),
+            None => return,
+        };
+
+        self.editing = None;
+        self.show_form(
+            ConnectionForm::from_profile(&profile, password, password_saved),
+            window,
+            cx,
+        );
+    }
+
+    fn show_form(&mut self, form: ConnectionForm, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.form = Some(form);
         self.test_status = TestStatus::Idle;
         self.context_menu = None;
         let name_len = self
@@ -271,19 +282,44 @@ impl AppView {
 
             let _ = this.update(cx, |view, cx| {
                 if let Some(node) = view.connections.get_mut(index) {
+                    // Keep databases that were already open/expanded (and their loaded tables)
+                    // so refreshing the list does not close the user's databases.
+                    let previous = match std::mem::replace(&mut node.databases, Loadable::Idle) {
+                        Loadable::Loaded(databases) => databases,
+                        _ => Vec::new(),
+                    };
                     node.databases = match result {
-                        Ok(databases) => Loadable::Loaded(
-                            databases
-                                .into_iter()
-                                .map(|database| DatabaseNode {
-                                    name: database.name,
-                                    tables: Loadable::Idle,
-                                    opened: false,
-                                    expanded: false,
-                                    categories: Default::default(),
-                                })
-                                .collect(),
-                        ),
+                        Ok(databases) => {
+                            let mut previous = previous;
+                            Loadable::Loaded(
+                                databases
+                                    .into_iter()
+                                    .map(|database| {
+                                        if let Some(position) = previous
+                                            .iter()
+                                            .position(|existing| existing.name == database.name)
+                                        {
+                                            let existing = previous.remove(position);
+                                            DatabaseNode {
+                                                name: database.name,
+                                                tables: existing.tables,
+                                                opened: existing.opened,
+                                                expanded: existing.expanded,
+                                                categories: existing.categories,
+                                            }
+                                        } else {
+                                            DatabaseNode {
+                                                name: database.name,
+                                                tables: Loadable::Idle,
+                                                opened: false,
+                                                expanded: false,
+                                                categories: Default::default(),
+                                            }
+                                        }
+                                    })
+                                    .collect(),
+                            )
+                        }
                         Err(error) => Loadable::Failed(error.to_string()),
                     };
                 }
@@ -534,6 +570,10 @@ impl AppView {
             sort_draft: Vec::new(),
             sort_combo: None,
             sort_selected: None,
+            filters: Vec::new(),
+            filter_open: false,
+            filter_draft: Vec::new(),
+            filter_combo: None,
             elapsed: None,
         };
         let app = cx.weak_entity();

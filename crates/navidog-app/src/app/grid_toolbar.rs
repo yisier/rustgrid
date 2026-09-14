@@ -39,10 +39,10 @@ impl GridView {
                 "icons/filter.svg",
                 t!("grid.filter").to_string(),
                 theme.text,
-                true,
+                self.state.sql.is_none(),
+                self.state.filter_open,
                 false,
-                false,
-                |_, _, _| {},
+                cx.listener(|this, _event, _window, cx| this.toggle_filter_panel(cx)),
             ))
             .child(self.grid_tool_button(
                 "grid-sort",
@@ -385,6 +385,473 @@ impl GridView {
             .text_color(rgb(theme.text))
             .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
             .on_click(cx.listener(|this, _event, _window, cx| this.sort_apply(cx)))
+            .child(
+                svg()
+                    .path("icons/check.svg")
+                    .w(px(13.0))
+                    .h(px(13.0))
+                    .flex_none()
+                    .text_color(rgb(theme.text_muted)),
+            )
+            .child(t!("grid.apply").to_string())
+    }
+
+    pub(super) fn render_filter_panel(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let mut list = div()
+            .id("filter-condition-list")
+            .flex()
+            .flex_col()
+            .flex_none()
+            .min_h(px(46.0))
+            .max_h(px(184.0))
+            .overflow_y_scroll();
+
+        if self.state.filter_draft.is_empty() {
+            list = list.child(
+                div()
+                    .id("filter-add-hint")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .h(px(24.0))
+                    .w_full()
+                    .flex_none()
+                    .bg(rgb(theme.tree_hover_bg))
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(rgb(theme.tree_selected_bg)))
+                    .on_click(cx.listener(|this, _event, _window, cx| this.filter_add_rule(0, cx)))
+                    .child(sort_plus_badge(theme))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(theme.text_muted))
+                            .child(t!("grid.filter_hint").to_string()),
+                    ),
+            );
+        } else {
+            for (index, condition) in self.state.filter_draft.iter().enumerate() {
+                list = list.child(self.render_filter_row(index, condition, cx));
+            }
+        }
+
+        let footer = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .px_1()
+            .h(px(26.0))
+            .flex_none()
+            .border_t_1()
+            .border_color(rgb(theme.border))
+            .child(self.filter_apply_button(cx));
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .bg(rgb(theme.editor_bg))
+            .border_b_1()
+            .border_color(rgb(theme.border))
+            .child(list)
+            .child(footer)
+            .into_any_element()
+    }
+
+    fn render_filter_row(
+        &self,
+        index: usize,
+        condition: &FilterCondition,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let theme = self.theme;
+        let mut row = div()
+            .id(SharedString::from(format!("filter-row-{index}")))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .px_1()
+            .h(px(26.0))
+            .flex_none();
+
+        if index == 0 {
+            row = row.child(div().w(px(64.0)).flex_none());
+        } else {
+            row = row.child(self.filter_conjunction_toggle(index, cx));
+        }
+
+        row = row
+            .child(
+                div()
+                    .id(SharedString::from(format!("filter-enabled-{index}")))
+                    .flex()
+                    .items_center()
+                    .flex_none()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.filter_toggle_enabled(index, cx);
+                    }))
+                    .child(checkbox_box(condition.enabled, theme)),
+            )
+            .child(self.render_filter_field_combo(index, cx))
+            .child(self.render_filter_operator_combo(index, cx))
+            .child(self.render_filter_value(index, 0, cx));
+
+        if condition.operator.needs_second_value() {
+            row = row
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(rgb(theme.text_muted))
+                        .child(t!("filter.between").to_string()),
+                )
+                .child(self.render_filter_value(index, 1, cx));
+        }
+
+        row = row
+            .child(self.filter_row_action(index, false, cx))
+            .child(self.filter_row_action(index, true, cx));
+
+        row.into_any_element()
+    }
+
+    fn filter_conjunction_toggle(
+        &self,
+        index: usize,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
+        let theme = self.theme;
+        let conjunction = self
+            .state
+            .filter_draft
+            .get(index)
+            .map(|condition| condition.conjunction)
+            .unwrap_or_default();
+        let mut toggle = div()
+            .id(SharedString::from(format!("filter-conjunction-{index}")))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_0p5()
+            .w(px(64.0))
+            .flex_none()
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                this.filter_toggle_conjunction(index, cx);
+            }));
+        for option in [FilterConjunction::And, FilterConjunction::Or] {
+            let active = option == conjunction;
+            toggle = toggle.child(
+                div()
+                    .px_1()
+                    .h(px(18.0))
+                    .flex()
+                    .items_center()
+                    .text_size(px(11.0))
+                    .rounded_sm()
+                    .when(active, move |style| {
+                        style.bg(rgb(theme.primary)).text_color(rgb(0xffffff))
+                    })
+                    .when(!active, move |style| {
+                        style.text_color(rgb(theme.text_muted))
+                    })
+                    .child(t!(option.label_key()).to_string()),
+            );
+        }
+        toggle
+    }
+
+    fn render_filter_field_combo(
+        &self,
+        index: usize,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
+        let theme = self.theme;
+        let open = self.state.filter_combo == Some((index, FilterCombo::Field));
+        let value = self
+            .state
+            .filter_draft
+            .get(index)
+            .map(|condition| condition.column.clone())
+            .unwrap_or_default();
+
+        let button = ui::text_field(theme)
+            .id(SharedString::from(format!("filter-field-{index}")))
+            .flex()
+            .items_center()
+            .px_2()
+            .h(px(20.0))
+            .w(px(170.0))
+            .flex_none()
+            .text_size(px(12.0))
+            .whitespace_nowrap()
+            .overflow_hidden()
+            .cursor_pointer()
+            .hover(move |style| style.border_color(rgb(theme.button_default_border)))
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                this.filter_open_combo(index, FilterCombo::Field, cx);
+            }))
+            .child(value);
+
+        let mut list = div()
+            .id(SharedString::from(format!("filter-field-list-{index}")))
+            .absolute()
+            .top(px(22.0))
+            .left_0()
+            .w(px(170.0))
+            .max_h(px(240.0))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .bg(rgb(theme.dialog_bg))
+            .border_1()
+            .border_color(rgb(theme.border));
+        for column in &self.state.columns {
+            let name = column.name.clone();
+            let click = name.clone();
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!(
+                        "filter-field-option-{index}-{name}"
+                    )))
+                    .flex()
+                    .items_center()
+                    .h(px(20.0))
+                    .px_2()
+                    .flex_none()
+                    .text_size(px(12.0))
+                    .whitespace_nowrap()
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.filter_choose_field(index, click.clone(), cx);
+                    }))
+                    .child(name),
+            );
+        }
+
+        div().relative().child(button).when(open, move |style| {
+            style.child(deferred(list).with_priority(10))
+        })
+    }
+
+    fn render_filter_operator_combo(
+        &self,
+        index: usize,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
+        let theme = self.theme;
+        let open = self.state.filter_combo == Some((index, FilterCombo::Operator));
+        let operator = self
+            .state
+            .filter_draft
+            .get(index)
+            .map(|condition| condition.operator)
+            .unwrap_or(FilterOperator::Equal);
+
+        let button = ui::text_field(theme)
+            .id(SharedString::from(format!("filter-operator-{index}")))
+            .flex()
+            .items_center()
+            .px_2()
+            .h(px(20.0))
+            .w(px(150.0))
+            .flex_none()
+            .text_size(px(12.0))
+            .whitespace_nowrap()
+            .overflow_hidden()
+            .cursor_pointer()
+            .hover(move |style| style.border_color(rgb(theme.button_default_border)))
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                this.filter_open_combo(index, FilterCombo::Operator, cx);
+            }))
+            .child(t!(operator.label_key()).to_string());
+
+        let mut list = div()
+            .id(SharedString::from(format!("filter-operator-list-{index}")))
+            .absolute()
+            .top(px(22.0))
+            .left_0()
+            .w(px(150.0))
+            .max_h(px(240.0))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .bg(rgb(theme.dialog_bg))
+            .border_1()
+            .border_color(rgb(theme.border));
+        for option in FilterOperator::ALL {
+            let selected = option == operator;
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!(
+                        "filter-operator-option-{index}-{}",
+                        option.label_key()
+                    )))
+                    .flex()
+                    .items_center()
+                    .h(px(20.0))
+                    .px_2()
+                    .flex_none()
+                    .text_size(px(12.0))
+                    .whitespace_nowrap()
+                    .cursor_pointer()
+                    .when(selected, move |style| {
+                        style
+                            .bg(rgb(theme.tree_selected_bg))
+                            .text_color(rgb(theme.tree_selected_text))
+                    })
+                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.filter_choose_operator(index, option, cx);
+                    }))
+                    .child(t!(option.label_key()).to_string()),
+            );
+        }
+
+        div().relative().child(button).when(open, move |style| {
+            style.child(deferred(list).with_priority(10))
+        })
+    }
+
+    fn render_filter_value(
+        &self,
+        index: usize,
+        slot: u8,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
+        let theme = self.theme;
+        let condition = self.state.filter_draft.get(index);
+        let operator = condition
+            .map(|condition| condition.operator)
+            .unwrap_or(FilterOperator::Equal);
+        let enabled = if slot == 0 {
+            operator.needs_value()
+        } else {
+            operator.needs_second_value()
+        };
+        let value = condition
+            .map(|condition| {
+                if slot == 0 {
+                    condition.value.clone()
+                } else {
+                    condition.value2.clone()
+                }
+            })
+            .unwrap_or_default();
+        let focused = enabled && self.filter_active == Some((index, slot));
+        let handle = if slot == 0 {
+            self.filter_value_focus.get(index).cloned()
+        } else {
+            self.filter_value2_focus.get(index).cloned()
+        };
+
+        let mut field = ui::text_field(theme)
+            .id(SharedString::from(format!("filter-value-{index}-{slot}")))
+            .flex()
+            .flex_row()
+            .items_center()
+            .w(px(200.0))
+            .h(px(20.0))
+            .flex_none()
+            .px_2()
+            .text_size(px(12.0))
+            .overflow_hidden();
+        if enabled {
+            if let Some(handle) = handle {
+                field = field
+                    .track_focus(&handle)
+                    .cursor_text()
+                    .on_key_down(cx.listener(move |this, event, _window, cx| {
+                        this.filter_value_key(index, slot, event, cx);
+                    }))
+                    .on_click(cx.listener(move |this, _event, window, cx| {
+                        this.filter_focus_value(index, slot, window, cx);
+                    }));
+            }
+        } else {
+            field = field
+                .bg(rgb(theme.dialog_face))
+                .text_color(rgb(theme.text_muted));
+        }
+        field.child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .child(value)
+                .when(focused, move |style| {
+                    style.child(div().w(px(1.5)).h(px(13.0)).flex_none().bg(rgb(theme.text)))
+                }),
+        )
+    }
+
+    fn filter_row_action(
+        &self,
+        index: usize,
+        add: bool,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
+        let theme = self.theme;
+        let (icon, color, id) = if add {
+            (
+                "icons/plus.svg",
+                theme.icon_backups,
+                SharedString::from(format!("filter-add-{index}")),
+            )
+        } else {
+            (
+                "icons/cross.svg",
+                theme.danger,
+                SharedString::from(format!("filter-remove-{index}")),
+            )
+        };
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(18.0))
+            .h(px(18.0))
+            .flex_none()
+            .cursor_pointer()
+            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                if add {
+                    this.filter_add_rule(index, cx);
+                } else {
+                    this.filter_remove_rule(index, cx);
+                }
+            }))
+            .child(
+                svg()
+                    .path(icon)
+                    .w(px(10.0))
+                    .h(px(10.0))
+                    .flex_none()
+                    .text_color(rgb(color)),
+            )
+    }
+
+    fn filter_apply_button(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let theme = self.theme;
+        div()
+            .id("filter-apply")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .h(px(20.0))
+            .cursor_pointer()
+            .text_size(px(12.0))
+            .text_color(rgb(theme.text))
+            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            .on_click(cx.listener(|this, _event, _window, cx| this.filter_apply(cx)))
             .child(
                 svg()
                     .path("icons/check.svg")

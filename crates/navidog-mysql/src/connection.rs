@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use navidog_core::{
-    CellValue, ColumnInfo, Connection, DatabaseInfo, DriverId, Error, ObjectKind, PageRequest,
-    QueryResult, Result, RowUpdate, TableInfo, TablePage,
+    CellValue, ColumnInfo, Connection, DatabaseInfo, DriverId, Error, FilterCondition,
+    FilterConjunction, FilterOperator, ObjectKind, PageRequest, QueryResult, Result, RowUpdate,
+    TableInfo, TablePage,
 };
 use sqlx::mysql::{MySqlColumn, MySqlRow};
 use sqlx::{
@@ -19,11 +20,12 @@ impl MysqlConnection {
         Self { pool }
     }
 
-    async fn scalar_u64(&self, sql: String) -> Result<u64> {
-        let row = sqlx::query(sqlx::AssertSqlSafe(sql))
-            .fetch_one(&self.pool)
-            .await
-            .map_err(map_query_error)?;
+    async fn scalar_u64(&self, sql: String, binds: &[String]) -> Result<u64> {
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(sql));
+        for bind in binds {
+            query = query.bind(bind);
+        }
+        let row = query.fetch_one(&self.pool).await.map_err(map_query_error)?;
 
         if let Ok(value) = row.try_get::<i64, _>(0) {
             return Ok(value.max(0) as u64);
@@ -121,16 +123,25 @@ impl Connection for MysqlConnection {
         let columns = self.columns(database, table).await?;
         let qualified = format!("{}.{}", quote_identifier(database), quote_identifier(table));
 
+        let (where_clause, binds) = filter_clause(&page.filter);
+
         let total_rows = self
-            .scalar_u64(format!("SELECT COUNT(*) FROM {qualified}"))
+            .scalar_u64(
+                format!("SELECT COUNT(*) FROM {qualified}{where_clause}"),
+                &binds,
+            )
             .await
             .ok();
 
         let page_sql = format!(
-            "SELECT * FROM {qualified}{} LIMIT ? OFFSET ?",
+            "SELECT * FROM {qualified}{where_clause}{} LIMIT ? OFFSET ?",
             order_clause(&page)
         );
-        let rows = sqlx::query(sqlx::AssertSqlSafe(page_sql))
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(page_sql));
+        for bind in &binds {
+            query = query.bind(bind);
+        }
+        let rows = query
             .bind(page.page_size as i64)
             .bind(page.offset() as i64)
             .fetch_all(&self.pool)
@@ -434,6 +445,126 @@ fn order_clause(page: &PageRequest) -> String {
     format!(" ORDER BY {terms}")
 }
 
+/// Build the ` WHERE ...` fragment for a page request's filter, together with the values to bind
+/// in placeholder order.
+fn filter_clause(filter: &[FilterCondition]) -> (String, Vec<String>) {
+    let mut clauses: Vec<String> = Vec::new();
+    let mut binds: Vec<String> = Vec::new();
+
+    for condition in filter {
+        if !condition.enabled || condition.column.is_empty() {
+            continue;
+        }
+        let operator = condition.operator;
+        if operator.needs_value() && condition.value.is_empty() {
+            continue;
+        }
+        if operator.needs_second_value() && condition.value2.is_empty() {
+            continue;
+        }
+
+        let column = quote_identifier(&condition.column);
+        let piece = match operator {
+            FilterOperator::Equal => {
+                binds.push(condition.value.clone());
+                format!("{column} = ?")
+            }
+            FilterOperator::NotEqual => {
+                binds.push(condition.value.clone());
+                format!("{column} <> ?")
+            }
+            FilterOperator::LessThan => {
+                binds.push(condition.value.clone());
+                format!("{column} < ?")
+            }
+            FilterOperator::LessOrEqual => {
+                binds.push(condition.value.clone());
+                format!("{column} <= ?")
+            }
+            FilterOperator::GreaterThan => {
+                binds.push(condition.value.clone());
+                format!("{column} > ?")
+            }
+            FilterOperator::GreaterOrEqual => {
+                binds.push(condition.value.clone());
+                format!("{column} >= ?")
+            }
+            FilterOperator::Contains => {
+                binds.push(format!("%{}%", condition.value));
+                format!("{column} LIKE ?")
+            }
+            FilterOperator::NotContains => {
+                binds.push(format!("%{}%", condition.value));
+                format!("{column} NOT LIKE ?")
+            }
+            FilterOperator::StartsWith => {
+                binds.push(format!("{}%", condition.value));
+                format!("{column} LIKE ?")
+            }
+            FilterOperator::NotStartsWith => {
+                binds.push(format!("{}%", condition.value));
+                format!("{column} NOT LIKE ?")
+            }
+            FilterOperator::EndsWith => {
+                binds.push(format!("%{}", condition.value));
+                format!("{column} LIKE ?")
+            }
+            FilterOperator::NotEndsWith => {
+                binds.push(format!("%{}", condition.value));
+                format!("{column} NOT LIKE ?")
+            }
+            FilterOperator::IsNull => format!("{column} IS NULL"),
+            FilterOperator::IsNotNull => format!("{column} IS NOT NULL"),
+            FilterOperator::IsEmpty => format!("({column} IS NULL OR {column} = '')"),
+            FilterOperator::IsNotEmpty => format!("({column} IS NOT NULL AND {column} <> '')"),
+            FilterOperator::Between => {
+                binds.push(condition.value.clone());
+                binds.push(condition.value2.clone());
+                format!("{column} BETWEEN ? AND ?")
+            }
+            FilterOperator::NotBetween => {
+                binds.push(condition.value.clone());
+                binds.push(condition.value2.clone());
+                format!("{column} NOT BETWEEN ? AND ?")
+            }
+            FilterOperator::InList => {
+                let values = condition.list_values();
+                if values.is_empty() {
+                    continue;
+                }
+                let placeholders = vec!["?"; values.len()].join(", ");
+                binds.extend(values);
+                format!("{column} IN ({placeholders})")
+            }
+            FilterOperator::NotInList => {
+                let values = condition.list_values();
+                if values.is_empty() {
+                    continue;
+                }
+                let placeholders = vec!["?"; values.len()].join(", ");
+                binds.extend(values);
+                format!("{column} NOT IN ({placeholders})")
+            }
+        };
+
+        if clauses.is_empty() {
+            clauses.push(piece);
+        } else {
+            let conjunction = match condition.conjunction {
+                FilterConjunction::And => "AND",
+                FilterConjunction::Or => "OR",
+            };
+            clauses.push(format!("{conjunction} {piece}"));
+        }
+    }
+
+    if clauses.is_empty() {
+        (String::new(), Vec::new())
+    } else {
+        (format!(" WHERE {}", clauses.join(" ")), binds)
+    }
+}
+
 /// Map a sqlx error to a Navicat-style message: `<code> - <message>` for MySQL server errors.
 fn map_query_error(error: sqlx::Error) -> Error {
     if let sqlx::Error::Database(database_error) = &error
@@ -567,8 +698,21 @@ fn decode_cell(row: &MySqlRow, index: usize) -> CellValue {
 
 #[cfg(test)]
 mod tests {
-    use super::{order_clause, returns_result_set};
-    use navidog_core::{PageRequest, SortColumn};
+    use super::{filter_clause, order_clause, returns_result_set};
+    use navidog_core::{
+        FilterCondition, FilterConjunction, FilterOperator, PageRequest, SortColumn,
+    };
+
+    fn condition(column: &str, operator: FilterOperator, value: &str) -> FilterCondition {
+        FilterCondition {
+            column: column.to_string(),
+            operator,
+            value: value.to_string(),
+            value2: String::new(),
+            conjunction: FilterConjunction::And,
+            enabled: true,
+        }
+    }
 
     #[test]
     fn builds_order_by_from_sort_columns() {
@@ -588,6 +732,48 @@ mod tests {
     #[test]
     fn order_by_is_empty_when_unsorted() {
         assert_eq!(order_clause(&PageRequest::new(0, 10)), "");
+    }
+
+    #[test]
+    fn builds_where_with_bound_values() {
+        let mut filter = vec![
+            condition("name", FilterOperator::Contains, "ali"),
+            condition("age", FilterOperator::GreaterOrEqual, "18"),
+        ];
+        filter[1].conjunction = FilterConjunction::Or;
+        let (clause, binds) = filter_clause(&filter);
+        assert_eq!(clause, " WHERE `name` LIKE ? OR `age` >= ?".to_string());
+        assert_eq!(binds, vec!["%ali%".to_string(), "18".to_string()]);
+    }
+
+    #[test]
+    fn filter_skips_disabled_and_valueless_conditions() {
+        let mut filter = vec![
+            condition("a", FilterOperator::IsNull, ""),
+            condition("b", FilterOperator::Equal, ""),
+        ];
+        filter[0].enabled = false;
+        assert_eq!(filter_clause(&filter), (String::new(), Vec::new()));
+
+        let between = FilterCondition {
+            column: "c".to_string(),
+            operator: FilterOperator::Between,
+            value: "1".to_string(),
+            value2: "2".to_string(),
+            conjunction: FilterConjunction::And,
+            enabled: true,
+        };
+        let (clause, binds) = filter_clause(&[between]);
+        assert_eq!(clause, " WHERE `c` BETWEEN ? AND ?".to_string());
+        assert_eq!(binds, vec!["1".to_string(), "2".to_string()]);
+    }
+
+    #[test]
+    fn filter_in_list_splits_values() {
+        let condition = condition("id", FilterOperator::InList, "1, 2 ,3");
+        let (clause, binds) = filter_clause(&[condition]);
+        assert_eq!(clause, " WHERE `id` IN (?, ?, ?)".to_string());
+        assert_eq!(binds, vec!["1", "2", "3"]);
     }
 
     #[test]

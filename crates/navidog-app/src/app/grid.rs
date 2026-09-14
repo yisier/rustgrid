@@ -102,6 +102,7 @@ impl GridView {
         let page_index = self.state.page_index;
         let page_size = self.state.page_size;
         let order_by = self.state.sort_columns();
+        let filter = self.state.filter_conditions();
 
         self.selecting_cells = false;
         self.cell_editor = None;
@@ -116,7 +117,9 @@ impl GridView {
                         .fetch_page(
                             &database,
                             &table,
-                            PageRequest::new(page_index, page_size).with_order_by(order_by),
+                            PageRequest::new(page_index, page_size)
+                                .with_order_by(order_by)
+                                .with_filter(filter),
                         )
                         .await
                 })
@@ -533,6 +536,224 @@ impl GridView {
             self.state.sort_draft = self.state.sort_rules.clone();
             self.state.sort_selected = Some(0);
         }
+        self.state.page_index = 0;
+        self.sync_page_input();
+        self.load_page(cx);
+    }
+
+    pub(super) fn toggle_filter_panel(&mut self, cx: &mut Context<'_, Self>) {
+        if self.state.filter_open {
+            self.state.filter_open = false;
+            self.state.filter_combo = None;
+            self.filter_active = None;
+            self.state.filter_draft.clear();
+            self.filter_value_focus.clear();
+            self.filter_value2_focus.clear();
+        } else {
+            if self.state.sql.is_some() {
+                return;
+            }
+            self.state.filter_open = true;
+            self.state.filter_combo = None;
+            self.filter_active = None;
+            self.state.filter_draft = self.state.filters.clone();
+            if self.state.filter_draft.is_empty()
+                && let Some(column) = self.state.columns.first().map(|column| column.name.clone())
+            {
+                self.state.filter_draft.push(FilterCondition::new(column));
+            }
+            self.rebuild_filter_focus(cx);
+        }
+        cx.notify();
+    }
+
+    fn rebuild_filter_focus(&mut self, cx: &mut Context<'_, Self>) {
+        self.filter_value_focus = self
+            .state
+            .filter_draft
+            .iter()
+            .map(|_| cx.focus_handle())
+            .collect();
+        self.filter_value2_focus = self
+            .state
+            .filter_draft
+            .iter()
+            .map(|_| cx.focus_handle())
+            .collect();
+    }
+
+    fn next_filter_column(&self) -> String {
+        self.state
+            .columns
+            .iter()
+            .map(|column| column.name.clone())
+            .find(|name| {
+                self.state
+                    .filter_draft
+                    .iter()
+                    .all(|condition| &condition.column != name)
+            })
+            .or_else(|| self.state.columns.first().map(|column| column.name.clone()))
+            .unwrap_or_default()
+    }
+
+    pub(super) fn filter_add_rule(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        let column = self.next_filter_column();
+        if column.is_empty() {
+            return;
+        }
+        let position = (index + 1).min(self.state.filter_draft.len());
+        self.state
+            .filter_draft
+            .insert(position, FilterCondition::new(column));
+        self.filter_value_focus.insert(position, cx.focus_handle());
+        self.filter_value2_focus.insert(position, cx.focus_handle());
+        self.state.filter_combo = None;
+        cx.notify();
+    }
+
+    pub(super) fn filter_remove_rule(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        if index < self.state.filter_draft.len() {
+            self.state.filter_draft.remove(index);
+        }
+        if index < self.filter_value_focus.len() {
+            self.filter_value_focus.remove(index);
+            self.filter_value2_focus.remove(index);
+        }
+        if matches!(self.filter_active, Some((row, _)) if row == index) {
+            self.filter_active = None;
+        } else if let Some((row, slot)) = self.filter_active
+            && row > index
+        {
+            self.filter_active = Some((row - 1, slot));
+        }
+        self.state.filter_combo = None;
+        cx.notify();
+    }
+
+    pub(super) fn filter_toggle_enabled(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        if let Some(condition) = self.state.filter_draft.get_mut(index) {
+            condition.enabled = !condition.enabled;
+        }
+        cx.notify();
+    }
+
+    pub(super) fn filter_toggle_conjunction(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        if let Some(condition) = self.state.filter_draft.get_mut(index) {
+            condition.conjunction = condition.conjunction.toggled();
+        }
+        cx.notify();
+    }
+
+    pub(super) fn filter_open_combo(
+        &mut self,
+        index: usize,
+        kind: FilterCombo,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.state.filter_combo = if self.state.filter_combo == Some((index, kind)) {
+            None
+        } else {
+            Some((index, kind))
+        };
+        self.filter_active = None;
+        cx.notify();
+    }
+
+    pub(super) fn filter_choose_field(
+        &mut self,
+        index: usize,
+        column: String,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(condition) = self.state.filter_draft.get_mut(index) {
+            condition.column = column;
+        }
+        self.state.filter_combo = None;
+        cx.notify();
+    }
+
+    pub(super) fn filter_choose_operator(
+        &mut self,
+        index: usize,
+        operator: FilterOperator,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(condition) = self.state.filter_draft.get_mut(index) {
+            condition.operator = operator;
+        }
+        self.state.filter_combo = None;
+        cx.notify();
+    }
+
+    pub(super) fn filter_focus_value(
+        &mut self,
+        index: usize,
+        slot: u8,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.state.filter_combo = None;
+        self.filter_active = Some((index, slot));
+        let handle = if slot == 0 {
+            self.filter_value_focus.get(index).cloned()
+        } else {
+            self.filter_value2_focus.get(index).cloned()
+        };
+        if let Some(handle) = handle {
+            window.focus(&handle);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn filter_value_key(
+        &mut self,
+        index: usize,
+        slot: u8,
+        event: &KeyDownEvent,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let keystroke = &event.keystroke;
+        if keystroke.modifiers.control || keystroke.modifiers.platform {
+            return;
+        }
+        let mut apply = false;
+        let mut unfocus = false;
+        if let Some(condition) = self.state.filter_draft.get_mut(index) {
+            let buffer = if slot == 0 {
+                &mut condition.value
+            } else {
+                &mut condition.value2
+            };
+            match keystroke.key.as_str() {
+                "backspace" => {
+                    buffer.pop();
+                }
+                "escape" => unfocus = true,
+                "enter" => apply = true,
+                _ => {
+                    if let Some(text) = keystroke.key_char.as_ref()
+                        && !text.chars().any(char::is_control)
+                    {
+                        buffer.push_str(text);
+                    }
+                }
+            }
+        }
+        if unfocus {
+            self.filter_active = None;
+        }
+        if apply {
+            self.filter_apply(cx);
+            return;
+        }
+        cx.notify();
+    }
+
+    pub(super) fn filter_apply(&mut self, cx: &mut Context<'_, Self>) {
+        self.state.filters = self.state.filter_draft.clone();
+        self.state.filter_combo = None;
+        self.filter_active = None;
         self.state.page_index = 0;
         self.sync_page_input();
         self.load_page(cx);

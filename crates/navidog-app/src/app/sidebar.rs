@@ -1,7 +1,7 @@
 use super::*;
 
 impl AppView {
-    pub(super) fn render_sidebar(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    pub(super) fn render_sidebar(&self) -> impl IntoElement {
         let theme = self.theme;
 
         div()
@@ -14,10 +14,10 @@ impl AppView {
             .border_r_1()
             .border_color(rgb(theme.border))
             .child(self.tree_pane.clone())
-            .child(self.render_sidebar_footer(cx))
+            .child(self.render_sidebar_footer())
     }
 
-    pub(super) fn render_sidebar_footer(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    pub(super) fn render_sidebar_footer(&self) -> impl IntoElement {
         let theme = self.theme;
 
         div()
@@ -38,94 +38,6 @@ impl AppView {
                         self.registry.len()
                     )),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap_1()
-                    .child(self.render_theme_button(
-                        ThemeSetting::Light,
-                        "theme-light",
-                        t!("theme.light").to_string(),
-                        cx,
-                    ))
-                    .child(self.render_theme_button(
-                        ThemeSetting::Dark,
-                        "theme-dark",
-                        t!("theme.dark").to_string(),
-                        cx,
-                    ))
-                    .child(self.render_theme_button(
-                        ThemeSetting::System,
-                        "theme-system",
-                        t!("theme.system").to_string(),
-                        cx,
-                    )),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap_1()
-                    .child(self.render_language_button(
-                        LanguageSetting::En,
-                        "lang-en",
-                        "English".to_string(),
-                        cx,
-                    ))
-                    .child(self.render_language_button(
-                        LanguageSetting::ZhCn,
-                        "lang-zh",
-                        "中文".to_string(),
-                        cx,
-                    )),
-            )
-    }
-
-    pub(super) fn render_language_button(
-        &self,
-        language: LanguageSetting,
-        id: &'static str,
-        label: String,
-        cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
-        let kind = if self.language == language {
-            ButtonKind::Selected
-        } else {
-            ButtonKind::Normal
-        };
-        self.win_button(
-            id,
-            label,
-            kind,
-            cx.listener(move |this, _event, _window, cx| {
-                this.set_language(language, cx);
-            }),
-        )
-        .flex_1()
-    }
-
-    pub(super) fn render_theme_button(
-        &self,
-        setting: ThemeSetting,
-        id: &'static str,
-        label: String,
-        cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
-        let kind = if self.theme_setting == setting {
-            ButtonKind::Selected
-        } else {
-            ButtonKind::Normal
-        };
-        self.win_button(
-            id,
-            label,
-            kind,
-            cx.listener(move |this, _event, _window, cx| {
-                this.set_theme(setting, cx);
-            }),
-        )
-        .flex_1()
     }
 }
 
@@ -142,6 +54,7 @@ enum TreeStatus {
 struct TreeConnection {
     index: usize,
     name: String,
+    driver: String,
     status: TreeStatus,
     expanded: bool,
     databases: Loadable<Vec<TreeDatabase>>,
@@ -215,6 +128,7 @@ fn snapshot_connections(app: &AppView) -> Vec<TreeConnection> {
             TreeConnection {
                 index,
                 name: node.profile.name.clone(),
+                driver: node.profile.driver.as_str().to_string(),
                 status,
                 expanded: node.expanded,
                 databases,
@@ -249,6 +163,14 @@ impl TreePane {
             TreeStatus::Connecting => theme.warning,
             TreeStatus::Failed(_) => theme.danger,
             TreeStatus::Disconnected => theme.neutral,
+        };
+        // A theme-independent badge color so the driver glyph keeps its contrast on both the
+        // light and dark backgrounds.
+        let badge = match &connection.status {
+            TreeStatus::Connected => 0x2e9e5b,
+            TreeStatus::Connecting => 0xb58900,
+            TreeStatus::Failed(_) => 0xd13438,
+            TreeStatus::Disconnected => 0x6b6b6b,
         };
 
         let click_app = self.app.clone();
@@ -309,7 +231,7 @@ impl TreePane {
             } else {
                 chevron_spacer()
             })
-            .child(tree_icon("icons/connection.svg", icon_color))
+            .child(tree_driver_icon(&connection.driver, icon_color, badge))
             .child(
                 div()
                     .flex_1()

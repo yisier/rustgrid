@@ -126,12 +126,172 @@ pub struct SortColumn {
     pub descending: bool,
 }
 
+/// A comparison operator available in the filter builder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterOperator {
+    Equal,
+    NotEqual,
+    LessThan,
+    LessOrEqual,
+    GreaterThan,
+    GreaterOrEqual,
+    Contains,
+    NotContains,
+    StartsWith,
+    NotStartsWith,
+    EndsWith,
+    NotEndsWith,
+    IsNull,
+    IsNotNull,
+    IsEmpty,
+    IsNotEmpty,
+    Between,
+    NotBetween,
+    InList,
+    NotInList,
+}
+
+impl FilterOperator {
+    /// Every operator, in the order the UI presents them.
+    pub const ALL: [FilterOperator; 20] = [
+        FilterOperator::Equal,
+        FilterOperator::NotEqual,
+        FilterOperator::LessThan,
+        FilterOperator::LessOrEqual,
+        FilterOperator::GreaterThan,
+        FilterOperator::GreaterOrEqual,
+        FilterOperator::Contains,
+        FilterOperator::NotContains,
+        FilterOperator::StartsWith,
+        FilterOperator::NotStartsWith,
+        FilterOperator::EndsWith,
+        FilterOperator::NotEndsWith,
+        FilterOperator::IsNull,
+        FilterOperator::IsNotNull,
+        FilterOperator::IsEmpty,
+        FilterOperator::IsNotEmpty,
+        FilterOperator::Between,
+        FilterOperator::NotBetween,
+        FilterOperator::InList,
+        FilterOperator::NotInList,
+    ];
+
+    /// The i18n key for the operator's label.
+    pub fn label_key(self) -> &'static str {
+        match self {
+            FilterOperator::Equal => "filter.op.equal",
+            FilterOperator::NotEqual => "filter.op.not_equal",
+            FilterOperator::LessThan => "filter.op.less",
+            FilterOperator::LessOrEqual => "filter.op.less_equal",
+            FilterOperator::GreaterThan => "filter.op.greater",
+            FilterOperator::GreaterOrEqual => "filter.op.greater_equal",
+            FilterOperator::Contains => "filter.op.contains",
+            FilterOperator::NotContains => "filter.op.not_contains",
+            FilterOperator::StartsWith => "filter.op.starts_with",
+            FilterOperator::NotStartsWith => "filter.op.not_starts_with",
+            FilterOperator::EndsWith => "filter.op.ends_with",
+            FilterOperator::NotEndsWith => "filter.op.not_ends_with",
+            FilterOperator::IsNull => "filter.op.is_null",
+            FilterOperator::IsNotNull => "filter.op.is_not_null",
+            FilterOperator::IsEmpty => "filter.op.is_empty",
+            FilterOperator::IsNotEmpty => "filter.op.is_not_empty",
+            FilterOperator::Between => "filter.op.between",
+            FilterOperator::NotBetween => "filter.op.not_between",
+            FilterOperator::InList => "filter.op.in_list",
+            FilterOperator::NotInList => "filter.op.not_in_list",
+        }
+    }
+
+    /// Whether the operator consumes a value.
+    pub fn needs_value(self) -> bool {
+        !matches!(
+            self,
+            FilterOperator::IsNull
+                | FilterOperator::IsNotNull
+                | FilterOperator::IsEmpty
+                | FilterOperator::IsNotEmpty
+        )
+    }
+
+    /// Whether the operator consumes a second value (`value2`).
+    pub fn needs_second_value(self) -> bool {
+        matches!(self, FilterOperator::Between | FilterOperator::NotBetween)
+    }
+}
+
+/// How a filter condition joins to the condition before it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FilterConjunction {
+    #[default]
+    And,
+    Or,
+}
+
+impl FilterConjunction {
+    pub fn toggled(self) -> Self {
+        match self {
+            FilterConjunction::And => FilterConjunction::Or,
+            FilterConjunction::Or => FilterConjunction::And,
+        }
+    }
+
+    pub fn label_key(self) -> &'static str {
+        match self {
+            FilterConjunction::And => "filter.conjunction.and",
+            FilterConjunction::Or => "filter.conjunction.or",
+        }
+    }
+}
+
+/// One row of the filter builder: a column, a comparison and up to two values. Engine-agnostic;
+/// each driver translates it into its own `WHERE` syntax.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilterCondition {
+    pub column: String,
+    pub operator: FilterOperator,
+    pub value: String,
+    pub value2: String,
+    pub conjunction: FilterConjunction,
+    pub enabled: bool,
+}
+
+impl FilterCondition {
+    pub fn new(column: impl Into<String>) -> Self {
+        Self {
+            column: column.into(),
+            operator: FilterOperator::Equal,
+            value: String::new(),
+            value2: String::new(),
+            conjunction: FilterConjunction::And,
+            enabled: true,
+        }
+    }
+
+    /// The comma-separated `value` split into an `IN` list, trimming blanks.
+    pub fn list_values(&self) -> Vec<String> {
+        self.value
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+}
+
+impl Default for FilterCondition {
+    fn default() -> Self {
+        Self::new("")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PageRequest {
     pub page: u64,
     pub page_size: u64,
     /// Applied `ORDER BY`, in priority order. Empty means the engine's natural order.
     pub order_by: Vec<SortColumn>,
+    /// Applied `WHERE`, as a conjunction of conditions. Empty means no filtering.
+    pub filter: Vec<FilterCondition>,
 }
 
 impl PageRequest {
@@ -140,11 +300,17 @@ impl PageRequest {
             page,
             page_size: page_size.max(1),
             order_by: Vec::new(),
+            filter: Vec::new(),
         }
     }
 
     pub fn with_order_by(mut self, order_by: Vec<SortColumn>) -> Self {
         self.order_by = order_by;
+        self
+    }
+
+    pub fn with_filter(mut self, filter: Vec<FilterCondition>) -> Self {
+        self.filter = filter;
         self
     }
 

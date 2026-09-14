@@ -203,6 +203,103 @@ impl AppView {
         }
         field
     }
+
+    /// The bottom status strip of the object list: item count on the left, connection and
+    /// database on the right (Navicat layout).
+    pub(super) fn render_object_status(
+        &self,
+        pane: &Entity<ObjectPane>,
+        cx: &Context<'_, Self>,
+    ) -> impl IntoElement {
+        let theme = self.theme;
+        let (connection_index, database_index, category) = {
+            let pane = pane.read(cx);
+            (pane.connection_index, pane.database_index, pane.category)
+        };
+        let connection_name = self
+            .connections
+            .get(connection_index)
+            .map(|node| node.profile.name.clone())
+            .unwrap_or_default();
+        let database_name = self
+            .database_name(connection_index, database_index)
+            .unwrap_or_default();
+        let count = self.object_count(connection_index, database_index, category);
+
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .h(px(24.0))
+            .flex_none()
+            .px_2()
+            .bg(rgb(theme.toolbar_bg))
+            .border_t_1()
+            .border_color(rgb(theme.border))
+            .text_size(px(12.0))
+            .child(div().text_color(rgb(theme.text)).child(format!(
+                "{} {}",
+                count,
+                t!(category.label())
+            )))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .text_color(rgb(theme.text))
+                            .child(tree_icon("icons/connection.svg", theme.icon_connection))
+                            .child(connection_name),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .text_color(rgb(theme.text))
+                            .child(tree_icon("icons/database.svg", theme.icon_database))
+                            .child(database_name),
+                    ),
+            )
+    }
+
+    fn object_count(
+        &self,
+        connection_index: usize,
+        database_index: usize,
+        category: Category,
+    ) -> usize {
+        let Some(node) = self.connections.get(connection_index) else {
+            return 0;
+        };
+        let Loadable::Loaded(databases) = &node.databases else {
+            return 0;
+        };
+        let Some(database) = databases.get(database_index) else {
+            return 0;
+        };
+        let Loadable::Loaded(tables) = &database.tables else {
+            return 0;
+        };
+        let want_view = match category {
+            Category::Tables => false,
+            Category::Views => true,
+            _ => return 0,
+        };
+        tables
+            .iter()
+            .filter(|table| matches!(table.kind, navidog_core::ObjectKind::View) == want_view)
+            .count()
+    }
 }
 
 impl ObjectPane {

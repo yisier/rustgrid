@@ -1,8 +1,9 @@
 use super::*;
 
 impl AppView {
-    pub(super) fn render_menu_bar(&self) -> impl IntoElement {
+    pub(super) fn render_menu_bar(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
+        let anchor = self.menu_popup_anchor.clone();
         let mut bar = div()
             .flex()
             .flex_row()
@@ -17,24 +18,71 @@ impl AppView {
 
         for (id, key) in [
             ("menu-file", "menu.file"),
-            ("menu-tools", "menu.tools"),
             ("menu-view", "menu.view"),
+            ("menu-tools", "menu.tools"),
             ("menu-help", "menu.help"),
         ] {
-            bar = bar.child(
-                div()
-                    .id(id)
-                    .px_3()
-                    .py_0p5()
-                    .rounded_sm()
-                    .text_size(px(12.0))
-                    .cursor_pointer()
-                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-                    .child(t!(key).to_string()),
-            );
+            let mut item = div()
+                .id(id)
+                .px_3()
+                .py_0p5()
+                .rounded_sm()
+                .text_size(px(12.0))
+                .cursor_pointer()
+                .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                .child(t!(key).to_string());
+            if id == "menu-tools" {
+                item = item
+                    .when(self.tools_menu_open, move |style| {
+                        style.bg(rgb(theme.tree_selected_bg))
+                    })
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.tools_menu_open = !this.tools_menu_open;
+                        cx.notify();
+                    }));
+            }
+            bar = bar.child(item);
         }
 
-        bar
+        // Remember where the Tools item sits so its dropdown can be anchored under it. The menu
+        // bar's direct children are the four items in order (File, View, Tools, Help).
+        bar.on_children_prepainted(move |bounds, _window, _cx| {
+            if let Some(bounds) = bounds.get(2) {
+                *anchor.borrow_mut() = Point::new(bounds.left(), bounds.bottom());
+            }
+        })
+    }
+
+    pub(super) fn render_tools_menu(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let theme = self.theme;
+        let anchor = *self.menu_popup_anchor.borrow();
+        let items = div()
+            .flex()
+            .flex_col()
+            .w(px(180.0))
+            .py_1()
+            .bg(rgb(theme.dialog_bg))
+            .border_1()
+            .border_color(rgb(theme.border))
+            .child(self.context_item(
+                "tools-options",
+                t!("menu.options").to_string(),
+                cx.listener(|this, _event, _window, cx| {
+                    this.tools_menu_open = false;
+                    this.open_options(cx);
+                }),
+            ));
+
+        div()
+            .absolute()
+            .left(anchor.x)
+            .top(anchor.y)
+            .occlude()
+            .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
+                this.tools_menu_open = false;
+                cx.notify();
+            }))
+            .child(items)
     }
 
     pub(super) fn render_main_toolbar(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {

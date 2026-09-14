@@ -16,15 +16,15 @@ use gpui::{
 };
 use navidog_config::{AppSettings, ConfigStore, LanguageSetting, ThemeSetting};
 use navidog_core::{
-    CellValue, Connection, ConnectionConfig, DriverRegistry, Error, PageRequest, QueryResult,
-    RowUpdate,
+    CellValue, Connection, ConnectionConfig, DriverRegistry, Error, FilterCondition,
+    FilterConjunction, FilterOperator, PageRequest, QueryResult, RowUpdate,
 };
 
 use crate::form::{ConnectionForm, FORM_FIELDS, FormField};
 use crate::runtime::Runtime;
 use crate::session::{
     Category, CategoryExpansion, CellSelection, ConnectionNode, ConnectionStatus, DatabaseNode,
-    GridState, Loadable, QueryTab, SortRule, compute_column_widths,
+    FilterCombo, GridState, Loadable, QueryTab, SortRule, compute_column_widths,
 };
 use crate::sql::{self, SqlSpan, SqlToken};
 use crate::theme::Theme;
@@ -75,6 +75,7 @@ enum ContextTarget {
         connection_index: usize,
         database_index: usize,
     },
+    QueryEditor,
 }
 
 struct ContextMenu {
@@ -201,6 +202,10 @@ struct GridView {
     sort_combo_focused: bool,
     sort_combo_filter: String,
     sort_combo_highlight: usize,
+
+    filter_value_focus: Vec<FocusHandle>,
+    filter_value2_focus: Vec<FocusHandle>,
+    filter_active: Option<(usize, u8)>,
 
     page_input: String,
     page_input_focus: FocusHandle,
@@ -340,6 +345,8 @@ pub struct AppView {
     test_status: TestStatus,
     context_menu: Option<ContextMenu>,
     tab_menu: Option<TabMenu>,
+    tools_menu_open: bool,
+    menu_popup_anchor: Rc<RefCell<Point<Pixels>>>,
     object_pane: Option<Entity<ObjectPane>>,
     tab_bar: Entity<TabBar>,
     tree_pane: Entity<TreePane>,
@@ -381,6 +388,10 @@ pub struct AppView {
     theme_setting: ThemeSetting,
     theme: Theme,
     language: LanguageSetting,
+    options_open: bool,
+    options_theme: ThemeSetting,
+    options_language: LanguageSetting,
+    options_language_open: bool,
 }
 
 mod database;
@@ -395,6 +406,7 @@ mod grid_scroll;
 mod grid_toolbar;
 mod grid_view;
 mod objects;
+mod options;
 mod query;
 mod query_editor;
 mod query_view;
@@ -465,6 +477,8 @@ impl AppView {
             test_status: TestStatus::Idle,
             context_menu: None,
             tab_menu: None,
+            tools_menu_open: false,
+            menu_popup_anchor: Rc::new(RefCell::new(Point::default())),
             object_pane: None,
             tab_bar: cx.new(|_| TabBar::new(app.clone())),
             tree_pane: cx.new(|_| TreePane::new(app)),
@@ -513,6 +527,10 @@ impl AppView {
             theme_setting,
             theme: Theme::dark(),
             language,
+            options_open: false,
+            options_theme: theme_setting,
+            options_language: language,
+            options_language_open: false,
         }
     }
 
@@ -645,6 +663,29 @@ fn line_bounds(text: &str, offset: usize) -> (usize, usize) {
     (start, end)
 }
 
+/// The byte range of the identifier-like word around `offset` (alphanumerics and `_`).
+fn word_bounds(text: &str, offset: usize) -> (usize, usize) {
+    let mut offset = offset.min(text.len());
+    while offset > 0 && !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    let is_word = |character: char| character.is_alphanumeric() || character == '_';
+    let start = text[..offset]
+        .char_indices()
+        .rev()
+        .take_while(|(_, character)| is_word(*character))
+        .last()
+        .map(|(index, _)| index)
+        .unwrap_or(offset);
+    let end = text[offset..]
+        .char_indices()
+        .take_while(|(_, character)| is_word(*character))
+        .last()
+        .map(|(index, character)| offset + index + character.len_utf8())
+        .unwrap_or(offset);
+    (start, end)
+}
+
 /// The byte offset of the first character of every line in `text`, starting at 0.
 fn sql_line_starts(text: &str) -> Vec<usize> {
     let mut starts = vec![0];
@@ -760,7 +801,7 @@ impl Render for AppView {
             .flex_1()
             .w_full()
             .overflow_hidden()
-            .child(self.render_sidebar(cx))
+            .child(self.render_sidebar())
             .child(self.render_content(window, cx));
 
         let mut root = div()
@@ -772,9 +813,13 @@ impl Render for AppView {
             .text_color(rgb(theme.text))
             .text_size(px(12.5))
             .child(render_titlebar(theme))
-            .child(self.render_menu_bar())
+            .child(self.render_menu_bar(cx))
             .child(self.render_main_toolbar(cx))
             .child(body);
+
+        if self.tools_menu_open {
+            root = root.child(self.render_tools_menu(cx));
+        }
 
         if let Some(menu) = self.context_menu.as_ref() {
             root = root.child(self.render_context_menu(menu, cx));
@@ -804,6 +849,10 @@ impl Render for AppView {
             root = root.child(self.render_delete_confirm(confirm, cx));
         }
 
+        if self.options_open {
+            root = root.child(self.render_options_dialog(cx));
+        }
+
         self.query_editor_measured = self.active_query.is_some();
 
         root
@@ -826,6 +875,41 @@ fn tree_chevron(expanded: bool, color: u32) -> AnyElement {
 
 fn chevron_spacer() -> AnyElement {
     div().w(px(14.0)).flex_none().into_any_element()
+}
+
+/// The icon that represents a connection, keyed by its engine id.
+fn driver_icon(driver: &str) -> &'static str {
+    match driver {
+        "mysql" => "icons/mysql.svg",
+        _ => "icons/connection.svg",
+    }
+}
+
+/// A connection icon. Engine logos with fine detail are drawn as a white glyph on a solid badge
+/// so they stay legible on both light and dark backgrounds; `badge` also carries the connection
+/// status color.
+fn tree_driver_icon(driver: &str, color: u32, badge: u32) -> AnyElement {
+    let path = driver_icon(driver);
+    if driver == "mysql" {
+        return div()
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(16.0))
+            .h(px(16.0))
+            .flex_none()
+            .bg(rgb(badge))
+            .child(
+                svg()
+                    .path(path)
+                    .w(px(12.0))
+                    .h(px(12.0))
+                    .flex_none()
+                    .text_color(rgb(0xffffff)),
+            )
+            .into_any_element();
+    }
+    tree_icon(path, color).into_any_element()
 }
 
 fn tree_icon(path: &'static str, color: u32) -> Svg {

@@ -20,7 +20,8 @@ impl AppView {
                     .flex_1()
                     .overflow_hidden()
                     .child(self.render_object_toolbar(&pane, cx))
-                    .child(pane)
+                    .child(pane.clone())
+                    .child(self.render_object_status(&pane, cx))
                     .into_any_element()
             } else if self.main_tab == MainTab::Queries {
                 div()
@@ -421,11 +422,6 @@ impl Render for TabBar {
             .overflow_x_scroll()
             .track_scroll(&self.scroll);
 
-        strip = strip.child(self.object_tab(
-            theme,
-            active_grid.is_none() && active_query.is_none(),
-            cx,
-        ));
         for (index, id, title, is_view) in grid_tabs {
             strip = strip.child(self.table_tab(
                 theme,
@@ -441,16 +437,25 @@ impl Render for TabBar {
             strip = strip.child(self.query_tab(theme, index, id, active_query == Some(index), cx));
         }
 
-        div()
+        // The object tab is pinned; the arrows only appear (and wrap the scrollable tab strip)
+        // when the open tabs no longer fit.
+        let needs_scroll = self.scroll.max_offset().width > px(0.0);
+        let mut bar = div()
             .flex()
             .flex_row()
             .items_end()
+            .gap_1()
             .h(px(30.0))
             .flex_none()
             .bg(rgb(theme.toolbar_bg))
-            .child(self.scroll_button("tab-scroll-left", true, cx))
-            .child(strip)
-            .child(self.scroll_button("tab-scroll-right", false, cx))
-            .into_any_element()
+            .child(self.object_tab(theme, active_grid.is_none() && active_query.is_none(), cx));
+        if needs_scroll {
+            bar = bar.child(self.scroll_button("tab-scroll-left", true, cx));
+        }
+        bar = bar.child(strip);
+        if needs_scroll {
+            bar = bar.child(self.scroll_button("tab-scroll-right", false, cx));
+        }
+        bar.into_any_element()
     }
 }

@@ -360,8 +360,8 @@ impl AppView {
         let mut items = div()
             .flex()
             .flex_col()
-            .w(px(150.0))
-            .py_1()
+            .w(px(170.0))
+            .p_0p5()
             .bg(rgb(theme.dialog_bg))
             .border_1()
             .border_color(rgb(theme.border));
@@ -399,10 +399,35 @@ impl AppView {
                     ))
                     .child(self.context_item(
                         "ctx-delete",
-                        t!("connection.delete").to_string(),
+                        t!("connection.delete_connection").to_string(),
                         cx.listener(move |this, _event, _window, cx| {
                             this.context_menu = None;
                             this.delete_connection(index, cx);
+                        }),
+                    ))
+                    .child(self.context_item(
+                        "ctx-copy",
+                        t!("connection.copy").to_string(),
+                        cx.listener(move |this, _event, window, cx| {
+                            this.context_menu = None;
+                            this.open_copy_form(index, window, cx);
+                        }),
+                    ))
+                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(self.context_item(
+                        "ctx-new-database",
+                        t!("database.new").to_string(),
+                        cx.listener(|this, _event, _window, cx| {
+                            this.context_menu = None;
+                            cx.notify();
+                        }),
+                    ))
+                    .child(self.context_item(
+                        "ctx-new-query",
+                        t!("main.new_query").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.open_new_query_for_connection(index, cx);
                         }),
                     ));
             }
@@ -469,11 +494,73 @@ impl AppView {
                     ))
                     .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
                     .child(self.context_item(
+                        "db-new-query",
+                        t!("main.new_query").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.open_new_query_for_database(ci, di, cx);
+                        }),
+                    ))
+                    .child(self.context_item(
                         "db-refresh",
                         t!("database.refresh").to_string(),
                         cx.listener(move |this, _event, _window, cx| {
                             this.context_menu = None;
                             this.load_databases(ci, cx);
+                        }),
+                    ));
+            }
+            ContextTarget::QueryEditor => {
+                items = items
+                    .child(self.context_item(
+                        "editor-run-selected",
+                        t!("query.run_selected").to_string(),
+                        cx.listener(|this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.run_query(false, true, cx);
+                        }),
+                    ))
+                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(self.context_item(
+                        "editor-undo",
+                        t!("query.undo").to_string(),
+                        cx.listener(|this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.query_editor_undo(cx);
+                        }),
+                    ))
+                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(self.context_item(
+                        "editor-cut",
+                        t!("query.cut").to_string(),
+                        cx.listener(|this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.query_editor_cut(cx);
+                        }),
+                    ))
+                    .child(self.context_item(
+                        "editor-copy",
+                        t!("query.copy").to_string(),
+                        cx.listener(|this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.query_editor_copy(cx);
+                        }),
+                    ))
+                    .child(self.context_item(
+                        "editor-paste",
+                        t!("query.paste").to_string(),
+                        cx.listener(|this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.query_editor_paste(cx);
+                        }),
+                    ))
+                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(self.context_item(
+                        "editor-select-all",
+                        t!("query.select_all").to_string(),
+                        cx.listener(|this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.query_editor_select_all(cx);
                         }),
                     ));
             }
@@ -484,6 +571,7 @@ impl AppView {
             .left(menu.position.x)
             .top(menu.position.y)
             .occlude()
+            .shadow(dialog_shadow())
             .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
                 this.context_menu = None;
                 cx.notify();
@@ -501,8 +589,8 @@ impl AppView {
         let items = div()
             .flex()
             .flex_col()
-            .w(px(160.0))
-            .py_1()
+            .w(px(170.0))
+            .p_0p5()
             .bg(rgb(theme.dialog_bg))
             .border_1()
             .border_color(rgb(theme.border))
@@ -527,6 +615,7 @@ impl AppView {
             .left(menu.position.x)
             .top(menu.position.y)
             .occlude()
+            .shadow(dialog_shadow())
             .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
                 this.tab_menu = None;
                 cx.notify();
@@ -546,7 +635,7 @@ impl AppView {
             .flex()
             .items_center()
             .w_full()
-            .h(px(24.0))
+            .h(px(26.0))
             .px_3()
             .text_size(px(12.5))
             .cursor_pointer()
