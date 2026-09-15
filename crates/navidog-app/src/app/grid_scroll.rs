@@ -16,13 +16,27 @@ impl GridView {
         } else {
             0.0
         };
+        // The track must cover exactly the list viewport, not the whole column: otherwise its
+        // travel is shorter than the thumb's and the thumb can never reach the bottom. Offset
+        // the header on top and the horizontal scrollbar (when present) at the bottom.
+        let footer = if self.hscroll.max_offset().width > px(0.0) {
+            GRID_SCROLLBAR_THICKNESS
+        } else {
+            0.0
+        };
 
-        ui::vscrollbar_track("grid-vscrollbar", theme, thumb_y, thumb_h)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                    this.grid_vscroll_begin(event.position.y, cx);
-                }),
+        div()
+            .flex_none()
+            .h_full()
+            .pt(px(GRID_ROW_HEIGHT))
+            .pb(px(footer))
+            .child(
+                ui::vscrollbar_track("grid-vscrollbar", theme, thumb_y, thumb_h).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                        this.grid_vscroll_begin(event.position.y, cx);
+                    }),
+                ),
             )
             .into_any_element()
     }
@@ -110,7 +124,7 @@ impl GridView {
         }
         let scroll = -f32::from(handle.offset().y);
         let thumb_y = (scroll / max) * travel;
-        let relative = f32::from(mouse_y) - f32::from(self.hscroll.bounds().top());
+        let relative = f32::from(mouse_y) - f32::from(bounds.top());
         let grab = if relative >= thumb_y && relative <= thumb_y + thumb_h {
             relative - thumb_y
         } else {
@@ -129,7 +143,8 @@ impl GridView {
             cx.notify();
             return;
         }
-        let relative = f32::from(event.position.y) - f32::from(self.hscroll.bounds().top());
+        let handle = self.list_scroll.0.borrow().base_handle.clone();
+        let relative = f32::from(event.position.y) - f32::from(handle.bounds().top());
         self.grid_vscroll_set(relative, grab, cx);
     }
 

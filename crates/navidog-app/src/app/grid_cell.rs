@@ -171,6 +171,7 @@ impl GridView {
                 }),
             )
             .child(content)
+            .child(self.ime_probe(&self.cell_editor_focus))
             .into_any_element()
     }
 

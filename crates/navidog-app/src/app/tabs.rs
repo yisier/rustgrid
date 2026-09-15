@@ -8,36 +8,40 @@ impl AppView {
     ) -> impl IntoElement {
         let theme = self.theme;
 
-        let body: AnyElement =
-            if let Some(query) = self.active_query.and_then(|index| self.queries.get(index)) {
-                self.render_query_view(query, window, cx).into_any_element()
-            } else if let Some(grid) = self.active_grid.and_then(|index| self.grids.get(index)) {
-                grid.clone().into_any_element()
-            } else if let Some(pane) = self.object_pane.clone() {
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .overflow_hidden()
-                    .child(self.render_object_toolbar(&pane, cx))
-                    .child(pane.clone())
-                    .child(self.render_object_status(&pane, cx))
-                    .into_any_element()
-            } else if self.main_tab == MainTab::Queries {
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .overflow_hidden()
-                    .child(self.render_query_object_toolbar(cx))
-                    .child(div().flex_1())
-                    .into_any_element()
-            } else {
-                div().into_any_element()
-            };
+        let body: AnyElement = if let Some(design) =
+            self.active_design.and_then(|index| self.designs.get(index))
+        {
+            design.clone().into_any_element()
+        } else if let Some(query) = self.active_query.and_then(|index| self.queries.get(index)) {
+            self.render_query_view(query, window, cx).into_any_element()
+        } else if let Some(grid) = self.active_grid.and_then(|index| self.grids.get(index)) {
+            grid.clone().into_any_element()
+        } else if let Some(pane) = self.object_pane.clone() {
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .overflow_hidden()
+                .child(self.render_object_toolbar(&pane, cx))
+                .child(pane.clone())
+                .child(self.render_object_status(&pane, cx))
+                .into_any_element()
+        } else if self.main_tab == MainTab::Queries {
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .overflow_hidden()
+                .child(self.render_query_object_toolbar(cx))
+                .child(div().flex_1())
+                .into_any_element()
+        } else {
+            div().into_any_element()
+        };
 
         let has_tabs = self.object_pane.is_some()
             || !self.grids.is_empty()
+            || !self.designs.is_empty()
             || !self.queries.is_empty()
             || self.main_tab == MainTab::Queries;
         let mut content = div()
@@ -363,11 +367,112 @@ impl TabBar {
                     .child("✕"),
             )
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn design_tab(
+        &self,
+        theme: Theme,
+        index: usize,
+        id: u64,
+        title: String,
+        is_view: bool,
+        active: bool,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
+        let icon_color = if is_view {
+            theme.icon_view
+        } else {
+            theme.icon_table
+        };
+        let tab_id = SharedString::from(format!("design-tab-{id}"));
+        let close_id = SharedString::from(format!("design-tab-close-{id}"));
+        let activate = self.app.clone();
+        let close = self.app.clone();
+        let menu = self.app.clone();
+        let middle = self.app.clone();
+
+        div()
+            .id(tab_id)
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .h_full()
+            .px_2()
+            .flex_none()
+            .cursor_pointer()
+            .text_size(px(12.0))
+            .when(active, |style| {
+                style
+                    .bg(rgb(theme.editor_bg))
+                    .border_t_1()
+                    .border_l_1()
+                    .border_r_1()
+                    .border_color(rgb(theme.border))
+            })
+            .when(!active, |style| {
+                style
+                    .bg(rgb(theme.button_bg))
+                    .border_1()
+                    .border_color(rgb(theme.border))
+            })
+            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            .on_click(cx.listener(move |_this, _event, _window, cx| {
+                let _ = activate.update(cx, |app, cx| {
+                    if index < app.designs.len() {
+                        app.activate_design(Some(index), cx);
+                    }
+                });
+            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |_this, event: &MouseDownEvent, _window, cx| {
+                    let _ = menu.update(cx, |app, cx| {
+                        app.context_menu = None;
+                        app.tab_menu = Some(TabMenu {
+                            target: TabTarget::Design(index),
+                            position: event.position,
+                        });
+                        cx.notify();
+                    });
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(move |_this, _event, _window, cx| {
+                    let _ = middle.update(cx, |app, cx| app.close_design(index, cx));
+                }),
+            )
+            .child(tree_icon("icons/design_table.svg", icon_color))
+            .child(
+                div()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .max_w(px(160.0))
+                    .child(title),
+            )
+            .child(
+                div()
+                    .id(close_id)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(16.0))
+                    .h(px(16.0))
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(rgb(theme.button_hover_bg)))
+                    .on_click(cx.listener(move |_this, _event, _window, cx| {
+                        cx.stop_propagation();
+                        let _ = close.update(cx, |app, cx| app.close_design(index, cx));
+                    }))
+                    .child("✕"),
+            )
+    }
 }
 
 impl Render for TabBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let (theme, active_grid, active_query, grid_tabs, query_tabs) = {
+        let (theme, active_grid, active_query, active_design, grid_tabs, query_tabs, design_tabs) = {
             let Some(app) = self.app.upgrade() else {
                 return div().into_any_element();
             };
@@ -400,12 +505,40 @@ impl Render for TabBar {
                 .enumerate()
                 .map(|(index, query)| (index, query.id))
                 .collect();
+            let design_tabs: Vec<(usize, u64, String, bool)> = app
+                .designs
+                .iter()
+                .enumerate()
+                .map(|(index, entity)| {
+                    let design = entity.read(cx);
+                    let kind = t!(if design.is_view {
+                        "common.view"
+                    } else {
+                        "common.table"
+                    })
+                    .to_string();
+                    let title = if design.dirty {
+                        format!(
+                            "{} @{} ({}) - {} *",
+                            design.table, design.database, design.connection_name, kind
+                        )
+                    } else {
+                        format!(
+                            "{} @{} ({}) - {}",
+                            design.table, design.database, design.connection_name, kind
+                        )
+                    };
+                    (index, design.id, title, design.is_view)
+                })
+                .collect();
             (
                 app.theme,
                 app.active_grid,
                 app.active_query,
+                app.active_design,
                 grid_tabs,
                 query_tabs,
+                design_tabs,
             )
         };
 
@@ -433,6 +566,17 @@ impl Render for TabBar {
                 cx,
             ));
         }
+        for (index, id, title, is_view) in design_tabs {
+            strip = strip.child(self.design_tab(
+                theme,
+                index,
+                id,
+                title,
+                is_view,
+                active_design == Some(index),
+                cx,
+            ));
+        }
         for (index, id) in query_tabs {
             strip = strip.child(self.query_tab(theme, index, id, active_query == Some(index), cx));
         }
@@ -448,7 +592,11 @@ impl Render for TabBar {
             .h(px(30.0))
             .flex_none()
             .bg(rgb(theme.toolbar_bg))
-            .child(self.object_tab(theme, active_grid.is_none() && active_query.is_none(), cx));
+            .child(self.object_tab(
+                theme,
+                active_grid.is_none() && active_query.is_none() && active_design.is_none(),
+                cx,
+            ));
         if needs_scroll {
             bar = bar.child(self.scroll_button("tab-scroll-left", true, cx));
         }

@@ -1,5 +1,18 @@
 use super::*;
 
+/// The object pane's current selection plus its database coordinates and whether it is a view.
+fn object_selection(pane: &Entity<ObjectPane>, cx: &App) -> Option<(usize, usize, String, bool)> {
+    let pane = pane.read(cx);
+    pane.selected.clone().map(|name| {
+        (
+            pane.connection_index,
+            pane.database_index,
+            name,
+            pane.category == Category::Views,
+        )
+    })
+}
+
 impl AppView {
     pub(super) fn render_object_toolbar(
         &self,
@@ -14,7 +27,9 @@ impl AppView {
         if category == Category::Queries {
             return self.render_query_object_toolbar(cx);
         }
+        let design_enabled = category == Category::Tables && open_enabled;
         let pane_for_open = pane.clone();
+        let pane_for_design = pane.clone();
         div()
             .flex()
             .flex_row()
@@ -36,10 +51,18 @@ impl AppView {
                         "icons/tables.svg",
                         t!("object.open_table").to_string(),
                         open_enabled,
-                        cx.listener(move |_this, _event, _window, cx| {
-                            pane_for_open.update(cx, |pane, cx| {
-                                pane.open_selected_object(cx);
-                            });
+                        cx.listener(move |this, _event, _window, cx| {
+                            let Some((connection_index, database_index, name, is_view)) =
+                                object_selection(&pane_for_open, cx)
+                            else {
+                                return;
+                            };
+                            let Some(database) =
+                                this.database_name(connection_index, database_index)
+                            else {
+                                return;
+                            };
+                            this.select_table(connection_index, database, name, is_view, cx);
                         }),
                     ))
                     .child(toolbar_separator(theme))
@@ -47,8 +70,20 @@ impl AppView {
                         "obj-design",
                         "icons/design_table.svg",
                         t!("object.design_table").to_string(),
-                        false,
-                        |_, _, _| {},
+                        design_enabled,
+                        cx.listener(move |this, _event, _window, cx| {
+                            let Some((connection_index, database_index, name, is_view)) =
+                                object_selection(&pane_for_design, cx)
+                            else {
+                                return;
+                            };
+                            let Some(database) =
+                                this.database_name(connection_index, database_index)
+                            else {
+                                return;
+                            };
+                            this.open_design_table(connection_index, database, name, is_view, cx);
+                        }),
                     ))
                     .child(toolbar_separator(theme))
                     .child(self.toolbar_item(
@@ -124,84 +159,20 @@ impl AppView {
             .child(self.render_object_search(cx))
     }
 
-    pub(super) fn render_object_search(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let theme = self.theme;
-        let has_text = !self.object_search.is_empty();
-        let mut field = ui::text_field(theme)
-            .id("object-search")
-            .track_focus(&self.object_search_focus)
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_1()
+    pub(super) fn render_object_search(&self, _cx: &mut Context<'_, Self>) -> impl IntoElement {
+        div()
             .w(px(220.0))
             .h(px(24.0))
-            .px_2()
-            .cursor_text()
-            .on_key_down(cx.listener(|this, event, _window, cx| this.object_search_key(event, cx)))
-            .on_click(cx.listener(|this, _event, window, cx| {
-                window.focus(&this.object_search_focus);
-                cx.notify();
-            }))
-            .child(
-                svg()
-                    .path("icons/search.svg")
-                    .w(px(13.0))
-                    .h(px(13.0))
-                    .flex_none()
-                    .text_color(rgb(theme.text_muted)),
-            );
-        let caret = self.object_search_focused && self.caret_visible;
-        if has_text {
-            field = field.child(div().flex_1().overflow_hidden().whitespace_nowrap().child(
-                format!("{}{}", self.object_search, if caret { "|" } else { "" }),
-            ));
-        } else {
-            field = field.child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .flex_row()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .child(if caret { "|" } else { "" })
-                    .child(if self.object_search_focused {
-                        div()
-                    } else {
-                        div()
-                            .text_color(rgb(theme.text_muted))
-                            .child(t!("object.search").to_string())
-                    }),
-            );
-        }
-        if has_text {
-            field = field.child(
-                div()
-                    .id("object-search-clear")
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .w(px(14.0))
-                    .h(px(14.0))
-                    .flex_none()
-                    .cursor_pointer()
-                    .hover(move |style| style.bg(rgb(theme.button_hover_bg)))
-                    .on_click(cx.listener(|this, _event, _window, cx| {
-                        this.object_search.clear();
-                        this.notify_object_pane(cx);
-                        cx.notify();
-                    }))
-                    .child(
-                        svg()
-                            .path("icons/cross.svg")
-                            .w(px(10.0))
-                            .h(px(10.0))
-                            .flex_none()
-                            .text_color(rgb(theme.text_muted)),
-                    ),
-            );
-        }
-        field
+            .child(self.object_search_input.clone())
+    }
+
+    /// Clear the object search box and refresh the filtered list.
+    pub(super) fn clear_object_search(&mut self, cx: &mut Context<'_, Self>) {
+        self.object_search.clear();
+        self.object_search_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.notify_object_pane(cx);
+        cx.notify();
     }
 
     /// The bottom status strip of the object list: item count on the left, connection and

@@ -105,74 +105,52 @@ impl AppView {
         &self,
         confirm: &DeleteConfirm,
         cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
         let theme = self.theme;
-        let count = confirm.rows.len();
-        let message = t!("grid.delete_confirm", count = count).to_string();
-        let accept = t!("grid.delete_button", count = count).to_string();
-
-        let titlebar = ui::dialog_titlebar(theme)
-            .pl_3()
-            .child(
-                div()
-                    .text_size(px(12.5))
-                    .child(t!("grid.delete_title").to_string()),
-            )
-            .child(self.dialog_close_button(
-                "delete-close",
-                cx.listener(|this, _event, _window, cx| this.cancel_delete(cx)),
-            ));
-
-        let body = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_3()
-            .px_4()
-            .py_6()
-            .child(
-                svg()
-                    .path("icons/warning.svg")
-                    .w(px(28.0))
-                    .h(px(28.0))
-                    .flex_none()
-                    .text_color(rgb(theme.warning)),
-            )
-            .child(div().flex_1().text_size(px(12.5)).child(message));
-
-        let footer = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .px_4()
-            .pb_4()
-            .child(self.dialog_button(
-                "delete-accept",
-                accept,
-                false,
-                cx.listener(|this, _event, _window, cx| this.confirm_delete(cx)),
-            ))
-            .child(self.dialog_button(
-                "delete-cancel",
-                t!("form.cancel").to_string(),
-                true,
-                cx.listener(|this, _event, _window, cx| this.cancel_delete(cx)),
-            ));
-
-        ui::overlay(theme).child(
-            ui::dialog_frame(theme, theme.dialog_bg)
-                .w(px(380.0))
-                .child(titlebar)
-                .child(body)
-                .child(footer),
-        )
+        let drag = self.confirm_drag(cx);
+        match confirm {
+            DeleteConfirm::Rows { rows, .. } => {
+                let count = rows.len();
+                ui::confirm_dialog(
+                    ui::ConfirmDialog {
+                        id: "grid-delete",
+                        title: t!("grid.delete_title").to_string(),
+                        message: t!("grid.delete_confirm", count = count).to_string(),
+                        confirm_label: t!("grid.delete_button", count = count).to_string(),
+                        cancel_label: t!("form.cancel").to_string(),
+                    },
+                    drag,
+                    theme,
+                    Rc::new(cx.listener(|this, _event, _window, cx| this.confirm_delete(cx))),
+                    Rc::new(cx.listener(|this, _event, _window, cx| this.cancel_delete(cx))),
+                )
+            }
+            DeleteConfirm::Connection { index } => {
+                let name = self
+                    .connections
+                    .get(*index)
+                    .map(|node| node.profile.name.clone())
+                    .unwrap_or_default();
+                ui::confirm_dialog(
+                    ui::ConfirmDialog {
+                        id: "connection-delete",
+                        title: t!("connection.delete_title").to_string(),
+                        message: t!("connection.delete_confirm", name = name).to_string(),
+                        confirm_label: t!("connection.delete_button").to_string(),
+                        cancel_label: t!("form.cancel").to_string(),
+                    },
+                    drag,
+                    theme,
+                    Rc::new(cx.listener(|this, _event, _window, cx| this.confirm_delete(cx))),
+                    Rc::new(cx.listener(|this, _event, _window, cx| this.cancel_delete(cx))),
+                )
+            }
+        }
     }
 
     pub(super) fn render_password_prompt(
         &self,
         prompt: &PasswordPrompt,
-        window: &Window,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let name = self
@@ -181,13 +159,6 @@ impl AppView {
             .map(|node| node.profile.name.clone())
             .unwrap_or_default();
         let title = format!("{}: {}", t!("password.title"), name);
-        let masked = "*".repeat(prompt.password.chars().count());
-        let shown = if self.password_focus.is_focused(window) {
-            format!("{masked}|")
-        } else {
-            masked
-        };
-        let focus_handle = self.password_focus.clone();
         let theme = self.theme;
 
         ui::overlay(theme).child(
@@ -199,23 +170,7 @@ impl AppView {
                 .p_4()
                 .bg(rgb(theme.dialog_bg))
                 .child(div().text_size(px(14.0)).child(title))
-                .child(
-                    ui::text_field(theme)
-                        .id("password-field")
-                        .track_focus(&self.password_focus)
-                        .cursor_text()
-                        .on_key_down(cx.listener(|this, event, _window, cx| {
-                            this.password_key(event, cx);
-                        }))
-                        .on_click(cx.listener(move |_this, _event, window, _cx| {
-                            window.focus(&focus_handle);
-                        }))
-                        .h(px(28.0))
-                        .flex()
-                        .items_center()
-                        .px_2()
-                        .child(shown),
-                )
+                .child(div().w_full().h(px(28.0)).child(prompt.input.clone()))
                 .child(
                     div()
                         .id("password-save")
@@ -315,17 +270,8 @@ impl AppView {
         }
 
         ui::overlay(theme)
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
-                if this.form_selecting {
-                    let text = this
-                        .form
-                        .as_ref()
-                        .map(|form| form.value(this.form_active_field).to_string())
-                        .unwrap_or_default();
-                    let index = this.field_index_for_x(&text, event.position.x, window);
-                    this.form_selection.cursor = index;
-                    cx.notify();
-                } else if this.db_sql_selecting {
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                if this.db_sql_selecting {
                     this.db_sql_cursor = this.db_sql_index_for_position(event.position);
                     cx.notify();
                 } else if this.form_dragging {
@@ -341,8 +287,7 @@ impl AppView {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
-                    if this.form_selecting || this.form_dragging || this.db_sql_selecting {
-                        this.form_selecting = false;
+                    if this.form_dragging || this.db_sql_selecting {
                         this.form_dragging = false;
                         this.db_sql_selecting = false;
                         cx.notify();
@@ -362,7 +307,6 @@ impl AppView {
                                 MouseButton::Left,
                                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
                                     this.form_dragging = true;
-                                    this.form_selecting = false;
                                     this.form_drag_origin = event.position;
                                     this.form_drag_base = this.form_offset;
                                     cx.notify();
@@ -388,6 +332,7 @@ impl AppView {
                                 "form-close",
                                 cx.listener(|this, _event, _window, cx| {
                                     this.form = None;
+                                    this.form_inputs = None;
                                     this.context_menu = None;
                                     cx.notify();
                                 }),

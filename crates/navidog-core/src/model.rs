@@ -335,6 +335,92 @@ pub struct RowUpdate {
     pub keys: Vec<(String, String)>,
 }
 
+/// One column of a table as shown by the table designer. Engine-agnostic: the driver translates
+/// this to (and from) its own catalog and DDL syntax.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ColumnDef {
+    pub name: String,
+    /// The base type, e.g. `bigint`, `varchar`, `datetime`.
+    pub data_type: String,
+    /// Display length. Empty or `"0"` means the length is not part of the definition.
+    pub length: String,
+    /// Decimal places. Empty or `"0"` means the length is not part of the definition.
+    pub decimals: String,
+    pub nullable: bool,
+    /// Default value expression, exactly as it should appear after `DEFAULT`.
+    pub default: String,
+    pub primary_key: bool,
+    pub auto_increment: bool,
+    pub unsigned: bool,
+    pub zerofill: bool,
+    pub comment: String,
+    pub charset: String,
+    pub collation: String,
+    /// Server-side extra clause, e.g. `on update CURRENT_TIMESTAMP`.
+    pub extra: String,
+    /// Generation expression for a generated column; empty for a normal column.
+    pub generated: String,
+    /// `true` for a `STORED` generated column, `false` for `VIRTUAL` (or a normal column).
+    pub stored: bool,
+}
+
+/// One index of a table.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct IndexDef {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub unique: bool,
+    pub primary: bool,
+    /// `BTREE`, `HASH`, `FULLTEXT` or `SPATIAL`.
+    pub index_type: String,
+    pub comment: String,
+}
+
+/// One foreign key constraint of a table.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ForeignKeyDef {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub referenced_table: String,
+    pub referenced_columns: Vec<String>,
+    /// `CASCADE`, `SET NULL`, `RESTRICT`, `NO ACTION`, ... Empty means unspecified.
+    pub on_delete: String,
+    /// Same vocabulary as `on_delete`.
+    pub on_update: String,
+}
+
+/// One trigger of a table.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TriggerDef {
+    pub name: String,
+    /// `BEFORE` or `AFTER`.
+    pub timing: String,
+    /// `INSERT`, `UPDATE` or `DELETE`.
+    pub event: String,
+    pub statement: String,
+}
+
+/// Table-level storage options shown by the designer's *Options* tab.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TableOptions {
+    pub engine: String,
+    pub charset: String,
+    pub collation: String,
+    pub comment: String,
+    /// The next auto-increment value, as text.
+    pub auto_increment: String,
+}
+
+/// A complete table definition: columns plus indexes, foreign keys, triggers and options.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TableSchema {
+    pub columns: Vec<ColumnDef>,
+    pub indexes: Vec<IndexDef>,
+    pub foreign_keys: Vec<ForeignKeyDef>,
+    pub triggers: Vec<TriggerDef>,
+    pub options: TableOptions,
+}
+
 /// The outcome of running an arbitrary SQL statement from the query editor.
 #[derive(Debug, Clone)]
 pub struct QueryResult {

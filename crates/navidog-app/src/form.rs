@@ -62,17 +62,6 @@ impl ConnectionForm {
         }
     }
 
-    pub fn value(&self, field: FormField) -> &str {
-        match field {
-            FormField::Name => &self.name,
-            FormField::Host => &self.host,
-            FormField::Port => &self.port,
-            FormField::Username => &self.username,
-            FormField::Password => &self.password,
-            FormField::Database => &self.database,
-        }
-    }
-
     pub fn set_value(&mut self, field: FormField, value: String) {
         *match field {
             FormField::Name => &mut self.name,

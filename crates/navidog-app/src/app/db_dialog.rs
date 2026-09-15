@@ -4,25 +4,54 @@ impl AppView {
     pub(super) fn render_db_dialog(
         &self,
         dialog: &DbDialog,
-        window: &Window,
+        _window: &Window,
         cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
         let theme = self.theme;
 
+        // Destructive actions use the shared confirmation modal rather than the form frame.
+        if let DbDialog::Delete { name, error, .. } = dialog {
+            let mut message = t!("database.delete_message", name = name).to_string();
+            if let Some(error) = error {
+                message = format!("{message} ({error})");
+            }
+            let drag = self.confirm_drag(cx);
+            return ui::confirm_dialog(
+                ui::ConfirmDialog {
+                    id: "database-delete",
+                    title: t!("database.delete").to_string(),
+                    message,
+                    confirm_label: t!("database.delete").to_string(),
+                    cancel_label: t!("form.cancel").to_string(),
+                },
+                drag,
+                theme,
+                Rc::new(cx.listener(|this, _event, _window, cx| this.db_submit(cx))),
+                Rc::new(cx.listener(|this, _event, _window, cx| {
+                    this.db_dialog = None;
+                    this.db_name_input = None;
+                    cx.notify();
+                })),
+            );
+        }
+
         let (title, content, allow_ok): (String, AnyElement, bool) = match dialog {
-            DbDialog::New { name, error, .. } => {
+            DbDialog::New { error, .. } => {
+                let mut name_row = div().flex().flex_row().items_center().gap_2().child(
+                    div()
+                        .w(px(150.0))
+                        .flex_none()
+                        .text_size(px(12.0))
+                        .child(format!("{}:", t!("database.name"))),
+                );
+                if let Some(input) = self.db_name_input.as_ref() {
+                    name_row = name_row.child(div().w(px(300.0)).h(px(24.0)).child(input.clone()));
+                }
                 let body = div()
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .child(self.db_field(
-                        format!("{}:", t!("database.name")),
-                        name,
-                        &self.db_focus,
-                        "db-name",
-                        window,
-                        cx,
-                    ))
+                    .child(name_row)
                     .child(db_error(error, theme));
                 (
                     t!("database.new").to_string(),
@@ -281,6 +310,7 @@ impl AppView {
                                 "db-close",
                                 cx.listener(|this, _event, _window, cx| {
                                     this.db_dialog = None;
+                                    this.db_name_input = None;
                                     this.db_combo = None;
                                     cx.notify();
                                 }),
@@ -304,6 +334,7 @@ impl AppView {
                                 false,
                                 cx.listener(|this, _event, _window, cx| {
                                     this.db_dialog = None;
+                                    this.db_name_input = None;
                                     cx.notify();
                                 }),
                             ))
@@ -319,5 +350,6 @@ impl AppView {
                             )),
                     ),
             )
+            .into_any_element()
     }
 }

@@ -46,40 +46,19 @@ impl AppView {
         let Some(confirm) = self.delete_confirm.take() else {
             return;
         };
-        let target = self
-            .grids
-            .iter()
-            .find(|grid| grid.read(cx).state.id == confirm.grid_id)
-            .cloned();
-        if let Some(grid) = target {
-            grid.update(cx, |grid, cx| grid.delete_rows(confirm.rows, cx));
-        }
-        cx.notify();
-    }
-
-    pub(super) fn object_search_key(&mut self, event: &KeyDownEvent, cx: &mut Context<'_, Self>) {
-        let keystroke = &event.keystroke;
-        if keystroke.modifiers.control || keystroke.modifiers.platform {
-            return;
-        }
-
-        match keystroke.key.as_str() {
-            "backspace" => {
-                self.object_search.pop();
-            }
-            "escape" => {
-                self.object_search.clear();
-            }
-            "enter" => {}
-            _ => {
-                if let Some(text) = keystroke.key_char.as_ref()
-                    && !text.chars().any(char::is_control)
-                {
-                    self.object_search.push_str(text);
+        match confirm {
+            DeleteConfirm::Rows { grid_id, rows } => {
+                let target = self
+                    .grids
+                    .iter()
+                    .find(|grid| grid.read(cx).state.id == grid_id)
+                    .cloned();
+                if let Some(grid) = target {
+                    grid.update(cx, |grid, cx| grid.delete_rows(rows, cx));
                 }
             }
+            DeleteConfirm::Connection { index } => self.delete_connection(index, cx),
         }
-        self.notify_object_pane(cx);
         cx.notify();
     }
 }
@@ -267,11 +246,8 @@ impl GridView {
                 self.sync_page_input();
             }
             _ => {
-                if let Some(text) = keystroke.key_char.as_ref()
-                    && text.chars().all(|character| character.is_ascii_digit())
-                {
-                    self.page_input.push_str(text);
-                }
+                // Digits (and IME) arrive through the grid's input handler, which filters to
+                // ASCII digits for the page field.
             }
         }
         cx.notify();
@@ -452,12 +428,7 @@ impl GridView {
                 self.sort_combo_highlight = 0;
             }
             _ => {
-                if let Some(text) = event.keystroke.key_char.as_ref()
-                    && !text.chars().any(char::is_control)
-                {
-                    self.sort_combo_filter.push_str(text);
-                    self.sort_combo_highlight = 0;
-                }
+                // Text characters (including IME) arrive through the grid's input handler.
             }
         }
         self.sort_combo_highlight = self.sort_combo_highlight.min(count.saturating_sub(1));
@@ -732,11 +703,7 @@ impl GridView {
                 "escape" => unfocus = true,
                 "enter" => apply = true,
                 _ => {
-                    if let Some(text) = keystroke.key_char.as_ref()
-                        && !text.chars().any(char::is_control)
-                    {
-                        buffer.push_str(text);
-                    }
+                    // Text characters (including IME) arrive through the grid's input handler.
                 }
             }
         }
@@ -809,11 +776,8 @@ impl GridView {
                 self.page_size_input = next.to_string();
             }
             _ => {
-                if let Some(text) = keystroke.key_char.as_ref()
-                    && text.chars().all(|character| character.is_ascii_digit())
-                {
-                    self.page_size_input.push_str(text);
-                }
+                // Digits (and IME) arrive through the grid's input handler, which filters to
+                // ASCII digits for the page-size field.
             }
         }
         cx.notify();

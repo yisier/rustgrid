@@ -752,6 +752,7 @@ impl GridView {
 
         let mut field = ui::text_field(theme)
             .id(SharedString::from(format!("filter-value-{index}-{slot}")))
+            .relative()
             .flex()
             .flex_row()
             .items_center()
@@ -771,7 +772,8 @@ impl GridView {
                     }))
                     .on_click(cx.listener(move |this, _event, window, cx| {
                         this.filter_focus_value(index, slot, window, cx);
-                    }));
+                    }))
+                    .child(self.ime_probe(&handle));
             }
         } else {
             field = field
@@ -883,6 +885,7 @@ impl GridView {
             .px_2()
             .h(px(22.0))
             .flex_none()
+            .relative()
             .border_b_1()
             .border_color(rgb(theme.border))
             .child(
@@ -893,10 +896,13 @@ impl GridView {
                     .flex_none()
                     .text_color(rgb(theme.text_muted)),
             )
-            .child(
-                div()
+            .child({
+                let mut text = div()
                     .flex_1()
                     .min_w(px(0.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_size(px(12.0))
@@ -904,21 +910,18 @@ impl GridView {
                         theme.text_muted
                     } else {
                         theme.text
-                    }))
-                    .child(if filter.is_empty() {
-                        t!("grid.sort_search").to_string()
-                    } else {
-                        format!(
-                            "{}{}",
-                            filter,
-                            if self.sort_combo_focused && self.caret() {
-                                "|"
-                            } else {
-                                ""
-                            }
-                        )
-                    }),
-            );
+                    }));
+                text = text.child(if filter.is_empty() {
+                    t!("grid.sort_search").to_string()
+                } else {
+                    filter.clone()
+                });
+                if self.sort_combo_focused && self.caret() {
+                    text = text.child(ui::text_caret(theme));
+                }
+                text
+            })
+            .child(self.ime_probe(&self.sort_combo_focus));
 
         let mut options = div()
             .id("sort-combo-options")
@@ -1168,6 +1171,7 @@ impl GridView {
         ui::text_field(theme)
             .id("grid-page-input")
             .track_focus(&self.page_input_focus)
+            .relative()
             .flex()
             .items_center()
             .justify_center()
@@ -1180,15 +1184,11 @@ impl GridView {
                 window.focus(&this.page_input_focus);
                 cx.notify();
             }))
-            .child(format!(
-                "{}{}",
-                self.page_input,
-                if self.page_input_focused && self.caret() {
-                    "|"
-                } else {
-                    ""
-                }
-            ))
+            .child(self.page_input.clone())
+            .when(self.page_input_focused && self.caret(), move |input| {
+                input.child(ui::text_caret(theme))
+            })
+            .child(self.ime_probe(&self.page_input_focus))
     }
 
     /// The collapsible "Limit Records [n] records per page" bar, revealed by the gear button.
@@ -1237,6 +1237,7 @@ impl GridView {
                 div()
                     .id("page-size-input")
                     .track_focus(&self.page_size_focus)
+                    .relative()
                     .flex()
                     .items_center()
                     .justify_center()
@@ -1269,7 +1270,8 @@ impl GridView {
                                     caret.bg(rgb(theme.text))
                                 }),
                         ),
-                    ),
+                    )
+                    .child(self.ime_probe(&self.page_size_focus)),
             )
             .child(
                 div()

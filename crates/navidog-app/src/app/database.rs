@@ -35,6 +35,10 @@ impl AppView {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
+        let weak = cx.weak_entity();
+        let input = make_db_name_input(self.theme, &weak, cx);
+        let focus = input.read(cx).focus_handle();
+        self.db_name_input = Some(input);
         self.db_dialog = Some(DbDialog::New {
             connection_index,
             name: String::new(),
@@ -42,7 +46,7 @@ impl AppView {
         });
         self.db_combo = None;
         self.form_offset = Point::default();
-        window.focus(&self.db_focus);
+        window.focus(&focus);
         cx.notify();
     }
 
@@ -50,7 +54,7 @@ impl AppView {
         &mut self,
         connection_index: usize,
         database_index: usize,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
         let Some(name) = self.database_name(connection_index, database_index) else {
@@ -72,7 +76,6 @@ impl AppView {
         });
         self.db_combo = None;
         self.form_offset = Point::default();
-        window.focus(&self.db_focus);
 
         let Some(connection) = self.connection_arc(connection_index) else {
             cx.notify();
@@ -354,97 +357,6 @@ impl AppView {
                 .detach();
             }
         }
-    }
-
-    pub(super) fn db_key(&mut self, event: &KeyDownEvent, cx: &mut Context<'_, Self>) {
-        let keystroke = &event.keystroke;
-        if keystroke.modifiers.control || keystroke.modifiers.platform {
-            return;
-        }
-
-        match keystroke.key.as_str() {
-            "enter" => {
-                self.db_submit(cx);
-                return;
-            }
-            "escape" => {
-                self.db_dialog = None;
-                self.db_combo = None;
-                cx.notify();
-                return;
-            }
-            _ => {}
-        }
-
-        let Some(dialog) = self.db_dialog.as_mut() else {
-            return;
-        };
-        let target = match dialog {
-            DbDialog::New { name, .. } => name,
-            _ => return,
-        };
-
-        match keystroke.key.as_str() {
-            "backspace" => {
-                target.pop();
-            }
-            "space" => target.push(' '),
-            _ => {
-                if let Some(text) = keystroke.key_char.as_ref() {
-                    target.push_str(text);
-                }
-            }
-        }
-        cx.notify();
-    }
-
-    pub(super) fn db_field(
-        &self,
-        label: String,
-        value: &str,
-        handle: &FocusHandle,
-        id: &'static str,
-        window: &Window,
-        cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
-        let theme = self.theme;
-        let focused = handle.is_focused(window);
-        let shown = if focused && self.caret_visible {
-            format!("{value}|")
-        } else {
-            value.to_string()
-        };
-        let focus_handle = handle.clone();
-
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .child(
-                div()
-                    .w(px(150.0))
-                    .flex_none()
-                    .text_size(px(12.0))
-                    .child(label),
-            )
-            .child(
-                ui::text_field(theme)
-                    .id(id)
-                    .track_focus(handle)
-                    .cursor_text()
-                    .on_key_down(cx.listener(|this, event, _window, cx| this.db_key(event, cx)))
-                    .on_click(cx.listener(move |_this, _event, window, _cx| {
-                        window.focus(&focus_handle);
-                    }))
-                    .w(px(300.0))
-                    .h(px(24.0))
-                    .flex()
-                    .items_center()
-                    .px_2()
-                    .text_size(px(12.0))
-                    .child(shown),
-            )
     }
 
     pub(super) fn db_combo(

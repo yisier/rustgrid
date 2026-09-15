@@ -78,10 +78,10 @@ impl AppView {
         self.queries.push(tab);
         self.active_query = Some(self.queries.len() - 1);
         self.active_grid = None;
+        self.active_design = None;
         self.query_combo = None;
         self.query_completion = None;
-        self.object_search.clear();
-        self.notify_object_pane(cx);
+        self.clear_object_search(cx);
         self.query_focus_pending = true;
         self.main_tab = MainTab::Queries;
         cx.notify();
@@ -89,6 +89,7 @@ impl AppView {
 
     pub(super) fn activate_query(&mut self, index: usize, cx: &mut Context<'_, Self>) {
         self.active_query = Some(index);
+        self.active_design = None;
         self.active_grid = self
             .queries
             .get(index)
@@ -155,6 +156,7 @@ impl AppView {
         match target {
             TabTarget::Grid(index) => self.close_grid(index, cx),
             TabTarget::Query(index) => self.close_query(index, cx),
+            TabTarget::Design(index) => self.close_design(index, cx),
         }
     }
 
@@ -165,6 +167,9 @@ impl AppView {
                 let keep_id = self.grids.get(keep).map(|grid| grid.read(cx).state.id);
                 while !self.queries.is_empty() {
                     self.close_query(self.queries.len() - 1, cx);
+                }
+                while !self.designs.is_empty() {
+                    self.close_design(self.designs.len() - 1, cx);
                 }
                 let mut index = self.grids.len();
                 while index > 0 {
@@ -187,6 +192,9 @@ impl AppView {
                 while !self.grids.is_empty() {
                     self.close_grid(self.grids.len() - 1, cx);
                 }
+                while !self.designs.is_empty() {
+                    self.close_design(self.designs.len() - 1, cx);
+                }
                 let mut index = self.queries.len();
                 while index > 0 {
                     index -= 1;
@@ -200,6 +208,30 @@ impl AppView {
                     self.activate_query(position, cx);
                 }
             }
+            TabTarget::Design(keep) => {
+                let keep_id = self.designs.get(keep).map(|design| design.read(cx).id);
+                while !self.queries.is_empty() {
+                    self.close_query(self.queries.len() - 1, cx);
+                }
+                while !self.grids.is_empty() {
+                    self.close_grid(self.grids.len() - 1, cx);
+                }
+                let mut index = self.designs.len();
+                while index > 0 {
+                    index -= 1;
+                    if Some(self.designs[index].read(cx).id) != keep_id {
+                        self.close_design(index, cx);
+                    }
+                }
+                if let Some(id) = keep_id
+                    && let Some(position) = self
+                        .designs
+                        .iter()
+                        .position(|design| design.read(cx).id == id)
+                {
+                    self.activate_design(Some(position), cx);
+                }
+            }
         }
     }
 
@@ -210,6 +242,9 @@ impl AppView {
         }
         while !self.grids.is_empty() {
             self.close_grid(self.grids.len() - 1, cx);
+        }
+        while !self.designs.is_empty() {
+            self.close_design(self.designs.len() - 1, cx);
         }
     }
 

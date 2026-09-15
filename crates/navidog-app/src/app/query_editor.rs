@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use super::*;
 
 impl AppView {
@@ -125,7 +127,23 @@ impl AppView {
                     .font_family("Consolas")
                     .text_size(px(12.5))
                     .line_height(px(18.0))
-                    .child(styled),
+                    .child(styled)
+                    .child({
+                        let entity = cx.entity();
+                        let focus = self.query_focus.clone();
+                        canvas(
+                            |_, _, _| {},
+                            move |bounds, _, window, cx| {
+                                window.handle_input(
+                                    &focus,
+                                    ElementInputHandler::new(bounds, entity.clone()),
+                                    cx,
+                                );
+                            },
+                        )
+                        .absolute()
+                        .inset_0()
+                    }),
             );
 
         if let Some((x, y)) = caret_offset
@@ -488,7 +506,10 @@ impl AppView {
                     modified = true;
                 }
                 "space" => {
+                    // Only Ctrl+Space is handled here (manual completion); plain space is
+                    // delivered by the platform input handler.
                     self.refresh_query_completion(true);
+                    cx.stop_propagation();
                     return;
                 }
                 _ => return,
@@ -585,25 +606,10 @@ impl AppView {
                     new_anchor = new_caret;
                     modified = true;
                 }
-                "space" => {
-                    new_sql.replace_range(start..end, " ");
-                    new_caret = start + 1;
-                    new_anchor = new_caret;
-                    modified = true;
-                }
                 _ => {
-                    if let Some(insert) = keystroke
-                        .key_char
-                        .as_ref()
-                        .filter(|insert| !insert.is_empty() && !insert.contains('\n'))
-                    {
-                        new_sql.replace_range(start..end, insert);
-                        new_caret = start + insert.len();
-                        new_anchor = new_caret;
-                        modified = true;
-                    } else {
-                        return;
-                    }
+                    // Text characters (including IME composition) are delivered by the platform
+                    // input handler so composed input is not lost.
+                    return;
                 }
             }
         }
@@ -738,5 +744,178 @@ impl AppView {
         }
         self.query_completion = None;
         cx.notify();
+    }
+
+    /// Insert `text` into the active SQL tab, replacing `range` (byte offsets) or the current
+    /// selection. Drives both IME composition and ordinary `WM_CHAR` input.
+    fn query_insert(
+        &mut self,
+        range: Option<(usize, usize)>,
+        text: &str,
+        mark: bool,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(index) = self.active_query else {
+            return;
+        };
+        let Some(tab) = self.queries.get(index) else {
+            return;
+        };
+        let sql = tab.sql.clone();
+        let (default_start, default_end) = tab.selection();
+        let (mut start, mut end) = range.unwrap_or((default_start, default_end));
+        start = start.min(sql.len());
+        end = end.min(sql.len()).max(start);
+        if !sql.is_char_boundary(start) {
+            start = previous_boundary(&sql, start);
+        }
+        if !sql.is_char_boundary(end) {
+            end = next_boundary(&sql, end).min(sql.len());
+        }
+
+        let mut new_sql = sql.clone();
+        new_sql.replace_range(start..end, text);
+        let caret = start + text.len();
+        let undo_caret = tab.caret;
+        let undo_anchor = tab.anchor;
+        if let Some(tab) = self.queries.get_mut(index) {
+            tab.undo.push((sql, undo_caret, undo_anchor));
+            tab.sql = new_sql;
+            tab.caret = caret;
+            tab.anchor = caret;
+        }
+
+        if mark && !text.is_empty() {
+            self.query_ime_marked = Some(start..caret);
+        } else {
+            self.query_ime_marked = None;
+        }
+        self.caret_visible = true;
+        if !mark {
+            self.refresh_query_completion(false);
+        }
+        cx.notify();
+    }
+}
+
+impl EntityInputHandler for AppView {
+    fn text_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        actual_range: &mut Option<Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let tab = self.queries.get(self.active_query?)?;
+        let text = tab.sql.clone();
+        let start = offset_from_utf16(&text, range_utf16.start);
+        let end = offset_from_utf16(&text, range_utf16.end);
+        actual_range.replace(offset_to_utf16(&text, start)..offset_to_utf16(&text, end));
+        Some(text[start..end].to_string())
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        let tab = self.queries.get(self.active_query?)?;
+        let text = tab.sql.clone();
+        let (start, end) = tab.selection();
+        Some(UTF16Selection {
+            range: offset_to_utf16(&text, start)..offset_to_utf16(&text, end),
+            reversed: false,
+        })
+    }
+
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
+        let tab = self.queries.get(self.active_query?)?;
+        let marked = self.query_ime_marked.clone()?;
+        Some(offset_to_utf16(&tab.sql, marked.start)..offset_to_utf16(&tab.sql, marked.end))
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+        self.query_ime_marked = None;
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.active_query else {
+            return;
+        };
+        let Some(tab) = self.queries.get(index) else {
+            return;
+        };
+        let text = tab.sql.clone();
+        let range = range_utf16.map(|range| {
+            (
+                offset_from_utf16(&text, range.start),
+                offset_from_utf16(&text, range.end),
+            )
+        });
+        self.query_insert(range, new_text, false, cx);
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        _new_selected_range_utf16: Option<Range<usize>>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.active_query else {
+            return;
+        };
+        let Some(tab) = self.queries.get(index) else {
+            return;
+        };
+        let text = tab.sql.clone();
+        let range = range_utf16
+            .map(|range| {
+                (
+                    offset_from_utf16(&text, range.start),
+                    offset_from_utf16(&text, range.end),
+                )
+            })
+            .or_else(|| {
+                self.query_ime_marked
+                    .clone()
+                    .map(|marked| (marked.start, marked.end))
+            });
+        self.query_insert(range, new_text, !new_text.is_empty(), cx);
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _range_utf16: Range<usize>,
+        bounds: Bounds<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        let line_height = self.query_editor_layout.borrow().line_height();
+        Some(Bounds::new(
+            bounds.origin,
+            gpui::size(px(1.0), line_height.max(px(1.0))),
+        ))
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _point: Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        None
     }
 }

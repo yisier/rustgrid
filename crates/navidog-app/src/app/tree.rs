@@ -84,24 +84,47 @@ impl AppView {
     }
 
     fn show_form(&mut self, form: ConnectionForm, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let weak = cx.weak_entity();
+        let theme = self.theme;
+        let inputs = FormInputs {
+            fields: [
+                make_form_input(theme, form.name.clone(), false, FormField::Name, &weak, cx),
+                make_form_input(theme, form.host.clone(), false, FormField::Host, &weak, cx),
+                make_form_input(theme, form.port.clone(), false, FormField::Port, &weak, cx),
+                make_form_input(
+                    theme,
+                    form.username.clone(),
+                    false,
+                    FormField::Username,
+                    &weak,
+                    cx,
+                ),
+                make_form_input(
+                    theme,
+                    form.password.clone(),
+                    true,
+                    FormField::Password,
+                    &weak,
+                    cx,
+                ),
+                make_form_input(
+                    theme,
+                    form.database.clone(),
+                    false,
+                    FormField::Database,
+                    &weak,
+                    cx,
+                ),
+            ],
+        };
+        let name_focus = inputs.get(FormField::Name).read(cx).focus_handle();
+        self.form_inputs = Some(inputs);
         self.form = Some(form);
         self.test_status = TestStatus::Idle;
         self.context_menu = None;
-        let name_len = self
-            .form
-            .as_ref()
-            .map(|form| form.name.chars().count())
-            .unwrap_or(0);
-        self.form_selection = FieldSelection {
-            anchor: name_len,
-            cursor: name_len,
-        };
-        self.form_selecting = false;
-        self.form_active_field = FormField::Name;
         self.form_offset = Point::default();
         self.form_dragging = false;
-        self.caret_visible = true;
-        window.focus(&self.form_focus.name);
+        window.focus(&name_focus);
         cx.notify();
     }
 
@@ -134,6 +157,7 @@ impl AppView {
                 std::cmp::Ordering::Equal => {
                     self.editing = None;
                     self.form = None;
+                    self.form_inputs = None;
                 }
                 std::cmp::Ordering::Greater => self.editing = Some(editing - 1),
                 std::cmp::Ordering::Less => {}
@@ -224,8 +248,12 @@ impl AppView {
                         }
 
                         if authentication {
+                            let weak = cx.weak_entity();
+                            let theme = view.theme;
+                            let input = make_password_input(theme, &weak, cx);
                             view.password_prompt = Some(PasswordPrompt {
                                 index,
+                                input,
                                 password: String::new(),
                                 save_password: true,
                             });
@@ -250,6 +278,7 @@ impl AppView {
 
         if let Some(connection) = connection {
             self.close_connection_grids(&connection, cx);
+            self.close_connection_designs(&connection, cx);
             let runtime = self.runtime.clone();
             cx.spawn(async move |_this, _cx| {
                 let _ = runtime.spawn(async move { connection.close().await }).await;
@@ -386,8 +415,10 @@ impl AppView {
                 },
             };
             self.open_object_pane(connection_index, database_index, category, cx);
-            self.object_search.clear();
+            self.clear_object_search(cx);
             self.active_grid = None;
+            self.active_query = None;
+            self.active_design = None;
         }
 
         cx.notify();
@@ -436,8 +467,10 @@ impl AppView {
         }
 
         self.open_object_pane(connection_index, database_index, category, cx);
-        self.object_search.clear();
+        self.clear_object_search(cx);
         self.active_grid = None;
+        self.active_query = None;
+        self.active_design = None;
         match category {
             Category::Tables => self.main_tab = MainTab::Tables,
             Category::Views => self.main_tab = MainTab::Views,
@@ -590,6 +623,7 @@ impl AppView {
     pub(super) fn activate_grid(&mut self, index: Option<usize>, cx: &mut Context<'_, Self>) {
         self.active_grid = index;
         self.active_query = None;
+        self.active_design = None;
         self.query_combo = None;
         self.query_completion = None;
         cx.notify();

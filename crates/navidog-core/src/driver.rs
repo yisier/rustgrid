@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use crate::error::Result;
 use crate::model::{
     ColumnInfo, ConnectionConfig, DatabaseInfo, DriverId, PageRequest, QueryResult, RowUpdate,
-    TableInfo, TablePage,
+    TableInfo, TablePage, TableSchema,
 };
 
 #[async_trait]
@@ -73,6 +73,39 @@ pub trait Connection: Send + Sync {
         charset: Option<&str>,
         collation: Option<&str>,
     ) -> String;
+
+    /// The column types this engine offers in the table designer's type list, in display order.
+    fn column_types(&self) -> Vec<&'static str>;
+
+    /// Introspect the full definition of an existing table (or view).
+    async fn table_schema(&self, database: &str, table: &str) -> Result<TableSchema>;
+
+    /// Build the DDL script that turns `original` into `modified`. When `original` is `None`
+    /// the script creates the table; when it is `Some` it alters the table to match `modified`.
+    /// The script is empty when nothing changed. It is used both for the designer's SQL preview
+    /// and, via [`Connection::save_table_schema`], to apply the change.
+    fn table_schema_sql(
+        &self,
+        database: &str,
+        table: &str,
+        original: Option<&TableSchema>,
+        modified: &TableSchema,
+    ) -> String;
+
+    /// Apply the change described by [`Connection::table_schema_sql`].
+    async fn save_table_schema(
+        &self,
+        database: &str,
+        table: &str,
+        original: Option<&TableSchema>,
+        modified: &TableSchema,
+    ) -> Result<()> {
+        let sql = self.table_schema_sql(database, table, original, modified);
+        if sql.trim().is_empty() {
+            return Ok(());
+        }
+        self.execute_query(Some(database), &sql).await.map(|_| ())
+    }
 
     async fn close(&self) -> Result<()>;
 }

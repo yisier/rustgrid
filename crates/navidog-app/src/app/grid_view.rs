@@ -46,6 +46,9 @@ impl GridView {
             page_size_focused: false,
             caret_visible: true,
             caret_blink_running: false,
+            self_weak: cx.weak_entity(),
+            ime_field: None,
+            ime_marked: None,
         }
     }
 

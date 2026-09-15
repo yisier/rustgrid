@@ -1,7 +1,7 @@
 use gpui::WindowAppearance;
 use navidog_config::ThemeSetting;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
     pub window_bg: u32,
     pub titlebar_bg: u32,

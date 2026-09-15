@@ -1,9 +1,9 @@
 use async_trait::async_trait;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use navidog_core::{
-    CellValue, ColumnInfo, Connection, DatabaseInfo, DriverId, Error, FilterCondition,
-    FilterConjunction, FilterOperator, ObjectKind, PageRequest, QueryResult, Result, RowUpdate,
-    TableInfo, TablePage,
+    CellValue, ColumnDef, ColumnInfo, Connection, DatabaseInfo, DriverId, Error, FilterCondition,
+    FilterConjunction, FilterOperator, ForeignKeyDef, IndexDef, ObjectKind, PageRequest,
+    QueryResult, Result, RowUpdate, TableInfo, TableOptions, TablePage, TableSchema, TriggerDef,
 };
 use sqlx::mysql::{MySqlColumn, MySqlRow};
 use sqlx::{
@@ -415,10 +415,657 @@ impl Connection for MysqlConnection {
         sql
     }
 
+    fn column_types(&self) -> Vec<&'static str> {
+        MYSQL_COLUMN_TYPES.to_vec()
+    }
+
+    async fn table_schema(&self, database: &str, table: &str) -> Result<TableSchema> {
+        let column_rows = sqlx::query(
+            "SELECT column_name, data_type, column_type, is_nullable, column_default, extra, \
+                    column_key, column_comment, character_set_name, collation_name, \
+                    character_maximum_length, numeric_precision, numeric_scale, \
+                    generation_expression \
+             FROM information_schema.columns \
+             WHERE table_schema = ? AND table_name = ? \
+             ORDER BY ordinal_position",
+        )
+        .bind(database)
+        .bind(table)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_query_error)?;
+
+        let mut columns = Vec::with_capacity(column_rows.len());
+        for row in &column_rows {
+            let name: String = row.try_get(0).map_err(map_query_error)?;
+            let data_type: String = row.try_get(1).map_err(map_query_error)?;
+            let column_type: String = row.try_get(2).map_err(map_query_error)?;
+            let nullable: String = row.try_get(3).unwrap_or_else(|_| "YES".to_string());
+            let default: Option<String> = row.try_get(4).unwrap_or(None);
+            let extra: String = row.try_get(5).unwrap_or_default();
+            let key: String = row.try_get(6).unwrap_or_default();
+            let comment: String = row.try_get(7).unwrap_or_default();
+            let charset: Option<String> = row.try_get(8).unwrap_or(None);
+            let collation: Option<String> = row.try_get(9).unwrap_or(None);
+            let char_length = optional_u64(row, 10);
+            let precision = optional_u64(row, 11);
+            let scale = optional_u64(row, 12);
+            let generated: Option<String> = row.try_get(13).unwrap_or(None);
+
+            let numeric = data_type.eq_ignore_ascii_case("decimal")
+                || data_type.eq_ignore_ascii_case("numeric");
+            let length = if let Some(length) = char_length {
+                length.to_string()
+            } else if numeric {
+                precision
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "0".to_string())
+            } else {
+                "0".to_string()
+            };
+            let decimals = if numeric {
+                scale
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "0".to_string())
+            } else {
+                "0".to_string()
+            };
+
+            let extra_lower = extra.to_ascii_lowercase();
+            let column_type_lower = column_type.to_ascii_lowercase();
+            let on_update = extra_lower
+                .find("on update")
+                .map(|index| extra[index..].trim().to_string())
+                .unwrap_or_default();
+
+            columns.push(ColumnDef {
+                name,
+                data_type,
+                length,
+                decimals,
+                nullable: nullable.eq_ignore_ascii_case("YES"),
+                default: default.unwrap_or_default(),
+                primary_key: key.eq_ignore_ascii_case("PRI"),
+                auto_increment: extra_lower.contains("auto_increment"),
+                unsigned: column_type_lower.contains("unsigned"),
+                zerofill: column_type_lower.contains("zerofill"),
+                comment,
+                charset: charset.unwrap_or_default(),
+                collation: collation.unwrap_or_default(),
+                extra: on_update,
+                generated: generated.unwrap_or_default(),
+                stored: extra_lower.contains("stored"),
+            });
+        }
+
+        let index_rows = sqlx::query(
+            "SELECT index_name, non_unique, index_type, column_name, comment \
+             FROM information_schema.statistics \
+             WHERE table_schema = ? AND table_name = ? \
+             ORDER BY index_name, seq_in_index",
+        )
+        .bind(database)
+        .bind(table)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_query_error)?;
+
+        let mut indexes: Vec<IndexDef> = Vec::new();
+        for row in &index_rows {
+            let name: String = row.try_get(0).map_err(map_query_error)?;
+            let non_unique: i64 = row.try_get(1).unwrap_or(0);
+            let index_type: String = row.try_get(2).unwrap_or_default();
+            let column: Option<String> = row.try_get(3).unwrap_or(None);
+            let comment: String = row.try_get(4).unwrap_or_default();
+            if let Some(existing) = indexes.iter_mut().find(|index| index.name == name) {
+                if let Some(column) = column {
+                    existing.columns.push(column);
+                }
+            } else {
+                indexes.push(IndexDef {
+                    name: name.clone(),
+                    columns: column.into_iter().collect(),
+                    unique: non_unique == 0,
+                    primary: name.eq_ignore_ascii_case("PRIMARY"),
+                    index_type,
+                    comment,
+                });
+            }
+        }
+
+        let fk_rows = sqlx::query(
+            "SELECT k.constraint_name, k.column_name, k.referenced_table_name, \
+                    k.referenced_column_name, r.update_rule, r.delete_rule \
+             FROM information_schema.key_column_usage AS k \
+             JOIN information_schema.referential_constraints AS r \
+               ON r.constraint_schema = k.constraint_schema \
+              AND r.constraint_name = k.constraint_name \
+             WHERE k.table_schema = ? AND k.table_name = ? \
+               AND k.referenced_table_name IS NOT NULL \
+             ORDER BY k.constraint_name, k.ordinal_position",
+        )
+        .bind(database)
+        .bind(table)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_query_error)?;
+
+        let mut foreign_keys: Vec<ForeignKeyDef> = Vec::new();
+        for row in &fk_rows {
+            let name: String = row.try_get(0).map_err(map_query_error)?;
+            let column: Option<String> = row.try_get(1).unwrap_or(None);
+            let ref_table: Option<String> = row.try_get(2).unwrap_or(None);
+            let ref_column: Option<String> = row.try_get(3).unwrap_or(None);
+            let update_rule: String = row.try_get(4).unwrap_or_default();
+            let delete_rule: String = row.try_get(5).unwrap_or_default();
+            if let Some(existing) = foreign_keys.iter_mut().find(|fk| fk.name == name) {
+                if let Some(column) = column {
+                    existing.columns.push(column);
+                }
+                if let Some(column) = ref_column {
+                    existing.referenced_columns.push(column);
+                }
+            } else {
+                foreign_keys.push(ForeignKeyDef {
+                    name,
+                    columns: column.into_iter().collect(),
+                    referenced_table: ref_table.unwrap_or_default(),
+                    referenced_columns: ref_column.into_iter().collect(),
+                    on_delete: normalize_rule(&delete_rule),
+                    on_update: normalize_rule(&update_rule),
+                });
+            }
+        }
+
+        let trigger_rows = sqlx::query(
+            "SELECT trigger_name, action_timing, event_manipulation, action_statement \
+             FROM information_schema.triggers \
+             WHERE event_object_schema = ? AND event_object_table = ? \
+             ORDER BY trigger_name",
+        )
+        .bind(database)
+        .bind(table)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_query_error)?;
+
+        let mut triggers = Vec::with_capacity(trigger_rows.len());
+        for row in &trigger_rows {
+            triggers.push(TriggerDef {
+                name: row.try_get(0).unwrap_or_default(),
+                timing: row.try_get(1).unwrap_or_default(),
+                event: row.try_get(2).unwrap_or_default(),
+                statement: row.try_get(3).unwrap_or_default(),
+            });
+        }
+
+        let option_row = sqlx::query(
+            "SELECT engine, table_collation, table_comment, auto_increment \
+             FROM information_schema.tables \
+             WHERE table_schema = ? AND table_name = ?",
+        )
+        .bind(database)
+        .bind(table)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_query_error)?;
+
+        let options = match option_row {
+            Some(row) => {
+                let engine: Option<String> = row.try_get(0).unwrap_or(None);
+                let collation: Option<String> = row.try_get(1).unwrap_or(None);
+                let comment: String = row.try_get(2).unwrap_or_default();
+                let auto_increment = optional_u64(&row, 3);
+                let collation = collation.unwrap_or_default();
+                let charset = collation
+                    .split_once('_')
+                    .map(|(charset, _)| charset.to_string())
+                    .unwrap_or_default();
+                TableOptions {
+                    engine: engine.unwrap_or_default(),
+                    charset,
+                    collation,
+                    comment,
+                    auto_increment: auto_increment.map(|v| v.to_string()).unwrap_or_default(),
+                }
+            }
+            None => TableOptions::default(),
+        };
+
+        Ok(TableSchema {
+            columns,
+            indexes,
+            foreign_keys,
+            triggers,
+            options,
+        })
+    }
+
+    fn table_schema_sql(
+        &self,
+        database: &str,
+        table: &str,
+        original: Option<&TableSchema>,
+        modified: &TableSchema,
+    ) -> String {
+        schema_sql(database, table, original, modified)
+    }
+
     async fn close(&self) -> Result<()> {
         self.pool.close().await;
         Ok(())
     }
+}
+
+/// Build the DDL that turns `original` into `modified`; exposed free so it can be unit tested
+/// without a live pool.
+fn schema_sql(
+    database: &str,
+    table: &str,
+    original: Option<&TableSchema>,
+    modified: &TableSchema,
+) -> String {
+    let qualified = format!("{}.{}", quote_identifier(database), quote_identifier(table));
+
+    let Some(original) = original else {
+        let mut parts: Vec<String> = modified.columns.iter().map(column_sql).collect();
+        let primary = primary_columns(modified);
+        if !primary.is_empty() {
+            let columns = primary
+                .iter()
+                .map(|column| quote_identifier(column))
+                .collect::<Vec<_>>()
+                .join(", ");
+            parts.push(format!("PRIMARY KEY ({columns})"));
+        }
+        for index in modified.indexes.iter().filter(|index| !index.primary) {
+            parts.push(index_sql(index));
+        }
+        for foreign_key in &modified.foreign_keys {
+            parts.push(foreign_key_sql(foreign_key));
+        }
+        let mut sql = format!("CREATE TABLE {qualified} (\n  {}\n)", parts.join(",\n  "));
+        let options = table_options_sql(&modified.options);
+        if !options.is_empty() {
+            sql.push(' ');
+            sql.push_str(&options);
+        }
+        sql.push(';');
+        return sql;
+    };
+
+    let mut clauses: Vec<String> = Vec::new();
+
+    for (position, column) in modified.columns.iter().enumerate() {
+        let existing = original
+            .columns
+            .iter()
+            .find(|candidate| candidate.name == column.name);
+        let definition = column_sql(column);
+        match existing {
+            None => {
+                let mut clause = format!("ADD COLUMN {definition}");
+                clause.push_str(&position_clause(modified, position));
+                clauses.push(clause);
+            }
+            Some(existing) if existing != column => {
+                let mut clause = format!("MODIFY COLUMN {definition}");
+                clause.push_str(&position_clause(modified, position));
+                clauses.push(clause);
+            }
+            Some(_) => {}
+        }
+    }
+    for column in &original.columns {
+        if !modified.columns.iter().any(|c| c.name == column.name) {
+            clauses.push(format!("DROP COLUMN {}", quote_identifier(&column.name)));
+        }
+    }
+
+    let original_primary = primary_columns(original);
+    let modified_primary = primary_columns(modified);
+    if original_primary != modified_primary {
+        if !original_primary.is_empty() {
+            clauses.push("DROP PRIMARY KEY".to_string());
+        }
+        if !modified_primary.is_empty() {
+            let columns = modified_primary
+                .iter()
+                .map(|column| quote_identifier(column))
+                .collect::<Vec<_>>()
+                .join(", ");
+            clauses.push(format!("ADD PRIMARY KEY ({columns})"));
+        }
+    }
+
+    for index in modified.indexes.iter().filter(|index| !index.primary) {
+        match original
+            .indexes
+            .iter()
+            .find(|candidate| candidate.name == index.name && !candidate.primary)
+        {
+            None => clauses.push(format!("ADD {}", index_sql(index))),
+            Some(existing) if existing != index => {
+                clauses.push(format!("DROP INDEX {}", quote_identifier(&index.name)));
+                clauses.push(format!("ADD {}", index_sql(index)));
+            }
+            Some(_) => {}
+        }
+    }
+    for index in original.indexes.iter().filter(|index| !index.primary) {
+        if !modified
+            .indexes
+            .iter()
+            .any(|candidate| candidate.name == index.name && !candidate.primary)
+        {
+            clauses.push(format!("DROP INDEX {}", quote_identifier(&index.name)));
+        }
+    }
+
+    for foreign_key in &modified.foreign_keys {
+        match original
+            .foreign_keys
+            .iter()
+            .find(|candidate| candidate.name == foreign_key.name)
+        {
+            None => clauses.push(format!("ADD {}", foreign_key_sql(foreign_key))),
+            Some(existing) if existing != foreign_key => {
+                clauses.push(format!(
+                    "DROP FOREIGN KEY {}",
+                    quote_identifier(&foreign_key.name)
+                ));
+                clauses.push(format!("ADD {}", foreign_key_sql(foreign_key)));
+            }
+            Some(_) => {}
+        }
+    }
+    for foreign_key in &original.foreign_keys {
+        if !modified
+            .foreign_keys
+            .iter()
+            .any(|candidate| candidate.name == foreign_key.name)
+        {
+            clauses.push(format!(
+                "DROP FOREIGN KEY {}",
+                quote_identifier(&foreign_key.name)
+            ));
+        }
+    }
+
+    if original.options != modified.options {
+        let options = table_options_sql(&modified.options);
+        if !options.is_empty() {
+            clauses.push(options);
+        }
+    }
+
+    if clauses.is_empty() {
+        return String::new();
+    }
+    format!("ALTER TABLE {qualified}\n  {};", clauses.join(",\n  "))
+}
+
+/// The MySQL types offered by the table designer's type list.
+const MYSQL_COLUMN_TYPES: [&str; 37] = [
+    "bigint",
+    "int",
+    "mediumint",
+    "smallint",
+    "tinyint",
+    "bit",
+    "decimal",
+    "numeric",
+    "float",
+    "double",
+    "char",
+    "varchar",
+    "tinytext",
+    "text",
+    "mediumtext",
+    "longtext",
+    "binary",
+    "varbinary",
+    "tinyblob",
+    "blob",
+    "mediumblob",
+    "longblob",
+    "date",
+    "time",
+    "datetime",
+    "timestamp",
+    "year",
+    "enum",
+    "set",
+    "json",
+    "geometry",
+    "point",
+    "linestring",
+    "polygon",
+    "multipoint",
+    "multilinestring",
+    "multipolygon",
+];
+
+/// Read a nullable numeric `information_schema` column, tolerating both its signed and unsigned
+/// `BIGINT` representations.
+fn optional_u64(row: &MySqlRow, index: usize) -> Option<u64> {
+    if let Ok(value) = row.try_get::<Option<u64>, _>(index) {
+        return value;
+    }
+    if let Ok(value) = row.try_get::<Option<i64>, _>(index) {
+        return value.filter(|value| *value >= 0).map(|value| value as u64);
+    }
+    None
+}
+
+/// Normalize a referential action (`NO ACTION` becomes an empty, i.e. default, rule).
+fn normalize_rule(rule: &str) -> String {
+    if rule.eq_ignore_ascii_case("NO ACTION") {
+        String::new()
+    } else {
+        rule.to_string()
+    }
+}
+
+/// The ` FIRST` / ` AFTER \`prev\`` suffix placing a column at `position` in `schema`.
+fn position_clause(schema: &TableSchema, position: usize) -> String {
+    if position == 0 {
+        return " FIRST".to_string();
+    }
+    match schema.columns.get(position - 1) {
+        Some(previous) => format!(" AFTER {}", quote_identifier(&previous.name)),
+        None => String::new(),
+    }
+}
+
+fn primary_columns(schema: &TableSchema) -> Vec<String> {
+    schema
+        .columns
+        .iter()
+        .filter(|column| column.primary_key)
+        .map(|column| column.name.clone())
+        .collect()
+}
+
+/// Render one column definition for `CREATE`/`ALTER TABLE`.
+fn column_sql(column: &ColumnDef) -> String {
+    let mut sql = quote_identifier(&column.name);
+    sql.push(' ');
+    sql.push_str(column.data_type.trim());
+
+    let length = column.length.trim();
+    let decimals = column.decimals.trim();
+    if !length.is_empty() && length != "0" {
+        sql.push('(');
+        sql.push_str(length);
+        if !decimals.is_empty() && decimals != "0" {
+            sql.push(',');
+            sql.push_str(decimals);
+        }
+        sql.push(')');
+    }
+
+    if column.unsigned {
+        sql.push_str(" unsigned");
+    }
+    if column.zerofill {
+        sql.push_str(" zerofill");
+    }
+    if !column.charset.trim().is_empty() {
+        sql.push_str(" CHARACTER SET ");
+        sql.push_str(column.charset.trim());
+    }
+    if !column.collation.trim().is_empty() {
+        sql.push_str(" COLLATE ");
+        sql.push_str(column.collation.trim());
+    }
+
+    let generated = column.generated.trim();
+    if !generated.is_empty() {
+        sql.push_str(" GENERATED ALWAYS AS (");
+        sql.push_str(generated);
+        sql.push_str(if column.stored {
+            ") STORED"
+        } else {
+            ") VIRTUAL"
+        });
+    }
+
+    sql.push_str(if column.nullable {
+        " NULL"
+    } else {
+        " NOT NULL"
+    });
+
+    if generated.is_empty() {
+        if let Some(default) = format_default(&column.default) {
+            sql.push(' ');
+            sql.push_str(&default);
+        }
+        if column.auto_increment {
+            sql.push_str(" AUTO_INCREMENT");
+        }
+    }
+    if !column.extra.trim().is_empty() {
+        sql.push(' ');
+        sql.push_str(column.extra.trim());
+    }
+    if !column.comment.trim().is_empty() {
+        sql.push_str(" COMMENT ");
+        sql.push_str(&quote_literal(column.comment.trim()));
+    }
+    sql
+}
+
+fn index_sql(index: &IndexDef) -> String {
+    let columns = index
+        .columns
+        .iter()
+        .map(|column| quote_identifier(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if index.primary {
+        return format!("PRIMARY KEY ({columns})");
+    }
+
+    let kind = match index.index_type.to_ascii_uppercase().as_str() {
+        "FULLTEXT" => "FULLTEXT ",
+        "SPATIAL" => "SPATIAL ",
+        _ => "",
+    };
+    let unique = if index.unique && kind.is_empty() {
+        "UNIQUE "
+    } else {
+        ""
+    };
+    let mut sql = format!(
+        "{unique}{kind}INDEX {} ({columns})",
+        quote_identifier(&index.name)
+    );
+    if !index.comment.trim().is_empty() {
+        sql.push_str(" COMMENT ");
+        sql.push_str(&quote_literal(index.comment.trim()));
+    }
+    sql
+}
+
+fn foreign_key_sql(foreign_key: &ForeignKeyDef) -> String {
+    let columns = foreign_key
+        .columns
+        .iter()
+        .map(|column| quote_identifier(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let referenced = foreign_key
+        .referenced_columns
+        .iter()
+        .map(|column| quote_identifier(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut sql = format!(
+        "CONSTRAINT {} FOREIGN KEY ({columns}) REFERENCES {} ({referenced})",
+        quote_identifier(&foreign_key.name),
+        quote_identifier(&foreign_key.referenced_table),
+    );
+    if !foreign_key.on_delete.trim().is_empty() {
+        sql.push_str(" ON DELETE ");
+        sql.push_str(foreign_key.on_delete.trim());
+    }
+    if !foreign_key.on_update.trim().is_empty() {
+        sql.push_str(" ON UPDATE ");
+        sql.push_str(foreign_key.on_update.trim());
+    }
+    sql
+}
+
+fn table_options_sql(options: &TableOptions) -> String {
+    let mut parts = Vec::new();
+    if !options.engine.trim().is_empty() {
+        parts.push(format!("ENGINE={}", options.engine.trim()));
+    }
+    if !options.charset.trim().is_empty() {
+        parts.push(format!("DEFAULT CHARACTER SET {}", options.charset.trim()));
+    }
+    if !options.collation.trim().is_empty() {
+        parts.push(format!("COLLATE {}", options.collation.trim()));
+    }
+    if !options.auto_increment.trim().is_empty() && options.auto_increment.trim() != "0" {
+        parts.push(format!("AUTO_INCREMENT={}", options.auto_increment.trim()));
+    }
+    if !options.comment.trim().is_empty() {
+        parts.push(format!("COMMENT={}", quote_literal(options.comment.trim())));
+    }
+    parts.join(" ")
+}
+
+/// Render a `DEFAULT ...` fragment for a column, quoting values and leaving expressions and
+/// numbers bare.
+fn format_default(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let upper = value.to_ascii_uppercase();
+    if upper == "NULL" {
+        return Some("DEFAULT NULL".to_string());
+    }
+    let expression = upper.starts_with("CURRENT_TIMESTAMP")
+        || upper.starts_with("CURRENT_DATE")
+        || upper.starts_with("CURRENT_TIME")
+        || upper.starts_with("NOW(")
+        || upper.starts_with("UUID(")
+        || value.starts_with('(')
+        || value.parse::<f64>().is_ok()
+        || (value.len() >= 2 && value.starts_with('\'') && value.ends_with('\''));
+    if expression {
+        Some(format!("DEFAULT {value}"))
+    } else {
+        Some(format!("DEFAULT {}", quote_literal(value)))
+    }
+}
+
+fn quote_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 fn quote_identifier(identifier: &str) -> String {
@@ -698,10 +1345,124 @@ fn decode_cell(row: &MySqlRow, index: usize) -> CellValue {
 
 #[cfg(test)]
 mod tests {
-    use super::{filter_clause, order_clause, returns_result_set};
-    use navidog_core::{
-        FilterCondition, FilterConjunction, FilterOperator, PageRequest, SortColumn,
+    use super::{
+        column_sql, filter_clause, format_default, order_clause, returns_result_set, schema_sql,
     };
+    use navidog_core::{
+        ColumnDef, FilterCondition, FilterConjunction, FilterOperator, PageRequest, SortColumn,
+        TableSchema,
+    };
+
+    #[test]
+    fn renders_column_definitions() {
+        let column = ColumnDef {
+            name: "name".to_string(),
+            data_type: "varchar".to_string(),
+            length: "50".to_string(),
+            nullable: false,
+            default: "x".to_string(),
+            comment: "the name".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            column_sql(&column),
+            "`name` varchar(50) NOT NULL DEFAULT 'x' COMMENT 'the name'"
+        );
+
+        let unsigned = ColumnDef {
+            name: "qty".to_string(),
+            data_type: "int".to_string(),
+            length: "11".to_string(),
+            nullable: true,
+            unsigned: true,
+            auto_increment: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            column_sql(&unsigned),
+            "`qty` int(11) unsigned NULL AUTO_INCREMENT"
+        );
+    }
+
+    #[test]
+    fn formats_default_values() {
+        assert_eq!(format_default("").as_deref(), None);
+        assert_eq!(format_default("NULL").as_deref(), Some("DEFAULT NULL"));
+        assert_eq!(
+            format_default("CURRENT_TIMESTAMP").as_deref(),
+            Some("DEFAULT CURRENT_TIMESTAMP")
+        );
+        assert_eq!(format_default("5").as_deref(), Some("DEFAULT 5"));
+        assert_eq!(format_default("abc").as_deref(), Some("DEFAULT 'abc'"));
+    }
+
+    #[test]
+    fn builds_create_table_from_schema() {
+        let schema = TableSchema {
+            columns: vec![ColumnDef {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                nullable: false,
+                primary_key: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let sql = schema_sql("db", "t", None, &schema);
+        assert!(sql.starts_with("CREATE TABLE `db`.`t`"));
+        assert!(sql.contains("`id` int NOT NULL"));
+        assert!(sql.contains("PRIMARY KEY (`id`)"));
+    }
+
+    #[test]
+    fn builds_alter_for_schema_changes() {
+        let original = TableSchema {
+            columns: vec![
+                ColumnDef {
+                    name: "id".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: false,
+                    primary_key: true,
+                    ..Default::default()
+                },
+                ColumnDef {
+                    name: "name".to_string(),
+                    data_type: "varchar".to_string(),
+                    length: "50".to_string(),
+                    nullable: true,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let mut modified = original.clone();
+        modified.columns[1].length = "100".to_string();
+        modified.columns.push(ColumnDef {
+            name: "age".to_string(),
+            data_type: "int".to_string(),
+            nullable: true,
+            ..Default::default()
+        });
+
+        let sql = schema_sql("db", "t", Some(&original), &modified);
+        assert!(sql.starts_with("ALTER TABLE `db`.`t`"));
+        assert!(sql.contains("MODIFY COLUMN `name` varchar(100) NULL AFTER `id`"));
+        assert!(sql.contains("ADD COLUMN `age` int NULL AFTER `name`"));
+    }
+
+    #[test]
+    fn emits_nothing_when_schema_unchanged() {
+        let schema = TableSchema {
+            columns: vec![ColumnDef {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                nullable: false,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(schema_sql("db", "t", Some(&schema), &schema).is_empty());
+    }
 
     fn condition(column: &str, operator: FilterOperator, value: &str) -> FilterCondition {
         FilterCondition {

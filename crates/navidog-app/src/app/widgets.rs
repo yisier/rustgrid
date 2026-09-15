@@ -8,6 +8,7 @@ impl AppView {
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let theme = self.theme;
+        let _ = window;
 
         let mut content = div()
             .flex()
@@ -42,61 +43,38 @@ impl AppView {
                         theme,
                     )),
             )
-            .child(self.render_form_field(
-                FormField::Name,
-                format!("{}:", t!("form.name")),
-                form.value(FormField::Name),
-                window,
-                cx,
-            ))
-            .child(self.render_form_field(
-                FormField::Host,
-                format!("{}:", t!("form.host")),
-                form.value(FormField::Host),
-                window,
-                cx,
-            ))
-            .child(self.render_form_field(
-                FormField::Port,
-                format!("{}:", t!("form.port")),
-                form.value(FormField::Port),
-                window,
-                cx,
-            ))
-            .child(self.render_form_field(
-                FormField::Username,
-                format!("{}:", t!("form.username")),
-                form.value(FormField::Username),
-                window,
-                cx,
-            ))
-            .child(self.render_form_field(
-                FormField::Password,
-                format!("{}:", t!("form.password")),
-                form.value(FormField::Password),
-                window,
-                cx,
-            ))
+            .child(self.render_form_field(FormField::Name, format!("{}:", t!("form.name"))))
+            .child(self.render_form_field(FormField::Host, format!("{}:", t!("form.host"))))
+            .child(self.render_form_field(FormField::Port, format!("{}:", t!("form.port"))))
+            .child(self.render_form_field(FormField::Username, format!("{}:", t!("form.username"))))
+            .child(self.render_form_field(FormField::Password, format!("{}:", t!("form.password"))))
             .child(
                 div()
-                    .id("form-save-password")
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_1()
-                    .pl(px(120.0))
-                    .cursor_pointer()
-                    .on_click(cx.listener(|this, _event, _window, cx| {
-                        if let Some(form) = this.form.as_mut() {
-                            form.save_password = !form.save_password;
-                        }
-                        cx.notify();
-                    }))
-                    .child(checkbox_box(form.save_password, theme))
+                    .gap_2()
+                    .child(div().w(px(FIELD_LABEL_WIDTH)).flex_none())
                     .child(
                         div()
-                            .text_size(px(12.0))
-                            .child(t!("form.save_password").to_string()),
+                            .id("form-save-password")
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                if let Some(form) = this.form.as_mut() {
+                                    form.save_password = !form.save_password;
+                                }
+                                cx.notify();
+                            }))
+                            .child(checkbox_box(form.save_password, theme))
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .child(t!("form.save_password").to_string()),
+                            ),
                     ),
             );
 
@@ -228,126 +206,28 @@ impl AppView {
         ui::toolbar_item(id, icon, label, enabled, self.theme, on_click)
     }
 
-    pub(super) fn render_form_field(
-        &self,
-        field: FormField,
-        label: String,
-        value: &str,
-        window: &Window,
-        cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
-        let masked = field == FormField::Password;
+    pub(super) fn render_form_field(&self, field: FormField, label: String) -> impl IntoElement {
         let width = match field {
             FormField::Name | FormField::Host => 360.0,
             FormField::Port => 80.0,
             FormField::Username | FormField::Password | FormField::Database => 300.0,
         };
-        let handle = self.form_focus.get(field);
-        let focused = handle.is_focused(window);
-        let theme = self.theme;
+        let input = self
+            .form_inputs
+            .as_ref()
+            .map(|inputs| inputs.get(field).clone());
 
-        let chars: Vec<char> = value.chars().collect();
-        let display: Vec<char> = if masked {
-            vec!['*'; chars.len()]
-        } else {
-            chars.clone()
-        };
-        let len = display.len();
-
-        let mut shown = div().flex().flex_row().items_center();
-        if focused {
-            let mut selection = self.form_selection;
-            selection.anchor = selection.anchor.min(len);
-            selection.cursor = selection.cursor.min(len);
-            let (start, end) = selection.range();
-            if start < end {
-                if start > 0 {
-                    shown = shown.child(display[..start].iter().copied().collect::<String>());
-                }
-                shown = shown.child(
-                    div()
-                        .bg(rgb(theme.tree_selected_bg))
-                        .text_color(rgb(theme.tree_selected_text))
-                        .child(display[start..end].iter().copied().collect::<String>()),
-                );
-                if end < len {
-                    shown = shown.child(display[end..].iter().copied().collect::<String>());
-                }
-            } else {
-                if selection.cursor > 0 {
-                    shown = shown.child(
-                        display[..selection.cursor]
-                            .iter()
-                            .copied()
-                            .collect::<String>(),
-                    );
-                }
-                if self.caret_visible {
-                    shown = shown.child("|");
-                }
-                if selection.cursor < len {
-                    shown = shown.child(
-                        display[selection.cursor..]
-                            .iter()
-                            .copied()
-                            .collect::<String>(),
-                    );
-                }
-            }
-        } else {
-            shown = shown.child(display.iter().copied().collect::<String>());
+        let mut row = div().flex().flex_row().items_center().gap_2().child(
+            div()
+                .w(px(FIELD_LABEL_WIDTH))
+                .flex_none()
+                .text_size(px(12.0))
+                .child(label),
+        );
+        if let Some(input) = input {
+            row = row.child(div().w(px(width)).h(px(22.0)).child(input));
         }
-
-        let focus_handle = handle.clone();
-        let index_text = value.to_string();
-
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .child(
-                div()
-                    .w(px(FIELD_LABEL_WIDTH))
-                    .flex_none()
-                    .text_size(px(12.0))
-                    .child(label),
-            )
-            .child(
-                div()
-                    .id(SharedString::from(format!("field-{}", field as usize)))
-                    .track_focus(handle)
-                    .cursor_text()
-                    .on_key_down(cx.listener(move |this, event, window, cx| {
-                        this.form_key(field, event, window, cx)
-                    }))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                            window.focus(&focus_handle);
-                            this.form_active_field = field;
-                            let index =
-                                this.field_index_for_x(&index_text, event.position.x, window);
-                            this.form_selection = FieldSelection {
-                                anchor: index,
-                                cursor: index,
-                            };
-                            this.form_selecting = true;
-                            this.form_dragging = false;
-                            cx.notify();
-                        }),
-                    )
-                    .w(px(width))
-                    .h(px(22.0))
-                    .flex()
-                    .items_center()
-                    .px_2()
-                    .text_size(px(12.0))
-                    .bg(rgb(theme.input_bg))
-                    .border_1()
-                    .border_color(rgb(theme.border))
-                    .child(shown),
-            )
+        row
     }
 
     pub(super) fn render_context_menu(
@@ -402,7 +282,10 @@ impl AppView {
                         t!("connection.delete_connection").to_string(),
                         cx.listener(move |this, _event, _window, cx| {
                             this.context_menu = None;
-                            this.delete_connection(index, cx);
+                            this.delete_confirm = Some(DeleteConfirm::Connection { index });
+                            this.confirm_offset = Point::default();
+                            this.confirm_dragging = false;
+                            cx.notify();
                         }),
                     ))
                     .child(self.context_item(

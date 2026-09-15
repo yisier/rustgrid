@@ -74,8 +74,13 @@ impl GridView {
         cx.notify();
     }
 
-    /// Move the grid selection one row up/down in response to a wheel notch, keeping the
-    /// selected row in view. Returns `true` when the event was consumed.
+    /// Scroll the grid one row in response to a wheel notch, moving the selected row with the
+    /// viewport. Returns `true` when the event was consumed.
+    ///
+    /// The viewport moves directly instead of the view snapping to the selection, so wheeling
+    /// continues from wherever the scrollbar left the view. A selection that is currently
+    /// off-screen moves to the edge row that scrolls into view rather than dragging the view
+    /// back to it.
     pub(super) fn scroll_grid_selection(
         &mut self,
         position: Point<Pixels>,
@@ -94,27 +99,31 @@ impl GridView {
         if rows == 0 {
             return false;
         }
-        let (mut row, col) = selection.cursor;
-        if delta > 0.0 {
-            row = row.saturating_sub(1);
-        } else {
-            row = (row + 1).min(rows - 1);
+
+        let step: isize = if delta > 0.0 { -1 } else { 1 };
+        let max = f32::from(handle.max_offset().height);
+        let scroll = -f32::from(handle.offset().y);
+        let viewport_h = f32::from(bounds.size.height);
+        let visible = (viewport_h / GRID_ROW_HEIGHT).floor().max(1.0) as usize;
+        let first = (scroll / GRID_ROW_HEIGHT).round() as isize;
+        let max_first = ((max / GRID_ROW_HEIGHT).round() as isize).max(0);
+        let new_scroll =
+            ((first + step).clamp(0, max_first) as f32 * GRID_ROW_HEIGHT).clamp(0.0, max);
+        let new_first = (new_scroll / GRID_ROW_HEIGHT).round() as usize;
+        let new_last = (new_first + visible.saturating_sub(1)).min(rows - 1);
+
+        let (row, col) = selection.cursor;
+        let moved = (row as isize + step).clamp(0, rows as isize - 1) as usize;
+        let new_row = moved.clamp(new_first, new_last);
+
+        if new_scroll != scroll {
+            let x = handle.offset().x;
+            handle.set_offset(Point::new(x, px(-new_scroll)));
         }
         self.state.selection = Some(CellSelection {
-            anchor: (row, col),
-            cursor: (row, col),
+            anchor: (new_row, col),
+            cursor: (new_row, col),
         });
-
-        let viewport_h = f32::from(bounds.size.height);
-        let scroll = -f32::from(handle.offset().y);
-        let first = (scroll / GRID_ROW_HEIGHT).floor().max(0.0) as usize;
-        let visible = (viewport_h / GRID_ROW_HEIGHT).floor().max(1.0) as usize;
-        let last = first + visible.saturating_sub(1);
-        if row < first {
-            self.list_scroll.scroll_to_item(row, ScrollStrategy::Top);
-        } else if row > last {
-            self.list_scroll.scroll_to_item(row, ScrollStrategy::Bottom);
-        }
 
         cx.notify();
         true
@@ -188,16 +197,26 @@ impl GridView {
                     _ => {}
                 }
                 self.state.selection = Some(CellSelection::new(new_row, new_col));
+                cx.stop_propagation();
                 cx.notify();
             }
-            "delete" => self.set_selection_null(cx),
-            "enter" => self.begin_edit((row, col), None, window, cx),
+            "delete" => {
+                self.set_selection_null(cx);
+                cx.stop_propagation();
+            }
+            "enter" => {
+                self.begin_edit((row, col), None, window, cx);
+                cx.stop_propagation();
+            }
             _ => {
                 if let Some(text) = keystroke.key_char.as_ref()
                     && let Some(character) = text.chars().next()
                     && !character.is_control()
                 {
                     self.begin_edit((row, col), Some(character), window, cx);
+                    // Consume the keystroke so the platform does not also emit a `WM_CHAR`
+                    // for the character that seeded the edit.
+                    cx.stop_propagation();
                 }
             }
         }
@@ -490,28 +509,10 @@ impl GridView {
                 }
                 "enter" => commit = true,
                 "escape" => cancel = true,
-                "space" => {
-                    let mut next: Vec<char> = chars[..start].to_vec();
-                    next.push(' ');
-                    next.extend_from_slice(&chars[end..]);
-                    new_cursor = start + 1;
-                    new_anchor = new_cursor;
-                    new_value = Some(next);
-                }
                 _ => {
-                    if let Some(insert) = keystroke.key_char.as_ref().filter(|insert| {
-                        !insert.is_empty() && !insert.chars().any(char::is_control)
-                    }) {
-                        let insert: Vec<char> = insert.chars().collect();
-                        let mut next: Vec<char> = chars[..start].to_vec();
-                        next.extend_from_slice(&insert);
-                        next.extend_from_slice(&chars[end..]);
-                        new_cursor = start + insert.len();
-                        new_anchor = new_cursor;
-                        new_value = Some(next);
-                    } else {
-                        return;
-                    }
+                    // Text characters (including IME composition) are delivered to
+                    // `GridView::replace_text_in_range` via the platform input handler.
+                    return;
                 }
             }
         }

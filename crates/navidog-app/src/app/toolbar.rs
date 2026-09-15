@@ -206,10 +206,10 @@ impl AppView {
                 cx.notify();
             });
         }
-        self.object_search.clear();
-        self.notify_object_pane(cx);
+        self.clear_object_search(cx);
         self.active_grid = None;
         self.active_query = None;
+        self.active_design = None;
         cx.notify();
     }
 }

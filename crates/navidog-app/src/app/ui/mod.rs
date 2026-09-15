@@ -5,12 +5,19 @@
 //! module. The rules (square corners, `Theme` colors, `ButtonKind` variants) are described in
 //! `AGENTS.md` under "UI conventions".
 
+use std::rc::Rc;
+
 use gpui::{
-    App, BoxShadow, ClickEvent, Div, FontWeight, IntoElement, Point, SharedString, Stateful,
-    Window, div, prelude::*, px, rgb, rgba, svg,
+    AnyElement, App, BoxShadow, ClickEvent, Div, FontWeight, IntoElement, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Stateful, Window,
+    div, prelude::*, px, rgb, rgba, svg,
 };
 
 use crate::theme::Theme;
+
+mod text_input;
+
+pub(crate) use text_input::{TextInput, TextInputOptions};
 
 /// The variant of a push button. See `win_button` / `dialog_button`.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -288,6 +295,147 @@ pub(super) fn dialog_header(theme: Theme) -> Div {
         .bg(rgb(theme.dialog_bg))
 }
 
+/// A shared dialog button callback.
+pub(super) type DialogCallback = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+/// Shared mouse callbacks for dialog dragging.
+pub(super) type MouseDownCallback = Rc<dyn Fn(&MouseDownEvent, &mut Window, &mut App)>;
+pub(super) type MouseMoveCallback = Rc<dyn Fn(&MouseMoveEvent, &mut Window, &mut App)>;
+pub(super) type MouseUpCallback = Rc<dyn Fn(&MouseUpEvent, &mut Window, &mut App)>;
+
+/// Mouse-driven dragging for the app-drawn dialogs: the caller owns the offset and passes the
+/// three handlers that update it.
+pub(super) struct DialogDrag {
+    pub offset: Point<Pixels>,
+    pub on_start: MouseDownCallback,
+    pub on_move: MouseMoveCallback,
+    pub on_end: MouseUpCallback,
+}
+
+/// The Windows-style warning glyph: a warning-tinted triangle with a dark exclamation mark drawn
+/// on top. gpui renders an SVG as a single tinted layer, so the two colors are two overlaid SVGs
+/// that share the same 16x16 view box.
+fn warning_icon(size: f32, theme: Theme) -> impl IntoElement {
+    div()
+        .relative()
+        .flex_none()
+        .w(px(size))
+        .h(px(size))
+        .child(
+            svg()
+                .path("icons/warning.svg")
+                .size_full()
+                .text_color(rgb(theme.warning)),
+        )
+        .child(
+            svg()
+                .path("icons/warning_mark.svg")
+                .absolute()
+                .inset_0()
+                .text_color(rgb(0x1a1300)),
+        )
+}
+
+/// Content of a [`confirm_dialog`].
+pub(super) struct ConfirmDialog {
+    pub id: &'static str,
+    pub title: String,
+    pub message: String,
+    pub confirm_label: String,
+    pub cancel_label: String,
+}
+
+/// The single shared destructive-confirmation modal: an overlay with a draggable warning
+/// titlebar, a warning body and a `[Confirm] [Cancel]` footer. Every confirm in the app goes
+/// through this so the chrome and button order never drift.
+pub(super) fn confirm_dialog(
+    dialog: ConfirmDialog,
+    drag: DialogDrag,
+    theme: Theme,
+    on_confirm: DialogCallback,
+    on_cancel: DialogCallback,
+) -> AnyElement {
+    let ConfirmDialog {
+        id: base_id,
+        title,
+        message,
+        confirm_label,
+        cancel_label,
+    } = dialog;
+    let offset = drag.offset;
+    let drag_start = drag.on_start.clone();
+    let drag_move = drag.on_move.clone();
+    let drag_end = drag.on_end.clone();
+    let close_cancel = on_cancel.clone();
+    let titlebar = dialog_titlebar(theme)
+        .pl_3()
+        .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+            drag_start(event, window, cx)
+        })
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .child(warning_icon(14.0, theme))
+                .child(div().text_size(px(12.5)).child(title)),
+        )
+        .child(dialog_close_button(
+            base_id,
+            theme,
+            move |event, window, cx| close_cancel(event, window, cx),
+        ));
+
+    let body = div()
+        .flex()
+        .flex_row()
+        .items_start()
+        .gap_3()
+        .px_4()
+        .py_5()
+        .child(warning_icon(28.0, theme))
+        .child(div().flex_1().text_size(px(12.5)).child(message));
+
+    let footer = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_end()
+        .gap_2()
+        .px_4()
+        .pb_4()
+        .child(dialog_button(
+            format!("{base_id}-confirm"),
+            confirm_label,
+            false,
+            theme,
+            move |event, window, cx| on_confirm(event, window, cx),
+        ))
+        .child(dialog_button(
+            format!("{base_id}-cancel"),
+            cancel_label,
+            true,
+            theme,
+            move |event, window, cx| on_cancel(event, window, cx),
+        ));
+
+    overlay(theme)
+        .on_mouse_move(move |event, window, cx| drag_move(event, window, cx))
+        .on_mouse_up(MouseButton::Left, move |event, window, cx| {
+            drag_end(event, window, cx)
+        })
+        .child(
+            dialog_frame(theme, theme.dialog_bg)
+                .left(offset.x)
+                .top(offset.y)
+                .w(px(420.0))
+                .child(titlebar)
+                .child(body)
+                .child(footer),
+        )
+        .into_any_element()
+}
+
 /// The neutral input face shared by text fields, combos and dropdowns. Callers add layout,
 /// sizing, focus and children.
 pub(super) fn text_field(theme: Theme) -> Div {
@@ -295,6 +443,21 @@ pub(super) fn text_field(theme: Theme) -> Div {
         .bg(rgb(theme.input_bg))
         .border_1()
         .border_color(rgb(theme.border))
+}
+
+/// A zero-layout caret anchor: a 0px box with an absolutely positioned 1px bar, so toggling it
+/// never pushes the text around (unlike a `"|"` glyph). Used by the simple append-only inputs;
+/// the full [`TextInput`](text_input::TextInput) paints its own caret.
+pub(super) fn text_caret(theme: Theme) -> impl IntoElement {
+    div().relative().flex_none().w(px(0.0)).h_full().child(
+        div()
+            .absolute()
+            .left_0()
+            .top(px(2.0))
+            .bottom(px(2.0))
+            .w(px(1.0))
+            .bg(rgb(theme.text)),
+    )
 }
 
 /// Thumb length and its travel range for a scrollbar track of `viewport` px showing

@@ -7,12 +7,13 @@ use std::time::Duration;
 use chrono::{Datelike, NaiveDate, NaiveDateTime, Timelike};
 
 use gpui::{
-    AnyElement, App, ClickEvent, ClipboardItem, Context, DispatchPhase, Div, Entity, FocusHandle,
-    FontWeight, HighlightStyle, ImageSource, KeyDownEvent, ListHorizontalSizingBehavior,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Resource,
-    ScrollDelta, ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, Stateful,
-    StyledText, Subscription, Svg, TextLayout, UniformListScrollHandle, WeakEntity, Window,
-    WindowControlArea, canvas, deferred, div, img, prelude::*, px, rgb, svg, uniform_list,
+    AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, DispatchPhase, Div,
+    ElementInputHandler, Entity, EntityInputHandler, FocusHandle, FontWeight, HighlightStyle,
+    ImageSource, KeyDownEvent, ListHorizontalSizingBehavior, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Resource, ScrollDelta, ScrollHandle,
+    ScrollWheelEvent, SharedString, Stateful, StyledText, Subscription, Svg, TextLayout,
+    UTF16Selection, UniformListScrollHandle, WeakEntity, Window, WindowControlArea, canvas,
+    deferred, div, img, prelude::*, px, rgb, svg, uniform_list,
 };
 use navidog_config::{AppSettings, ConfigStore, LanguageSetting, ThemeSetting};
 use navidog_core::{
@@ -30,36 +31,140 @@ use crate::sql::{self, SqlSpan, SqlToken};
 use crate::theme::Theme;
 
 use ui::{
-    ButtonKind, checkbox_box, dialog_shadow, form_tab, main_separator, scrollbar_thumb,
-    toolbar_separator,
+    ButtonKind, TextInput, TextInputOptions, checkbox_box, dialog_shadow, form_tab, main_separator,
+    scrollbar_thumb, toolbar_separator,
 };
 
-struct FormFocus {
-    name: FocusHandle,
-    host: FocusHandle,
-    port: FocusHandle,
-    username: FocusHandle,
-    password: FocusHandle,
-    database: FocusHandle,
+/// The six text inputs of the connection form, created when the form opens. Order follows
+/// [`FORM_FIELDS`] so `FormField as usize` indexes the array.
+struct FormInputs {
+    fields: [Entity<TextInput>; 6],
 }
 
-impl FormFocus {
-    fn get(&self, field: FormField) -> &FocusHandle {
-        match field {
-            FormField::Name => &self.name,
-            FormField::Host => &self.host,
-            FormField::Port => &self.port,
-            FormField::Username => &self.username,
-            FormField::Password => &self.password,
-            FormField::Database => &self.database,
-        }
+impl FormInputs {
+    fn get(&self, field: FormField) -> &Entity<TextInput> {
+        &self.fields[field as usize]
     }
+}
+
+/// Build one connection-form field. Edits write straight into `ConnectionForm` so the dialog
+/// title and the save/test paths always see the latest text without reading the entity back
+/// (which would re-enter a borrowed entity during the change callback).
+fn make_form_input(
+    theme: Theme,
+    value: String,
+    masked: bool,
+    field: FormField,
+    app: &WeakEntity<AppView>,
+    cx: &mut Context<'_, AppView>,
+) -> Entity<TextInput> {
+    let change = app.clone();
+    let submit = app.clone();
+    let tab = app.clone();
+    cx.new(move |cx| {
+        TextInput::new(
+            theme,
+            value,
+            TextInputOptions {
+                masked,
+                placeholder: SharedString::default(),
+                accepts: None,
+                ..Default::default()
+            },
+            cx,
+        )
+        .on_change(Rc::new(move |text, _window, cx| {
+            let _ = change.update(cx, |app, cx| app.set_form_field(field, text, cx));
+        }))
+        .on_submit(Rc::new(move |_window, cx| {
+            let _ = submit.update(cx, |app, cx| app.save_form(cx));
+        }))
+        .on_tab(Rc::new(move |shift, window, cx| {
+            let _ = tab.update(cx, |app, cx| {
+                if let Some(handle) = app.form_neighbor(field, shift, cx) {
+                    window.focus(&handle);
+                }
+            });
+        }))
+    })
 }
 
 struct PasswordPrompt {
     index: usize,
+    input: Entity<TextInput>,
     password: String,
     save_password: bool,
+}
+
+/// Build the masked password field for the password prompt. The plaintext mirrors into
+/// `PasswordPrompt::password` so `submit_password` never reads the entity back during its own
+/// change callback.
+fn make_password_input(
+    theme: Theme,
+    app: &WeakEntity<AppView>,
+    cx: &mut Context<'_, AppView>,
+) -> Entity<TextInput> {
+    let change = app.clone();
+    let submit = app.clone();
+    cx.new(move |cx| {
+        TextInput::new(
+            theme,
+            "",
+            TextInputOptions {
+                masked: true,
+                placeholder: SharedString::default(),
+                accepts: None,
+                ..Default::default()
+            },
+            cx,
+        )
+        .on_change(Rc::new(move |text, _window, cx| {
+            let _ = change.update(cx, |app, cx| {
+                if let Some(prompt) = app.password_prompt.as_mut() {
+                    prompt.password = text.to_string();
+                }
+                cx.notify();
+            });
+        }))
+        .on_submit(Rc::new(move |_window, cx| {
+            let _ = submit.update(cx, |app, cx| app.submit_password(cx));
+        }))
+    })
+}
+
+/// Build the database-name field of the "new database" dialog.
+fn make_db_name_input(
+    theme: Theme,
+    app: &WeakEntity<AppView>,
+    cx: &mut Context<'_, AppView>,
+) -> Entity<TextInput> {
+    let change = app.clone();
+    let submit = app.clone();
+    cx.new(move |cx| {
+        TextInput::new(theme, "", TextInputOptions::default(), cx)
+            .on_change(Rc::new(move |text, _window, cx| {
+                let _ = change.update(cx, |app, cx| {
+                    if let Some(DbDialog::New { name, .. }) = app.db_dialog.as_mut() {
+                        *name = text.to_string();
+                    }
+                    cx.notify();
+                });
+            }))
+            .on_submit(Rc::new(move |_window, cx| {
+                let _ = submit.update(cx, |app, cx| app.db_submit(cx));
+            }))
+            .on_cancel(Rc::new({
+                let cancel = app.clone();
+                move |_window, cx| {
+                    let _ = cancel.update(cx, |app, cx| {
+                        app.db_dialog = None;
+                        app.db_name_input = None;
+                        app.db_combo = None;
+                        cx.notify();
+                    });
+                }
+            }))
+    })
 }
 
 enum TestStatus {
@@ -87,6 +192,7 @@ struct ContextMenu {
 enum TabTarget {
     Grid(usize),
     Query(usize),
+    Design(usize),
 }
 
 struct TabMenu {
@@ -170,6 +276,19 @@ struct TreePane {
     theme: Theme,
 }
 
+/// Which text field of a grid owns the platform text input (IME / `WM_CHAR`). Grids keep several
+/// bespoke single-line editors whose focus handles are dynamic (filter values in particular), so
+/// rather than wrapping each in `TextInput`, `GridView` implements `EntityInputHandler` itself
+/// and routes input to whichever field is focused.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GridTextField {
+    CellEditor,
+    PageInput,
+    PageSize,
+    SortSearch,
+    Filter(usize, u8),
+}
+
 /// A single open grid (a table page or a SQL result) as an isolated child view. Owns the grid
 /// data (`GridState`) and every piece of interaction state (scroll handles, cell editor, date
 /// picker, sort popup, page inputs), so grid-local interactions re-render only this view.
@@ -218,6 +337,13 @@ struct GridView {
 
     caret_visible: bool,
     caret_blink_running: bool,
+
+    /// A weak handle to this view, used to register the input handler from a paint callback
+    /// without forming an `Entity` reference cycle.
+    self_weak: WeakEntity<GridView>,
+    /// The field the platform IME is currently driving and its composing byte range.
+    ime_field: Option<GridTextField>,
+    ime_marked: Option<std::ops::Range<usize>>,
 }
 
 struct CellEditor {
@@ -265,10 +391,12 @@ struct DatePicker {
     has_time: bool,
 }
 
-/// Pending confirmation for deleting the selected rows of a grid.
-struct DeleteConfirm {
-    grid_id: u64,
-    rows: Vec<usize>,
+/// Pending destructive action that needs confirmation before it runs.
+enum DeleteConfirm {
+    /// Delete the selected rows of a grid.
+    Rows { grid_id: u64, rows: Vec<usize> },
+    /// Delete a connection (and its open grids/query tabs).
+    Connection { index: usize },
 }
 
 #[derive(Clone, Copy, Default)]
@@ -304,12 +432,13 @@ const MAIN_TABS: [(MainTab, &str, &str); 6] = [
 
 const PANEL_WIDTH: f32 = 620.0;
 const FIELD_LABEL_WIDTH: f32 = 96.0;
-const FIELD_TEXT_LEFT: f32 = 16.0 + FIELD_LABEL_WIDTH + 8.0 + 8.0;
 const OBJECT_ROW_HEIGHT: f32 = 20.0;
 const OBJECT_BOTTOM_MARGIN: f32 = 20.0;
 const GRID_ROW_HEIGHT: f32 = 24.0;
 const GRID_COLUMN_WIDTH: f32 = 120.0;
 const GRID_GUTTER_WIDTH: f32 = 22.0;
+/// Thickness of the app-drawn grid scrollbars (matches `ui::vscrollbar_track` / `hscrollbar_track`).
+const GRID_SCROLLBAR_THICKNESS: f32 = 14.0;
 const QUERY_EDITOR_PAD: f32 = 6.0;
 /// Cap used when "Limit Records" is unchecked, standing in for an unlimited fetch.
 const NO_LIMIT_PAGE_SIZE: u64 = 1_000_000;
@@ -320,12 +449,17 @@ pub struct AppView {
     runtime: Arc<Runtime>,
     connections: Vec<ConnectionNode>,
     grids: Vec<Entity<GridView>>,
+    designs: Vec<Entity<design::TableDesignView>>,
     queries: Vec<QueryTab>,
+    active_design: Option<usize>,
+    next_design_id: u64,
     active_query: Option<usize>,
     next_query_id: u64,
     query_focus: FocusHandle,
     query_focus_pending: bool,
     query_editor_focused: bool,
+    /// The SQL editor's IME composing byte range, if any.
+    query_ime_marked: Option<std::ops::Range<usize>>,
     query_editor_layout: RefCell<TextLayout>,
     query_editor_text: RefCell<String>,
     query_editor_measured: bool,
@@ -353,16 +487,14 @@ pub struct AppView {
     main_tab: MainTab,
     db_dialog: Option<DbDialog>,
     db_combo: Option<DbCombo>,
-    db_focus: FocusHandle,
+    db_name_input: Option<Entity<TextInput>>,
     db_sql_focus: FocusHandle,
     db_sql_layout: RefCell<TextLayout>,
     db_sql_text: RefCell<String>,
     db_sql_anchor: usize,
     db_sql_cursor: usize,
     db_sql_selecting: bool,
-    form_selection: FieldSelection,
-    form_selecting: bool,
-    form_active_field: FormField,
+    form_inputs: Option<FormInputs>,
     form_offset: Point<Pixels>,
     form_dragging: bool,
     form_drag_origin: Point<Pixels>,
@@ -371,17 +503,18 @@ pub struct AppView {
     error_dragging: bool,
     error_drag_origin: Point<Pixels>,
     error_drag_base: Point<Pixels>,
+    confirm_offset: Point<Pixels>,
+    confirm_dragging: bool,
+    confirm_drag_origin: Point<Pixels>,
+    confirm_drag_base: Point<Pixels>,
     caret_visible: bool,
     caret_blink_running: bool,
     password_prompt: Option<PasswordPrompt>,
-    password_focus: FocusHandle,
     password_focus_pending: bool,
-    form_focus: FormFocus,
     page_size: u64,
     limit_records: bool,
     object_search: String,
-    object_search_focus: FocusHandle,
-    object_search_focused: bool,
+    object_search_input: Entity<TextInput>,
     delete_confirm: Option<DeleteConfirm>,
     error_dialog: Option<String>,
     window_bounds_subscription: Option<Subscription>,
@@ -396,11 +529,14 @@ pub struct AppView {
 
 mod database;
 mod db_dialog;
+mod design;
+mod design_view;
 mod dialogs;
 mod form;
 mod grid;
 mod grid_cell;
 mod grid_commit;
+mod grid_ime;
 mod grid_input;
 mod grid_scroll;
 mod grid_toolbar;
@@ -455,12 +591,16 @@ impl AppView {
             runtime,
             connections,
             grids: Vec::new(),
+            designs: Vec::new(),
             queries: Vec::new(),
+            active_design: None,
+            next_design_id: 0,
             active_query: None,
             next_query_id: 0,
             query_focus: cx.focus_handle(),
             query_focus_pending: false,
             query_editor_focused: false,
+            query_ime_marked: None,
             query_editor_layout: RefCell::new(TextLayout::default()),
             query_editor_text: RefCell::new(String::new()),
             query_editor_measured: false,
@@ -481,20 +621,18 @@ impl AppView {
             menu_popup_anchor: Rc::new(RefCell::new(Point::default())),
             object_pane: None,
             tab_bar: cx.new(|_| TabBar::new(app.clone())),
-            tree_pane: cx.new(|_| TreePane::new(app)),
+            tree_pane: cx.new(|_| TreePane::new(app.clone())),
             main_tab: MainTab::Tables,
             db_dialog: None,
             db_combo: None,
-            db_focus: cx.focus_handle(),
+            db_name_input: None,
             db_sql_focus: cx.focus_handle(),
             db_sql_layout: RefCell::new(TextLayout::default()),
             db_sql_text: RefCell::new(String::new()),
             db_sql_anchor: 0,
             db_sql_cursor: 0,
             db_sql_selecting: false,
-            form_selection: FieldSelection::default(),
-            form_selecting: false,
-            form_active_field: FormField::Name,
+            form_inputs: None,
             form_offset: Point::default(),
             form_dragging: false,
             form_drag_origin: Point::default(),
@@ -503,24 +641,40 @@ impl AppView {
             error_dragging: false,
             error_drag_origin: Point::default(),
             error_drag_base: Point::default(),
+            confirm_offset: Point::default(),
+            confirm_dragging: false,
+            confirm_drag_origin: Point::default(),
+            confirm_drag_base: Point::default(),
             caret_visible: true,
             caret_blink_running: false,
             password_prompt: None,
-            password_focus: cx.focus_handle(),
             password_focus_pending: false,
-            form_focus: FormFocus {
-                name: cx.focus_handle(),
-                host: cx.focus_handle(),
-                port: cx.focus_handle(),
-                username: cx.focus_handle(),
-                password: cx.focus_handle(),
-                database: cx.focus_handle(),
-            },
             page_size: 1000,
             limit_records: true,
             object_search: String::new(),
-            object_search_focus: cx.focus_handle(),
-            object_search_focused: false,
+            object_search_input: {
+                let weak = app.clone();
+                cx.new(move |cx| {
+                    TextInput::new(
+                        Theme::dark(),
+                        "",
+                        TextInputOptions {
+                            placeholder: t!("object.search").to_string().into(),
+                            icon: Some("icons/search.svg"),
+                            clearable: true,
+                            ..Default::default()
+                        },
+                        cx,
+                    )
+                    .on_change(Rc::new(move |text, _window, cx| {
+                        let _ = weak.update(cx, |app, cx| {
+                            app.object_search = text.to_string();
+                            app.notify_object_pane(cx);
+                            cx.notify();
+                        });
+                    }))
+                })
+            },
             delete_confirm: None,
             error_dialog: None,
             window_bounds_subscription: None,
@@ -570,6 +724,60 @@ impl AppView {
                 pane.theme = theme;
                 cx.notify();
             });
+        }
+    }
+
+    /// Push the resolved theme into every managed [`TextInput`] so the fields track light/dark
+    /// changes. `TextInput::set_theme` only notifies when the value actually changed.
+    fn sync_input_themes(&mut self, cx: &mut Context<'_, Self>) {
+        let theme = self.theme;
+        if let Some(inputs) = self.form_inputs.as_ref() {
+            for input in &inputs.fields {
+                input.update(cx, |input, cx| input.set_theme(theme, cx));
+            }
+        }
+        self.object_search_input
+            .update(cx, |input, cx| input.set_theme(theme, cx));
+        if let Some(input) = self.db_name_input.as_ref() {
+            input.update(cx, |input, cx| input.set_theme(theme, cx));
+        }
+        if let Some(prompt) = self.password_prompt.as_ref() {
+            prompt
+                .input
+                .update(cx, |input, cx| input.set_theme(theme, cx));
+        }
+        for design in &self.designs {
+            design.update(cx, |design, cx| design.set_theme(theme, cx));
+        }
+    }
+
+    /// The drag handlers and current offset for the shared confirmation modal.
+    fn confirm_drag(&self, cx: &mut Context<'_, Self>) -> ui::DialogDrag {
+        ui::DialogDrag {
+            offset: self.confirm_offset,
+            on_start: Rc::new(cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                this.confirm_dragging = true;
+                this.confirm_drag_origin = event.position;
+                this.confirm_drag_base = this.confirm_offset;
+                cx.notify();
+            })),
+            on_move: Rc::new(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                if this.confirm_dragging {
+                    let dx = event.position.x - this.confirm_drag_origin.x;
+                    let dy = event.position.y - this.confirm_drag_origin.y;
+                    this.confirm_offset = Point {
+                        x: this.confirm_drag_base.x + dx,
+                        y: this.confirm_drag_base.y + dy,
+                    };
+                    cx.notify();
+                }
+            })),
+            on_end: Rc::new(cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                if this.confirm_dragging {
+                    this.confirm_dragging = false;
+                    cx.notify();
+                }
+            })),
         }
     }
 }
@@ -647,6 +855,34 @@ fn next_boundary(text: &str, offset: usize) -> usize {
         index += 1;
     }
     index
+}
+
+/// The byte offset for a UTF-16 offset (used by the platform IME protocol).
+fn offset_from_utf16(text: &str, offset: usize) -> usize {
+    let mut utf8 = 0;
+    let mut utf16 = 0;
+    for character in text.chars() {
+        if utf16 >= offset {
+            break;
+        }
+        utf16 += character.len_utf16();
+        utf8 += character.len_utf8();
+    }
+    utf8
+}
+
+/// The UTF-16 offset for a byte offset (used by the platform IME protocol).
+fn offset_to_utf16(text: &str, offset: usize) -> usize {
+    let mut utf8 = 0;
+    let mut utf16 = 0;
+    for character in text.chars() {
+        if utf8 >= offset {
+            break;
+        }
+        utf8 += character.len_utf8();
+        utf16 += character.len_utf16();
+    }
+    utf16
 }
 
 /// The byte range of the line containing `offset`, excluding the trailing newline.
@@ -737,6 +973,7 @@ fn move_vertical(text: &str, offset: usize, delta: isize) -> usize {
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         self.theme = Theme::resolve(self.theme_setting, window.appearance());
+        self.sync_input_themes(cx);
         let theme = self.theme;
 
         // gpui does not re-run `render` when the window is resized, so the object list would
@@ -751,7 +988,10 @@ impl Render for AppView {
         }
 
         if self.password_focus_pending {
-            window.focus(&self.password_focus);
+            if let Some(prompt) = self.password_prompt.as_ref() {
+                let handle = prompt.input.read(cx).focus_handle();
+                window.focus(&handle);
+            }
             self.password_focus_pending = false;
         }
 
@@ -760,24 +1000,16 @@ impl Render for AppView {
             self.query_focus_pending = false;
         }
 
-        self.object_search_focused = self.object_search_focus.is_focused(window);
         self.query_editor_focused = self.query_focus.is_focused(window);
 
-        let text_field_active = self.object_search_focused || self.query_editor_focused;
-        if (self.form.is_some() || self.db_dialog.is_some() || text_field_active)
-            && !self.caret_blink_running
-        {
+        if self.query_editor_focused && !self.caret_blink_running {
             self.caret_blink_running = true;
             let executor = cx.background_executor().clone();
             cx.spawn(async move |this, cx| {
                 loop {
                     executor.timer(Duration::from_millis(530)).await;
                     let keep_going = this.update(cx, |view, cx| {
-                        if view.form.is_some()
-                            || view.db_dialog.is_some()
-                            || view.object_search_focused
-                            || view.query_editor_focused
-                        {
+                        if view.query_editor_focused {
                             view.caret_visible = !view.caret_visible;
                             cx.notify();
                             true
@@ -838,7 +1070,7 @@ impl Render for AppView {
         }
 
         if let Some(prompt) = self.password_prompt.as_ref() {
-            root = root.child(self.render_password_prompt(prompt, window, cx));
+            root = root.child(self.render_password_prompt(prompt, cx));
         }
 
         if let Some(message) = self.error_dialog.clone() {
