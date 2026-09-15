@@ -5,33 +5,20 @@ impl GridView {
         let theme = self.theme;
         let handle = self.list_scroll.0.borrow().base_handle.clone();
         let viewport = f32::from(handle.bounds().size.height);
-        let max = f32::from(handle.max_offset().height);
+        let max = (self.state.rows.len() as f32 * GRID_ROW_HEIGHT - viewport).max(0.0);
         if max <= 0.0 {
             return div().into_any_element();
         }
         let scroll = -f32::from(handle.offset().y);
-        let (thumb_h, travel) = scrollbar_thumb(viewport, max);
-        let thumb_y = if max > 0.0 {
-            (scroll / max) * travel
-        } else {
-            0.0
-        };
-        // The track must cover exactly the list viewport, not the whole column: otherwise its
-        // travel is shorter than the thumb's and the thumb can never reach the bottom. Offset
-        // the header on top and the horizontal scrollbar (when present) at the bottom.
-        let footer = if self.hscroll.max_offset().width > px(0.0) {
-            GRID_SCROLLBAR_THICKNESS
-        } else {
-            0.0
-        };
+        let (thumb_top, thumb_len) = scrollbar_fractions(viewport, max, scroll);
 
         div()
             .flex_none()
             .h_full()
             .pt(px(GRID_ROW_HEIGHT))
-            .pb(px(footer))
+            .pb(px(GRID_SCROLLBAR_THICKNESS))
             .child(
-                ui::vscrollbar_track("grid-vscrollbar", theme, thumb_y, thumb_h).on_mouse_down(
+                ui::vscrollbar_track("grid-vscrollbar", theme, thumb_top, thumb_len).on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, event: &MouseDownEvent, _window, cx| {
                         this.grid_vscroll_begin(event.position.y, cx);
@@ -46,17 +33,17 @@ impl GridView {
         let viewport = f32::from(self.hscroll.bounds().size.width);
         let max = f32::from(self.hscroll.max_offset().width);
         if max <= 0.0 {
-            return div().into_any_element();
+            // Reserve the same height as a real scrollbar so the vertical track's viewport stays
+            // constant whether or not the grid can scroll horizontally.
+            return div()
+                .flex_none()
+                .h(px(GRID_SCROLLBAR_THICKNESS))
+                .into_any_element();
         }
         let scroll = -f32::from(self.hscroll.offset().x);
-        let (thumb_w, travel) = scrollbar_thumb(viewport, max);
-        let thumb_x = if max > 0.0 {
-            (scroll / max) * travel
-        } else {
-            0.0
-        };
+        let (thumb_left, thumb_len) = scrollbar_fractions(viewport, max, scroll);
 
-        ui::hscrollbar_track("grid-hscrollbar", theme, thumb_x, thumb_w)
+        ui::hscrollbar_track("grid-hscrollbar", theme, thumb_left, thumb_len)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
@@ -117,7 +104,7 @@ impl GridView {
         let handle = self.list_scroll.0.borrow().base_handle.clone();
         let bounds = handle.bounds();
         let viewport = f32::from(bounds.size.height);
-        let max = f32::from(handle.max_offset().height);
+        let max = (self.state.rows.len() as f32 * GRID_ROW_HEIGHT - viewport).max(0.0);
         let (thumb_h, travel) = scrollbar_thumb(viewport, max);
         if travel <= 0.0 {
             return;
@@ -151,7 +138,7 @@ impl GridView {
     pub(super) fn grid_vscroll_set(&self, relative: f32, grab: f32, cx: &mut Context<'_, Self>) {
         let handle = self.list_scroll.0.borrow().base_handle.clone();
         let viewport = f32::from(handle.bounds().size.height);
-        let max = f32::from(handle.max_offset().height);
+        let max = (self.state.rows.len() as f32 * GRID_ROW_HEIGHT - viewport).max(0.0);
         let (_, travel) = scrollbar_thumb(viewport, max);
         if travel <= 0.0 {
             return;

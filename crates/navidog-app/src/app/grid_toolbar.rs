@@ -284,9 +284,9 @@ impl GridView {
                     .overflow_hidden()
                     .cursor_pointer()
                     .hover(move |style| style.border_color(rgb(theme.button_default_border)))
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                    .on_click(cx.listener(move |this, _event, window, cx| {
                         cx.stop_propagation();
-                        this.sort_open_combo(index, cx)
+                        this.sort_open_combo(index, window, cx)
                     }))
                     .child(rule.column.clone()),
             )
@@ -592,28 +592,21 @@ impl GridView {
             .overflow_hidden()
             .cursor_pointer()
             .hover(move |style| style.border_color(rgb(theme.button_default_border)))
-            .on_click(cx.listener(move |this, _event, _window, cx| {
-                this.filter_open_combo(index, FilterCombo::Field, cx);
+            .on_click(cx.listener(move |this, _event, window, cx| {
+                this.filter_open_combo(index, FilterCombo::Field, window, cx);
             }))
             .child(value);
 
-        let mut list = div()
-            .id(SharedString::from(format!("filter-field-list-{index}")))
-            .absolute()
-            .top(px(22.0))
-            .left_0()
-            .w(px(170.0))
-            .max_h(px(240.0))
+        let mut options = div()
+            .id(SharedString::from(format!("filter-field-options-{index}")))
+            .max_h(px(200.0))
             .overflow_y_scroll()
             .flex()
-            .flex_col()
-            .bg(rgb(theme.dialog_bg))
-            .border_1()
-            .border_color(rgb(theme.border));
-        for column in &self.state.columns {
-            let name = column.name.clone();
+            .flex_col();
+        for name in self.filter_field_matches() {
+            let name = name.to_string();
             let click = name.clone();
-            list = list.child(
+            options = options.child(
                 div()
                     .id(SharedString::from(format!(
                         "filter-field-option-{index}-{name}"
@@ -633,6 +626,29 @@ impl GridView {
                     .child(name),
             );
         }
+
+        let mut list = div()
+            .id(SharedString::from(format!("filter-field-list-{index}")))
+            .absolute()
+            .top(px(22.0))
+            .left_0()
+            .w(px(170.0))
+            .flex()
+            .flex_col()
+            .bg(rgb(theme.dialog_bg))
+            .border_1()
+            .border_color(rgb(theme.border));
+        if let Some(search) = self.filter_search.clone() {
+            list = list.child(
+                div()
+                    .flex_none()
+                    .p_1()
+                    .border_b_1()
+                    .border_color(rgb(theme.grid_line))
+                    .child(div().h(px(20.0)).child(search)),
+            );
+        }
+        list = list.child(options);
 
         div().relative().child(button).when(open, move |style| {
             style.child(deferred(list).with_priority(10))
@@ -666,27 +682,22 @@ impl GridView {
             .overflow_hidden()
             .cursor_pointer()
             .hover(move |style| style.border_color(rgb(theme.button_default_border)))
-            .on_click(cx.listener(move |this, _event, _window, cx| {
-                this.filter_open_combo(index, FilterCombo::Operator, cx);
+            .on_click(cx.listener(move |this, _event, window, cx| {
+                this.filter_open_combo(index, FilterCombo::Operator, window, cx);
             }))
             .child(t!(operator.label_key()).to_string());
 
-        let mut list = div()
-            .id(SharedString::from(format!("filter-operator-list-{index}")))
-            .absolute()
-            .top(px(22.0))
-            .left_0()
-            .w(px(150.0))
-            .max_h(px(240.0))
+        let mut options = div()
+            .id(SharedString::from(format!(
+                "filter-operator-options-{index}"
+            )))
+            .max_h(px(200.0))
             .overflow_y_scroll()
             .flex()
-            .flex_col()
-            .bg(rgb(theme.dialog_bg))
-            .border_1()
-            .border_color(rgb(theme.border));
-        for option in FilterOperator::ALL {
+            .flex_col();
+        for option in self.filter_operator_matches() {
             let selected = option == operator;
-            list = list.child(
+            options = options.child(
                 div()
                     .id(SharedString::from(format!(
                         "filter-operator-option-{index}-{}",
@@ -712,6 +723,29 @@ impl GridView {
                     .child(t!(option.label_key()).to_string()),
             );
         }
+
+        let mut list = div()
+            .id(SharedString::from(format!("filter-operator-list-{index}")))
+            .absolute()
+            .top(px(22.0))
+            .left_0()
+            .w(px(150.0))
+            .flex()
+            .flex_col()
+            .bg(rgb(theme.dialog_bg))
+            .border_1()
+            .border_color(rgb(theme.border));
+        if let Some(search) = self.filter_search.clone() {
+            list = list.child(
+                div()
+                    .flex_none()
+                    .p_1()
+                    .border_b_1()
+                    .border_color(rgb(theme.grid_line))
+                    .child(div().h(px(20.0)).child(search)),
+            );
+        }
+        list = list.child(options);
 
         div().relative().child(button).when(open, move |style| {
             style.child(deferred(list).with_priority(10))
@@ -759,7 +793,8 @@ impl GridView {
             .w(px(200.0))
             .h(px(20.0))
             .flex_none()
-            .px_2()
+            .pl(px(2.0))
+            .pr(px(2.0))
             .text_size(px(12.0))
             .overflow_hidden();
         if enabled {
@@ -875,53 +910,20 @@ impl GridView {
         let highlight = self
             .sort_combo_highlight
             .min(matches.len().saturating_sub(1));
-        let filter = self.sort_combo_filter.clone();
 
-        let search = div()
+        let mut search = div()
             .flex()
             .flex_row()
             .items_center()
-            .gap_1()
-            .px_2()
-            .h(px(22.0))
+            .px_1()
+            .py_1()
+            .h(px(24.0))
             .flex_none()
-            .relative()
             .border_b_1()
-            .border_color(rgb(theme.border))
-            .child(
-                svg()
-                    .path("icons/search.svg")
-                    .w(px(11.0))
-                    .h(px(11.0))
-                    .flex_none()
-                    .text_color(rgb(theme.text_muted)),
-            )
-            .child({
-                let mut text = div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_size(px(12.0))
-                    .text_color(rgb(if filter.is_empty() {
-                        theme.text_muted
-                    } else {
-                        theme.text
-                    }));
-                text = text.child(if filter.is_empty() {
-                    t!("grid.sort_search").to_string()
-                } else {
-                    filter.clone()
-                });
-                if self.sort_combo_focused && self.caret() {
-                    text = text.child(ui::text_caret(theme));
-                }
-                text
-            })
-            .child(self.ime_probe(&self.sort_combo_focus));
+            .border_color(rgb(theme.border));
+        if let Some(input) = self.sort_search.clone() {
+            search = search.child(div().h(px(20.0)).flex_1().child(input));
+        }
 
         let mut options = div()
             .id("sort-combo-options")
@@ -983,7 +985,6 @@ impl GridView {
         let top = 52.0 + rule_index as f32 * 24.0;
         div()
             .id("sort-combo-popup")
-            .track_focus(&self.sort_combo_focus)
             .on_key_down(cx.listener(|this, event, _window, cx| this.sort_combo_key(event, cx)))
             .absolute()
             .occlude()
@@ -1174,9 +1175,11 @@ impl GridView {
             .relative()
             .flex()
             .items_center()
-            .justify_center()
+            .justify_start()
             .w(px(52.0))
             .h(px(22.0))
+            .pl(px(2.0))
+            .pr(px(2.0))
             .text_size(px(12.0))
             .cursor_text()
             .on_key_down(cx.listener(|this, event, _window, cx| this.page_input_key(event, cx)))
@@ -1240,9 +1243,11 @@ impl GridView {
                     .relative()
                     .flex()
                     .items_center()
-                    .justify_center()
+                    .justify_start()
                     .w(px(64.0))
                     .h(px(20.0))
+                    .pl(px(2.0))
+                    .pr(px(2.0))
                     .bg(rgb(if limit_records {
                         theme.input_bg
                     } else {

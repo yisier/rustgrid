@@ -61,10 +61,6 @@ impl AppView {
             }
             DbDialog::Edit {
                 name,
-                charset,
-                collation,
-                charsets,
-                collations,
                 tab,
                 loading,
                 error,
@@ -106,29 +102,13 @@ impl AppView {
                                     .child(t!("common.loading").to_string()),
                             );
                         } else {
-                            let collation_options: Vec<String> = if charset.is_empty() {
-                                collations.clone()
-                            } else {
-                                let prefix = format!("{charset}_");
-                                collations
-                                    .iter()
-                                    .filter(|candidate| candidate.starts_with(&prefix))
-                                    .cloned()
-                                    .collect()
-                            };
-                            form = form.child(self.db_combo(
+                            form = form.child(db_combo_row(
                                 format!("{}:", t!("database.charset")),
-                                charset,
-                                charsets,
-                                DbCombo::Charset,
-                                cx,
+                                self.db_charset_combo.clone(),
                             ));
-                            form = form.child(self.db_combo(
+                            form = form.child(db_combo_row(
                                 format!("{}:", t!("database.collation")),
-                                collation,
-                                &collation_options,
-                                DbCombo::Collation,
-                                cx,
+                                self.db_collation_combo.clone(),
                             ));
                         }
                         form = form.child(db_error(error, theme));
@@ -311,7 +291,6 @@ impl AppView {
                                 cx.listener(|this, _event, _window, cx| {
                                     this.db_dialog = None;
                                     this.db_name_input = None;
-                                    this.db_combo = None;
                                     cx.notify();
                                 }),
                             )),
@@ -352,4 +331,19 @@ impl AppView {
             )
             .into_any_element()
     }
+}
+
+/// A labelled editable drop-down row (`label: [combo]`), with the combo entity rendered as-is.
+fn db_combo_row(label: String, combo: Option<Entity<ComboBox>>) -> Div {
+    let mut row = div().flex().flex_row().items_center().gap_2().child(
+        div()
+            .w(px(150.0))
+            .flex_none()
+            .text_size(px(12.0))
+            .child(label),
+    );
+    if let Some(combo) = combo {
+        row = row.child(combo);
+    }
+    row
 }

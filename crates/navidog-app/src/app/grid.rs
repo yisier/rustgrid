@@ -1,5 +1,19 @@
 use super::*;
 
+/// Case-insensitive substring-or-subsequence test for the filter popups' search fields.
+fn filter_matches(query: &str, label: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    if label.contains(query) {
+        return true;
+    }
+    let mut chars = label.chars();
+    query
+        .chars()
+        .all(|needle| chars.any(|haystack| haystack == needle))
+}
+
 impl AppView {
     pub(super) fn active_grid_id(&self, cx: &App) -> Option<u64> {
         self.active_grid
@@ -85,6 +99,7 @@ impl GridView {
 
         self.selecting_cells = false;
         self.cell_editor = None;
+        self.cell_editor_blur_subscription = None;
         self.date_picker = None;
         cx.notify();
 
@@ -142,6 +157,7 @@ impl GridView {
         self.state.selection = None;
         self.state.edits.clear();
         self.cell_editor = None;
+        self.cell_editor_blur_subscription = None;
         self.date_picker = None;
         cx.notify();
 
@@ -338,7 +354,12 @@ impl GridView {
         cx.notify();
     }
 
-    pub(super) fn sort_open_combo(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+    pub(super) fn sort_open_combo(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         let current = self
             .state
             .sort_draft
@@ -353,18 +374,50 @@ impl GridView {
             .is_some_and(|(open, _)| *open == index)
         {
             self.state.sort_combo = None;
-        } else {
-            let highlight = self
-                .state
-                .columns
-                .iter()
-                .position(|column| column.name == current)
-                .unwrap_or(0);
-            self.state.sort_combo = Some((index, current));
-            self.sort_combo_filter.clear();
-            self.sort_combo_highlight = highlight;
-            self.sort_combo_focus_pending = true;
+            cx.notify();
+            return;
         }
+        let highlight = self
+            .state
+            .columns
+            .iter()
+            .position(|column| column.name == current)
+            .unwrap_or(0);
+        self.state.sort_combo = Some((index, current));
+        self.sort_combo_filter.clear();
+        self.sort_combo_highlight = highlight;
+        let theme = self.theme;
+        let weak = self.self_weak.clone();
+        let input = self
+            .sort_search
+            .get_or_insert_with(|| {
+                let change = weak.clone();
+                let submit = weak.clone();
+                let cancel = weak;
+                cx.new(move |cx| {
+                    TextInput::new(theme, "", TextInputOptions::default(), cx)
+                        .on_change(Rc::new(move |text, _window, cx| {
+                            let _ = change.update(cx, |grid, cx| {
+                                grid.sort_combo_filter = text.to_string();
+                                grid.sort_combo_highlight = 0;
+                                cx.notify();
+                            });
+                        }))
+                        .on_submit(Rc::new(move |_window, cx| {
+                            let _ = submit.update(cx, |grid, cx| grid.sort_confirm_combo(cx));
+                        }))
+                        .on_cancel(Rc::new(move |_window, cx| {
+                            let _ = cancel.update(cx, |grid, cx| grid.sort_cancel_combo(cx));
+                        }))
+                })
+            })
+            .clone();
+        input.update(cx, |input, cx| {
+            input.set_text("", cx);
+            input.set_placeholder(t!("grid.sort_search").to_string(), cx);
+        });
+        let focus = input.read(cx).focus_handle();
+        window.focus(&focus);
         cx.notify();
     }
 
@@ -398,38 +451,16 @@ impl GridView {
         if self.state.sort_combo.is_none() {
             return;
         }
-        let matches = self.sort_combo_matches();
-        let count = matches.len();
+        let count = self.sort_combo_matches().len();
 
         match event.keystroke.key.as_str() {
-            "up" => {
-                if count > 0 {
-                    self.sort_combo_highlight = self.sort_combo_highlight.saturating_sub(1);
-                }
+            "up" if count > 0 => {
+                self.sort_combo_highlight = self.sort_combo_highlight.saturating_sub(1);
             }
-            "down" => {
-                if count > 0 {
-                    self.sort_combo_highlight = (self.sort_combo_highlight + 1) % count;
-                }
+            "down" if count > 0 => {
+                self.sort_combo_highlight = (self.sort_combo_highlight + 1) % count;
             }
-            "enter" => {
-                if let Some(column) = matches.get(self.sort_combo_highlight).cloned() {
-                    let index = self.state.sort_combo.as_ref().map(|(i, _)| *i).unwrap_or(0);
-                    self.sort_choose_column(index, column, cx);
-                    return;
-                }
-            }
-            "escape" => {
-                self.sort_cancel_combo(cx);
-                return;
-            }
-            "backspace" => {
-                self.sort_combo_filter.pop();
-                self.sort_combo_highlight = 0;
-            }
-            _ => {
-                // Text characters (including IME) arrive through the grid's input handler.
-            }
+            _ => {}
         }
         self.sort_combo_highlight = self.sort_combo_highlight.min(count.saturating_sub(1));
         cx.notify();
@@ -620,15 +651,93 @@ impl GridView {
         &mut self,
         index: usize,
         kind: FilterCombo,
+        window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        self.state.filter_combo = if self.state.filter_combo == Some((index, kind)) {
-            None
-        } else {
-            Some((index, kind))
-        };
+        if self.state.filter_combo == Some((index, kind)) {
+            self.state.filter_combo = None;
+            self.filter_active = None;
+            cx.notify();
+            return;
+        }
+        self.state.filter_combo = Some((index, kind));
         self.filter_active = None;
+        self.filter_query.clear();
+        let theme = self.theme;
+        let weak = self.self_weak.clone();
+        let input = self
+            .filter_search
+            .get_or_insert_with(|| {
+                let change = weak.clone();
+                let submit = weak.clone();
+                let cancel = weak;
+                cx.new(move |cx| {
+                    TextInput::new(theme, "", TextInputOptions::default(), cx)
+                        .on_change(Rc::new(move |text, _window, cx| {
+                            let _ = change.update(cx, |grid, cx| {
+                                grid.filter_query = text.to_string();
+                                cx.notify();
+                            });
+                        }))
+                        .on_submit(Rc::new(move |_window, cx| {
+                            let _ = submit.update(cx, |grid, cx| grid.filter_choose_first(cx));
+                        }))
+                        .on_cancel(Rc::new(move |_window, cx| {
+                            let _ = cancel.update(cx, |grid, cx| {
+                                grid.state.filter_combo = None;
+                                cx.notify();
+                            });
+                        }))
+                })
+            })
+            .clone();
+        input.update(cx, |input, cx| input.set_text("", cx));
+        let focus = input.read(cx).focus_handle();
+        window.focus(&focus);
         cx.notify();
+    }
+
+    /// The column names that match the filter popup's search text.
+    pub(super) fn filter_field_matches(&self) -> Vec<&str> {
+        let query = self.filter_query.trim().to_lowercase();
+        self.state
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .filter(|name| filter_matches(&query, &name.to_lowercase()))
+            .collect()
+    }
+
+    /// The operators whose translated label matches the filter popup's search text.
+    pub(super) fn filter_operator_matches(&self) -> Vec<FilterOperator> {
+        let query = self.filter_query.trim().to_lowercase();
+        FilterOperator::ALL
+            .iter()
+            .copied()
+            .filter(|operator| filter_matches(&query, &t!(operator.label_key()).to_lowercase()))
+            .collect()
+    }
+
+    fn filter_choose_first(&mut self, cx: &mut Context<'_, Self>) {
+        let Some((index, kind)) = self.state.filter_combo else {
+            return;
+        };
+        match kind {
+            FilterCombo::Field => {
+                if let Some(name) = self
+                    .filter_field_matches()
+                    .first()
+                    .map(|name| name.to_string())
+                {
+                    self.filter_choose_field(index, name, cx);
+                }
+            }
+            FilterCombo::Operator => {
+                if let Some(operator) = self.filter_operator_matches().first().copied() {
+                    self.filter_choose_operator(index, operator, cx);
+                }
+            }
+        }
     }
 
     pub(super) fn filter_choose_field(

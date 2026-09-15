@@ -10,13 +10,15 @@ use std::rc::Rc;
 use gpui::{
     AnyElement, App, BoxShadow, ClickEvent, Div, FontWeight, IntoElement, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Stateful, Window,
-    div, prelude::*, px, rgb, rgba, svg,
+    div, prelude::*, px, relative, rgb, rgba, svg,
 };
 
 use crate::theme::Theme;
 
+mod combo;
 mod text_input;
 
+pub(crate) use combo::{ComboBox, ComboOption};
 pub(crate) use text_input::{TextInput, TextInputOptions};
 
 /// The variant of a push button. See `win_button` / `dialog_button`.
@@ -471,21 +473,42 @@ pub(super) fn scrollbar_thumb(viewport: f32, max: f32) -> (f32, f32) {
     (thumb, (viewport - thumb).max(0.0))
 }
 
-/// A vertical scrollbar track (14px wide) with its thumb already placed at `thumb_y`.
-/// gpui 0.2 does not paint scrollbars for `overflow_*`, so every scrollable pane draws its
-/// own; callers attach the drag handler.
+/// The thumb's `(top, length)` as fractions of the track, for `relative()` placement. Because the
+/// thumb is sized and positioned relative to the track it is drawn in, it can never overflow the
+/// track even when the viewport used for the math and the track's own size disagree.
+pub(super) fn scrollbar_fractions(viewport: f32, max: f32, scroll: f32) -> (f32, f32) {
+    if viewport <= 0.0 || max <= 0.0 {
+        return (0.0, 1.0);
+    }
+    let content = (viewport + max).max(1.0);
+    let min_len = (24.0 / viewport).min(1.0);
+    let length = (viewport / content).clamp(min_len, 1.0);
+    let travel = 1.0 - length;
+    let top = if max > 0.0 {
+        (scroll / max).clamp(0.0, 1.0) * travel
+    } else {
+        0.0
+    };
+    (top, length)
+}
+
+/// A vertical scrollbar track (14px wide) with its thumb placed by fraction of the track:
+/// `thumb_top`/`thumb_len` are in `[0, 1]`, so the thumb is always inside the track. gpui 0.2
+/// does not paint scrollbars for `overflow_*`, so every scrollable pane draws its own; callers
+/// attach the drag handler.
 pub(super) fn vscrollbar_track(
-    id: &'static str,
+    id: impl Into<SharedString>,
     theme: Theme,
-    thumb_y: f32,
-    thumb_h: f32,
+    thumb_top: f32,
+    thumb_len: f32,
 ) -> Stateful<Div> {
     div()
-        .id(id)
+        .id(id.into())
         .relative()
         .flex_none()
         .w(px(14.0))
         .h_full()
+        .overflow_hidden()
         .bg(rgb(theme.toolbar_bg))
         .border_l_1()
         .border_color(rgb(theme.border))
@@ -494,26 +517,27 @@ pub(super) fn vscrollbar_track(
             div()
                 .absolute()
                 .left(px(1.0))
-                .top(px(thumb_y))
+                .top(relative(thumb_top))
                 .w(px(12.0))
-                .h(px(thumb_h))
+                .h(relative(thumb_len))
                 .bg(rgb(theme.button_border)),
         )
 }
 
-/// A horizontal scrollbar track (14px tall) with its thumb already placed at `thumb_x`.
+/// A horizontal scrollbar track (14px tall) with its thumb placed by fraction of the track.
 pub(super) fn hscrollbar_track(
-    id: &'static str,
+    id: impl Into<SharedString>,
     theme: Theme,
-    thumb_x: f32,
-    thumb_w: f32,
+    thumb_left: f32,
+    thumb_len: f32,
 ) -> Stateful<Div> {
     div()
-        .id(id)
+        .id(id.into())
         .relative()
         .flex_none()
         .w_full()
         .h(px(14.0))
+        .overflow_hidden()
         .bg(rgb(theme.toolbar_bg))
         .border_t_1()
         .border_color(rgb(theme.border))
@@ -521,9 +545,9 @@ pub(super) fn hscrollbar_track(
         .child(
             div()
                 .absolute()
-                .left(px(thumb_x))
+                .left(relative(thumb_left))
                 .top(px(1.0))
-                .w(px(thumb_w))
+                .w(relative(thumb_len))
                 .h(px(12.0))
                 .bg(rgb(theme.button_border)),
         )

@@ -21,21 +21,21 @@ impl GridView {
             vscroll_grab: None,
             focus: cx.focus_handle(),
             selecting_cells: false,
+            cell_press: None,
+            cell_dragged: false,
             cell_editor: None,
-            cell_editor_focus: cx.focus_handle(),
-            cell_editor_focused: false,
             cell_editor_blur_subscription: None,
             cell_editor_focus_pending: false,
             date_picker: None,
             sort_hover: None,
-            sort_combo_focus: cx.focus_handle(),
-            sort_combo_focus_pending: false,
-            sort_combo_focused: false,
+            sort_search: None,
             sort_combo_filter: String::new(),
             sort_combo_highlight: 0,
             filter_value_focus: Vec::new(),
             filter_value2_focus: Vec::new(),
             filter_active: None,
+            filter_search: None,
+            filter_query: String::new(),
             page_input,
             page_input_focus: cx.focus_handle(),
             page_input_focused: false,
@@ -56,42 +56,38 @@ impl GridView {
     /// any pending focus requests. Called at the top of `render`.
     fn prepare_frame(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         if let Some(app) = self.app.upgrade() {
-            self.theme = app.read(cx).theme;
+            let theme = app.read(cx).theme;
+            if theme != self.theme {
+                self.theme = theme;
+                if let Some(input) = self.cell_editor.as_ref().map(|editor| editor.input.clone()) {
+                    input.update(cx, |input, cx| input.set_theme(theme, cx));
+                }
+                if let Some(input) = self.filter_search.clone() {
+                    input.update(cx, |input, cx| input.set_theme(theme, cx));
+                }
+                if let Some(input) = self.sort_search.clone() {
+                    input.update(cx, |input, cx| input.set_theme(theme, cx));
+                }
+            }
         }
         if self.cell_editor_focus_pending {
-            window.focus(&self.cell_editor_focus);
+            if let Some(input) = self.cell_editor.as_ref().map(|editor| editor.input.clone()) {
+                let focus = input.read(cx).focus_handle();
+                window.focus(&focus);
+            }
             self.cell_editor_focus_pending = false;
-        }
-        if self.sort_combo_focus_pending {
-            window.focus(&self.sort_combo_focus);
-            self.sort_combo_focus_pending = false;
         }
         if self.page_size_focus_pending {
             window.focus(&self.page_size_focus);
             self.page_size_focus_pending = false;
         }
-        if self.cell_editor_blur_subscription.is_none() {
-            self.cell_editor_blur_subscription =
-                Some(
-                    cx.on_blur(&self.cell_editor_focus, window, |this, _window, cx| {
-                        if this.cell_editor.is_some() {
-                            this.finish_cell_editor(cx);
-                        }
-                    }),
-                );
-        }
-        self.cell_editor_focused = self.cell_editor_focus.is_focused(window);
         self.page_input_focused = self.page_input_focus.is_focused(window);
         self.page_size_focused = self.page_size_focus.is_focused(window);
-        self.sort_combo_focused = self.sort_combo_focus.is_focused(window);
         self.update_blink(cx);
     }
 
     fn has_focused_input(&self) -> bool {
-        self.cell_editor_focused
-            || self.sort_combo_focused
-            || self.page_input_focused
-            || self.page_size_focused
+        self.page_input_focused || self.page_size_focused
     }
 
     fn update_blink(&mut self, cx: &mut Context<'_, Self>) {
@@ -218,7 +214,7 @@ impl Render for GridView {
                 .h(px(GRID_ROW_HEIGHT))
                 .w(px(width))
                 .flex_none()
-                .px_2()
+                .pr(px(4.0))
                 .whitespace_nowrap()
                 .overflow_hidden()
                 .cursor_pointer()
@@ -363,7 +359,7 @@ impl Render for GridView {
                                 .h(px(GRID_ROW_HEIGHT))
                                 .w(px(width))
                                 .flex_none()
-                                .px_2()
+                                .pr(px(4.0))
                                 .whitespace_nowrap()
                                 .overflow_hidden()
                                 .border_r_1()
@@ -433,63 +429,28 @@ impl Render for GridView {
                     .flex_col()
                     .h_full()
                     .w(px(content_width))
-                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
-                        if this
-                            .cell_editor
-                            .as_ref()
-                            .is_some_and(|editor| editor.selecting)
-                        {
-                            this.cell_editor_drag(event, window, cx);
-                        } else {
-                            this.grid_mouse_move(event, cx);
-                        }
+                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                        this.grid_mouse_move(event, cx);
                     }))
                     .on_mouse_up(
                         MouseButton::Left,
-                        cx.listener(|this, _event, _window, cx| {
-                            if let Some(editor) = this.cell_editor.as_mut() {
-                                editor.selecting = false;
-                            }
+                        cx.listener(|this, _event, window, cx| {
                             this.selecting_cells = false;
+                            let press = this.cell_press.take();
+                            let dragged = this.cell_dragged;
+                            this.cell_dragged = false;
+                            if let Some((row, col)) = press
+                                && !dragged
+                            {
+                                this.begin_edit((row, col), None, window, cx);
+                            }
                             cx.notify();
                         }),
                     )
                     .child(header)
                     .child(list)
-                    .child(self.render_cell_editor(window, cx))
-                    .child(self.render_date_picker(cx))
-                    .child({
-                        let weak = cx.weak_entity();
-                        canvas(
-                            |_, _, _| {},
-                            move |bounds, _state, window, _cx| {
-                                window.on_mouse_event(
-                                    move |event: &ScrollWheelEvent, phase, _window, cx| {
-                                        if phase != DispatchPhase::Capture
-                                            || !bounds.contains(&event.position)
-                                        {
-                                            return;
-                                        }
-                                        let delta = match event.delta {
-                                            ScrollDelta::Lines(delta) => delta.y,
-                                            ScrollDelta::Pixels(delta) => f32::from(delta.y),
-                                        };
-                                        if delta == 0.0 {
-                                            return;
-                                        }
-                                        let position = event.position;
-                                        let _ = weak.update(cx, |this, cx| {
-                                            if this.scroll_grid_selection(position, delta, cx) {
-                                                cx.stop_propagation();
-                                            }
-                                        });
-                                    },
-                                );
-                            },
-                        )
-                        .absolute()
-                        .inset_0()
-                    }),
+                    .child(self.render_cell_editor(cx))
+                    .child(self.render_date_picker(cx)),
             );
 
         let mut root = div().relative().flex().flex_col().size_full();
@@ -502,23 +463,63 @@ impl Render for GridView {
                 root = root.child(self.render_sort_panel(cx));
             }
         }
+        let wheel_weak = cx.weak_entity();
         root = root.child(
             div()
+                .relative()
                 .flex()
-                .flex_row()
                 .flex_1()
                 .min_h(px(0.0))
                 .child(
                     div()
                         .flex()
-                        .flex_col()
+                        .flex_row()
                         .flex_1()
-                        .min_w(px(0.0))
                         .min_h(px(0.0))
-                        .child(table)
-                        .child(self.render_grid_hscrollbar(cx)),
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .min_h(px(0.0))
+                                .child(table)
+                                .child(self.render_grid_hscrollbar(cx)),
+                        )
+                        .child(self.render_grid_vscrollbar(cx)),
                 )
-                .child(self.render_grid_vscrollbar(cx)),
+                .child({
+                    let weak = wheel_weak.clone();
+                    canvas(
+                        |_, _, _| {},
+                        move |bounds, _state, window, _cx| {
+                            window.on_mouse_event(
+                                move |event: &ScrollWheelEvent, phase, _window, cx| {
+                                    if phase != DispatchPhase::Capture
+                                        || !bounds.contains(&event.position)
+                                    {
+                                        return;
+                                    }
+                                    let delta = match event.delta {
+                                        ScrollDelta::Lines(delta) => delta.y,
+                                        ScrollDelta::Pixels(delta) => f32::from(delta.y),
+                                    };
+                                    if delta == 0.0 {
+                                        return;
+                                    }
+                                    let position = event.position;
+                                    let _ = weak.update(cx, |this, cx| {
+                                        if this.scroll_grid_selection(position, delta, cx) {
+                                            cx.stop_propagation();
+                                        }
+                                    });
+                                },
+                            );
+                        },
+                    )
+                    .absolute()
+                    .inset_0()
+                }),
         );
 
         if self.state.show_toolbar && self.page_size_menu_open {

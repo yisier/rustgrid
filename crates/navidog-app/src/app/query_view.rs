@@ -58,20 +58,6 @@ impl AppView {
                 |_, _, _| {},
             ));
 
-        let connection_label = query
-            .connection_index
-            .and_then(|index| self.connections.get(index))
-            .map(|node| node.profile.name.clone())
-            .unwrap_or_else(|| t!("query.not_connected").to_string());
-        let database_label = query
-            .database
-            .clone()
-            .unwrap_or_else(|| t!("database.name").to_string());
-        let connection_options = self.query_connection_options();
-        let database_options = query
-            .connection_index
-            .map(|index| self.query_database_options(index))
-            .unwrap_or_default();
         let has_connection = query
             .connection_index
             .and_then(|index| self.connection_arc(index))
@@ -96,24 +82,8 @@ impl AppView {
             .bg(rgb(theme.toolbar_bg))
             .border_b_1()
             .border_color(rgb(theme.border))
-            .child(self.query_combo(
-                QueryCombo::Connection,
-                "icons/connection.svg",
-                theme.icon_connection,
-                &connection_label,
-                &connection_options,
-                true,
-                cx,
-            ))
-            .child(self.query_combo(
-                QueryCombo::Database,
-                "icons/database.svg",
-                theme.icon_database,
-                &database_label,
-                &database_options,
-                query.connection_index.is_some(),
-                cx,
-            ))
+            .child(self.query_connection_combo_element())
+            .child(self.query_database_combo_element())
             .child(div().w(px(10.0)).flex_none())
             .child(self.query_tool_button(
                 "query-run",
@@ -242,118 +212,17 @@ impl AppView {
             .child(label)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn query_combo(
-        &self,
-        kind: QueryCombo,
-        icon: &'static str,
-        icon_color: u32,
-        selected: &str,
-        options: &[(String, String)],
-        enabled: bool,
-        cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
-        let theme = self.theme;
-        let open = self.query_combo == Some(kind);
-
-        let mut list = div()
-            .id(SharedString::from(format!("query-combo-list-{kind:?}")))
-            .absolute()
-            .top(px(25.0))
-            .left_0()
-            .w(px(240.0))
-            .flex()
-            .flex_col()
-            .bg(rgb(theme.dialog_bg))
-            .border_1()
-            .border_color(rgb(theme.border))
-            .h(px((options.len().min(10) as f32) * 22.0 + 4.0))
-            .overflow_y_scroll();
-        for (value, label) in options {
-            let is_selected = value == selected;
-            let value = value.clone();
-            let label = label.clone();
-            list = list.child(
-                div()
-                    .id(SharedString::from(format!("query-combo-{kind:?}-{value}")))
-                    .flex()
-                    .items_center()
-                    .h(px(22.0))
-                    .px_2()
-                    .flex_none()
-                    .text_size(px(12.0))
-                    .cursor_pointer()
-                    .when(is_selected, move |style| {
-                        style
-                            .bg(rgb(theme.tree_selected_bg))
-                            .text_color(rgb(theme.tree_selected_text))
-                    })
-                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.query_select_combo(kind, value.clone(), cx);
-                    }))
-                    .child(label),
-            );
+    fn query_connection_combo_element(&self) -> AnyElement {
+        match self.query_connection_combo.as_ref() {
+            Some(combo) => combo.clone().into_any_element(),
+            None => div().into_any_element(),
         }
+    }
 
-        let text_color = if enabled {
-            theme.text
-        } else {
-            theme.text_muted
-        };
-        let combo = ui::text_field(theme)
-            .id(SharedString::from(format!("query-combo-btn-{kind:?}")))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_1()
-            .w(px(240.0))
-            .h(px(24.0))
-            .px_2()
-            .text_size(px(12.0))
-            .text_color(rgb(text_color))
-            .when(enabled, move |style| {
-                style
-                    .cursor_pointer()
-                    .hover(move |style| style.border_color(rgb(theme.button_default_border)))
-            })
-            .on_click(cx.listener(move |this, _event, _window, cx| {
-                if !enabled {
-                    return;
-                }
-                this.query_combo = if this.query_combo == Some(kind) {
-                    None
-                } else {
-                    Some(kind)
-                };
-                cx.notify();
-            }))
-            .child(
-                svg()
-                    .path(icon)
-                    .w(px(14.0))
-                    .h(px(14.0))
-                    .flex_none()
-                    .text_color(rgb(icon_color)),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .child(selected.to_string()),
-            )
-            .child(
-                svg()
-                    .path("icons/chevron-down.svg")
-                    .w(px(12.0))
-                    .h(px(12.0))
-                    .flex_none()
-                    .text_color(rgb(theme.text_muted)),
-            );
-
-        div().relative().child(combo).when(open, move |style| {
-            style.child(deferred(list).with_priority(10))
-        })
+    fn query_database_combo_element(&self) -> AnyElement {
+        match self.query_database_combo.as_ref() {
+            Some(combo) => combo.clone().into_any_element(),
+            None => div().into_any_element(),
+        }
     }
 }

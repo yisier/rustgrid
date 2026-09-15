@@ -767,7 +767,12 @@ impl TableDesignView {
             return div().into_any_element();
         };
         let origin = *self.root_anchor.borrow();
-        let anchor = *self.combo_anchor.borrow();
+        let anchor = self
+            .combo_anchor
+            .borrow()
+            .get(&row)
+            .copied()
+            .unwrap_or_default();
         let anchor = Point::new(anchor.x - origin.x, anchor.y - origin.y);
         let current = self
             .schema
@@ -776,28 +781,17 @@ impl TableDesignView {
             .map(|column| column.data_type.clone())
             .unwrap_or_default();
         let weak = self.self_weak.clone();
-        let mut list = div()
-            .id("design-type-list")
-            .absolute()
-            .left(anchor.x)
-            .top(anchor.y)
-            .w(px(FIELD_TYPE_WIDTH))
-            .max_h(px(320.0))
+
+        let mut options = div()
+            .id("design-type-options")
+            .max_h(px(300.0))
             .overflow_y_scroll()
             .flex()
-            .flex_col()
-            .bg(rgb(theme.dialog_bg))
-            .border_1()
-            .border_color(rgb(theme.border))
-            .shadow(dialog_shadow())
-            .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
-                this.type_combo = None;
-                cx.notify();
-            }));
-        for &data_type in &self.column_types {
+            .flex_col();
+        for data_type in self.filtered_types() {
             let selected = data_type == current;
             let weak = weak.clone();
-            list = list.child(
+            options = options.child(
                 div()
                     .id(SharedString::from(format!(
                         "design-type-option-{data_type}"
@@ -821,7 +815,35 @@ impl TableDesignView {
                     .child(data_type.to_string()),
             );
         }
-        deferred(list).with_priority(100).into_any_element()
+
+        let mut popup = div()
+            .id("design-type-list")
+            .absolute()
+            .left(anchor.x)
+            .top(anchor.y)
+            .w(px(FIELD_TYPE_WIDTH))
+            .flex()
+            .flex_col()
+            .bg(rgb(theme.dialog_bg))
+            .border_1()
+            .border_color(rgb(theme.border))
+            .shadow(dialog_shadow())
+            .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
+                this.type_combo = None;
+                cx.notify();
+            }));
+        if let Some(search) = self.type_search.clone() {
+            popup = popup.child(
+                div()
+                    .flex_none()
+                    .p_1()
+                    .border_b_1()
+                    .border_color(rgb(theme.grid_line))
+                    .child(div().h(px(20.0)).child(search)),
+            );
+        }
+        popup = popup.child(options);
+        deferred(popup).with_priority(100).into_any_element()
     }
 
     fn render_hscrollbar(&self, cx: &mut Context<'_, Self>) -> AnyElement {
@@ -832,13 +854,8 @@ impl TableDesignView {
             return div().flex_none().h(px(14.0)).into_any_element();
         }
         let scroll = -f32::from(self.hscroll.offset().x);
-        let (thumb_w, travel) = scrollbar_thumb(viewport, max);
-        let thumb_x = if max > 0.0 {
-            (scroll / max) * travel
-        } else {
-            0.0
-        };
-        ui::hscrollbar_track("design-hscrollbar", theme, thumb_x, thumb_w)
+        let (thumb_left, thumb_len) = scrollbar_fractions(viewport, max, scroll);
+        ui::hscrollbar_track("design-hscrollbar", theme, thumb_left, thumb_len)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
@@ -857,23 +874,20 @@ impl TableDesignView {
             return div().into_any_element();
         }
         let scroll = -f32::from(handle.offset().y);
-        let (thumb_h, travel) = scrollbar_thumb(viewport, max);
-        let thumb_y = if max > 0.0 {
-            (scroll / max) * travel
-        } else {
-            0.0
-        };
+        let (thumb_top, thumb_len) = scrollbar_fractions(viewport, max, scroll);
         div()
             .flex_none()
             .h_full()
             .pt(px(DESIGN_HEADER_HEIGHT))
+            .pb(px(14.0))
             .child(
-                ui::vscrollbar_track("design-vscrollbar", theme, thumb_y, thumb_h).on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                        this.vscroll_begin(event.position.y, cx);
-                    }),
-                ),
+                ui::vscrollbar_track("design-vscrollbar", theme, thumb_top, thumb_len)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                            this.vscroll_begin(event.position.y, cx);
+                        }),
+                    ),
             )
             .into_any_element()
     }
@@ -1013,7 +1027,7 @@ fn design_edit_cell(
             .into_any_element();
     }
     let weak = weak.clone();
-    cell.px_2()
+    cell.pr(px(4.0))
         .cursor_text()
         .on_click(move |_event, window, cx| {
             let _ = weak.update(cx, |view, cx| view.begin_edit(row, column, window, cx));
@@ -1031,7 +1045,7 @@ fn design_type_cell(
     selected: bool,
     weak: &WeakEntity<TableDesignView>,
     row: usize,
-    anchor: Rc<RefCell<Point<Pixels>>>,
+    anchor: Rc<RefCell<BTreeMap<usize, Point<Pixels>>>>,
 ) -> AnyElement {
     let weak = weak.clone();
     div()
@@ -1048,16 +1062,18 @@ fn design_type_cell(
         .when(selected, |style| {
             style.text_color(rgb(theme.tree_selected_text))
         })
-        .px_2()
+        .pr(px(4.0))
         .cursor_pointer()
         .on_children_prepainted(move |bounds, _window, _cx| {
             if let Some(first) = bounds.first() {
-                *anchor.borrow_mut() = Point::new(first.left(), first.bottom());
+                anchor
+                    .borrow_mut()
+                    .insert(row, Point::new(first.left(), first.bottom()));
             }
         })
         .id(id)
-        .on_click(move |_event, _window, cx| {
-            let _ = weak.update(cx, |view, cx| view.open_type_combo(row, cx));
+        .on_click(move |_event, window, cx| {
+            let _ = weak.update(cx, |view, cx| view.open_type_combo(row, window, cx));
         })
         .child(div().flex_1().min_w(px(0.0)).overflow_hidden().child(text))
         .child(

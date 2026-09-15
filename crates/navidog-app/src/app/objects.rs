@@ -378,14 +378,13 @@ impl ObjectPane {
         let viewport = f32::from(bounds.size.width);
         let max = f32::from(self.scroll.max_offset().width);
         let scroll = -f32::from(self.scroll.offset().x);
-        let (thumb_w, travel) = scrollbar_thumb(viewport, max);
-        let thumb_x = if max > 0.0 {
-            (scroll / max) * travel
+        let (thumb_left, thumb_len) = if max > 0.0 {
+            scrollbar_fractions(viewport, max, scroll)
         } else {
-            0.0
+            (0.0, 0.0)
         };
 
-        ui::hscrollbar_track("object-hscrollbar", theme, thumb_x, thumb_w).on_mouse_down(
+        ui::hscrollbar_track("object-hscrollbar", theme, thumb_left, thumb_len).on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, event: &MouseDownEvent, _window, cx| {
                 this.hscroll_begin(event.position.x, cx);

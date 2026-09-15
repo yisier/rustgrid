@@ -31,8 +31,8 @@ use crate::sql::{self, SqlSpan, SqlToken};
 use crate::theme::Theme;
 
 use ui::{
-    ButtonKind, TextInput, TextInputOptions, checkbox_box, dialog_shadow, form_tab, main_separator,
-    scrollbar_thumb, toolbar_separator,
+    ButtonKind, ComboBox, ComboOption, TextInput, TextInputOptions, checkbox_box, dialog_shadow,
+    form_tab, main_separator, scrollbar_fractions, scrollbar_thumb, toolbar_separator,
 };
 
 /// The six text inputs of the connection form, created when the form opens. Order follows
@@ -159,7 +159,6 @@ fn make_db_name_input(
                     let _ = cancel.update(cx, |app, cx| {
                         app.db_dialog = None;
                         app.db_name_input = None;
-                        app.db_combo = None;
                         cx.notify();
                     });
                 }
@@ -198,18 +197,6 @@ enum TabTarget {
 struct TabMenu {
     target: TabTarget,
     position: Point<Pixels>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum DbCombo {
-    Charset,
-    Collation,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum QueryCombo {
-    Connection,
-    Database,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -282,10 +269,8 @@ struct TreePane {
 /// and routes input to whichever field is focused.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GridTextField {
-    CellEditor,
     PageInput,
     PageSize,
-    SortSearch,
     Filter(usize, u8),
 }
 
@@ -307,24 +292,27 @@ struct GridView {
     vscroll_grab: Option<f32>,
     focus: FocusHandle,
     selecting_cells: bool,
+    /// The cell pressed on mouse-down; if the button is released without dragging to another
+    /// cell, a single click opens its editor.
+    cell_press: Option<(usize, usize)>,
+    cell_dragged: bool,
 
     cell_editor: Option<CellEditor>,
-    cell_editor_focus: FocusHandle,
-    cell_editor_focused: bool,
     cell_editor_blur_subscription: Option<Subscription>,
     cell_editor_focus_pending: bool,
     date_picker: Option<DatePicker>,
 
     sort_hover: Option<usize>,
-    sort_combo_focus: FocusHandle,
-    sort_combo_focus_pending: bool,
-    sort_combo_focused: bool,
+    sort_search: Option<Entity<TextInput>>,
     sort_combo_filter: String,
     sort_combo_highlight: usize,
 
     filter_value_focus: Vec<FocusHandle>,
     filter_value2_focus: Vec<FocusHandle>,
     filter_active: Option<(usize, u8)>,
+    /// The search field at the top of an open filter field/operator popup, and its text.
+    filter_search: Option<Entity<TextInput>>,
+    filter_query: String,
 
     page_input: String,
     page_input_focus: FocusHandle,
@@ -346,14 +334,15 @@ struct GridView {
     ime_marked: Option<std::ops::Range<usize>>,
 }
 
+/// The in-place editor over one grid cell. The text itself lives in a shared [`TextInput`] entity
+/// (so caret rendering, selection, clipboard and IME are the same as every other field); `value`
+/// mirrors its text because a multi-cell edit previews the same string in every selected cell.
 struct CellEditor {
     row: usize,
     col: usize,
     cells: Vec<(usize, usize)>,
     value: String,
-    selection: FieldSelection,
-    selecting: bool,
-    history: Vec<String>,
+    input: Entity<TextInput>,
 }
 
 /// The SQL completion popup state for the active query editor.
@@ -397,18 +386,6 @@ enum DeleteConfirm {
     Rows { grid_id: u64, rows: Vec<usize> },
     /// Delete a connection (and its open grids/query tabs).
     Connection { index: usize },
-}
-
-#[derive(Clone, Copy, Default)]
-struct FieldSelection {
-    anchor: usize,
-    cursor: usize,
-}
-
-impl FieldSelection {
-    fn range(self) -> (usize, usize) {
-        (self.anchor.min(self.cursor), self.anchor.max(self.cursor))
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -464,7 +441,8 @@ pub struct AppView {
     query_editor_text: RefCell<String>,
     query_editor_measured: bool,
     query_result_scroll: UniformListScrollHandle,
-    query_combo: Option<QueryCombo>,
+    query_connection_combo: Option<Entity<ComboBox>>,
+    query_database_combo: Option<Entity<ComboBox>>,
     query_completion: Option<Completion>,
     query_completion_cache: RefCell<Option<CompletionCache>>,
     /// Bumped whenever the loaded table sets change, invalidating the completion cache.
@@ -486,7 +464,8 @@ pub struct AppView {
     tree_pane: Entity<TreePane>,
     main_tab: MainTab,
     db_dialog: Option<DbDialog>,
-    db_combo: Option<DbCombo>,
+    db_charset_combo: Option<Entity<ComboBox>>,
+    db_collation_combo: Option<Entity<ComboBox>>,
     db_name_input: Option<Entity<TextInput>>,
     db_sql_focus: FocusHandle,
     db_sql_layout: RefCell<TextLayout>,
@@ -524,7 +503,7 @@ pub struct AppView {
     options_open: bool,
     options_theme: ThemeSetting,
     options_language: LanguageSetting,
-    options_language_open: bool,
+    language_combo: Option<Entity<ComboBox>>,
 }
 
 mod database;
@@ -605,7 +584,8 @@ impl AppView {
             query_editor_text: RefCell::new(String::new()),
             query_editor_measured: false,
             query_result_scroll: UniformListScrollHandle::new(),
-            query_combo: None,
+            query_connection_combo: None,
+            query_database_combo: None,
             query_completion: None,
             query_completion_cache: RefCell::new(None),
             completion_generation: 0,
@@ -624,7 +604,8 @@ impl AppView {
             tree_pane: cx.new(|_| TreePane::new(app.clone())),
             main_tab: MainTab::Tables,
             db_dialog: None,
-            db_combo: None,
+            db_charset_combo: None,
+            db_collation_combo: None,
             db_name_input: None,
             db_sql_focus: cx.focus_handle(),
             db_sql_layout: RefCell::new(TextLayout::default()),
@@ -684,7 +665,7 @@ impl AppView {
             options_open: false,
             options_theme: theme_setting,
             options_language: language,
-            options_language_open: false,
+            language_combo: None,
         }
     }
 
@@ -748,6 +729,18 @@ impl AppView {
         }
         for design in &self.designs {
             design.update(cx, |design, cx| design.set_theme(theme, cx));
+        }
+        for combo in [
+            self.db_charset_combo.as_ref(),
+            self.db_collation_combo.as_ref(),
+            self.query_connection_combo.as_ref(),
+            self.query_database_combo.as_ref(),
+            self.language_combo.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            combo.update(cx, |combo, cx| combo.set_theme(theme, cx));
         }
     }
 
@@ -974,6 +967,10 @@ impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         self.theme = Theme::resolve(self.theme_setting, window.appearance());
         self.sync_input_themes(cx);
+        self.ensure_query_combos(cx);
+        self.sync_db_combos(cx);
+        self.sync_query_combos(cx);
+        self.sync_language_combo(cx);
         let theme = self.theme;
 
         // gpui does not re-run `render` when the window is resized, so the object list would

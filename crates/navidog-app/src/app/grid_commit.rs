@@ -24,7 +24,7 @@ impl GridView {
         if let Some(picker) = self.date_picker.as_mut() {
             picker.day = day;
         }
-        self.sync_date_picker_to_editor();
+        self.sync_date_picker_to_editor(cx);
         cx.notify();
     }
 
@@ -41,7 +41,7 @@ impl GridView {
                 _ => picker.second = wrap_unit(picker.second, delta, 60),
             }
         }
-        self.sync_date_picker_to_editor();
+        self.sync_date_picker_to_editor(cx);
         cx.notify();
     }
 
@@ -55,7 +55,7 @@ impl GridView {
             picker.minute = now.minute();
             picker.second = now.second();
         }
-        self.sync_date_picker_to_editor();
+        self.sync_date_picker_to_editor(cx);
         cx.notify();
     }
 
@@ -63,7 +63,7 @@ impl GridView {
         if self.date_picker.take().is_none() {
             return;
         }
-        self.sync_date_picker_to_editor();
+        self.sync_date_picker_to_editor(cx);
         self.finish_cell_editor(cx);
     }
 
@@ -150,6 +150,7 @@ impl GridView {
         self.state.edits.clear();
         self.state.selection = None;
         self.cell_editor = None;
+        self.cell_editor_blur_subscription = None;
         self.date_picker = None;
         cx.notify();
     }

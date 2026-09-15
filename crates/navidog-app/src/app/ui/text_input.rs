@@ -40,6 +40,11 @@ pub(crate) struct TextInputOptions {
     pub accepts: Option<Rc<dyn Fn(char) -> bool + 'static>>,
     /// An optional leading icon (the search box uses this).
     pub icon: Option<&'static str>,
+    /// Tint for `icon`; muted when unset.
+    pub icon_color: Option<u32>,
+    /// Left inset of the text. Defaults to flush (2px); inline cell editors use 7px so the
+    /// border plus inset matches the cell's `px_2` text position.
+    pub padding_left: Option<f32>,
     /// Shows a clear (`✕`) button while the field has text.
     pub clearable: bool,
 }
@@ -54,6 +59,8 @@ pub(crate) struct TextInput {
     masked: bool,
     accepts: Option<Rc<dyn Fn(char) -> bool + 'static>>,
     icon: Option<&'static str>,
+    icon_color: Option<u32>,
+    padding_left: f32,
     clearable: bool,
     theme: Theme,
     focused: bool,
@@ -62,10 +69,21 @@ pub(crate) struct TextInput {
     selecting: bool,
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
+    /// Horizontal scroll (pixels) applied to keep the caret inside a narrow field.
+    last_scroll: Pixels,
     on_change: Option<TextChangeCallback>,
     on_submit: Option<TextVoidCallback>,
     on_cancel: Option<TextVoidCallback>,
     on_tab: Option<TextTabCallback>,
+    undo_stack: Vec<EditSnapshot>,
+    redo_stack: Vec<EditSnapshot>,
+}
+
+/// A restorable text state, captured before each undoable edit.
+struct EditSnapshot {
+    text: String,
+    selected_range: Range<usize>,
+    selection_reversed: bool,
 }
 
 impl TextInput {
@@ -87,6 +105,8 @@ impl TextInput {
             masked: options.masked,
             accepts: options.accepts,
             icon: options.icon,
+            icon_color: options.icon_color,
+            padding_left: options.padding_left.unwrap_or(2.0),
             clearable: options.clearable,
             theme,
             focused: false,
@@ -95,10 +115,13 @@ impl TextInput {
             selecting: false,
             last_layout: None,
             last_bounds: None,
+            last_scroll: px(0.0),
             on_change: None,
             on_submit: None,
             on_cancel: None,
             on_tab: None,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
         }
     }
 
@@ -108,6 +131,51 @@ impl TextInput {
         self.selected_range = end..end;
         self.selection_reversed = false;
         self.marked_range = None;
+        cx.notify();
+    }
+
+    /// Selects the whole text, so the next keystroke replaces it.
+    pub(crate) fn select_all(&mut self, cx: &mut Context<Self>) {
+        self.selected_range = 0..self.text.len();
+        self.selection_reversed = false;
+        self.caret_visible = true;
+        cx.notify();
+    }
+
+    pub(crate) fn set_icon(
+        &mut self,
+        icon: Option<&'static str>,
+        color: Option<u32>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.icon == icon && self.icon_color == color {
+            return;
+        }
+        self.icon = icon;
+        self.icon_color = color;
+        cx.notify();
+    }
+
+    pub(crate) fn set_placeholder(
+        &mut self,
+        placeholder: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        let placeholder = placeholder.into();
+        if self.placeholder == placeholder {
+            return;
+        }
+        self.placeholder = placeholder;
+        cx.notify();
+    }
+
+    /// Sets the left text inset. Inline cell editors use 7px so the 1px border puts the text on
+    /// the same 8px line as the cell contents.
+    pub(crate) fn set_padding_left(&mut self, padding: f32, cx: &mut Context<Self>) {
+        if self.padding_left == padding {
+            return;
+        }
+        self.padding_left = padding;
         cx.notify();
     }
 
@@ -250,6 +318,7 @@ impl TextInput {
         if text.is_empty() {
             return;
         }
+        self.push_undo();
         let range = self
             .marked_range
             .clone()
@@ -271,6 +340,7 @@ impl TextInput {
         if self.selected_range.is_empty() {
             return;
         }
+        self.push_undo();
         let range = self.selected_range.clone();
         self.text = format!("{}{}", &self.text[..range.start], &self.text[range.end..]);
         self.selected_range = range.start..range.start;
@@ -306,6 +376,52 @@ impl TextInput {
         cx.notify();
     }
 
+    /// Capture the current state before an undoable edit and clear the redo branch.
+    fn push_undo(&mut self) {
+        self.undo_stack.push(self.snapshot());
+        if self.undo_stack.len() > 256 {
+            self.undo_stack.remove(0);
+        }
+        self.redo_stack.clear();
+    }
+
+    fn snapshot(&self) -> EditSnapshot {
+        EditSnapshot {
+            text: self.text.clone(),
+            selected_range: self.selected_range.clone(),
+            selection_reversed: self.selection_reversed,
+        }
+    }
+
+    fn restore(&mut self, snapshot: EditSnapshot, window: &mut Window, cx: &mut Context<Self>) {
+        self.text = snapshot.text;
+        self.selected_range = snapshot.selected_range;
+        self.selection_reversed = snapshot.selection_reversed;
+        self.marked_range = None;
+        self.caret_visible = true;
+        if let Some(callback) = self.on_change.clone() {
+            let text = self.text.clone();
+            callback(&text, window, cx);
+        }
+        cx.notify();
+    }
+
+    fn undo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(snapshot) = self.undo_stack.pop() else {
+            return;
+        };
+        self.redo_stack.push(self.snapshot());
+        self.restore(snapshot, window, cx);
+    }
+
+    fn redo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(snapshot) = self.redo_stack.pop() else {
+            return;
+        };
+        self.undo_stack.push(self.snapshot());
+        self.restore(snapshot, window, cx);
+    }
+
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
         let command = keystroke.modifiers.control || keystroke.modifiers.platform;
@@ -322,6 +438,14 @@ impl TextInput {
                 "c" => self.copy(cx),
                 "x" => self.cut(window, cx),
                 "v" => self.paste(window, cx),
+                "y" => self.redo(window, cx),
+                "z" => {
+                    if shift {
+                        self.redo(window, cx);
+                    } else {
+                        self.undo(window, cx);
+                    }
+                }
                 _ => {}
             }
             cx.stop_propagation();
@@ -403,6 +527,7 @@ impl TextInput {
         if self.text.is_empty() {
             return;
         }
+        self.push_undo();
         self.text.clear();
         self.selected_range = 0..0;
         self.selection_reversed = false;
@@ -421,7 +546,7 @@ impl TextInput {
         if position.y > bounds.bottom() {
             return self.text.len();
         }
-        self.text_offset(line.closest_index_for_x(position.x - bounds.left()))
+        self.text_offset(line.closest_index_for_x(position.x - bounds.left() + self.last_scroll))
     }
 
     fn on_mouse_down(
@@ -644,8 +769,14 @@ impl EntityInputHandler for TextInput {
         let start = self.display_offset(range.start);
         let end = self.display_offset(range.end);
         Some(Bounds::from_corners(
-            point(bounds.left() + line.x_for_index(start), bounds.top()),
-            point(bounds.left() + line.x_for_index(end), bounds.bottom()),
+            point(
+                bounds.left() + line.x_for_index(start) - self.last_scroll,
+                bounds.top(),
+            ),
+            point(
+                bounds.left() + line.x_for_index(end) - self.last_scroll,
+                bounds.bottom(),
+            ),
         ))
     }
 
@@ -671,7 +802,9 @@ impl Render for TextInput {
             .flex()
             .items_center()
             .gap_1()
-            .px_2()
+            .overflow_hidden()
+            .pl(px(self.padding_left))
+            .pr(px(6.0))
             .text_size(px(12.0))
             .line_height(px(16.0))
             .bg(rgb(theme.input_bg))
@@ -690,13 +823,14 @@ impl Render for TextInput {
             .on_mouse_move(cx.listener(Self::on_mouse_move));
 
         if let Some(icon) = self.icon {
+            let icon_color = self.icon_color.unwrap_or(theme.text_muted);
             field = field.child(
                 svg()
                     .path(icon)
                     .w(px(13.0))
                     .h(px(13.0))
                     .flex_none()
-                    .text_color(rgb(theme.text_muted)),
+                    .text_color(rgb(icon_color)),
             );
         }
 
@@ -752,6 +886,7 @@ struct PrepaintState {
     line: Option<ShapedLine>,
     cursor: Option<PaintQuad>,
     selection: Option<PaintQuad>,
+    scroll: Pixels,
 }
 
 impl IntoElement for TextElement {
@@ -853,12 +988,18 @@ impl Element for TextElement {
         let selection_start = input.display_offset(selected_range.start);
         let selection_end = input.display_offset(selected_range.end);
         let cursor = input.display_offset(cursor);
+        // Keep the caret inside the field: a narrow box (e.g. a grid cell) scrolls horizontally
+        // instead of letting the text spill over the neighbouring column.
+        let caret_x = line.x_for_index(cursor);
+        let field_width = f32::from(bounds.size.width);
+        let overflow = (f32::from(line.width) - field_width).max(0.0);
+        let scroll = px((f32::from(caret_x) + 4.0 - field_width).clamp(0.0, overflow));
         let (selection, cursor) = if selected_range.is_empty() {
             (
                 None,
                 Some(fill(
                     Bounds::new(
-                        point(bounds.left() + line.x_for_index(cursor), bounds.top()),
+                        point(bounds.left() + caret_x - scroll, bounds.top()),
                         size(px(1.5), bounds.bottom() - bounds.top()),
                     ),
                     rgb(input.theme.text),
@@ -869,11 +1010,11 @@ impl Element for TextElement {
                 Some(fill(
                     Bounds::from_corners(
                         point(
-                            bounds.left() + line.x_for_index(selection_start),
+                            bounds.left() + line.x_for_index(selection_start) - scroll,
                             bounds.top(),
                         ),
                         point(
-                            bounds.left() + line.x_for_index(selection_end),
+                            bounds.left() + line.x_for_index(selection_end) - scroll,
                             bounds.bottom(),
                         ),
                     ),
@@ -886,6 +1027,7 @@ impl Element for TextElement {
             line: Some(line),
             cursor,
             selection,
+            scroll,
         }
     }
 
@@ -911,8 +1053,14 @@ impl Element for TextElement {
         let Some(line) = prepaint.line.take() else {
             return;
         };
-        line.paint(bounds.origin, window.line_height(), window, cx)
-            .ok();
+        let scroll = prepaint.scroll;
+        line.paint(
+            point(bounds.left() - scroll, bounds.top()),
+            window.line_height(),
+            window,
+            cx,
+        )
+        .ok();
 
         if focus_handle.is_focused(window)
             && self.input.read(cx).caret_visible
@@ -924,6 +1072,7 @@ impl Element for TextElement {
         self.input.update(cx, |input, _cx| {
             input.last_layout = Some(line);
             input.last_bounds = Some(bounds);
+            input.last_scroll = scroll;
         });
     }
 }

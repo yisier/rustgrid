@@ -7,19 +7,64 @@ fn language_label(setting: LanguageSetting) -> String {
     }
 }
 
+/// The two selectable languages as combo rows, keyed by locale code.
+fn language_options() -> Vec<ComboOption> {
+    [LanguageSetting::ZhCn, LanguageSetting::En]
+        .into_iter()
+        .map(|setting| ComboOption::new(setting.locale(), language_label(setting)))
+        .collect()
+}
+
+fn language_from_locale(locale: &str) -> LanguageSetting {
+    if locale == LanguageSetting::En.locale() {
+        LanguageSetting::En
+    } else {
+        LanguageSetting::ZhCn
+    }
+}
+
 impl AppView {
     pub(super) fn open_options(&mut self, cx: &mut Context<'_, Self>) {
         self.options_open = true;
         self.options_theme = self.theme_setting;
         self.options_language = self.language;
-        self.options_language_open = false;
+        self.ensure_language_combo(cx);
         cx.notify();
     }
 
     pub(super) fn close_options(&mut self, cx: &mut Context<'_, Self>) {
         self.options_open = false;
-        self.options_language_open = false;
         cx.notify();
+    }
+
+    fn ensure_language_combo(&mut self, cx: &mut Context<'_, Self>) {
+        if self.language_combo.is_some() {
+            return;
+        }
+        let theme = self.theme;
+        let weak = cx.weak_entity();
+        let combo = cx.new(|cx| {
+            ComboBox::new(theme, language_options(), self.language.locale(), 220.0, cx).on_select(
+                Rc::new(move |value, _window, cx| {
+                    let _ = weak.update(cx, |app, cx| {
+                        app.options_language = language_from_locale(value);
+                        cx.notify();
+                    });
+                }),
+            )
+        });
+        self.language_combo = Some(combo);
+    }
+
+    pub(super) fn sync_language_combo(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(combo) = self.language_combo.clone() else {
+            return;
+        };
+        let selected = self.options_language.locale().to_string();
+        combo.update(cx, |combo, cx| {
+            combo.set_options(language_options(), cx);
+            combo.set_selected(selected, cx);
+        });
     }
 
     fn apply_options(&mut self, cx: &mut Context<'_, Self>) {
@@ -88,80 +133,11 @@ impl AppView {
         )
     }
 
-    fn language_combo(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let theme = self.theme;
-        let current = self.options_language;
-        let open = self.options_language_open;
-
-        let mut list = div()
-            .id("options-lang-list")
-            .absolute()
-            .top(px(24.0))
-            .left_0()
-            .w(px(220.0))
-            .flex()
-            .flex_col()
-            .py_0p5()
-            .bg(rgb(theme.dialog_bg))
-            .border_1()
-            .border_color(rgb(theme.border));
-        for setting in [LanguageSetting::ZhCn, LanguageSetting::En] {
-            let selected = setting == current;
-            let label = language_label(setting);
-            let option_id = SharedString::from(format!("options-lang-{label}"));
-            list = list.child(
-                div()
-                    .id(option_id)
-                    .flex()
-                    .items_center()
-                    .h(px(22.0))
-                    .px_2()
-                    .flex_none()
-                    .text_size(px(12.0))
-                    .cursor_pointer()
-                    .when(selected, move |style| {
-                        style
-                            .bg(rgb(theme.tree_selected_bg))
-                            .text_color(rgb(theme.tree_selected_text))
-                    })
-                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.options_language = setting;
-                        this.options_language_open = false;
-                        cx.notify();
-                    }))
-                    .child(label),
-            );
+    fn language_combo(&self, _cx: &mut Context<'_, Self>) -> AnyElement {
+        match self.language_combo.clone() {
+            Some(combo) => combo.into_any_element(),
+            None => div().into_any_element(),
         }
-
-        let combo_box = ui::text_field(theme)
-            .id("options-lang-combo")
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .w(px(220.0))
-            .h(px(24.0))
-            .px_2()
-            .text_size(px(12.0))
-            .cursor_pointer()
-            .on_click(cx.listener(|this, _event, _window, cx| {
-                this.options_language_open = !this.options_language_open;
-                cx.notify();
-            }))
-            .child(language_label(current))
-            .child(
-                svg()
-                    .path("icons/chevron-down.svg")
-                    .w(px(12.0))
-                    .h(px(12.0))
-                    .flex_none()
-                    .text_color(rgb(theme.text_muted)),
-            );
-
-        div().relative().child(combo_box).when(open, move |style| {
-            style.child(deferred(list).with_priority(10))
-        })
     }
 
     pub(super) fn render_options_dialog(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {

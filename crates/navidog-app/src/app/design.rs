@@ -118,7 +118,12 @@ pub(super) struct TableDesignView {
     pub(super) edit: Option<FieldEdit>,
     edit_blur: Option<Subscription>,
     pub(super) type_combo: Option<usize>,
-    pub(super) combo_anchor: Rc<RefCell<Point<Pixels>>>,
+    /// The search field shown at the top of the type drop-down; its text filters the list.
+    pub(super) type_search: Option<Entity<TextInput>>,
+    pub(super) type_query: String,
+    /// Each row's type-cell bottom-left in window coordinates, keyed by field index. A shared
+    /// single anchor cannot work here because every visible row prepaints and would overwrite it.
+    pub(super) combo_anchor: Rc<RefCell<BTreeMap<usize, Point<Pixels>>>>,
     /// The design view's own window-space origin, so the type dropdown can convert the
     /// (window-absolute) prepaint anchor into view-local coordinates.
     pub(super) root_anchor: Rc<RefCell<Point<Pixels>>>,
@@ -134,6 +139,14 @@ pub(super) struct TableDesignView {
     pub(super) list_scroll: UniformListScrollHandle,
     pub(super) vscroll_grab: Option<f32>,
     pub(super) self_weak: WeakEntity<TableDesignView>,
+}
+
+/// A case-insensitive subsequence test used by the type drop-down's search field.
+fn is_fuzzy_subsequence(needle: &str, haystack: &str) -> bool {
+    let mut chars = haystack.chars();
+    needle
+        .chars()
+        .all(|needle| chars.any(|haystack| haystack == needle))
 }
 
 fn text_input(
@@ -204,7 +217,9 @@ impl TableDesignView {
             edit: None,
             edit_blur: None,
             type_combo: None,
-            combo_anchor: Rc::new(RefCell::new(Point::default())),
+            type_search: None,
+            type_query: String::new(),
+            combo_anchor: Rc::new(RefCell::new(BTreeMap::new())),
             root_anchor: Rc::new(RefCell::new(Point::default())),
             default_input,
             engine_input,
@@ -379,6 +394,7 @@ impl TableDesignView {
             ))
         });
         let focus = input.read(cx).focus_handle();
+        input.update(cx, |input, cx| input.set_padding_left(0.0, cx));
         self.type_combo = None;
         self.edit = None;
         self.edit_blur = None;
@@ -395,16 +411,83 @@ impl TableDesignView {
         }
     }
 
-    pub(super) fn open_type_combo(&mut self, row: usize, cx: &mut Context<'_, Self>) {
+    pub(super) fn open_type_combo(
+        &mut self,
+        row: usize,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         self.edit = None;
         self.edit_blur = None;
         self.select_field(row, cx);
-        self.type_combo = if self.type_combo == Some(row) {
-            None
-        } else {
-            Some(row)
-        };
+        if self.type_combo == Some(row) {
+            self.type_combo = None;
+            cx.notify();
+            return;
+        }
+        self.type_combo = Some(row);
+        self.type_query.clear();
+        let theme = self.theme;
+        let weak = self.self_weak.clone();
+        let input = self
+            .type_search
+            .get_or_insert_with(|| {
+                let change = weak.clone();
+                let submit = weak.clone();
+                let cancel = weak;
+                cx.new(move |cx| {
+                    TextInput::new(theme, "", TextInputOptions::default(), cx)
+                        .on_change(Rc::new(move |text, _window, cx| {
+                            let _ = change.update(cx, |view, cx| {
+                                view.type_query = text.to_string();
+                                cx.notify();
+                            });
+                        }))
+                        .on_submit(Rc::new(move |_window, cx| {
+                            let _ = submit.update(cx, |view, cx| view.select_first_type(cx));
+                        }))
+                        .on_cancel(Rc::new(move |_window, cx| {
+                            let _ = cancel.update(cx, |view, cx| {
+                                view.type_combo = None;
+                                cx.notify();
+                            });
+                        }))
+                })
+            })
+            .clone();
+        input.update(cx, |input, cx| input.set_text("", cx));
+        let focus = input.read(cx).focus_handle();
+        window.focus(&focus);
         cx.notify();
+    }
+
+    /// The type names that match the current search text, best matches first.
+    pub(super) fn filtered_types(&self) -> Vec<&'static str> {
+        let query = self.type_query.trim().to_lowercase();
+        if query.is_empty() {
+            return self.column_types.clone();
+        }
+        let mut substring = Vec::new();
+        let mut fuzzy = Vec::new();
+        for &data_type in &self.column_types {
+            let lower = data_type.to_lowercase();
+            if lower.contains(&query) {
+                substring.push(data_type);
+            } else if is_fuzzy_subsequence(&query, &lower) {
+                fuzzy.push(data_type);
+            }
+        }
+        substring.extend(fuzzy);
+        substring
+    }
+
+    fn select_first_type(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(row) = self.type_combo else {
+            return;
+        };
+        if let Some(data_type) = self.filtered_types().first().copied() {
+            self.select_type(row, data_type, cx);
+        }
     }
 
     pub(super) fn select_type(&mut self, row: usize, data_type: &str, cx: &mut Context<'_, Self>) {
@@ -628,6 +711,9 @@ impl TableDesignView {
             return;
         }
         self.theme = theme;
+        if let Some(input) = self.type_search.clone() {
+            input.update(cx, |input, cx| input.set_theme(theme, cx));
+        }
         for input in [
             &self.default_input,
             &self.engine_input,
@@ -694,7 +780,6 @@ impl AppView {
         self.active_design = Some(self.designs.len() - 1);
         self.active_grid = None;
         self.active_query = None;
-        self.query_combo = None;
         entity.update(cx, |design, cx| design.load_schema(cx));
         cx.notify();
     }
@@ -703,7 +788,6 @@ impl AppView {
         self.active_design = index;
         self.active_query = None;
         self.active_grid = None;
-        self.query_combo = None;
         self.query_completion = None;
         cx.notify();
     }

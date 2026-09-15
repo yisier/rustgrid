@@ -624,7 +624,6 @@ impl AppView {
         self.active_grid = index;
         self.active_query = None;
         self.active_design = None;
-        self.query_combo = None;
         self.query_completion = None;
         cx.notify();
     }

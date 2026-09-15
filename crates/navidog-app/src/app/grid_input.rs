@@ -13,17 +13,14 @@ impl GridView {
         self.date_picker = None;
 
         let Some(hit) = self.grid_hit(event.position) else {
+            self.cell_press = None;
             return;
         };
-        if event.click_count >= 2 {
-            if let GridHit::Cell(row, col) = hit {
-                self.begin_edit((row, col), None, window, cx);
-            }
-            return;
-        }
         let column_count = self.state.columns.len();
+        self.cell_dragged = false;
         match hit {
             GridHit::Gutter(row) => {
+                self.cell_press = None;
                 if !self.state.rows.is_empty() {
                     self.state.selection = Some(CellSelection {
                         anchor: (row, 0),
@@ -33,6 +30,7 @@ impl GridView {
             }
             GridHit::Cell(row, col) => {
                 if event.modifiers.shift {
+                    self.cell_press = None;
                     if let Some(selection) = self.state.selection {
                         self.state.selection = Some(CellSelection {
                             anchor: selection.anchor,
@@ -43,6 +41,7 @@ impl GridView {
                     }
                 } else {
                     self.state.selection = Some(CellSelection::new(row, col));
+                    self.cell_press = Some((row, col));
                 }
             }
         }
@@ -58,6 +57,11 @@ impl GridView {
         let Some(hit) = self.grid_hit(event.position) else {
             return;
         };
+        if let GridHit::Cell(row, col) = hit
+            && self.cell_press != Some((row, col))
+        {
+            self.cell_dragged = true;
+        }
         if let Some(selection) = self.state.selection {
             let (start_row, _) = selection.rows();
             self.state.selection = Some(match hit {
@@ -83,47 +87,55 @@ impl GridView {
     /// back to it.
     pub(super) fn scroll_grid_selection(
         &mut self,
-        position: Point<Pixels>,
+        _position: Point<Pixels>,
         delta: f32,
         cx: &mut Context<'_, Self>,
     ) -> bool {
-        let Some(selection) = self.state.selection else {
-            return false;
-        };
         let handle = self.list_scroll.0.borrow().base_handle.clone();
         let bounds = handle.bounds();
-        if !bounds.contains(&position) {
-            return false;
-        }
         let rows = self.state.rows.len();
         if rows == 0 {
             return false;
         }
 
         let step: isize = if delta > 0.0 { -1 } else { 1 };
-        let max = f32::from(handle.max_offset().height);
-        let scroll = -f32::from(handle.offset().y);
         let viewport_h = f32::from(bounds.size.height);
+        if viewport_h <= 0.0 {
+            return false;
+        }
+        // Derive the maximum scroll from the known row count instead of gpui's cached
+        // `max_offset` (which can be a frame behind right after a scrollbar drag) so wheeling
+        // never becomes stuck.
+        let max = (rows as f32 * GRID_ROW_HEIGHT - viewport_h).max(0.0);
+        if max <= 0.0 {
+            return false;
+        }
+        let scroll = -f32::from(handle.offset().y);
         let visible = (viewport_h / GRID_ROW_HEIGHT).floor().max(1.0) as usize;
         let first = (scroll / GRID_ROW_HEIGHT).round() as isize;
         let max_first = ((max / GRID_ROW_HEIGHT).round() as isize).max(0);
         let new_scroll =
             ((first + step).clamp(0, max_first) as f32 * GRID_ROW_HEIGHT).clamp(0.0, max);
+        if (new_scroll - scroll).abs() < 0.5 {
+            // Already at the top/bottom.
+            return false;
+        }
+
         let new_first = (new_scroll / GRID_ROW_HEIGHT).round() as usize;
         let new_last = (new_first + visible.saturating_sub(1)).min(rows - 1);
+        let x = handle.offset().x;
+        handle.set_offset(Point::new(x, px(-new_scroll)));
 
-        let (row, col) = selection.cursor;
-        let moved = (row as isize + step).clamp(0, rows as isize - 1) as usize;
-        let new_row = moved.clamp(new_first, new_last);
-
-        if new_scroll != scroll {
-            let x = handle.offset().x;
-            handle.set_offset(Point::new(x, px(-new_scroll)));
+        // Keep the cursor row inside the viewport, moving it to the edge if it scrolled away.
+        if let Some(selection) = self.state.selection {
+            let (row, col) = selection.cursor;
+            let moved = (row as isize + step).clamp(0, rows as isize - 1) as usize;
+            let new_row = moved.clamp(new_first, new_last);
+            self.state.selection = Some(CellSelection {
+                anchor: (new_row, col),
+                cursor: (new_row, col),
+            });
         }
-        self.state.selection = Some(CellSelection {
-            anchor: (new_row, col),
-            cursor: (new_row, col),
-        });
 
         cx.notify();
         true
@@ -304,23 +316,58 @@ impl GridView {
             Some(character) => character.to_string(),
             None => value,
         };
-        let caret = value.chars().count();
+
+        let theme = self.theme;
+        let weak = self.self_weak.clone();
+        let initial_text = value.clone();
+        let input = cx.new(move |cx| {
+            TextInput::new(theme, initial_text, TextInputOptions::default(), cx)
+                .on_change(Rc::new({
+                    let weak = weak.clone();
+                    move |text, _window, cx| {
+                        let _ = weak.update(cx, |grid, cx| grid.cell_editor_changed(text, cx));
+                    }
+                }))
+                .on_submit(Rc::new({
+                    let weak = weak.clone();
+                    move |_window, cx| {
+                        let _ = weak.update(cx, |grid, cx| grid.finish_cell_editor(cx));
+                    }
+                }))
+                .on_cancel(Rc::new({
+                    let weak = weak.clone();
+                    move |_window, cx| {
+                        let _ = weak.update(cx, |grid, cx| grid.cancel_editor(cx));
+                    }
+                }))
+        });
+        let focus = input.read(cx).focus_handle();
+        input.update(cx, |input, cx| input.set_padding_left(0.0, cx));
+        self.cell_editor_blur_subscription =
+            Some(cx.on_blur(&focus, window, |this, _window, cx| {
+                if this.cell_editor.is_some() {
+                    this.finish_cell_editor(cx);
+                }
+            }));
         self.cell_editor = Some(CellEditor {
             row,
             col,
             cells,
             value: value.clone(),
-            selection: FieldSelection {
-                anchor: caret,
-                cursor: caret,
-            },
-            selecting: false,
-            history: Vec::new(),
+            input,
         });
         self.cell_editor_focus_pending = true;
-        window.focus(&self.cell_editor_focus);
+        window.focus(&focus);
         if is_temporal {
             self.open_date_picker(row, col, &value, cx);
+        }
+        cx.notify();
+    }
+
+    /// Mirror the editor's text so the multi-cell preview and the eventual commit see it.
+    fn cell_editor_changed(&mut self, text: &str, cx: &mut Context<'_, Self>) {
+        if let Some(editor) = self.cell_editor.as_mut() {
+            editor.value = text.to_string();
         }
         cx.notify();
     }
@@ -350,7 +397,7 @@ impl GridView {
     }
 
     /// Rewrite the cell editor's text from the current date picker state.
-    pub(super) fn sync_date_picker_to_editor(&mut self) {
+    pub(super) fn sync_date_picker_to_editor(&mut self, cx: &mut Context<'_, Self>) {
         let Some(picker) = self.date_picker.as_ref() else {
             return;
         };
@@ -363,193 +410,11 @@ impl GridView {
             format!("{:04}-{:02}-{:02}", picker.year, picker.month, picker.day)
         };
         if let Some(editor) = self.cell_editor.as_mut() {
-            editor.history.push(editor.value.clone());
-            editor.value = value;
-            let caret = editor.value.chars().count();
-            editor.selection = FieldSelection {
-                anchor: caret,
-                cursor: caret,
-            };
+            editor.value = value.clone();
+            let input = editor.input.clone();
+            input.update(cx, |input, cx| input.set_text(value, cx));
         }
         self.caret_visible = true;
-    }
-
-    pub(super) fn editor_key(&mut self, event: &KeyDownEvent, cx: &mut Context<'_, Self>) {
-        let keystroke = event.keystroke.clone();
-        let command = keystroke.modifiers.control || keystroke.modifiers.platform;
-        let shift = keystroke.modifiers.shift;
-
-        let Some(editor) = self.cell_editor.as_ref() else {
-            return;
-        };
-        let text = editor.value.clone();
-        let mut chars: Vec<char> = text.chars().collect();
-        let len = chars.len();
-        let mut selection = editor.selection;
-        selection.anchor = selection.anchor.min(len);
-        selection.cursor = selection.cursor.min(len);
-        let (start, end) = selection.range();
-
-        let mut new_value: Option<Vec<char>> = None;
-        let mut new_cursor = selection.cursor;
-        let mut new_anchor = selection.anchor;
-        let mut undo = false;
-        let mut commit = false;
-        let mut cancel = false;
-
-        if command {
-            match keystroke.key.as_str() {
-                "a" => {
-                    new_anchor = 0;
-                    new_cursor = len;
-                }
-                "c" => {
-                    if start < end {
-                        let selected: String = chars[start..end].iter().copied().collect();
-                        cx.write_to_clipboard(ClipboardItem::new_string(selected));
-                    }
-                    return;
-                }
-                "x" => {
-                    if start < end {
-                        let selected: String = chars[start..end].iter().copied().collect();
-                        cx.write_to_clipboard(ClipboardItem::new_string(selected));
-                        chars.drain(start..end);
-                        new_cursor = start;
-                        new_anchor = start;
-                        new_value = Some(chars);
-                    } else {
-                        return;
-                    }
-                }
-                "v" => {
-                    if let Some(pasted) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                        let pasted: Vec<char> = pasted
-                            .chars()
-                            .filter(|character| *character != '\n' && *character != '\r')
-                            .collect();
-                        if !pasted.is_empty() {
-                            let mut next: Vec<char> = chars[..start].to_vec();
-                            next.extend_from_slice(&pasted);
-                            next.extend_from_slice(&chars[end..]);
-                            new_cursor = start + pasted.len();
-                            new_anchor = new_cursor;
-                            new_value = Some(next);
-                        } else {
-                            return;
-                        }
-                    } else {
-                        return;
-                    }
-                }
-                "z" => undo = true,
-                _ => return,
-            }
-        } else {
-            match keystroke.key.as_str() {
-                "left" => {
-                    let cursor = if shift {
-                        selection.cursor.saturating_sub(1)
-                    } else if start < end {
-                        start
-                    } else {
-                        selection.cursor.saturating_sub(1)
-                    };
-                    new_cursor = cursor;
-                    new_anchor = if shift { selection.anchor } else { cursor };
-                }
-                "right" => {
-                    let cursor = if shift {
-                        (selection.cursor + 1).min(len)
-                    } else if start < end {
-                        end
-                    } else {
-                        (selection.cursor + 1).min(len)
-                    };
-                    new_cursor = cursor;
-                    new_anchor = if shift { selection.anchor } else { cursor };
-                }
-                "home" => {
-                    new_cursor = 0;
-                    new_anchor = if shift { selection.anchor } else { 0 };
-                }
-                "end" => {
-                    new_cursor = len;
-                    new_anchor = if shift { selection.anchor } else { len };
-                }
-                "backspace" => {
-                    if start < end {
-                        chars.drain(start..end);
-                        new_cursor = start;
-                        new_anchor = start;
-                        new_value = Some(chars);
-                    } else if start > 0 {
-                        chars.remove(start - 1);
-                        new_cursor = start - 1;
-                        new_anchor = start - 1;
-                        new_value = Some(chars);
-                    } else {
-                        return;
-                    }
-                }
-                "delete" => {
-                    if start < end {
-                        chars.drain(start..end);
-                        new_cursor = start;
-                        new_anchor = start;
-                        new_value = Some(chars);
-                    } else if start < len {
-                        chars.remove(start);
-                        new_cursor = start;
-                        new_anchor = start;
-                        new_value = Some(chars);
-                    } else {
-                        return;
-                    }
-                }
-                "enter" => commit = true,
-                "escape" => cancel = true,
-                _ => {
-                    // Text characters (including IME composition) are delivered to
-                    // `GridView::replace_text_in_range` via the platform input handler.
-                    return;
-                }
-            }
-        }
-
-        if commit {
-            self.finish_cell_editor(cx);
-            return;
-        }
-        if cancel {
-            self.cancel_editor(cx);
-            return;
-        }
-
-        let Some(editor) = self.cell_editor.as_mut() else {
-            return;
-        };
-        if undo {
-            if let Some(previous) = editor.history.pop() {
-                editor.value = previous;
-            }
-            let len = editor.value.chars().count();
-            editor.selection = FieldSelection {
-                anchor: len,
-                cursor: len,
-            };
-        } else {
-            if let Some(value) = new_value {
-                editor.history.push(editor.value.clone());
-                editor.value = value.into_iter().collect();
-            }
-            editor.selection = FieldSelection {
-                anchor: new_anchor,
-                cursor: new_cursor,
-            };
-        }
-        self.caret_visible = true;
-        cx.notify();
     }
 
     /// Stage the current cell edit, then auto-commit single-cell edits to the database.
@@ -568,49 +433,8 @@ impl GridView {
         }
     }
 
-    pub(super) fn cell_editor_index_for_x(&self, value: &str, x: Pixels, window: &Window) -> usize {
-        let char_count = value.chars().count();
-        let col = self
-            .cell_editor
-            .as_ref()
-            .map(|editor| editor.col)
-            .unwrap_or(0);
-        let content_left = self.list_scroll.0.borrow().base_handle.bounds().left();
-        let cell_left: f32 =
-            GRID_GUTTER_WIDTH + self.state.column_widths.iter().take(col).sum::<f32>();
-        let text_left = f32::from(content_left) + cell_left + 8.0;
-        let relative = f32::from(x) - text_left;
-        if char_count == 0 || relative <= 0.0 {
-            return 0;
-        }
-        let run = window.text_style().to_run(value.len());
-        let layout = window
-            .text_system()
-            .layout_line(value, px(12.0), &[run], None);
-        let byte = layout.closest_index_for_x(px(relative)).min(value.len());
-        value[..byte].chars().count()
-    }
-
-    pub(super) fn cell_editor_drag(
-        &mut self,
-        event: &MouseMoveEvent,
-        window: &Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        if event.pressed_button != Some(MouseButton::Left) {
-            return;
-        }
-        let Some(value) = self.cell_editor.as_ref().map(|editor| editor.value.clone()) else {
-            return;
-        };
-        let index = self.cell_editor_index_for_x(&value, event.position.x, window);
-        if let Some(editor) = self.cell_editor.as_mut() {
-            editor.selection.cursor = index;
-        }
-        cx.notify();
-    }
-
     pub(super) fn commit_editor(&mut self, cx: &mut Context<'_, Self>) {
+        self.cell_editor_blur_subscription = None;
         let Some(editor) = self.cell_editor.take() else {
             return;
         };
@@ -649,6 +473,8 @@ impl GridView {
 
     pub(super) fn cancel_editor(&mut self, cx: &mut Context<'_, Self>) {
         self.cell_editor = None;
+        self.cell_editor_blur_subscription = None;
+        self.date_picker = None;
         cx.notify();
     }
 }

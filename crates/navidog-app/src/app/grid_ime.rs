@@ -2,33 +2,14 @@ use std::ops::Range;
 
 use super::*;
 
-/// Converts a character index into a byte offset (clamped to the string length).
-fn char_to_byte(text: &str, index: usize) -> usize {
-    text.char_indices()
-        .nth(index)
-        .map(|(byte, _)| byte)
-        .unwrap_or(text.len())
-}
-
-/// Converts a byte offset into a character index (clamped to the string length).
-fn byte_to_char(text: &str, byte: usize) -> usize {
-    text[..byte.min(text.len())].chars().count()
-}
-
 impl GridView {
     /// The grid text field currently focused, if any.
     pub(super) fn active_text_field(&self, window: &Window) -> Option<GridTextField> {
-        if self.cell_editor.is_some() && self.cell_editor_focus.is_focused(window) {
-            return Some(GridTextField::CellEditor);
-        }
         if self.page_input_focus.is_focused(window) {
             return Some(GridTextField::PageInput);
         }
         if self.page_size_focus.is_focused(window) {
             return Some(GridTextField::PageSize);
-        }
-        if self.sort_combo_focus.is_focused(window) {
-            return Some(GridTextField::SortSearch);
         }
         for index in 0..self.filter_value_focus.len() {
             if self.filter_value_focus[index].is_focused(window) {
@@ -61,14 +42,8 @@ impl GridView {
 
     fn field_text(&self, field: GridTextField) -> String {
         match field {
-            GridTextField::CellEditor => self
-                .cell_editor
-                .as_ref()
-                .map(|editor| editor.value.clone())
-                .unwrap_or_default(),
             GridTextField::PageInput => self.page_input.clone(),
             GridTextField::PageSize => self.page_size_input.clone(),
-            GridTextField::SortSearch => self.sort_combo_filter.clone(),
             GridTextField::Filter(index, slot) => self
                 .state
                 .filter_draft
@@ -86,14 +61,8 @@ impl GridView {
 
     fn set_field_text(&mut self, field: GridTextField, value: String) {
         match field {
-            GridTextField::CellEditor => {
-                if let Some(editor) = self.cell_editor.as_mut() {
-                    editor.value = value;
-                }
-            }
             GridTextField::PageInput => self.page_input = value,
             GridTextField::PageSize => self.page_size_input = value,
-            GridTextField::SortSearch => self.sort_combo_filter = value,
             GridTextField::Filter(index, slot) => {
                 if let Some(condition) = self.state.filter_draft.get_mut(index) {
                     if slot == 0 {
@@ -109,29 +78,8 @@ impl GridView {
     /// The byte selection `(start, end)` of `field`. The append-only fields always have their
     /// caret at the end.
     fn field_selection(&self, field: GridTextField) -> (usize, usize) {
-        if field == GridTextField::CellEditor
-            && let Some(editor) = self.cell_editor.as_ref()
-        {
-            let (start, end) = editor.selection.range();
-            return (
-                char_to_byte(&editor.value, start),
-                char_to_byte(&editor.value, end),
-            );
-        }
         let len = self.field_text(field).len();
         (len, len)
-    }
-
-    fn set_field_caret(&mut self, field: GridTextField, byte: usize) {
-        if field == GridTextField::CellEditor
-            && let Some(editor) = self.cell_editor.as_mut()
-        {
-            let index = byte_to_char(&editor.value, byte);
-            editor.selection = FieldSelection {
-                anchor: index,
-                cursor: index,
-            };
-        }
     }
 
     fn field_is_numeric(field: GridTextField) -> bool {
@@ -139,10 +87,8 @@ impl GridView {
     }
 
     fn field_changed(&mut self, field: GridTextField, cx: &mut Context<'_, Self>) {
-        match field {
-            GridTextField::SortSearch => self.sort_combo_highlight = 0,
-            GridTextField::Filter(index, slot) => self.filter_active = Some((index, slot)),
-            _ => {}
+        if let GridTextField::Filter(index, slot) = field {
+            self.filter_active = Some((index, slot));
         }
         self.caret_visible = true;
         cx.notify();
@@ -169,13 +115,6 @@ impl GridView {
             insert.retain(|character| character.is_ascii_digit());
         }
 
-        if field == GridTextField::CellEditor
-            && !mark
-            && let Some(editor) = self.cell_editor.as_mut()
-        {
-            editor.history.push(editor.value.clone());
-        }
-
         let mut next = String::with_capacity(current.len() + insert.len());
         next.push_str(&current[..start]);
         next.push_str(&insert);
@@ -183,7 +122,6 @@ impl GridView {
         self.set_field_text(field, next);
 
         let caret = start + insert.len();
-        self.set_field_caret(field, caret);
         if mark && !insert.is_empty() {
             self.ime_marked = Some(start..caret);
         } else {

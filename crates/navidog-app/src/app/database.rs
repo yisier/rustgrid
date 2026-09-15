@@ -44,7 +44,6 @@ impl AppView {
             name: String::new(),
             error: None,
         });
-        self.db_combo = None;
         self.form_offset = Point::default();
         window.focus(&focus);
         cx.notify();
@@ -74,7 +73,7 @@ impl AppView {
             loading: true,
             error: None,
         });
-        self.db_combo = None;
+        self.ensure_db_combos(cx);
         self.form_offset = Point::default();
 
         let Some(connection) = self.connection_arc(connection_index) else {
@@ -359,105 +358,82 @@ impl AppView {
         }
     }
 
-    pub(super) fn db_combo(
-        &self,
-        label: String,
-        value: &str,
-        options: &[String],
-        kind: DbCombo,
-        cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
+    /// Create (once) the two editable drop-downs of the edit-database dialog. Their options and
+    /// value are pushed in by [`AppView::sync_db_combos`]; selection flows back through the
+    /// callbacks.
+    pub(super) fn ensure_db_combos(&mut self, cx: &mut Context<'_, Self>) {
         let theme = self.theme;
-        let open = self.db_combo == Some(kind);
-
-        let mut list = div()
-            .id(SharedString::from(format!("combo-list-{kind:?}")))
-            .absolute()
-            .top(px(24.0))
-            .left_0()
-            .w(px(300.0))
-            .flex()
-            .flex_col()
-            .bg(rgb(theme.dialog_bg))
-            .border_1()
-            .border_color(rgb(theme.border))
-            .h(px((options.len().min(10) as f32) * 22.0 + 4.0))
-            .overflow_y_scroll();
-        for option in options {
-            let selected = option == value;
-            let option_label = option.clone();
-            let option_value = option.clone();
-            list = list.child(
-                div()
-                    .id(SharedString::from(format!("combo-{kind:?}-{option}")))
-                    .flex()
-                    .items_center()
-                    .h(px(22.0))
-                    .px_2()
-                    .flex_none()
-                    .text_size(px(12.0))
-                    .cursor_pointer()
-                    .when(selected, move |style| {
-                        style
-                            .bg(rgb(theme.tree_selected_bg))
-                            .text_color(rgb(theme.tree_selected_text))
-                    })
-                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.db_select_combo(option_value.clone(), cx);
-                    }))
-                    .child(option_label),
-            );
+        if self.db_charset_combo.is_none() {
+            let weak = cx.weak_entity();
+            let combo = cx.new(|cx| {
+                ComboBox::new(theme, Vec::new(), String::new(), 300.0, cx).on_select(Rc::new(
+                    move |value, _window, cx| {
+                        let _ = weak.update(cx, |app, cx| app.db_charset_selected(value, cx));
+                    },
+                ))
+            });
+            self.db_charset_combo = Some(combo);
         }
-
-        let combo_box = ui::text_field(theme)
-            .id(SharedString::from(format!("combo-btn-{kind:?}")))
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .w(px(300.0))
-            .h(px(24.0))
-            .px_2()
-            .text_size(px(12.0))
-            .cursor_pointer()
-            .on_click(cx.listener(move |this, _event, _window, cx| {
-                this.db_combo = if this.db_combo == Some(kind) {
-                    None
-                } else {
-                    Some(kind)
-                };
-                cx.notify();
-            }))
-            .child(value.to_string())
-            .child(
-                svg()
-                    .path("icons/chevron-down.svg")
-                    .w(px(12.0))
-                    .h(px(12.0))
-                    .flex_none()
-                    .text_color(rgb(theme.text_muted)),
-            );
-
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .child(
-                div()
-                    .w(px(150.0))
-                    .flex_none()
-                    .text_size(px(12.0))
-                    .child(label),
-            )
-            .child(div().relative().child(combo_box).when(open, move |style| {
-                style.child(deferred(list).with_priority(10))
-            }))
+        if self.db_collation_combo.is_none() {
+            let weak = cx.weak_entity();
+            let combo = cx.new(|cx| {
+                ComboBox::new(theme, Vec::new(), String::new(), 300.0, cx).on_select(Rc::new(
+                    move |value, _window, cx| {
+                        let _ = weak.update(cx, |app, cx| app.db_collation_selected(value, cx));
+                    },
+                ))
+            });
+            self.db_collation_combo = Some(combo);
+        }
     }
 
-    pub(super) fn db_select_combo(&mut self, value: String, cx: &mut Context<'_, Self>) {
-        let combo = self.db_combo.take();
+    /// Push the dialog's charsets/collations into the two combo entities. Called every frame (the
+    /// setters are idempotent) so the list always reflects the loaded schema.
+    pub(super) fn sync_db_combos(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(DbDialog::Edit {
+            charset,
+            collation,
+            charsets,
+            collations,
+            loading,
+            ..
+        }) = self.db_dialog.as_ref()
+        else {
+            return;
+        };
+        if *loading {
+            return;
+        }
+        let charset = charset.clone();
+        let collation = collation.clone();
+        let charset_options: Vec<ComboOption> =
+            charsets.iter().cloned().map(ComboOption::plain).collect();
+        let prefix = format!("{charset}_");
+        let collation_options: Vec<ComboOption> = if charset.is_empty() {
+            collations.iter().cloned().map(ComboOption::plain).collect()
+        } else {
+            collations
+                .iter()
+                .filter(|candidate| candidate.starts_with(&prefix))
+                .cloned()
+                .map(ComboOption::plain)
+                .collect()
+        };
+        if let Some(combo) = self.db_charset_combo.clone() {
+            combo.update(cx, |combo, cx| {
+                combo.set_options(charset_options, cx);
+                combo.set_selected(charset, cx);
+            });
+        }
+        if let Some(combo) = self.db_collation_combo.clone() {
+            combo.update(cx, |combo, cx| {
+                combo.set_options(collation_options, cx);
+                combo.set_selected(collation, cx);
+            });
+        }
+    }
+
+    pub(super) fn db_charset_selected(&mut self, value: &str, cx: &mut Context<'_, Self>) {
         if let Some(DbDialog::Edit {
             charset,
             collation,
@@ -465,23 +441,26 @@ impl AppView {
             ..
         }) = self.db_dialog.as_mut()
         {
-            match combo {
-                Some(DbCombo::Charset) => {
-                    *charset = value.clone();
-                    let prefix = format!("{value}_");
-                    if let Some(first) = collations
-                        .iter()
-                        .find(|candidate| candidate.starts_with(&prefix))
-                        .cloned()
-                    {
-                        *collation = first;
-                    } else {
-                        collation.clear();
-                    }
-                }
-                Some(DbCombo::Collation) => *collation = value,
-                None => {}
+            *charset = value.to_string();
+            let prefix = format!("{value}_");
+            if let Some(first) = collations
+                .iter()
+                .find(|candidate| candidate.starts_with(&prefix))
+                .cloned()
+            {
+                *collation = first;
+            } else {
+                collation.clear();
             }
+        }
+        self.db_sql_anchor = 0;
+        self.db_sql_cursor = 0;
+        cx.notify();
+    }
+
+    pub(super) fn db_collation_selected(&mut self, value: &str, cx: &mut Context<'_, Self>) {
+        if let Some(DbDialog::Edit { collation, .. }) = self.db_dialog.as_mut() {
+            *collation = value.to_string();
         }
         self.db_sql_anchor = 0;
         self.db_sql_cursor = 0;

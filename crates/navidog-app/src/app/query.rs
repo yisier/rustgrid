@@ -79,7 +79,6 @@ impl AppView {
         self.active_query = Some(self.queries.len() - 1);
         self.active_grid = None;
         self.active_design = None;
-        self.query_combo = None;
         self.query_completion = None;
         self.clear_object_search(cx);
         self.query_focus_pending = true;
@@ -99,7 +98,6 @@ impl AppView {
                     .iter()
                     .position(|grid| grid.read(cx).state.id == id)
             });
-        self.query_combo = None;
         self.query_completion = None;
         self.query_focus_pending = true;
         cx.notify();
@@ -146,7 +144,6 @@ impl AppView {
                         .position(|grid| grid.read(cx).state.id == id)
                 })
             });
-        self.query_combo = None;
         self.query_completion = None;
         cx.notify();
     }
@@ -270,42 +267,112 @@ impl AppView {
         }
     }
 
-    pub(super) fn query_select_combo(
-        &mut self,
-        kind: QueryCombo,
-        value: String,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.query_combo = None;
+    pub(super) fn ensure_query_combos(&mut self, cx: &mut Context<'_, Self>) {
+        let theme = self.theme;
+        if self.query_connection_combo.is_none() {
+            let weak = cx.weak_entity();
+            let combo = cx.new(|cx| {
+                ComboBox::new(theme, Vec::new(), String::new(), 240.0, cx).on_select(Rc::new(
+                    move |value, _window, cx| {
+                        let _ = weak.update(cx, |app, cx| app.query_connection_selected(value, cx));
+                    },
+                ))
+            });
+            combo.update(cx, |combo, cx| {
+                combo.set_icon("icons/connection.svg", theme.icon_connection, cx);
+            });
+            self.query_connection_combo = Some(combo);
+        }
+        if self.query_database_combo.is_none() {
+            let weak = cx.weak_entity();
+            let combo = cx.new(|cx| {
+                ComboBox::new(theme, Vec::new(), String::new(), 240.0, cx).on_select(Rc::new(
+                    move |value, _window, cx| {
+                        let _ = weak.update(cx, |app, cx| app.query_database_selected(value, cx));
+                    },
+                ))
+            });
+            combo.update(cx, |combo, cx| {
+                combo.set_icon("icons/database.svg", theme.icon_database, cx);
+            });
+            self.query_database_combo = Some(combo);
+        }
+    }
+
+    pub(super) fn sync_query_combos(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(active) = self.active_query else {
+            return;
+        };
+        let Some(tab) = self.queries.get(active) else {
+            return;
+        };
+        let has_connection = tab.connection_index.is_some();
+        let connection_selected = tab
+            .connection_index
+            .map(|index| index.to_string())
+            .unwrap_or_default();
+        let database_selected = tab.database.clone().unwrap_or_default();
+        let connection_options: Vec<ComboOption> = self
+            .query_connection_options()
+            .into_iter()
+            .map(|(value, label)| ComboOption::new(value, label))
+            .collect();
+        let database_options: Vec<ComboOption> = tab
+            .connection_index
+            .map(|index| self.query_database_options(index))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(value, label)| ComboOption::new(value, label))
+            .collect();
+        let not_connected = t!("query.not_connected").to_string();
+        let database_placeholder = t!("database.name").to_string();
+        if let Some(combo) = self.query_connection_combo.clone() {
+            combo.update(cx, |combo, cx| {
+                combo.set_options(connection_options, cx);
+                combo.set_placeholder(not_connected, cx);
+                combo.set_selected(connection_selected, cx);
+            });
+        }
+        if let Some(combo) = self.query_database_combo.clone() {
+            combo.update(cx, |combo, cx| {
+                combo.set_options(database_options, cx);
+                combo.set_placeholder(database_placeholder, cx);
+                combo.set_enabled(has_connection, cx);
+                combo.set_selected(database_selected, cx);
+            });
+        }
+    }
+
+    pub(super) fn query_connection_selected(&mut self, value: &str, cx: &mut Context<'_, Self>) {
         self.query_completion = None;
         let Some(index) = self.active_query else {
             return;
         };
-        match kind {
-            QueryCombo::Connection => {
-                let connection_index = value.parse::<usize>().ok();
-                let database =
-                    connection_index.and_then(|index| self.default_query_database(index, cx));
-                if let Some(tab) = self.queries.get_mut(index) {
-                    tab.connection_index = connection_index;
-                    tab.database = database;
-                }
-                if let Some(connection_index) = connection_index
-                    && !matches!(
-                        self.connections
-                            .get(connection_index)
-                            .map(|node| &node.status),
-                        Some(ConnectionStatus::Connected(_))
-                    )
-                {
-                    self.connect(connection_index, cx);
-                }
-            }
-            QueryCombo::Database => {
-                if let Some(tab) = self.queries.get_mut(index) {
-                    tab.database = Some(value);
-                }
-            }
+        let connection_index = value.parse::<usize>().ok();
+        let database = connection_index.and_then(|index| self.default_query_database(index, cx));
+        if let Some(tab) = self.queries.get_mut(index) {
+            tab.connection_index = connection_index;
+            tab.database = database;
+        }
+        if let Some(connection_index) = connection_index
+            && !matches!(
+                self.connections
+                    .get(connection_index)
+                    .map(|node| &node.status),
+                Some(ConnectionStatus::Connected(_))
+            )
+        {
+            self.connect(connection_index, cx);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn query_database_selected(&mut self, value: &str, cx: &mut Context<'_, Self>) {
+        self.query_completion = None;
+        if let Some(index) = self.active_query
+            && let Some(tab) = self.queries.get_mut(index)
+        {
+            tab.database = Some(value.to_string());
         }
         cx.notify();
     }

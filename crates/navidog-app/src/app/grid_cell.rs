@@ -1,11 +1,7 @@
 use super::*;
 
 impl GridView {
-    pub(super) fn render_cell_editor(
-        &self,
-        window: &Window,
-        cx: &mut Context<'_, Self>,
-    ) -> AnyElement {
+    pub(super) fn render_cell_editor(&self, _cx: &mut Context<'_, Self>) -> AnyElement {
         let Some(editor) = self.cell_editor.as_ref() else {
             return div().into_any_element();
         };
@@ -25,78 +21,7 @@ impl GridView {
                 .sum::<f32>();
         let offset_y = f32::from(self.list_scroll.0.borrow().base_handle.offset().y);
         let top = GRID_ROW_HEIGHT + editor.row as f32 * GRID_ROW_HEIGHT + offset_y;
-        let theme = self.theme;
-
-        let chars: Vec<char> = editor.value.chars().collect();
-        let len = chars.len();
-        let mut selection = editor.selection;
-        selection.anchor = selection.anchor.min(len);
-        selection.cursor = selection.cursor.min(len);
-        let (start, end) = selection.range();
-        let focused = self.cell_editor_focused;
-
-        let mut shown = div().flex().flex_row().items_center().whitespace_nowrap();
-        if focused && start < end {
-            if start > 0 {
-                shown = shown.child(chars[..start].iter().copied().collect::<String>());
-            }
-            shown = shown.child(
-                div()
-                    .bg(rgb(theme.tree_selected_bg))
-                    .text_color(rgb(theme.tree_selected_text))
-                    .child(chars[start..end].iter().copied().collect::<String>()),
-            );
-            if end < len {
-                shown = shown.child(chars[end..].iter().copied().collect::<String>());
-            }
-        } else if focused {
-            if selection.cursor > 0 {
-                shown = shown.child(
-                    chars[..selection.cursor]
-                        .iter()
-                        .copied()
-                        .collect::<String>(),
-                );
-            }
-            if selection.cursor < len {
-                shown = shown.child(
-                    chars[selection.cursor..]
-                        .iter()
-                        .copied()
-                        .collect::<String>(),
-                );
-            }
-        } else {
-            shown = shown.child(editor.value.clone());
-        }
-
-        let caret_x = if focused && start >= end && self.caret() {
-            let prefix: String = chars[..selection.cursor].iter().copied().collect();
-            let run = window.text_style().to_run(prefix.len());
-            let layout = window
-                .text_system()
-                .layout_line(&prefix, px(12.0), &[run], None);
-            Some(f32::from(layout.width))
-        } else {
-            None
-        };
-        let mut content = div()
-            .relative()
-            .flex()
-            .flex_row()
-            .items_center()
-            .child(shown);
-        if let Some(x) = caret_x {
-            content = content.child(
-                div()
-                    .absolute()
-                    .left(px(x))
-                    .top(px(0.0))
-                    .w(px(1.5))
-                    .h(px(14.0))
-                    .bg(rgb(theme.text)),
-            );
-        }
+        let input = editor.input.clone();
 
         div()
             .id("cell-editor")
@@ -106,72 +31,7 @@ impl GridView {
             .top(px(top))
             .w(px(width))
             .h(px(GRID_ROW_HEIGHT))
-            .track_focus(&self.cell_editor_focus)
-            .cursor_text()
-            .flex()
-            .items_center()
-            .px_2()
-            .bg(rgb(theme.input_bg))
-            .border_1()
-            .border_color(rgb(theme.primary))
-            .text_size(px(12.0))
-            .on_key_down(cx.listener(|this, event, _window, cx| this.editor_key(event, cx)))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    window.focus(&this.cell_editor_focus);
-                    let Some(value) = this.cell_editor.as_ref().map(|editor| editor.value.clone())
-                    else {
-                        return;
-                    };
-                    let index = this.cell_editor_index_for_x(&value, event.position.x, window);
-                    if let Some(editor) = this.cell_editor.as_mut() {
-                        if event.modifiers.shift {
-                            editor.selection.cursor = index;
-                        } else {
-                            editor.selection = FieldSelection {
-                                anchor: index,
-                                cursor: index,
-                            };
-                            editor.selecting = true;
-                        }
-                    }
-                    this.caret_visible = true;
-                    cx.notify();
-                }),
-            )
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
-                if event.pressed_button != Some(MouseButton::Left) {
-                    return;
-                }
-                let selecting = this
-                    .cell_editor
-                    .as_ref()
-                    .is_some_and(|editor| editor.selecting);
-                if !selecting {
-                    return;
-                }
-                let Some(value) = this.cell_editor.as_ref().map(|editor| editor.value.clone())
-                else {
-                    return;
-                };
-                let index = this.cell_editor_index_for_x(&value, event.position.x, window);
-                if let Some(editor) = this.cell_editor.as_mut() {
-                    editor.selection.cursor = index;
-                }
-                cx.notify();
-            }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _event, _window, cx| {
-                    if let Some(editor) = this.cell_editor.as_mut() {
-                        editor.selecting = false;
-                    }
-                    cx.notify();
-                }),
-            )
-            .child(content)
-            .child(self.ime_probe(&self.cell_editor_focus))
+            .child(input)
             .into_any_element()
     }
 
