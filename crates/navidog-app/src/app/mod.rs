@@ -7,7 +7,7 @@ use std::time::Duration;
 use chrono::{Datelike, NaiveDate, NaiveDateTime, Timelike};
 
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, DispatchPhase, Div,
+    AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, DispatchPhase, Div,
     ElementInputHandler, Entity, EntityInputHandler, FocusHandle, FontWeight, HighlightStyle,
     ImageSource, KeyDownEvent, ListHorizontalSizingBehavior, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Resource, ScrollDelta, ScrollHandle,
@@ -18,14 +18,15 @@ use gpui::{
 use navidog_config::{AppSettings, ConfigStore, LanguageSetting, ThemeSetting};
 use navidog_core::{
     CellValue, Connection, ConnectionConfig, DriverRegistry, Error, FilterCondition,
-    FilterConjunction, FilterOperator, PageRequest, QueryResult, RowUpdate,
+    FilterConjunction, FilterGroup, FilterNode, FilterOperator, PageRequest, QueryResult,
+    RowUpdate,
 };
 
 use crate::form::{ConnectionForm, FORM_FIELDS, FormField};
 use crate::runtime::Runtime;
 use crate::session::{
     Category, CategoryExpansion, CellSelection, ConnectionNode, ConnectionStatus, DatabaseNode,
-    FilterCombo, GridState, Loadable, QueryTab, SortRule, compute_column_widths,
+    GridState, Loadable, QueryTab, SortRule, compute_column_widths,
 };
 use crate::sql::{self, SqlSpan, SqlToken};
 use crate::theme::Theme;
@@ -267,11 +268,12 @@ struct TreePane {
 /// bespoke single-line editors whose focus handles are dynamic (filter values in particular), so
 /// rather than wrapping each in `TextInput`, `GridView` implements `EntityInputHandler` itself
 /// and routes input to whichever field is focused.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum GridTextField {
     PageInput,
     PageSize,
-    Filter(usize, u8),
+    /// A filter value input, addressed by its node path in the filter tree and which value slot.
+    Filter(Vec<usize>, u8),
 }
 
 /// A single open grid (a table page or a SQL result) as an isolated child view. Owns the grid
@@ -302,17 +304,21 @@ struct GridView {
     cell_editor_focus_pending: bool,
     date_picker: Option<DatePicker>,
 
+    /// The column edge being dragged, with the pointer x and width captured on mouse-down.
+    column_resize: Option<ColumnResize>,
+
     sort_hover: Option<usize>,
     sort_search: Option<Entity<TextInput>>,
     sort_combo_filter: String,
     sort_combo_highlight: usize,
 
-    filter_value_focus: Vec<FocusHandle>,
-    filter_value2_focus: Vec<FocusHandle>,
-    filter_active: Option<(usize, u8)>,
-    /// The search field at the top of an open filter field/operator popup, and its text.
-    filter_search: Option<Entity<TextInput>>,
-    filter_query: String,
+    filter_value_focus: Vec<(Vec<usize>, FocusHandle)>,
+    filter_value2_focus: Vec<(Vec<usize>, FocusHandle)>,
+    filter_active: Option<(Vec<usize>, u8)>,
+    /// The shared dropdown entities for each condition row, keyed by the node path. Rebuilt after
+    /// any structural change so the paths stay valid.
+    filter_field_combos: BTreeMap<Vec<usize>, Entity<ComboBox>>,
+    filter_operator_combos: BTreeMap<Vec<usize>, Entity<ComboBox>>,
 
     page_input: String,
     page_input_focus: FocusHandle,
@@ -380,6 +386,15 @@ struct DatePicker {
     has_time: bool,
 }
 
+/// An in-progress drag of a grid column's right edge.
+#[derive(Clone, Copy)]
+struct ColumnResize {
+    col: usize,
+    /// Pointer x and column width when the drag started.
+    start_x: f32,
+    start_width: f32,
+}
+
 /// Pending destructive action that needs confirmation before it runs.
 enum DeleteConfirm {
     /// Delete the selected rows of a grid.
@@ -413,6 +428,15 @@ const OBJECT_ROW_HEIGHT: f32 = 20.0;
 const OBJECT_BOTTOM_MARGIN: f32 = 20.0;
 const GRID_ROW_HEIGHT: f32 = 24.0;
 const GRID_COLUMN_WIDTH: f32 = 120.0;
+/// Fixed column widths of a filter condition row. The filter builder's group boundary row reuses
+/// them to line its controls up under the operator column.
+const FILTER_TOGGLE_WIDTH: f32 = 78.0;
+const FILTER_FIELD_WIDTH: f32 = 170.0;
+const FILTER_OPERATOR_WIDTH: f32 = 150.0;
+const FILTER_VALUE_WIDTH: f32 = 200.0;
+/// Clamp for a column dragged to its narrowest/widest.
+const MIN_COLUMN_WIDTH: f32 = 32.0;
+const MAX_COLUMN_WIDTH: f32 = 1200.0;
 const GRID_GUTTER_WIDTH: f32 = 22.0;
 /// Thickness of the app-drawn grid scrollbars (matches `ui::vscrollbar_track` / `hscrollbar_track`).
 const GRID_SCROLLBAR_THICKNESS: f32 = 14.0;

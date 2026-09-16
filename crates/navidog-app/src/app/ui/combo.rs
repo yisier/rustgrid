@@ -472,6 +472,7 @@ impl ComboBox {
             .border_1()
             .border_color(rgb(theme.text_muted))
             .shadow(dialog_shadow())
+            .occlude()
             .on_mouse_down_out(cx.listener(|this, _event, _window, cx| this.close(cx)))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
                 this.scroll_drag(event, cx);

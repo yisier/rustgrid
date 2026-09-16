@@ -2,8 +2,9 @@ use async_trait::async_trait;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use navidog_core::{
     CellValue, ColumnDef, ColumnInfo, Connection, DatabaseInfo, DriverId, Error, FilterCondition,
-    FilterConjunction, FilterOperator, ForeignKeyDef, IndexDef, ObjectKind, PageRequest,
-    QueryResult, Result, RowUpdate, TableInfo, TableOptions, TablePage, TableSchema, TriggerDef,
+    FilterConjunction, FilterNode, FilterOperator, ForeignKeyDef, IndexDef, ObjectKind,
+    PageRequest, QueryResult, Result, RowUpdate, TableInfo, TableOptions, TablePage, TableSchema,
+    TriggerDef,
 };
 use sqlx::mysql::{MySqlColumn, MySqlRow};
 use sqlx::{
@@ -1092,112 +1093,40 @@ fn order_clause(page: &PageRequest) -> String {
     format!(" ORDER BY {terms}")
 }
 
-/// Build the ` WHERE ...` fragment for a page request's filter, together with the values to bind
-/// in placeholder order.
-fn filter_clause(filter: &[FilterCondition]) -> (String, Vec<String>) {
-    let mut clauses: Vec<String> = Vec::new();
+/// Build the ` WHERE ...` fragment for a page request's filter tree, together with the values to
+/// bind in placeholder order.
+fn filter_clause(filter: &[FilterNode]) -> (String, Vec<String>) {
     let mut binds: Vec<String> = Vec::new();
+    match filter_fragment(filter, &mut binds) {
+        Some(expr) => (format!(" WHERE {expr}"), binds),
+        None => (String::new(), Vec::new()),
+    }
+}
 
-    for condition in filter {
-        if !condition.enabled || condition.column.is_empty() {
-            continue;
-        }
-        let operator = condition.operator;
-        if operator.needs_value() && condition.value.is_empty() {
-            continue;
-        }
-        if operator.needs_second_value() && condition.value2.is_empty() {
-            continue;
-        }
+/// Render one sibling list as an `AND`/`OR` joined expression, or `None` when nothing enabled is
+/// left to filter on. Binds are appended in placeholder order; a skipped node never adds any.
+fn filter_fragment(filter: &[FilterNode], binds: &mut Vec<String>) -> Option<String> {
+    let mut clauses: Vec<String> = Vec::new();
 
-        let column = quote_identifier(&condition.column);
-        let piece = match operator {
-            FilterOperator::Equal => {
-                binds.push(condition.value.clone());
-                format!("{column} = ?")
-            }
-            FilterOperator::NotEqual => {
-                binds.push(condition.value.clone());
-                format!("{column} <> ?")
-            }
-            FilterOperator::LessThan => {
-                binds.push(condition.value.clone());
-                format!("{column} < ?")
-            }
-            FilterOperator::LessOrEqual => {
-                binds.push(condition.value.clone());
-                format!("{column} <= ?")
-            }
-            FilterOperator::GreaterThan => {
-                binds.push(condition.value.clone());
-                format!("{column} > ?")
-            }
-            FilterOperator::GreaterOrEqual => {
-                binds.push(condition.value.clone());
-                format!("{column} >= ?")
-            }
-            FilterOperator::Contains => {
-                binds.push(format!("%{}%", condition.value));
-                format!("{column} LIKE ?")
-            }
-            FilterOperator::NotContains => {
-                binds.push(format!("%{}%", condition.value));
-                format!("{column} NOT LIKE ?")
-            }
-            FilterOperator::StartsWith => {
-                binds.push(format!("{}%", condition.value));
-                format!("{column} LIKE ?")
-            }
-            FilterOperator::NotStartsWith => {
-                binds.push(format!("{}%", condition.value));
-                format!("{column} NOT LIKE ?")
-            }
-            FilterOperator::EndsWith => {
-                binds.push(format!("%{}", condition.value));
-                format!("{column} LIKE ?")
-            }
-            FilterOperator::NotEndsWith => {
-                binds.push(format!("%{}", condition.value));
-                format!("{column} NOT LIKE ?")
-            }
-            FilterOperator::IsNull => format!("{column} IS NULL"),
-            FilterOperator::IsNotNull => format!("{column} IS NOT NULL"),
-            FilterOperator::IsEmpty => format!("({column} IS NULL OR {column} = '')"),
-            FilterOperator::IsNotEmpty => format!("({column} IS NOT NULL AND {column} <> '')"),
-            FilterOperator::Between => {
-                binds.push(condition.value.clone());
-                binds.push(condition.value2.clone());
-                format!("{column} BETWEEN ? AND ?")
-            }
-            FilterOperator::NotBetween => {
-                binds.push(condition.value.clone());
-                binds.push(condition.value2.clone());
-                format!("{column} NOT BETWEEN ? AND ?")
-            }
-            FilterOperator::InList => {
-                let values = condition.list_values();
-                if values.is_empty() {
-                    continue;
+    for node in filter {
+        let piece = match node {
+            FilterNode::Condition(condition) => condition_piece(condition, binds),
+            FilterNode::Group(group) => {
+                if !group.enabled {
+                    None
+                } else {
+                    filter_fragment(&group.children, binds).map(|inner| format!("({inner})"))
                 }
-                let placeholders = vec!["?"; values.len()].join(", ");
-                binds.extend(values);
-                format!("{column} IN ({placeholders})")
             }
-            FilterOperator::NotInList => {
-                let values = condition.list_values();
-                if values.is_empty() {
-                    continue;
-                }
-                let placeholders = vec!["?"; values.len()].join(", ");
-                binds.extend(values);
-                format!("{column} NOT IN ({placeholders})")
-            }
+        };
+        let Some(piece) = piece else {
+            continue;
         };
 
         if clauses.is_empty() {
             clauses.push(piece);
         } else {
-            let conjunction = match condition.conjunction {
+            let conjunction = match node.conjunction() {
                 FilterConjunction::And => "AND",
                 FilterConjunction::Or => "OR",
             };
@@ -1205,11 +1134,108 @@ fn filter_clause(filter: &[FilterCondition]) -> (String, Vec<String>) {
         }
     }
 
-    if clauses.is_empty() {
-        (String::new(), Vec::new())
-    } else {
-        (format!(" WHERE {}", clauses.join(" ")), binds)
+    (!clauses.is_empty()).then(|| clauses.join(" "))
+}
+
+/// Render a single condition, or `None` when it is disabled/incomplete (in which case nothing is
+/// bound either).
+fn condition_piece(condition: &FilterCondition, binds: &mut Vec<String>) -> Option<String> {
+    if !condition.enabled || condition.column.is_empty() {
+        return None;
     }
+    let operator = condition.operator;
+    if operator.needs_value() && condition.value.is_empty() {
+        return None;
+    }
+    if operator.needs_second_value() && condition.value2.is_empty() {
+        return None;
+    }
+
+    let column = quote_identifier(&condition.column);
+    let piece = match operator {
+        FilterOperator::Equal => {
+            binds.push(condition.value.clone());
+            format!("{column} = ?")
+        }
+        FilterOperator::NotEqual => {
+            binds.push(condition.value.clone());
+            format!("{column} <> ?")
+        }
+        FilterOperator::LessThan => {
+            binds.push(condition.value.clone());
+            format!("{column} < ?")
+        }
+        FilterOperator::LessOrEqual => {
+            binds.push(condition.value.clone());
+            format!("{column} <= ?")
+        }
+        FilterOperator::GreaterThan => {
+            binds.push(condition.value.clone());
+            format!("{column} > ?")
+        }
+        FilterOperator::GreaterOrEqual => {
+            binds.push(condition.value.clone());
+            format!("{column} >= ?")
+        }
+        FilterOperator::Contains => {
+            binds.push(format!("%{}%", condition.value));
+            format!("{column} LIKE ?")
+        }
+        FilterOperator::NotContains => {
+            binds.push(format!("%{}%", condition.value));
+            format!("{column} NOT LIKE ?")
+        }
+        FilterOperator::StartsWith => {
+            binds.push(format!("{}%", condition.value));
+            format!("{column} LIKE ?")
+        }
+        FilterOperator::NotStartsWith => {
+            binds.push(format!("{}%", condition.value));
+            format!("{column} NOT LIKE ?")
+        }
+        FilterOperator::EndsWith => {
+            binds.push(format!("%{}", condition.value));
+            format!("{column} LIKE ?")
+        }
+        FilterOperator::NotEndsWith => {
+            binds.push(format!("%{}", condition.value));
+            format!("{column} NOT LIKE ?")
+        }
+        FilterOperator::IsNull => format!("{column} IS NULL"),
+        FilterOperator::IsNotNull => format!("{column} IS NOT NULL"),
+        FilterOperator::IsEmpty => format!("({column} IS NULL OR {column} = '')"),
+        FilterOperator::IsNotEmpty => format!("({column} IS NOT NULL AND {column} <> '')"),
+        FilterOperator::Between => {
+            binds.push(condition.value.clone());
+            binds.push(condition.value2.clone());
+            format!("{column} BETWEEN ? AND ?")
+        }
+        FilterOperator::NotBetween => {
+            binds.push(condition.value.clone());
+            binds.push(condition.value2.clone());
+            format!("{column} NOT BETWEEN ? AND ?")
+        }
+        FilterOperator::InList => {
+            let values = condition.list_values();
+            if values.is_empty() {
+                return None;
+            }
+            let placeholders = vec!["?"; values.len()].join(", ");
+            binds.extend(values);
+            format!("{column} IN ({placeholders})")
+        }
+        FilterOperator::NotInList => {
+            let values = condition.list_values();
+            if values.is_empty() {
+                return None;
+            }
+            let placeholders = vec!["?"; values.len()].join(", ");
+            binds.extend(values);
+            format!("{column} NOT IN ({placeholders})")
+        }
+    };
+
+    Some(piece)
 }
 
 /// Map a sqlx error to a Navicat-style message: `<code> - <message>` for MySQL server errors.
@@ -1349,8 +1375,8 @@ mod tests {
         column_sql, filter_clause, format_default, order_clause, returns_result_set, schema_sql,
     };
     use navidog_core::{
-        ColumnDef, FilterCondition, FilterConjunction, FilterOperator, PageRequest, SortColumn,
-        TableSchema,
+        ColumnDef, FilterCondition, FilterConjunction, FilterGroup, FilterNode, FilterOperator,
+        PageRequest, SortColumn, TableSchema,
     };
 
     #[test]
@@ -1475,6 +1501,10 @@ mod tests {
         }
     }
 
+    fn node(column: &str, operator: FilterOperator, value: &str) -> FilterNode {
+        FilterNode::Condition(condition(column, operator, value))
+    }
+
     #[test]
     fn builds_order_by_from_sort_columns() {
         let sorted = PageRequest::new(0, 10).with_order_by(vec![
@@ -1498,22 +1528,62 @@ mod tests {
     #[test]
     fn builds_where_with_bound_values() {
         let mut filter = vec![
-            condition("name", FilterOperator::Contains, "ali"),
-            condition("age", FilterOperator::GreaterOrEqual, "18"),
+            node("name", FilterOperator::Contains, "ali"),
+            node("age", FilterOperator::GreaterOrEqual, "18"),
         ];
-        filter[1].conjunction = FilterConjunction::Or;
+        filter[1].set_conjunction(FilterConjunction::Or);
         let (clause, binds) = filter_clause(&filter);
         assert_eq!(clause, " WHERE `name` LIKE ? OR `age` >= ?".to_string());
         assert_eq!(binds, vec!["%ali%".to_string(), "18".to_string()]);
     }
 
     #[test]
+    fn builds_where_with_nested_groups() {
+        let mut first = FilterGroup::new(FilterConjunction::And);
+        first.children = vec![
+            node("groupName", FilterOperator::Equal, "A"),
+            node("type", FilterOperator::Equal, "字符"),
+        ];
+        let mut second = FilterGroup::new(FilterConjunction::Or);
+        second.children = vec![
+            node("groupName", FilterOperator::Equal, "B"),
+            node("type", FilterOperator::Equal, "整数"),
+        ];
+        let filter = vec![FilterNode::Group(first), FilterNode::Group(second)];
+        let (clause, binds) = filter_clause(&filter);
+        assert_eq!(
+            clause,
+            " WHERE (`groupName` = ? AND `type` = ?) OR (`groupName` = ? AND `type` = ?)"
+        );
+        assert_eq!(binds, vec!["A", "字符", "B", "整数"]);
+    }
+
+    #[test]
+    fn nested_group_children_keep_binds_in_order() {
+        let mut group = FilterGroup::new(FilterConjunction::And);
+        group.children = vec![
+            node("a", FilterOperator::Equal, "1"),
+            node("b", FilterOperator::IsNull, ""),
+            node("c", FilterOperator::Between, "2"),
+        ];
+        if let FilterNode::Condition(condition) = &mut group.children[2] {
+            condition.value2 = "3".to_string();
+        }
+        let (clause, binds) = filter_clause(&[FilterNode::Group(group)]);
+        assert_eq!(
+            clause,
+            " WHERE (`a` = ? AND `b` IS NULL AND `c` BETWEEN ? AND ?)"
+        );
+        assert_eq!(binds, vec!["1", "2", "3"]);
+    }
+
+    #[test]
     fn filter_skips_disabled_and_valueless_conditions() {
         let mut filter = vec![
-            condition("a", FilterOperator::IsNull, ""),
-            condition("b", FilterOperator::Equal, ""),
+            node("a", FilterOperator::IsNull, ""),
+            node("b", FilterOperator::Equal, ""),
         ];
-        filter[0].enabled = false;
+        filter[0].set_enabled(false);
         assert_eq!(filter_clause(&filter), (String::new(), Vec::new()));
 
         let between = FilterCondition {
@@ -1524,14 +1594,26 @@ mod tests {
             conjunction: FilterConjunction::And,
             enabled: true,
         };
-        let (clause, binds) = filter_clause(&[between]);
+        let (clause, binds) = filter_clause(&[FilterNode::Condition(between)]);
         assert_eq!(clause, " WHERE `c` BETWEEN ? AND ?".to_string());
         assert_eq!(binds, vec!["1".to_string(), "2".to_string()]);
     }
 
     #[test]
+    fn empty_group_is_dropped() {
+        let group = FilterGroup::new(FilterConjunction::And);
+        let filter = vec![
+            node("a", FilterOperator::Equal, "1"),
+            FilterNode::Group(group),
+        ];
+        let (clause, binds) = filter_clause(&filter);
+        assert_eq!(clause, " WHERE `a` = ?".to_string());
+        assert_eq!(binds, vec!["1"]);
+    }
+
+    #[test]
     fn filter_in_list_splits_values() {
-        let condition = condition("id", FilterOperator::InList, "1, 2 ,3");
+        let condition = node("id", FilterOperator::InList, "1, 2 ,3");
         let (clause, binds) = filter_clause(&[condition]);
         assert_eq!(clause, " WHERE `id` IN (?, ?, ?)".to_string());
         assert_eq!(binds, vec!["1", "2", "3"]);

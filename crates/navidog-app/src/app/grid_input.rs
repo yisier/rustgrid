@@ -141,6 +141,44 @@ impl GridView {
         true
     }
 
+    /// Start dragging the right edge of `col`; the width follows the pointer until mouse-up.
+    pub(super) fn begin_column_resize(
+        &mut self,
+        col: usize,
+        mouse_x: Pixels,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(width) = self.state.column_widths.get(col).copied() else {
+            return;
+        };
+        self.column_resize = Some(ColumnResize {
+            col,
+            start_x: f32::from(mouse_x),
+            start_width: width,
+        });
+        cx.notify();
+    }
+
+    pub(super) fn grid_column_drag(&mut self, event: &MouseMoveEvent, cx: &mut Context<'_, Self>) {
+        let Some(resize) = self.column_resize else {
+            return;
+        };
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.column_resize = None;
+            cx.notify();
+            return;
+        }
+        let delta = f32::from(event.position.x) - resize.start_x;
+        let width = (resize.start_width + delta).clamp(MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH);
+        if let Some(slot) = self.state.column_widths.get_mut(resize.col)
+            && *slot != width
+        {
+            *slot = width;
+            self.state.manual_column_widths = true;
+            cx.notify();
+        }
+    }
+
     pub(super) fn grid_hit(&self, position: Point<Pixels>) -> Option<GridHit> {
         if self.state.rows.is_empty() {
             return None;

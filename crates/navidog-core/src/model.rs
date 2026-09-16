@@ -284,14 +284,74 @@ impl Default for FilterCondition {
     }
 }
 
+/// A node of the filter tree: a single comparison or a parenthesized sub-group. Siblings are
+/// combined by each node's own conjunction (so a group may mix `AND` and `OR`), and a group
+/// renders as `( ... )` in the `WHERE` clause.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FilterNode {
+    Condition(FilterCondition),
+    Group(FilterGroup),
+}
+
+impl FilterNode {
+    /// How this node joins the sibling before it.
+    pub fn conjunction(&self) -> FilterConjunction {
+        match self {
+            FilterNode::Condition(condition) => condition.conjunction,
+            FilterNode::Group(group) => group.conjunction,
+        }
+    }
+
+    pub fn set_conjunction(&mut self, conjunction: FilterConjunction) {
+        match self {
+            FilterNode::Condition(condition) => condition.conjunction = conjunction,
+            FilterNode::Group(group) => group.conjunction = conjunction,
+        }
+    }
+
+    /// Whether this node (and, for a group, its whole subtree) participates in the filter.
+    pub fn enabled(&self) -> bool {
+        match self {
+            FilterNode::Condition(condition) => condition.enabled,
+            FilterNode::Group(group) => group.enabled,
+        }
+    }
+
+    pub fn set_enabled(&mut self, enabled: bool) {
+        match self {
+            FilterNode::Condition(condition) => condition.enabled = enabled,
+            FilterNode::Group(group) => group.enabled = enabled,
+        }
+    }
+}
+
+/// A parenthesized set of filter nodes. `conjunction` joins the group to its previous sibling;
+/// the children are joined with each child's own conjunction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilterGroup {
+    pub conjunction: FilterConjunction,
+    pub enabled: bool,
+    pub children: Vec<FilterNode>,
+}
+
+impl FilterGroup {
+    pub fn new(conjunction: FilterConjunction) -> Self {
+        Self {
+            conjunction,
+            enabled: true,
+            children: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PageRequest {
     pub page: u64,
     pub page_size: u64,
     /// Applied `ORDER BY`, in priority order. Empty means the engine's natural order.
     pub order_by: Vec<SortColumn>,
-    /// Applied `WHERE`, as a conjunction of conditions. Empty means no filtering.
-    pub filter: Vec<FilterCondition>,
+    /// Applied `WHERE`, as a tree of conditions and groups. Empty means no filtering.
+    pub filter: Vec<FilterNode>,
 }
 
 impl PageRequest {
@@ -309,7 +369,7 @@ impl PageRequest {
         self
     }
 
-    pub fn with_filter(mut self, filter: Vec<FilterCondition>) -> Self {
+    pub fn with_filter(mut self, filter: Vec<FilterNode>) -> Self {
         self.filter = filter;
         self
     }

@@ -27,6 +27,7 @@ impl GridView {
             cell_editor_blur_subscription: None,
             cell_editor_focus_pending: false,
             date_picker: None,
+            column_resize: None,
             sort_hover: None,
             sort_search: None,
             sort_combo_filter: String::new(),
@@ -34,8 +35,8 @@ impl GridView {
             filter_value_focus: Vec::new(),
             filter_value2_focus: Vec::new(),
             filter_active: None,
-            filter_search: None,
-            filter_query: String::new(),
+            filter_field_combos: BTreeMap::new(),
+            filter_operator_combos: BTreeMap::new(),
             page_input,
             page_input_focus: cx.focus_handle(),
             page_input_focused: false,
@@ -62,8 +63,14 @@ impl GridView {
                 if let Some(input) = self.cell_editor.as_ref().map(|editor| editor.input.clone()) {
                     input.update(cx, |input, cx| input.set_theme(theme, cx));
                 }
-                if let Some(input) = self.filter_search.clone() {
-                    input.update(cx, |input, cx| input.set_theme(theme, cx));
+                let combos: Vec<Entity<ComboBox>> = self
+                    .filter_field_combos
+                    .values()
+                    .chain(self.filter_operator_combos.values())
+                    .cloned()
+                    .collect();
+                for combo in combos {
+                    combo.update(cx, |combo, cx| combo.set_theme(theme, cx));
                 }
                 if let Some(input) = self.sort_search.clone() {
                     input.update(cx, |input, cx| input.set_theme(theme, cx));
@@ -242,7 +249,31 @@ impl Render for GridView {
                         .overflow_hidden()
                         .child(column.name.clone()),
                 )
-                .child(slot);
+                .child(slot)
+                .child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "grid-resize-{}-{}",
+                            self.state.id, index
+                        )))
+                        .absolute()
+                        .right(px(0.0))
+                        .top(px(0.0))
+                        .bottom(px(0.0))
+                        .w(px(5.0))
+                        .cursor(CursorStyle::ResizeColumn)
+                        .when(
+                            self.column_resize.is_some_and(|resize| resize.col == index),
+                            |handle| handle.bg(rgb(theme.primary)),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                                cx.stop_propagation();
+                                this.begin_column_resize(index, event.position.x, cx);
+                            }),
+                        ),
+                );
             header = header.child(cell);
         }
 
@@ -539,13 +570,15 @@ impl Render for GridView {
         root.on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
             this.grid_hscroll_drag(event, cx);
             this.grid_vscroll_drag(event, cx);
+            this.grid_column_drag(event, cx);
         }))
         .on_mouse_up(
             MouseButton::Left,
             cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
                 let h = this.hscroll_grab.take().is_some();
                 let v = this.vscroll_grab.take().is_some();
-                if h || v {
+                let c = this.column_resize.take().is_some();
+                if h || v || c {
                     cx.notify();
                 }
             }),

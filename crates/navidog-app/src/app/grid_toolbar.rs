@@ -1,4 +1,24 @@
+use super::grid::filter_node;
 use super::*;
+
+/// The per-row actions of the filter builder.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FilterAction {
+    /// Remove the node.
+    Remove,
+    /// Add a condition child (inside a group) or sibling.
+    AddCondition,
+    /// Add a nested group child (inside a group) or sibling.
+    AddGroup,
+}
+
+/// A stable string form of a filter node path, for element ids.
+fn filter_path_key(path: &[usize]) -> String {
+    path.iter()
+        .map(|index| index.to_string())
+        .collect::<Vec<_>>()
+        .join("-")
+}
 
 impl GridView {
     pub(super) fn render_grid_toolbar(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
@@ -396,7 +416,7 @@ impl GridView {
             .child(t!("grid.apply").to_string())
     }
 
-    pub(super) fn render_filter_panel(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+    pub(super) fn render_filter_panel(&mut self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
         let mut list = div()
             .id("filter-condition-list")
@@ -404,7 +424,7 @@ impl GridView {
             .flex_col()
             .flex_none()
             .min_h(px(46.0))
-            .max_h(px(184.0))
+            .max_h(px(224.0))
             .overflow_y_scroll();
 
         if self.state.filter_draft.is_empty() {
@@ -422,7 +442,9 @@ impl GridView {
                     .bg(rgb(theme.tree_hover_bg))
                     .cursor_pointer()
                     .hover(move |style| style.bg(rgb(theme.tree_selected_bg)))
-                    .on_click(cx.listener(|this, _event, _window, cx| this.filter_add_rule(0, cx)))
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.filter_add_condition(Vec::new(), cx);
+                    }))
                     .child(sort_plus_badge(theme))
                     .child(
                         div()
@@ -432,8 +454,9 @@ impl GridView {
                     ),
             );
         } else {
-            for (index, condition) in self.state.filter_draft.iter().enumerate() {
-                list = list.child(self.render_filter_row(index, condition, cx));
+            let draft = self.state.filter_draft.clone();
+            for row in self.filter_rows(&draft, &mut Vec::new(), 0, cx) {
+                list = list.child(row);
             }
         }
 
@@ -461,46 +484,102 @@ impl GridView {
             .into_any_element()
     }
 
-    fn render_filter_row(
-        &self,
-        index: usize,
-        condition: &FilterCondition,
+    /// Flatten the filter tree into rows, depth-first. A group renders its condition rows and then
+    /// its boundary row (`并且/或者` + add/remove group).
+    fn filter_rows(
+        &mut self,
+        nodes: &[FilterNode],
+        prefix: &mut Vec<usize>,
+        depth: usize,
+        cx: &mut Context<'_, Self>,
+    ) -> Vec<AnyElement> {
+        let mut rows = Vec::new();
+        for (index, node) in nodes.iter().enumerate() {
+            prefix.push(index);
+            match node {
+                FilterNode::Condition(_) => {
+                    rows.push(self.render_filter_condition_row(prefix, node, depth, index == 0, cx))
+                }
+                FilterNode::Group(group) => {
+                    rows.extend(self.filter_rows(&group.children, prefix, depth + 1, cx));
+                    let next = nodes.get(index + 1).map(|_| {
+                        let mut path = prefix.clone();
+                        if let Some(last) = path.last_mut() {
+                            *last = index + 1;
+                        }
+                        path
+                    });
+                    rows.push(self.render_filter_group_control(prefix, next, depth, cx));
+                }
+            }
+            prefix.pop();
+        }
+        rows
+    }
+
+    /// One condition row: `[并且/或者] field op value ... [−][+]`. The first condition of a group
+    /// has no leading conjunction, so it gets a spacer instead of the toggle.
+    fn render_filter_condition_row(
+        &mut self,
+        path: &[usize],
+        node: &FilterNode,
+        depth: usize,
+        first: bool,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let theme = self.theme;
+        let path: Vec<usize> = path.to_vec();
+        let key = filter_path_key(&path);
+        let FilterNode::Condition(condition) = node else {
+            return div().into_any_element();
+        };
         let mut row = div()
-            .id(SharedString::from(format!("filter-row-{index}")))
+            .id(SharedString::from(format!("filter-row-{key}")))
             .flex()
             .flex_row()
             .items_center()
             .gap_1()
             .px_1()
             .h(px(26.0))
-            .flex_none();
+            .flex_none()
+            .when(depth > 0, |row| row.pl(px(depth as f32 * 16.0 + 4.0)));
 
-        if index == 0 {
-            row = row.child(div().w(px(64.0)).flex_none());
+        row = row.child(if first {
+            div()
+                .w(px(FILTER_TOGGLE_WIDTH))
+                .flex_none()
+                .into_any_element()
         } else {
-            row = row.child(self.filter_conjunction_toggle(index, cx));
-        }
+            self.filter_conjunction_toggle(&path, condition.conjunction, cx)
+                .into_any_element()
+        });
+
+        let field_options: Vec<ComboOption> = self
+            .state
+            .columns
+            .iter()
+            .map(|column| ComboOption::plain(column.name.clone()))
+            .collect();
+        let field_selected = condition.column.clone();
+        let field = self.filter_field_combo(&path, cx);
+        field.update(cx, |combo, cx| {
+            combo.set_options(field_options, cx);
+            combo.set_selected(field_selected, cx);
+        });
+
+        let operator_index = FilterOperator::ALL
+            .iter()
+            .position(|operator| *operator == condition.operator)
+            .unwrap_or(0);
+        let operator = self.filter_operator_combo(&path, cx);
+        operator.update(cx, |combo, cx| {
+            combo.set_selected(operator_index.to_string(), cx);
+        });
 
         row = row
-            .child(
-                div()
-                    .id(SharedString::from(format!("filter-enabled-{index}")))
-                    .flex()
-                    .items_center()
-                    .flex_none()
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.filter_toggle_enabled(index, cx);
-                    }))
-                    .child(checkbox_box(condition.enabled, theme)),
-            )
-            .child(self.render_filter_field_combo(index, cx))
-            .child(self.render_filter_operator_combo(index, cx))
-            .child(self.render_filter_value(index, 0, cx));
-
+            .child(field)
+            .child(operator)
+            .child(self.render_filter_value(&path, 0, cx));
         if condition.operator.needs_second_value() {
             row = row
                 .child(
@@ -509,50 +588,109 @@ impl GridView {
                         .text_color(rgb(theme.text_muted))
                         .child(t!("filter.between").to_string()),
                 )
-                .child(self.render_filter_value(index, 1, cx));
+                .child(self.render_filter_value(&path, 1, cx));
         }
-
         row = row
-            .child(self.filter_row_action(index, false, cx))
-            .child(self.filter_row_action(index, true, cx));
+            .child(self.filter_row_action(&path, FilterAction::Remove, cx))
+            .child(self.filter_row_action(&path, FilterAction::AddCondition, cx));
 
         row.into_any_element()
     }
 
-    fn filter_conjunction_toggle(
-        &self,
-        index: usize,
+    /// A group's boundary row, rendered after its conditions. The toggle sets the conjunction of
+    /// the next group; `+` inserts a new group after this one and `−` removes this group. The row
+    /// starts at the field column so the controls sit under the operator column.
+    fn render_filter_group_control(
+        &mut self,
+        group_path: &[usize],
+        next_path: Option<Vec<usize>>,
+        depth: usize,
         cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
-        let theme = self.theme;
-        let conjunction = self
-            .state
-            .filter_draft
-            .get(index)
-            .map(|condition| condition.conjunction)
-            .unwrap_or_default();
-        let mut toggle = div()
-            .id(SharedString::from(format!("filter-conjunction-{index}")))
+    ) -> AnyElement {
+        let group_path: Vec<usize> = group_path.to_vec();
+        let key = filter_path_key(&group_path);
+        let mut controls = div()
             .flex()
             .flex_row()
             .items_center()
-            .gap_0p5()
-            .w(px(64.0))
+            .justify_center()
+            .gap_1()
+            .w(px(FILTER_OPERATOR_WIDTH))
+            .flex_none();
+        match next_path {
+            Some(next_path) => {
+                let conjunction = filter_node(&self.state.filter_draft, &next_path)
+                    .map(FilterNode::conjunction)
+                    .unwrap_or_default();
+                controls =
+                    controls.child(self.filter_conjunction_toggle(&next_path, conjunction, cx));
+            }
+            None => controls = controls.child(div().w(px(FILTER_TOGGLE_WIDTH)).flex_none()),
+        }
+        controls = controls
+            .child(self.filter_row_action(&group_path, FilterAction::AddGroup, cx))
+            .child(self.filter_row_action(&group_path, FilterAction::Remove, cx));
+
+        div()
+            .id(SharedString::from(format!("filter-group-{key}")))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .px_1()
+            .pl(px((depth + 1) as f32 * 16.0 + 4.0))
+            .h(px(24.0))
             .flex_none()
+            .child(
+                div()
+                    .w(px(FILTER_TOGGLE_WIDTH))
+                    .flex_none()
+                    .into_any_element(),
+            )
+            .child(div().w(px(FILTER_FIELD_WIDTH)).flex_none())
+            .child(controls)
+            .child(div().flex_1())
+            .into_any_element()
+    }
+
+    fn filter_conjunction_toggle(
+        &self,
+        path: &[usize],
+        conjunction: FilterConjunction,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
+        let theme = self.theme;
+        let path = path.to_vec();
+        let mut toggle = div()
+            .id(SharedString::from(format!(
+                "filter-conjunction-{}",
+                filter_path_key(&path)
+            )))
+            .flex()
+            .flex_row()
+            .items_center()
+            .w(px(FILTER_TOGGLE_WIDTH))
+            .h(px(20.0))
+            .flex_none()
+            .overflow_hidden()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(theme.button_border))
+            .bg(rgb(theme.button_bg))
             .cursor_pointer()
             .on_click(cx.listener(move |this, _event, _window, cx| {
-                this.filter_toggle_conjunction(index, cx);
+                this.filter_toggle_conjunction(path.clone(), cx);
             }));
         for option in [FilterConjunction::And, FilterConjunction::Or] {
             let active = option == conjunction;
             toggle = toggle.child(
                 div()
-                    .px_1()
-                    .h(px(18.0))
+                    .flex_1()
+                    .h_full()
                     .flex()
                     .items_center()
+                    .justify_center()
                     .text_size(px(11.0))
-                    .rounded_sm()
                     .when(active, move |style| {
                         style.bg(rgb(theme.primary)).text_color(rgb(0xffffff))
                     })
@@ -565,232 +703,55 @@ impl GridView {
         toggle
     }
 
-    fn render_filter_field_combo(
-        &self,
-        index: usize,
-        cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
-        let theme = self.theme;
-        let open = self.state.filter_combo == Some((index, FilterCombo::Field));
-        let value = self
-            .state
-            .filter_draft
-            .get(index)
-            .map(|condition| condition.column.clone())
-            .unwrap_or_default();
-
-        let button = ui::text_field(theme)
-            .id(SharedString::from(format!("filter-field-{index}")))
-            .flex()
-            .items_center()
-            .px_2()
-            .h(px(20.0))
-            .w(px(170.0))
-            .flex_none()
-            .text_size(px(12.0))
-            .whitespace_nowrap()
-            .overflow_hidden()
-            .cursor_pointer()
-            .hover(move |style| style.border_color(rgb(theme.button_default_border)))
-            .on_click(cx.listener(move |this, _event, window, cx| {
-                this.filter_open_combo(index, FilterCombo::Field, window, cx);
-            }))
-            .child(value);
-
-        let mut options = div()
-            .id(SharedString::from(format!("filter-field-options-{index}")))
-            .max_h(px(200.0))
-            .overflow_y_scroll()
-            .flex()
-            .flex_col();
-        for name in self.filter_field_matches() {
-            let name = name.to_string();
-            let click = name.clone();
-            options = options.child(
-                div()
-                    .id(SharedString::from(format!(
-                        "filter-field-option-{index}-{name}"
-                    )))
-                    .flex()
-                    .items_center()
-                    .h(px(20.0))
-                    .px_2()
-                    .flex_none()
-                    .text_size(px(12.0))
-                    .whitespace_nowrap()
-                    .cursor_pointer()
-                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.filter_choose_field(index, click.clone(), cx);
-                    }))
-                    .child(name),
-            );
-        }
-
-        let mut list = div()
-            .id(SharedString::from(format!("filter-field-list-{index}")))
-            .absolute()
-            .top(px(22.0))
-            .left_0()
-            .w(px(170.0))
-            .flex()
-            .flex_col()
-            .bg(rgb(theme.dialog_bg))
-            .border_1()
-            .border_color(rgb(theme.border));
-        if let Some(search) = self.filter_search.clone() {
-            list = list.child(
-                div()
-                    .flex_none()
-                    .p_1()
-                    .border_b_1()
-                    .border_color(rgb(theme.grid_line))
-                    .child(div().h(px(20.0)).child(search)),
-            );
-        }
-        list = list.child(options);
-
-        div().relative().child(button).when(open, move |style| {
-            style.child(deferred(list).with_priority(10))
-        })
-    }
-
-    fn render_filter_operator_combo(
-        &self,
-        index: usize,
-        cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
-        let theme = self.theme;
-        let open = self.state.filter_combo == Some((index, FilterCombo::Operator));
-        let operator = self
-            .state
-            .filter_draft
-            .get(index)
-            .map(|condition| condition.operator)
-            .unwrap_or(FilterOperator::Equal);
-
-        let button = ui::text_field(theme)
-            .id(SharedString::from(format!("filter-operator-{index}")))
-            .flex()
-            .items_center()
-            .px_2()
-            .h(px(20.0))
-            .w(px(150.0))
-            .flex_none()
-            .text_size(px(12.0))
-            .whitespace_nowrap()
-            .overflow_hidden()
-            .cursor_pointer()
-            .hover(move |style| style.border_color(rgb(theme.button_default_border)))
-            .on_click(cx.listener(move |this, _event, window, cx| {
-                this.filter_open_combo(index, FilterCombo::Operator, window, cx);
-            }))
-            .child(t!(operator.label_key()).to_string());
-
-        let mut options = div()
-            .id(SharedString::from(format!(
-                "filter-operator-options-{index}"
-            )))
-            .max_h(px(200.0))
-            .overflow_y_scroll()
-            .flex()
-            .flex_col();
-        for option in self.filter_operator_matches() {
-            let selected = option == operator;
-            options = options.child(
-                div()
-                    .id(SharedString::from(format!(
-                        "filter-operator-option-{index}-{}",
-                        option.label_key()
-                    )))
-                    .flex()
-                    .items_center()
-                    .h(px(20.0))
-                    .px_2()
-                    .flex_none()
-                    .text_size(px(12.0))
-                    .whitespace_nowrap()
-                    .cursor_pointer()
-                    .when(selected, move |style| {
-                        style
-                            .bg(rgb(theme.tree_selected_bg))
-                            .text_color(rgb(theme.tree_selected_text))
-                    })
-                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.filter_choose_operator(index, option, cx);
-                    }))
-                    .child(t!(option.label_key()).to_string()),
-            );
-        }
-
-        let mut list = div()
-            .id(SharedString::from(format!("filter-operator-list-{index}")))
-            .absolute()
-            .top(px(22.0))
-            .left_0()
-            .w(px(150.0))
-            .flex()
-            .flex_col()
-            .bg(rgb(theme.dialog_bg))
-            .border_1()
-            .border_color(rgb(theme.border));
-        if let Some(search) = self.filter_search.clone() {
-            list = list.child(
-                div()
-                    .flex_none()
-                    .p_1()
-                    .border_b_1()
-                    .border_color(rgb(theme.grid_line))
-                    .child(div().h(px(20.0)).child(search)),
-            );
-        }
-        list = list.child(options);
-
-        div().relative().child(button).when(open, move |style| {
-            style.child(deferred(list).with_priority(10))
-        })
-    }
-
     fn render_filter_value(
         &self,
-        index: usize,
+        path: &[usize],
         slot: u8,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let theme = self.theme;
-        let condition = self.state.filter_draft.get(index);
+        let key = filter_path_key(path);
+        let path = path.to_vec();
+        let condition = filter_node(&self.state.filter_draft, &path);
         let operator = condition
-            .map(|condition| condition.operator)
+            .map(|node| match node {
+                FilterNode::Condition(condition) => condition.operator,
+                FilterNode::Group(_) => FilterOperator::Equal,
+            })
             .unwrap_or(FilterOperator::Equal);
         let enabled = if slot == 0 {
             operator.needs_value()
         } else {
             operator.needs_second_value()
         };
-        let value = condition
-            .map(|condition| {
+        let value = match condition {
+            Some(FilterNode::Condition(condition)) => {
                 if slot == 0 {
                     condition.value.clone()
                 } else {
                     condition.value2.clone()
                 }
-            })
-            .unwrap_or_default();
-        let focused = enabled && self.filter_active == Some((index, slot));
-        let handle = if slot == 0 {
-            self.filter_value_focus.get(index).cloned()
-        } else {
-            self.filter_value2_focus.get(index).cloned()
+            }
+            _ => String::new(),
         };
+        let focused = enabled && self.filter_active.as_ref() == Some(&(path.clone(), slot));
+        let handles = if slot == 0 {
+            &self.filter_value_focus
+        } else {
+            &self.filter_value2_focus
+        };
+        let handle = handles
+            .iter()
+            .find(|(candidate, _)| *candidate == path)
+            .map(|(_, handle)| handle.clone());
 
         let mut field = ui::text_field(theme)
-            .id(SharedString::from(format!("filter-value-{index}-{slot}")))
+            .id(SharedString::from(format!("filter-value-{key}-{slot}")))
             .relative()
             .flex()
             .flex_row()
             .items_center()
-            .w(px(200.0))
+            .w(px(FILTER_VALUE_WIDTH))
             .h(px(20.0))
             .flex_none()
             .pl(px(2.0))
@@ -799,14 +760,16 @@ impl GridView {
             .overflow_hidden();
         if enabled {
             if let Some(handle) = handle {
+                let key_target = path.clone();
+                let click_target = path.clone();
                 field = field
                     .track_focus(&handle)
                     .cursor_text()
                     .on_key_down(cx.listener(move |this, event, _window, cx| {
-                        this.filter_value_key(index, slot, event, cx);
+                        this.filter_value_key(key_target.clone(), slot, event, cx);
                     }))
                     .on_click(cx.listener(move |this, _event, window, cx| {
-                        this.filter_focus_value(index, slot, window, cx);
+                        this.filter_focus_value(click_target.clone(), slot, window, cx);
                     }))
                     .child(self.ime_probe(&handle));
             }
@@ -829,26 +792,32 @@ impl GridView {
 
     fn filter_row_action(
         &self,
-        index: usize,
-        add: bool,
+        path: &[usize],
+        action: FilterAction,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let theme = self.theme;
-        let (icon, color, id) = if add {
-            (
+        let path = path.to_vec();
+        let key = filter_path_key(&path);
+        let (icon, color, id) = match action {
+            FilterAction::AddCondition => (
                 "icons/plus.svg",
                 theme.icon_backups,
-                SharedString::from(format!("filter-add-{index}")),
-            )
-        } else {
-            (
-                "icons/cross.svg",
+                format!("filter-add-condition-{key}"),
+            ),
+            FilterAction::AddGroup => (
+                "icons/plus.svg",
+                theme.icon_backups,
+                format!("filter-add-group-{key}"),
+            ),
+            FilterAction::Remove => (
+                "icons/minus.svg",
                 theme.danger,
-                SharedString::from(format!("filter-remove-{index}")),
-            )
+                format!("filter-remove-{key}"),
+            ),
         };
         div()
-            .id(id)
+            .id(SharedString::from(id))
             .flex()
             .items_center()
             .justify_center()
@@ -857,12 +826,10 @@ impl GridView {
             .flex_none()
             .cursor_pointer()
             .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-            .on_click(cx.listener(move |this, _event, _window, cx| {
-                if add {
-                    this.filter_add_rule(index, cx);
-                } else {
-                    this.filter_remove_rule(index, cx);
-                }
+            .on_click(cx.listener(move |this, _event, _window, cx| match action {
+                FilterAction::AddCondition => this.filter_add_condition(path.clone(), cx),
+                FilterAction::AddGroup => this.filter_add_group(path.clone(), cx),
+                FilterAction::Remove => this.filter_remove_node(path.clone(), cx),
             }))
             .child(
                 svg()

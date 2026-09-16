@@ -1,5 +1,6 @@
 use std::ops::Range;
 
+use super::grid::{filter_node, filter_node_mut};
 use super::*;
 
 impl GridView {
@@ -11,12 +12,14 @@ impl GridView {
         if self.page_size_focus.is_focused(window) {
             return Some(GridTextField::PageSize);
         }
-        for index in 0..self.filter_value_focus.len() {
-            if self.filter_value_focus[index].is_focused(window) {
-                return Some(GridTextField::Filter(index, 0));
+        for (path, handle) in &self.filter_value_focus {
+            if handle.is_focused(window) {
+                return Some(GridTextField::Filter(path.clone(), 0));
             }
-            if self.filter_value2_focus[index].is_focused(window) {
-                return Some(GridTextField::Filter(index, 1));
+        }
+        for (path, handle) in &self.filter_value2_focus {
+            if handle.is_focused(window) {
+                return Some(GridTextField::Filter(path.clone(), 1));
             }
         }
         None
@@ -40,32 +43,34 @@ impl GridView {
         .inset_0()
     }
 
-    fn field_text(&self, field: GridTextField) -> String {
+    fn field_text(&self, field: &GridTextField) -> String {
         match field {
             GridTextField::PageInput => self.page_input.clone(),
             GridTextField::PageSize => self.page_size_input.clone(),
-            GridTextField::Filter(index, slot) => self
-                .state
-                .filter_draft
-                .get(index)
-                .map(|condition| {
-                    if slot == 0 {
-                        condition.value.clone()
-                    } else {
-                        condition.value2.clone()
+            GridTextField::Filter(path, slot) => {
+                match filter_node(&self.state.filter_draft, path) {
+                    Some(FilterNode::Condition(condition)) => {
+                        if *slot == 0 {
+                            condition.value.clone()
+                        } else {
+                            condition.value2.clone()
+                        }
                     }
-                })
-                .unwrap_or_default(),
+                    _ => String::new(),
+                }
+            }
         }
     }
 
-    fn set_field_text(&mut self, field: GridTextField, value: String) {
+    fn set_field_text(&mut self, field: &GridTextField, value: String) {
         match field {
             GridTextField::PageInput => self.page_input = value,
             GridTextField::PageSize => self.page_size_input = value,
-            GridTextField::Filter(index, slot) => {
-                if let Some(condition) = self.state.filter_draft.get_mut(index) {
-                    if slot == 0 {
+            GridTextField::Filter(path, slot) => {
+                if let Some(FilterNode::Condition(condition)) =
+                    filter_node_mut(&mut self.state.filter_draft, path)
+                {
+                    if *slot == 0 {
                         condition.value = value;
                     } else {
                         condition.value2 = value;
@@ -77,18 +82,18 @@ impl GridView {
 
     /// The byte selection `(start, end)` of `field`. The append-only fields always have their
     /// caret at the end.
-    fn field_selection(&self, field: GridTextField) -> (usize, usize) {
+    fn field_selection(&self, field: &GridTextField) -> (usize, usize) {
         let len = self.field_text(field).len();
         (len, len)
     }
 
-    fn field_is_numeric(field: GridTextField) -> bool {
+    fn field_is_numeric(field: &GridTextField) -> bool {
         matches!(field, GridTextField::PageInput | GridTextField::PageSize)
     }
 
-    fn field_changed(&mut self, field: GridTextField, cx: &mut Context<'_, Self>) {
-        if let GridTextField::Filter(index, slot) = field {
-            self.filter_active = Some((index, slot));
+    fn field_changed(&mut self, field: &GridTextField, cx: &mut Context<'_, Self>) {
+        if let GridTextField::Filter(path, slot) = field {
+            self.filter_active = Some((path.clone(), *slot));
         }
         self.caret_visible = true;
         cx.notify();
@@ -96,7 +101,7 @@ impl GridView {
 
     fn ime_replace(
         &mut self,
-        field: GridTextField,
+        field: &GridTextField,
         range: Option<(usize, usize)>,
         new_text: &str,
         mark: bool,
@@ -127,7 +132,7 @@ impl GridView {
         } else {
             self.ime_marked = None;
         }
-        self.ime_field = Some(field);
+        self.ime_field = Some(field.clone());
         self.field_changed(field, cx);
     }
 }
@@ -141,7 +146,7 @@ impl EntityInputHandler for GridView {
         _cx: &mut Context<Self>,
     ) -> Option<String> {
         let field = self.active_text_field(window)?;
-        let text = self.field_text(field);
+        let text = self.field_text(&field);
         let start = offset_from_utf16(&text, range_utf16.start);
         let end = offset_from_utf16(&text, range_utf16.end);
         actual_range.replace(offset_to_utf16(&text, start)..offset_to_utf16(&text, end));
@@ -155,8 +160,8 @@ impl EntityInputHandler for GridView {
         _cx: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
         let field = self.active_text_field(window)?;
-        let text = self.field_text(field);
-        let (start, end) = self.field_selection(field);
+        let text = self.field_text(&field);
+        let (start, end) = self.field_selection(&field);
         Some(UTF16Selection {
             range: offset_to_utf16(&text, start)..offset_to_utf16(&text, end),
             reversed: false,
@@ -169,11 +174,11 @@ impl EntityInputHandler for GridView {
         _cx: &mut Context<Self>,
     ) -> Option<Range<usize>> {
         let marked = self.ime_marked.clone()?;
-        let field = self.ime_field?;
-        if self.active_text_field(window) != Some(field) {
+        let field = self.ime_field.clone()?;
+        if self.active_text_field(window) != Some(field.clone()) {
             return None;
         }
-        let text = self.field_text(field);
+        let text = self.field_text(&field);
         Some(offset_to_utf16(&text, marked.start)..offset_to_utf16(&text, marked.end))
     }
 
@@ -188,17 +193,20 @@ impl EntityInputHandler for GridView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(field) = self.active_text_field(window).or(self.ime_field) else {
+        let Some(field) = self
+            .active_text_field(window)
+            .or_else(|| self.ime_field.clone())
+        else {
             return;
         };
-        let text = self.field_text(field);
+        let text = self.field_text(&field);
         let range = range_utf16.map(|range| {
             (
                 offset_from_utf16(&text, range.start),
                 offset_from_utf16(&text, range.end),
             )
         });
-        self.ime_replace(field, range, new_text, false, cx);
+        self.ime_replace(&field, range, new_text, false, cx);
     }
 
     fn replace_and_mark_text_in_range(
@@ -209,10 +217,13 @@ impl EntityInputHandler for GridView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(field) = self.active_text_field(window).or(self.ime_field) else {
+        let Some(field) = self
+            .active_text_field(window)
+            .or_else(|| self.ime_field.clone())
+        else {
             return;
         };
-        let text = self.field_text(field);
+        let text = self.field_text(&field);
         let range = range_utf16
             .map(|range| {
                 (
@@ -225,7 +236,7 @@ impl EntityInputHandler for GridView {
                     .clone()
                     .map(|marked| (marked.start, marked.end))
             });
-        self.ime_replace(field, range, new_text, !new_text.is_empty(), cx);
+        self.ime_replace(&field, range, new_text, !new_text.is_empty(), cx);
     }
 
     fn bounds_for_range(

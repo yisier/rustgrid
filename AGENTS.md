@@ -45,8 +45,10 @@ not a later refactor.
 
 ## Commands
 
-- **After every code change, verify it compiles** before finishing: `cargo check -p navidog-app`
-  (or `cargo check --workspace`). Debug builds do not need the shader toolchain below.
+- **After every code change, ALWAYS build automatically before finishing** (do not wait to be
+  asked): run `cargo fmt --all` then `cargo build` (use the GNU toolchain env vars in Gotchas on
+  Windows). A faster `cargo check -p navidog-app` (or `cargo check --workspace`) may be used while
+  iterating; finish with `cargo build`. Debug builds do not need the shader toolchain below.
 - `cargo check --workspace` / `cargo build`
 - `cargo run -p navidog-app` (produced binary is `navidog`)
 - Release build (`cargo build --release -p navidog-app`) additionally needs the fxc shim (see
@@ -174,6 +176,15 @@ leave them disabled unless asked). The abstractions above are what make more eng
 do not build those features early.
 
 ## Gotchas
+
+- The grid filter builder is a **tree**, not a flat list: `GridState::filters` / `filter_draft` are
+  `Vec<FilterNode>` where a node is either a `FilterCondition` or a `FilterGroup` (nested children,
+  parenthesized). Each node carries its own `FilterConjunction` (how it joins its previous sibling),
+  so a group may mix `AND`/`OR`; the root is an implicit list. UI rows are addressed by a node
+  **path** (`Vec<usize>`, indices from the root) — keep that in sync when adding node operations.
+  `navidog-mysql::filter_clause` and `session.rs::filter_display_clause` recurse over the tree,
+  skip disabled/incomplete nodes, drop groups left empty, and must keep bind order identical to the
+  rendered `?` placeholders.
 
 - `navidog-mysql::map_connect_error` flags authentication failures as
   `navidog_core::Error::Authentication` by checking `MySqlDatabaseError::number()`

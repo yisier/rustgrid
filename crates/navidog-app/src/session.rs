@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use navidog_core::{
     CellValue, ColumnInfo, Connection, ConnectionProfile, FilterCondition, FilterConjunction,
-    FilterOperator, QueryResult, SortColumn, TableInfo,
+    FilterNode, FilterOperator, QueryResult, SortColumn, TableInfo,
 };
 
 #[derive(Default)]
@@ -231,13 +231,6 @@ impl SortRule {
     }
 }
 
-/// Which dropdown of a filter condition row is open.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum FilterCombo {
-    Field,
-    Operator,
-}
-
 pub struct GridState {
     pub id: u64,
     pub connection: Arc<dyn Connection>,
@@ -252,6 +245,9 @@ pub struct GridState {
     pub columns: Vec<ColumnInfo>,
     pub rows: Arc<Vec<Vec<CellValue>>>,
     pub column_widths: Vec<f32>,
+    /// Set once the user drags a column edge. Keeps the widths for the rest of this grid's life
+    /// so paging/refreshing does not snap them back to the auto-fitted values.
+    pub manual_column_widths: bool,
     pub total_rows: Option<u64>,
     pub selection: Option<CellSelection>,
     pub edits: BTreeMap<(usize, usize), Option<String>>,
@@ -273,14 +269,12 @@ pub struct GridState {
     pub sort_combo: Option<(usize, String)>,
     /// The draft rule highlighted for reordering, if any.
     pub sort_selected: Option<usize>,
-    /// The `WHERE` applied to the table when pages are fetched.
-    pub filters: Vec<FilterCondition>,
+    /// The `WHERE` tree applied to the table when pages are fetched.
+    pub filters: Vec<FilterNode>,
     /// Whether the filter builder panel is expanded below the toolbar.
     pub filter_open: bool,
-    /// The panel's working copy of the conditions while it is open; applied on `Apply`.
-    pub filter_draft: Vec<FilterCondition>,
-    /// The open dropdown in the filter panel: which condition and which combo.
-    pub filter_combo: Option<(usize, FilterCombo)>,
+    /// The panel's working copy of the tree while it is open; applied on `Apply`.
+    pub filter_draft: Vec<FilterNode>,
     /// Wall-clock execution time of the query that produced this grid, when it is a query result.
     pub elapsed: Option<std::time::Duration>,
 }
@@ -324,105 +318,130 @@ fn quote_literal(value: &str) -> String {
 
 /// A human-readable ` WHERE ...` for the status bar. Values are inlined here, unlike the
 /// parameterized query the driver builds.
-fn filter_display_clause(filter: &[FilterCondition]) -> String {
+fn filter_display_clause(filter: &[FilterNode]) -> String {
+    match filter_display_fragment(filter) {
+        Some(expr) => format!(" WHERE {expr}"),
+        None => String::new(),
+    }
+}
+
+fn filter_display_fragment(filter: &[FilterNode]) -> Option<String> {
     let mut clauses: Vec<String> = Vec::new();
-    for condition in filter {
-        if !condition.enabled || condition.column.is_empty() {
-            continue;
-        }
-        let operator = condition.operator;
-        if operator.needs_value() && condition.value.is_empty() {
-            continue;
-        }
-        if operator.needs_second_value() && condition.value2.is_empty() {
-            continue;
-        }
-        let column = format!("`{}`", condition.column.replace('`', "``"));
-        let value = quote_literal(&condition.value);
-        let piece = match operator {
-            FilterOperator::Equal => format!("{column} = {value}"),
-            FilterOperator::NotEqual => format!("{column} <> {value}"),
-            FilterOperator::LessThan => format!("{column} < {value}"),
-            FilterOperator::LessOrEqual => format!("{column} <= {value}"),
-            FilterOperator::GreaterThan => format!("{column} > {value}"),
-            FilterOperator::GreaterOrEqual => format!("{column} >= {value}"),
-            FilterOperator::Contains => format!(
-                "{column} LIKE {}",
-                quote_literal(&format!("%{}%", condition.value))
-            ),
-            FilterOperator::NotContains => format!(
-                "{column} NOT LIKE {}",
-                quote_literal(&format!("%{}%", condition.value))
-            ),
-            FilterOperator::StartsWith => format!(
-                "{column} LIKE {}",
-                quote_literal(&format!("{}%", condition.value))
-            ),
-            FilterOperator::NotStartsWith => format!(
-                "{column} NOT LIKE {}",
-                quote_literal(&format!("{}%", condition.value))
-            ),
-            FilterOperator::EndsWith => format!(
-                "{column} LIKE {}",
-                quote_literal(&format!("%{}", condition.value))
-            ),
-            FilterOperator::NotEndsWith => format!(
-                "{column} NOT LIKE {}",
-                quote_literal(&format!("%{}", condition.value))
-            ),
-            FilterOperator::IsNull => format!("{column} IS NULL"),
-            FilterOperator::IsNotNull => format!("{column} IS NOT NULL"),
-            FilterOperator::IsEmpty => format!("({column} IS NULL OR {column} = '')"),
-            FilterOperator::IsNotEmpty => format!("({column} IS NOT NULL AND {column} <> '')"),
-            FilterOperator::Between => format!(
-                "{column} BETWEEN {value} AND {}",
-                quote_literal(&condition.value2)
-            ),
-            FilterOperator::NotBetween => format!(
-                "{column} NOT BETWEEN {value} AND {}",
-                quote_literal(&condition.value2)
-            ),
-            FilterOperator::InList => {
-                let values = condition.list_values();
-                if values.is_empty() {
-                    continue;
+    for node in filter {
+        let piece = match node {
+            FilterNode::Condition(condition) => condition_display(condition),
+            FilterNode::Group(group) => {
+                if !group.enabled {
+                    None
+                } else {
+                    filter_display_fragment(&group.children).map(|inner| format!("({inner})"))
                 }
-                let list = values
-                    .iter()
-                    .map(|item| quote_literal(item))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("{column} IN ({list})")
             }
-            FilterOperator::NotInList => {
-                let values = condition.list_values();
-                if values.is_empty() {
-                    continue;
-                }
-                let list = values
-                    .iter()
-                    .map(|item| quote_literal(item))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("{column} NOT IN ({list})")
-            }
+        };
+        let Some(piece) = piece else {
+            continue;
         };
         if clauses.is_empty() {
             clauses.push(piece);
         } else {
-            let conjunction = match condition.conjunction {
+            let conjunction = match node.conjunction() {
                 FilterConjunction::And => "AND",
                 FilterConjunction::Or => "OR",
             };
             clauses.push(format!("{conjunction} {piece}"));
         }
     }
+    (!clauses.is_empty()).then(|| clauses.join(" "))
+}
 
-    if clauses.is_empty() {
-        String::new()
-    } else {
-        format!(" WHERE {}", clauses.join(" "))
+fn condition_display(condition: &FilterCondition) -> Option<String> {
+    if !condition.enabled || condition.column.is_empty() {
+        return None;
     }
+    let operator = condition.operator;
+    if operator.needs_value() && condition.value.is_empty() {
+        return None;
+    }
+    if operator.needs_second_value() && condition.value2.is_empty() {
+        return None;
+    }
+    let column = format!("`{}`", condition.column.replace('`', "``"));
+    let value = quote_literal(&condition.value);
+    let piece = match operator {
+        FilterOperator::Equal => format!("{column} = {value}"),
+        FilterOperator::NotEqual => format!("{column} <> {value}"),
+        FilterOperator::LessThan => format!("{column} < {value}"),
+        FilterOperator::LessOrEqual => format!("{column} <= {value}"),
+        FilterOperator::GreaterThan => format!("{column} > {value}"),
+        FilterOperator::GreaterOrEqual => format!("{column} >= {value}"),
+        FilterOperator::Contains => {
+            format!(
+                "{column} LIKE {}",
+                quote_literal(&format!("%{}%", condition.value))
+            )
+        }
+        FilterOperator::NotContains => format!(
+            "{column} NOT LIKE {}",
+            quote_literal(&format!("%{}%", condition.value))
+        ),
+        FilterOperator::StartsWith => {
+            format!(
+                "{column} LIKE {}",
+                quote_literal(&format!("{}%", condition.value))
+            )
+        }
+        FilterOperator::NotStartsWith => format!(
+            "{column} NOT LIKE {}",
+            quote_literal(&format!("{}%", condition.value))
+        ),
+        FilterOperator::EndsWith => {
+            format!(
+                "{column} LIKE {}",
+                quote_literal(&format!("%{}", condition.value))
+            )
+        }
+        FilterOperator::NotEndsWith => format!(
+            "{column} NOT LIKE {}",
+            quote_literal(&format!("%{}", condition.value))
+        ),
+        FilterOperator::IsNull => format!("{column} IS NULL"),
+        FilterOperator::IsNotNull => format!("{column} IS NOT NULL"),
+        FilterOperator::IsEmpty => format!("({column} IS NULL OR {column} = '')"),
+        FilterOperator::IsNotEmpty => format!("({column} IS NOT NULL AND {column} <> '')"),
+        FilterOperator::Between => format!(
+            "{column} BETWEEN {value} AND {}",
+            quote_literal(&condition.value2)
+        ),
+        FilterOperator::NotBetween => format!(
+            "{column} NOT BETWEEN {value} AND {}",
+            quote_literal(&condition.value2)
+        ),
+        FilterOperator::InList => {
+            let values = condition.list_values();
+            if values.is_empty() {
+                return None;
+            }
+            let list = values
+                .iter()
+                .map(|item| quote_literal(item))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{column} IN ({list})")
+        }
+        FilterOperator::NotInList => {
+            let values = condition.list_values();
+            if values.is_empty() {
+                return None;
+            }
+            let list = values
+                .iter()
+                .map(|item| quote_literal(item))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{column} NOT IN ({list})")
+        }
+    };
+    Some(piece)
 }
 
 impl GridState {
@@ -470,18 +489,10 @@ impl GridState {
         sql
     }
 
-    /// The enabled filter conditions, in panel order, as an engine-agnostic `WHERE`.
-    pub fn filter_conditions(&self) -> Vec<FilterCondition> {
-        self.filters
-            .iter()
-            .filter(|condition| {
-                condition.enabled
-                    && !condition.column.is_empty()
-                    && (!condition.operator.needs_value() || !condition.value.is_empty())
-                    && (!condition.operator.needs_second_value() || !condition.value2.is_empty())
-            })
-            .cloned()
-            .collect()
+    /// The filter tree as an engine-agnostic `WHERE`. Disabled/incomplete nodes are pruned here;
+    /// the driver also skips them and drops any group left empty.
+    pub fn filter_conditions(&self) -> Vec<FilterNode> {
+        self.filters.clone()
     }
 
     /// The enabled sort rules, in panel order, as an engine-agnostic `ORDER BY`.

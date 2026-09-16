@@ -591,6 +591,7 @@ impl AppView {
             columns: Vec::new(),
             rows: Arc::new(Vec::new()),
             column_widths: Vec::new(),
+            manual_column_widths: false,
             total_rows: None,
             selection: None,
             edits: BTreeMap::new(),
@@ -606,7 +607,6 @@ impl AppView {
             filters: Vec::new(),
             filter_open: false,
             filter_draft: Vec::new(),
-            filter_combo: None,
             elapsed: None,
         };
         let app = cx.weak_entity();

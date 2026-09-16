@@ -1,17 +1,79 @@
 use super::*;
 
-/// Case-insensitive substring-or-subsequence test for the filter popups' search fields.
-fn filter_matches(query: &str, label: &str) -> bool {
-    if query.is_empty() {
-        return true;
+/// The filter node at `path`, where each element indexes into the previous group's children.
+pub(super) fn filter_node<'a>(nodes: &'a [FilterNode], path: &[usize]) -> Option<&'a FilterNode> {
+    let (index, parents) = path.split_last()?;
+    if parents.is_empty() {
+        return nodes.get(*index);
     }
-    if label.contains(query) {
-        return true;
+    match filter_node(nodes, parents)? {
+        FilterNode::Group(group) => group.children.get(*index),
+        FilterNode::Condition(_) => None,
     }
-    let mut chars = label.chars();
-    query
-        .chars()
-        .all(|needle| chars.any(|haystack| haystack == needle))
+}
+
+pub(super) fn filter_node_mut<'a>(
+    nodes: &'a mut [FilterNode],
+    path: &[usize],
+) -> Option<&'a mut FilterNode> {
+    let (index, parents) = path.split_last()?;
+    if parents.is_empty() {
+        return nodes.get_mut(*index);
+    }
+    match filter_node_mut(nodes, parents)? {
+        FilterNode::Group(group) => group.children.get_mut(*index),
+        FilterNode::Condition(_) => None,
+    }
+}
+
+/// The children list addressed by `path` (the root list when `path` is empty), if it is a group.
+fn filter_children_mut<'a>(
+    nodes: &'a mut Vec<FilterNode>,
+    path: &[usize],
+) -> Option<&'a mut Vec<FilterNode>> {
+    if path.is_empty() {
+        return Some(nodes);
+    }
+    match filter_node_mut(nodes, path)? {
+        FilterNode::Group(group) => Some(&mut group.children),
+        FilterNode::Condition(_) => None,
+    }
+}
+
+/// Every condition node's path, depth-first (used to key the per-field value focus handles).
+fn collect_condition_paths(
+    nodes: &[FilterNode],
+    prefix: &mut Vec<usize>,
+    out: &mut Vec<Vec<usize>>,
+) {
+    for (index, node) in nodes.iter().enumerate() {
+        prefix.push(index);
+        match node {
+            FilterNode::Condition(_) => out.push(prefix.clone()),
+            FilterNode::Group(group) => collect_condition_paths(&group.children, prefix, out),
+        }
+        prefix.pop();
+    }
+}
+
+fn collect_condition_columns<'a>(nodes: &'a [FilterNode], out: &mut Vec<&'a str>) {
+    for node in nodes {
+        match node {
+            FilterNode::Condition(condition) => out.push(condition.column.as_str()),
+            FilterNode::Group(group) => collect_condition_columns(&group.children, out),
+        }
+    }
+}
+
+/// Drop groups that hold no conditions, so removing the last condition of a group also removes the
+/// group and its boundary row.
+fn prune_filter_groups(nodes: &mut Vec<FilterNode>) {
+    for node in nodes.iter_mut() {
+        if let FilterNode::Group(group) = node {
+            prune_filter_groups(&mut group.children);
+        }
+    }
+    nodes.retain(|node| !matches!(node, FilterNode::Group(group) if group.children.is_empty()));
 }
 
 impl AppView {
@@ -127,7 +189,12 @@ impl GridView {
                 grid.state.loading = false;
                 match result {
                     Ok(page) => {
-                        grid.state.column_widths = compute_column_widths(&page.columns, &page.rows);
+                        if !grid.state.manual_column_widths
+                            || grid.state.column_widths.len() != page.columns.len()
+                        {
+                            grid.state.column_widths =
+                                compute_column_widths(&page.columns, &page.rows);
+                        }
                         grid.state.columns = page.columns;
                         grid.state.rows = Arc::new(page.rows);
                         grid.state.total_rows = page.total_rows;
@@ -181,8 +248,12 @@ impl GridView {
                 match result {
                     Ok(query_result) => {
                         let total = query_result.rows.len() as u64;
-                        grid.state.column_widths =
-                            compute_column_widths(&query_result.columns, &query_result.rows);
+                        if !grid.state.manual_column_widths
+                            || grid.state.column_widths.len() != query_result.columns.len()
+                        {
+                            grid.state.column_widths =
+                                compute_column_widths(&query_result.columns, &query_result.rows);
+                        }
                         grid.state.columns = query_result.columns;
                         grid.state.rows = Arc::new(query_result.rows);
                         grid.state.total_rows = Some(total);
@@ -546,240 +617,286 @@ impl GridView {
     pub(super) fn toggle_filter_panel(&mut self, cx: &mut Context<'_, Self>) {
         if self.state.filter_open {
             self.state.filter_open = false;
-            self.state.filter_combo = None;
             self.filter_active = None;
             self.state.filter_draft.clear();
             self.filter_value_focus.clear();
             self.filter_value2_focus.clear();
+            self.filter_field_combos.clear();
+            self.filter_operator_combos.clear();
         } else {
             if self.state.sql.is_some() {
                 return;
             }
             self.state.filter_open = true;
-            self.state.filter_combo = None;
             self.filter_active = None;
+            self.filter_field_combos.clear();
+            self.filter_operator_combos.clear();
             self.state.filter_draft = self.state.filters.clone();
-            if self.state.filter_draft.is_empty()
-                && let Some(column) = self.state.columns.first().map(|column| column.name.clone())
-            {
-                self.state.filter_draft.push(FilterCondition::new(column));
+            if self.state.filter_draft.is_empty() {
+                self.filter_draft_start();
             }
             self.rebuild_filter_focus(cx);
         }
         cx.notify();
     }
 
+    /// Seed an empty draft with one parenthesized group holding a single condition.
+    fn filter_draft_start(&mut self) {
+        if let Some(group) = self.new_filter_group() {
+            self.state.filter_draft.push(group);
+        }
+    }
+
+    /// One value focus handle per condition node, keyed by the node's path in the draft tree.
     fn rebuild_filter_focus(&mut self, cx: &mut Context<'_, Self>) {
-        self.filter_value_focus = self
-            .state
-            .filter_draft
+        let mut paths = Vec::new();
+        collect_condition_paths(&self.state.filter_draft, &mut Vec::new(), &mut paths);
+        self.filter_value_focus = paths
             .iter()
-            .map(|_| cx.focus_handle())
+            .map(|path| (path.clone(), cx.focus_handle()))
             .collect();
-        self.filter_value2_focus = self
-            .state
-            .filter_draft
-            .iter()
-            .map(|_| cx.focus_handle())
+        self.filter_value2_focus = paths
+            .into_iter()
+            .map(|path| (path, cx.focus_handle()))
             .collect();
     }
 
     fn next_filter_column(&self) -> String {
+        let mut used: Vec<&str> = Vec::new();
+        collect_condition_columns(&self.state.filter_draft, &mut used);
         self.state
             .columns
             .iter()
             .map(|column| column.name.clone())
-            .find(|name| {
-                self.state
-                    .filter_draft
-                    .iter()
-                    .all(|condition| &condition.column != name)
-            })
+            .find(|name| !used.contains(&name.as_str()))
             .or_else(|| self.state.columns.first().map(|column| column.name.clone()))
             .unwrap_or_default()
     }
 
-    pub(super) fn filter_add_rule(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+    fn new_filter_condition(&self) -> Option<FilterNode> {
         let column = self.next_filter_column();
-        if column.is_empty() {
+        (!column.is_empty()).then(|| FilterNode::Condition(FilterCondition::new(column)))
+    }
+
+    /// A new group holding a single condition.
+    fn new_filter_group(&self) -> Option<FilterNode> {
+        let condition = self.new_filter_condition()?;
+        let mut group = FilterGroup::new(FilterConjunction::And);
+        group.children.push(condition);
+        Some(FilterNode::Group(group))
+    }
+
+    /// The condition row's "+": insert a sibling condition after the node at `path`. With an empty
+    /// path it appends to the last group (starting a group when the draft is empty).
+    pub(super) fn filter_add_condition(&mut self, path: Vec<usize>, cx: &mut Context<'_, Self>) {
+        if path.is_empty() {
+            if self.state.filter_draft.is_empty() {
+                self.filter_draft_start();
+            } else if let Some(condition) = self.new_filter_condition() {
+                match self.state.filter_draft.last_mut() {
+                    Some(FilterNode::Group(group)) => group.children.push(condition),
+                    _ => self.state.filter_draft.push(condition),
+                }
+            }
+            self.after_filter_change(cx);
             return;
         }
-        let position = (index + 1).min(self.state.filter_draft.len());
-        self.state
-            .filter_draft
-            .insert(position, FilterCondition::new(column));
-        self.filter_value_focus.insert(position, cx.focus_handle());
-        self.filter_value2_focus.insert(position, cx.focus_handle());
-        self.state.filter_combo = None;
-        cx.notify();
-    }
 
-    pub(super) fn filter_remove_rule(&mut self, index: usize, cx: &mut Context<'_, Self>) {
-        if index < self.state.filter_draft.len() {
-            self.state.filter_draft.remove(index);
-        }
-        if index < self.filter_value_focus.len() {
-            self.filter_value_focus.remove(index);
-            self.filter_value2_focus.remove(index);
-        }
-        if matches!(self.filter_active, Some((row, _)) if row == index) {
-            self.filter_active = None;
-        } else if let Some((row, slot)) = self.filter_active
-            && row > index
-        {
-            self.filter_active = Some((row - 1, slot));
-        }
-        self.state.filter_combo = None;
-        cx.notify();
-    }
-
-    pub(super) fn filter_toggle_enabled(&mut self, index: usize, cx: &mut Context<'_, Self>) {
-        if let Some(condition) = self.state.filter_draft.get_mut(index) {
-            condition.enabled = !condition.enabled;
-        }
-        cx.notify();
-    }
-
-    pub(super) fn filter_toggle_conjunction(&mut self, index: usize, cx: &mut Context<'_, Self>) {
-        if let Some(condition) = self.state.filter_draft.get_mut(index) {
-            condition.conjunction = condition.conjunction.toggled();
-        }
-        cx.notify();
-    }
-
-    pub(super) fn filter_open_combo(
-        &mut self,
-        index: usize,
-        kind: FilterCombo,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        if self.state.filter_combo == Some((index, kind)) {
-            self.state.filter_combo = None;
-            self.filter_active = None;
-            cx.notify();
-            return;
-        }
-        self.state.filter_combo = Some((index, kind));
-        self.filter_active = None;
-        self.filter_query.clear();
-        let theme = self.theme;
-        let weak = self.self_weak.clone();
-        let input = self
-            .filter_search
-            .get_or_insert_with(|| {
-                let change = weak.clone();
-                let submit = weak.clone();
-                let cancel = weak;
-                cx.new(move |cx| {
-                    TextInput::new(theme, "", TextInputOptions::default(), cx)
-                        .on_change(Rc::new(move |text, _window, cx| {
-                            let _ = change.update(cx, |grid, cx| {
-                                grid.filter_query = text.to_string();
-                                cx.notify();
-                            });
-                        }))
-                        .on_submit(Rc::new(move |_window, cx| {
-                            let _ = submit.update(cx, |grid, cx| grid.filter_choose_first(cx));
-                        }))
-                        .on_cancel(Rc::new(move |_window, cx| {
-                            let _ = cancel.update(cx, |grid, cx| {
-                                grid.state.filter_combo = None;
-                                cx.notify();
-                            });
-                        }))
-                })
-            })
-            .clone();
-        input.update(cx, |input, cx| input.set_text("", cx));
-        let focus = input.read(cx).focus_handle();
-        window.focus(&focus);
-        cx.notify();
-    }
-
-    /// The column names that match the filter popup's search text.
-    pub(super) fn filter_field_matches(&self) -> Vec<&str> {
-        let query = self.filter_query.trim().to_lowercase();
-        self.state
-            .columns
-            .iter()
-            .map(|column| column.name.as_str())
-            .filter(|name| filter_matches(&query, &name.to_lowercase()))
-            .collect()
-    }
-
-    /// The operators whose translated label matches the filter popup's search text.
-    pub(super) fn filter_operator_matches(&self) -> Vec<FilterOperator> {
-        let query = self.filter_query.trim().to_lowercase();
-        FilterOperator::ALL
-            .iter()
-            .copied()
-            .filter(|operator| filter_matches(&query, &t!(operator.label_key()).to_lowercase()))
-            .collect()
-    }
-
-    fn filter_choose_first(&mut self, cx: &mut Context<'_, Self>) {
-        let Some((index, kind)) = self.state.filter_combo else {
+        let Some(condition) = self.new_filter_condition() else {
             return;
         };
-        match kind {
-            FilterCombo::Field => {
-                if let Some(name) = self
-                    .filter_field_matches()
-                    .first()
-                    .map(|name| name.to_string())
-                {
-                    self.filter_choose_field(index, name, cx);
-                }
-            }
-            FilterCombo::Operator => {
-                if let Some(operator) = self.filter_operator_matches().first().copied() {
-                    self.filter_choose_operator(index, operator, cx);
-                }
-            }
+        if let Some(FilterNode::Group(group)) = filter_node_mut(&mut self.state.filter_draft, &path)
+        {
+            group.children.push(condition);
+        } else {
+            self.filter_insert_after(&path, condition);
         }
+        self.after_filter_change(cx);
+    }
+
+    /// The group boundary row's "+": insert a new group after the one at `path`.
+    pub(super) fn filter_add_group(&mut self, path: Vec<usize>, cx: &mut Context<'_, Self>) {
+        let Some(group) = self.new_filter_group() else {
+            return;
+        };
+        if path.is_empty() {
+            self.state.filter_draft.push(group);
+        } else {
+            self.filter_insert_after(&path, group);
+        }
+        self.after_filter_change(cx);
+    }
+
+    /// Insert `node` right after the node at `path`, in the same parent.
+    fn filter_insert_after(&mut self, path: &[usize], node: FilterNode) {
+        let (parent, position) = match path.split_last() {
+            Some((index, parents)) => (parents.to_vec(), index + 1),
+            None => (Vec::new(), usize::MAX),
+        };
+        if let Some(children) = filter_children_mut(&mut self.state.filter_draft, &parent) {
+            let position = position.min(children.len());
+            children.insert(position, node);
+        }
+    }
+
+    pub(super) fn filter_remove_node(&mut self, path: Vec<usize>, cx: &mut Context<'_, Self>) {
+        let Some((index, parents)) = path.split_last() else {
+            return;
+        };
+        let (index, parents) = (*index, parents.to_vec());
+        if let Some(children) = filter_children_mut(&mut self.state.filter_draft, &parents)
+            && index < children.len()
+        {
+            children.remove(index);
+        }
+        self.after_filter_change(cx);
+    }
+
+    /// Reset the popups/active field and refresh focus handles after a structural change. Groups
+    /// left without conditions are dropped (the boundary rows hide them from edits anyway).
+    fn after_filter_change(&mut self, cx: &mut Context<'_, Self>) {
+        prune_filter_groups(&mut self.state.filter_draft);
+        self.filter_active = None;
+        self.filter_field_combos.clear();
+        self.filter_operator_combos.clear();
+        self.rebuild_filter_focus(cx);
+        cx.notify();
+    }
+
+    pub(super) fn filter_toggle_conjunction(
+        &mut self,
+        path: Vec<usize>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(node) = filter_node_mut(&mut self.state.filter_draft, &path) {
+            let conjunction = node.conjunction().toggled();
+            node.set_conjunction(conjunction);
+        }
+        cx.notify();
+    }
+
+    /// The shared drop-down for a condition's column, created lazily per node path.
+    pub(super) fn filter_field_combo(
+        &mut self,
+        path: &[usize],
+        cx: &mut Context<'_, Self>,
+    ) -> Entity<ComboBox> {
+        let key = path.to_vec();
+        if let Some(entity) = self.filter_field_combos.get(&key) {
+            return entity.clone();
+        }
+        let theme = self.theme;
+        let weak = self.self_weak.clone();
+        let callback_path = key.clone();
+        let options: Vec<ComboOption> = self
+            .state
+            .columns
+            .iter()
+            .map(|column| ComboOption::plain(column.name.clone()))
+            .collect();
+        let selected = self
+            .state
+            .columns
+            .first()
+            .map(|column| column.name.clone())
+            .unwrap_or_default();
+        let entity = cx.new(move |cx| {
+            ComboBox::new(theme, options, selected, FILTER_FIELD_WIDTH, cx).on_select(Rc::new(
+                move |value, _window, cx| {
+                    let _ = weak.update(cx, |grid, cx| {
+                        grid.filter_choose_field(callback_path.clone(), value.to_string(), cx);
+                    });
+                },
+            ))
+        });
+        self.filter_field_combos.insert(key, entity.clone());
+        entity
+    }
+
+    /// The shared drop-down for a condition's comparison operator, keyed by node path.
+    pub(super) fn filter_operator_combo(
+        &mut self,
+        path: &[usize],
+        cx: &mut Context<'_, Self>,
+    ) -> Entity<ComboBox> {
+        let key = path.to_vec();
+        if let Some(entity) = self.filter_operator_combos.get(&key) {
+            return entity.clone();
+        }
+        let theme = self.theme;
+        let weak = self.self_weak.clone();
+        let callback_path = key.clone();
+        let options: Vec<ComboOption> = FilterOperator::ALL
+            .iter()
+            .enumerate()
+            .map(|(index, operator)| {
+                ComboOption::new(index.to_string(), t!(operator.label_key()).to_string())
+            })
+            .collect();
+        let entity = cx.new(move |cx| {
+            ComboBox::new(theme, options, "0", FILTER_OPERATOR_WIDTH, cx).on_select(Rc::new(
+                move |value, _window, cx| {
+                    let Ok(index) = value.parse::<usize>() else {
+                        return;
+                    };
+                    let Some(operator) = FilterOperator::ALL.get(index).copied() else {
+                        return;
+                    };
+                    let _ = weak.update(cx, |grid, cx| {
+                        grid.filter_choose_operator(callback_path.clone(), operator, cx);
+                    });
+                },
+            ))
+        });
+        self.filter_operator_combos.insert(key, entity.clone());
+        entity
     }
 
     pub(super) fn filter_choose_field(
         &mut self,
-        index: usize,
+        path: Vec<usize>,
         column: String,
         cx: &mut Context<'_, Self>,
     ) {
-        if let Some(condition) = self.state.filter_draft.get_mut(index) {
+        if let Some(FilterNode::Condition(condition)) =
+            filter_node_mut(&mut self.state.filter_draft, &path)
+        {
             condition.column = column;
         }
-        self.state.filter_combo = None;
         cx.notify();
     }
 
     pub(super) fn filter_choose_operator(
         &mut self,
-        index: usize,
+        path: Vec<usize>,
         operator: FilterOperator,
         cx: &mut Context<'_, Self>,
     ) {
-        if let Some(condition) = self.state.filter_draft.get_mut(index) {
+        if let Some(FilterNode::Condition(condition)) =
+            filter_node_mut(&mut self.state.filter_draft, &path)
+        {
             condition.operator = operator;
         }
-        self.state.filter_combo = None;
         cx.notify();
     }
 
     pub(super) fn filter_focus_value(
         &mut self,
-        index: usize,
+        path: Vec<usize>,
         slot: u8,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        self.state.filter_combo = None;
-        self.filter_active = Some((index, slot));
-        let handle = if slot == 0 {
-            self.filter_value_focus.get(index).cloned()
+        self.filter_active = Some((path.clone(), slot));
+        let handles = if slot == 0 {
+            &self.filter_value_focus
         } else {
-            self.filter_value2_focus.get(index).cloned()
+            &self.filter_value2_focus
         };
+        let handle = handles
+            .iter()
+            .find(|(candidate, _)| *candidate == path)
+            .map(|(_, handle)| handle.clone());
         if let Some(handle) = handle {
             window.focus(&handle);
         }
@@ -788,7 +905,7 @@ impl GridView {
 
     pub(super) fn filter_value_key(
         &mut self,
-        index: usize,
+        path: Vec<usize>,
         slot: u8,
         event: &KeyDownEvent,
         cx: &mut Context<'_, Self>,
@@ -799,7 +916,9 @@ impl GridView {
         }
         let mut apply = false;
         let mut unfocus = false;
-        if let Some(condition) = self.state.filter_draft.get_mut(index) {
+        if let Some(FilterNode::Condition(condition)) =
+            filter_node_mut(&mut self.state.filter_draft, &path)
+        {
             let buffer = if slot == 0 {
                 &mut condition.value
             } else {
@@ -828,7 +947,6 @@ impl GridView {
 
     pub(super) fn filter_apply(&mut self, cx: &mut Context<'_, Self>) {
         self.state.filters = self.state.filter_draft.clone();
-        self.state.filter_combo = None;
         self.filter_active = None;
         self.state.page_index = 0;
         self.sync_page_input();
