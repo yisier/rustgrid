@@ -1,6 +1,6 @@
 # AGENTS.md
 
-A Navicat-like database management tool built with **Rust + GPUI**, targeting
+A Navicat-like database management tool built with **Rust + gpui-kit**, targeting
 **cross-platform** (Windows, macOS, Linux). **Extensibility is a first-class requirement**,
 not a later refactor.
 
@@ -18,14 +18,15 @@ not a later refactor.
   `sidebar`, `tabs`, `toolbar`, `query`, `query_view`, `query_editor`, `grid`, `grid_input`,
   `grid_commit`, `grid_view`, `grid_cell`, `grid_scroll`, `grid_toolbar`, `dialogs`,
   `widgets`, `form`). New view code goes in the matching submodule, **not** `mod.rs`.
-  `ui/` is the internal design system (buttons, dialogs, scrollbars, text fields, ...): put
-  shared chrome there, never one-off `div`s in feature code. Several subtrees are child
+  `ui/` is the internal design system (buttons, scrollbars, text fields, dropdowns, ...) and the
+  wrapper layer over gpui-kit: put shared chrome there, never one-off `div`s in feature code. Several subtrees are child
   `Entity` views wired through `WeakEntity<AppView>` + `notify_*` invalidation: the Tables/Views
   object list (`ObjectPane`), the tab strip (`TabBar`), the connection tree (`TreePane`), and
   each open grid (`GridView`, one entity per grid, owning its `GridState` and all grid
-  interaction state). Follow that pattern when a subtree gets large. App-level overlays that
-  must cover the whole window (delete confirm, error dialog) stay on `AppView` and are requested
-  by child views through the weak handle.
+  interaction state). Follow that pattern when a subtree gets large. Dialogs are **not** drawn by
+  `AppView`: it holds the dialog state (`form`, `db_dialog`, `password_prompt`, `error_dialog`,
+  `delete_confirm`, `options_open`) and `sync_dialog` hands it to `Root` via
+  `window.open_dialog` — see "UI conventions".
   Other files: `src/session.rs` (UI state), `src/form.rs` (connection form),
   `src/theme.rs` (light/dark palettes), `src/assets.rs` (embedded asset loader for
   `assets/`), `src/runtime.rs` (tokio bridge), locales in `locales/`.
@@ -36,8 +37,12 @@ not a later refactor.
 
 - Rust **stable**, **edition 2024** (`rust-toolchain.toml` pins `stable`; workspace
   `rust-version = "1.94"`).
-- UI: **`gpui = "0.2"`** from crates.io (published from `zed-industries/zed`). Use the
-  published crate — do **not** switch to a git dependency on the Zed monorepo.
+- UI: **`gpui-kit = "0.6"`** (crates.io). It is the facade over `gpui-pre` (a published
+  snapshot of Zed's GPUI) plus `gpui-base` and the shadcn-styled `gpui-component`; it also
+  re-exports GPUI itself. The workspace additionally depends on the same engine under the
+  name the app imports: `gpui = { package = "gpui-pre", version = "0.3" }`, so the ~40 view
+  files keep `use gpui::…`. **These two must move in lockstep** — see "Upgrading gpui-kit".
+  Do **not** switch either to a git dependency on the Zed monorepo.
 - MySQL: **sqlx 0.9**, `default-features = false`, only features
   `runtime-tokio`, `mysql`, `tls-rustls-ring`, `chrono`.
 - i18n: **rust-i18n 4**. Config dir: **directories 6**.
@@ -51,9 +56,9 @@ not a later refactor.
   iterating; finish with `cargo build`. Debug builds do not need the shader toolchain below.
 - `cargo check --workspace` / `cargo build`
 - `cargo run -p navidog-app` (produced binary is `navidog`)
-- Release build (`cargo build --release -p navidog-app`) additionally needs the fxc shim (see
-  Gotchas): build it once with
-  `gcc -O2 -o fxc.exe tools/fxc-shim/fxc.c -lkernel32`, then run cargo with
+- Release build (`cargo build --release -p navidog-app`) normally needs no shader toolchain
+  (gpui-kit enables `runtime_shaders`). If that ever changes, see Gotchas: build the fallback
+  shim once with `gcc -O2 -o fxc.exe tools/fxc-shim/fxc.c -lkernel32`, then run cargo with
   `GPUI_FXC_PATH=<abs path to fxc.exe>` (plus the GNU toolchain env vars below).
 - `cargo test --workspace`
 - Live MySQL integration test (ignored by default): set `NAVIDOG_MYSQL_PASSWORD` (and
@@ -87,50 +92,81 @@ touching UI code.
 
 ## UI conventions
 
-- **Windows classic desktop look.** The frame is drawn entirely by the app in the style of a
-  classic Win32/Navicat window: a custom 32px titlebar (`render_titlebar` / `titlebar_button`),
-  a menu bar, a command toolbar, then the connection tree + content pane. The native titlebar
-  is suppressed (`TitlebarOptions { appears_transparent: true }` in `main.rs`); dragging uses
+- **Look: shadcn/ui on Navicat's layout.** The structural layout is Navicat's — a custom 32px
+  titlebar (`render_titlebar` / `titlebar_button`), menu bar, command toolbar, then the
+  connection tree + content pane — but the chrome is the shadcn look delivered by gpui-kit:
+  rounded corners, muted borders, solid `primary` fills, ghost/outline button variants. Do not
+  re-introduce bespoke square Win32 chrome. The native titlebar is suppressed
+  (`TitlebarOptions { appears_transparent: true }` in `main.rs`); dragging uses
   `WindowControlArea::Drag`, and min/max/close call `window.minimize_window()`,
-  `window.zoom_window()`, `window.remove_window()`. Keep metrics square and compact — do not
-  introduce rounded/modern widgets.
+  `window.zoom_window()`, `window.remove_window()`.
+- **Use gpui-kit components first.** Reach for `gpui_kit::component::*` before hand-drawing a
+  control: `button::Button` (via `AppView::win_button` / `dialog_button` / `toolbar_item`),
+  `checkbox`, `Dialog`, `Input`, `Combobox`, `Scrollbar`, `Tab`, `Table`, `Theme`. Anything
+  shared by more than one view belongs in `src/app/ui/`, never inline in feature code.
+- **The `ui/` wrappers own the app-facing API.** `ui::TextInput` wraps gpui-kit's
+  `InputState`/`Input` and `ui::ComboBox` wraps `ComboboxState`/`Combobox`, exposing the app's
+  original signatures (`TextInputOptions`, `on_change`/`on_submit`/`on_cancel`/`on_tab`,
+  `set_text`, `set_options`, `set_selected`, ...). Because those gpui-kit states require a
+  `&mut Window` to construct, the inner state is created on the **first render** and pending
+  mutations/callbacks are flushed there. Do not use `InputState`/`ComboboxState` directly in
+  feature code — extend the wrapper instead.
+- **Dialogs are `Root`-managed, not app-drawn.** `AppView` holds the dialog state (`form`,
+  `db_dialog`, `password_prompt`, `error_dialog`, `delete_confirm`, `options_open`);
+  `dialogs.rs::sync_dialog` maps it to a `DialogKind` and opens/closes
+  `window.open_dialog(...)` accordingly. Dialog bodies are rebuilt every render through
+  `Entity<AppView>::update`, so status (e.g. "testing connection") stays live. Dialogs are
+  centered and **not** draggable. There is no `overlay`/`dialog_frame`/`confirm_dialog`
+  machinery any more — do not add one back.
 - **Colors come from `Theme`** (`src/theme.rs`), resolved from `ThemeSetting` +
-  `window.appearance()` on every `render`. Add new colors to **both** `Theme::light()` and
-  `Theme::dark()` and reference them as `rgb(theme.field)`; don't hardcode palette values in
-  `app.rs` (the one-off dialog-close hover reds are legacy exceptions).
-- **Icons are embedded assets.** Register every new SVG in `Assets::load` (`src/assets.rs`) and
-  load it with `svg().path("icons/foo.svg")`; bitmaps use
+  `window.appearance()` on every `render`. The palettes follow shadcn's "zinc" tokens (keep
+  `Theme::light()`/`Theme::dark()` in sync) and the same `render` calls
+  `gpui_kit::component::Theme::change(...)` when the resolved mode flips, so gpui-kit
+  components match. Reference colors as `rgb(theme.field)`; don't hardcode palette values.
+- **Icons are embedded assets, with a gpui-kit fallback.** Register every new SVG in
+  `Assets::load` (`src/assets.rs`) and load it with `svg().path("icons/foo.svg")` (or
+  `Icon::default().path(...)` for gpui-kit components); `Assets::load` delegates unknown paths
+  to `gpui_kit::assets::Assets`, which serves the bundled Lucide set. Bitmaps use
   `img(ImageSource::Resource(Resource::Embedded("logo.png".into())))`. An unregistered path
-  fails to load silently.
-- **Buttons are unified.** Every button must go through `AppView::win_button` (or
-  `AppView::dialog_button`) with a `ButtonKind` (`Normal`, `Default`, `Selected`, `Disabled`)
-  to keep the Windows/Navicat look: square corners, `button_bg` fill, a 1px border
-  (`button_border`, or `button_default_border` for the default/selected button), `theme.text`,
-  and a hover of `button_hover_bg` + accent border. Do **not** hand-roll one-off button `div`s,
-  rounded corners, or solid `primary` fills. Confirm buttons use `ButtonKind::Default`; toggles
-  such as theme/language use `ButtonKind::Selected`.
-- **Dialogs are app-drawn overlays, not native windows.** A modal is an `absolute inset-0`
-  overlay (`bg(rgba(theme.overlay))`) wrapping a centered frame: a 30px titlebar with an icon +
-  title + `dialog_close_button`, a `dialog_face` body, and a right-aligned button row. Tabs are
-  plain square buttons (active: `dialog_face` bg + top/left/right border only, so it merges with
-  the page; inactive: `button_bg` + full border). Inputs/combos stay `input_bg`.
+  that is not Lucide fails to load silently.
 - **Toolbar/tab items are flat, not push buttons.** The main toolbar
   (`AppView::render_main_tab`) and the object toolbar (`AppView::toolbar_item`) are borderless
-  icon+label items with a hover highlight and thin `toolbar_separator`s between them — do
-  **not** style them with `win_button` or borders. `win_button` is for dialog push buttons only.
+  icon+label items (ghost buttons) with thin `toolbar_separator`s between them — do **not**
+  style them with borders or filled buttons. `win_button`/`dialog_button` are for push buttons
+  inside dialogs.
 - **The object list (Tables/Views) follows Navicat's layout.** It is column-major: items are
   chunked into columns of `object_rows_per_column()` (derived from the scroll viewport height,
   `OBJECT_ROW_HEIGHT` per row) so a column fills top-to-bottom and then wraps to the next column
   to the right, and it scrolls **horizontally** (`overflow_x_scroll`), not vertically. The
   number of rows per column therefore adapts to the window height. Do not switch it back to
-  `flex_row()`/`overflow_scroll()`. gpui 0.2 does **not** paint scrollbars for `overflow_*`
+  `flex_row()`/`overflow_scroll()`. gpui-pre does **not** paint scrollbars for `overflow_*`
   (it only scrolls and reserves space), so the list ships its own horizontal scrollbar
   (`render_object_hscrollbar`, driven by `object_scroll`); keep it in sync when touching the
   object list.
-- Keep dialog controls compact: 12px text, ~24px-high buttons, square text fields.
+- Keep dialog controls compact: 12px text, ~24px-high buttons, compact text fields.
 - Embed bitmap images with `img(ImageSource::Resource(Resource::Embedded("name".into())))`.
   Calling `img("name")` treats the bare filename as a **URI** and fails with
   `Failed to load asset ... loading image asset from "name"`.
+
+## Upgrading gpui-kit
+
+`gpui-kit` and the workspace's `gpui` (= `gpui-pre`) alias are the same engine and **must be
+bumped together** in the root `Cargo.toml`; a mismatch gives two GPUI copies and incompatible
+element types. Two kinds of upgrade:
+
+- **`0.6.x` → `0.6.y` (no code):** `cargo update -p gpui-kit -p gpui-pre`. The `"0.6"`/`"0.3"`
+  ranges in the root `Cargo.toml` keep this in-family.
+- **A breaking bump (e.g. `gpui-kit 0.7`, a new `gpui-pre` snapshot):** edit both lines in the
+  root `Cargo.toml`, then fix the fallout. It is localized by design:
+  - `ui/text_input.rs`, `ui/combo.rs` (the wrappers) and the dialog builders
+    (`dialogs.rs`, `db_dialog.rs`, `options.rs`) absorb gpui-kit component API changes; the
+    40+ call sites behind them do not move.
+  - The rest is plain GPUI API churn (the `gpui 0.2` → `gpui-pre 0.3` jump was ~41 mechanical
+    errors across ~17 files: `focus(&h, cx)`, `ScrollHandle::max_offset()` returning `Point`,
+    `ShapedLine::paint` taking `TextAlign` + `Option<Pixels>`, `BoxShadow { inset }`,
+    `track_scroll(&h)`, `Entity::update` returning `R`). Budget one pass like that per
+    breaking engine bump.
+  - `Cargo.lock` is committed, so pin exactly what built.
 
 ## Dependency policy
 
@@ -143,22 +179,17 @@ touching UI code.
   calls `sqlformat`.
 - Keep the dependency tree small (see Gotchas).
 - **UI widget reference — `longbridge/gpui-kit`** (https://github.com/longbridge/gpui-kit,
-  formerly `gpui-component`, **Apache-2.0**). When a widget is non-trivial (date picker, text
-  input, virtualized table, dropdown, toast, tooltip, ...) **port the implementation from this
-  repo** instead of inventing it: restyle to the classic Win32/Navicat look and keep it under
-  `src/app/ui/`. Keep the upstream file's Apache-2.0 attribution/license notice on anything
-  copied verbatim.
-  Do **not** add it as a dependency: the current `gpui-kit` / `gpui-component 0.6` is built on
-  `gpui-pre` (a republished snapshot of Zed's GPUI), **not** the crates.io `gpui = "0.2"` this
-  workspace pins — adopting it would force a whole-app framework migration and break the
-  "use the published gpui 0.2 crate" rule. It also drags in heavy deps (`tree-sitter`, `reqwest`,
-  `resvg`, `ropey`, `markdown`, ...) and its modern shadcn look fights the required square
-  styling. (The older `gpui-component 0.5.x` line targets crates.io `gpui 0.2.2`, but is already
-  superseded and still heavy — use it only as a source to port from.)
+  formerly `gpui-component`, **Apache-2.0**). It **is** a dependency of this workspace (the
+  `gpui-kit` facade, see Tech stack): use its components rather than hand-drawing controls, and
+  when a widget is still missing (date picker, toast, tooltip, virtualized table, ...) prefer
+  wiring the kit's component over porting an implementation. Only fall back to porting upstream
+  code when the kit genuinely lacks the widget; keep ports under `src/app/ui/` and retain the
+  upstream Apache-2.0 attribution. Upgrade procedure and blast radius: "Upgrading gpui-kit".
 
 ## Scope (do not exceed)
 
-Strictly follow Navicat's UI layout. Implemented today:
+Keep Navicat's layout (connection tree on the left, content/details pane on the right) with the
+shadcn chrome described above. Implemented today:
 
 1. Connection management: create/edit/delete, connect/disconnect, password prompt
 2. Enumerate databases; create/edit/delete a database (charset + collation) and edit defaults
@@ -228,19 +259,34 @@ do not build those features early.
   A plain `cargo build` fails with `linker link.exe not found`. With the GNU toolchain the
   host *is* the GNU target, so the binary lands at `target/debug/navidog.exe` (not under a
   triple-named subdirectory).
-- Keep gpui usage close to the verified shape in `crates/navidog-app/src/app.rs` /
-  `main.rs` (`Application::new().with_assets(Assets).run`, `cx.open_window`, `impl Render`).
+- Keep GPUI usage close to the shapes verified in `main.rs` and the `ui/` wrappers.
+  `main.rs` opens the window as `gpui_kit::application().with_assets(Assets).run(|cx| { gpui_kit::init(cx); … })`
+  and wraps the app view in `Root::new(view, window, cx)` — `Root` must be the window root or
+  `window.open_dialog` panics.
+- **gpui-pre API deltas vs the old `gpui 0.2`** (recurring sources of compile errors):
+  `Window::focus(&handle, cx)` now takes `cx`; `ScrollHandle::max_offset()` returns
+  `Point<Pixels>` (`.x`/`.y`, not `.width`/`.height`); `ShapedLine::paint` takes
+  `TextAlign` + `Option<Pixels>`; `BoxShadow` gained an `inset` field; `uniform_list`'s
+  `track_scroll` takes `&handle`; `Entity::update` returns `R` directly while
+  `WeakEntity::update` returns `Result<R>`.
+- **gpui-kit stateful widgets need a `Window` at construction** (`InputState::new`,
+  `ComboboxState::new`, `TableState::new` all take `&mut Window`). The app builds its entities
+  while there is no window yet, so `ui/text_input.rs` and `ui/combo.rs` create the inner state
+  on the first `render` and queue setters/callbacks to that frame. Keep new gpui-kit-backed
+  state behind the same lazy wrapper pattern.
 - **Window-edge resizing on Windows is app-owned.** gpui hides the OS titlebar, so its
   `WM_NCCALCSIZE` leaves only a 1px frame and the titlebar's `WindowControlArea::Drag` claims
   the top edge, making the window effectively unresizable. `src/win_resize.rs` installs a
   `SetWindowSubclass` hook that answers `WM_NCHITTEST` with the real frame-metric resize codes
   before gpui sees the message (`install(window)` is called from `open_window`). Do **not** edit
   the crates.io copy of gpui under `~/.cargo/registry` to fix this — it is not reproducible.
-- gpui's build script only compiles HLSL when `debug_assertions` is **off** (release). It needs
-  the Windows SDK `fxc.exe`, which is **not** installed on this machine, so a plain release
-  build panics in `gpui/build.rs` with `Failed to find fxc.exe`. Debug builds compile shaders at
-  runtime via `D3DCompileFromFile` and are unaffected. Use `tools/fxc-shim` (speaks the fxc
-  subset gpui invokes; drives the system `d3dcompiler_47.dll`) via `GPUI_FXC_PATH` for release.
+- gpui's build script only compiles HLSL when `debug_assertions` is **off** (release). With
+  gpui-kit this is normally avoided: `gpui-kit` enables `runtime_shaders` on
+  `gpui-pre-platform`, so shaders compile at runtime and the Windows SDK `fxc.exe` is not
+  needed. If a future dependency change drops that feature, a plain release build panics in
+  `gpui/build.rs` with `Failed to find fxc.exe`; the fallback is `tools/fxc-shim` (speaks the
+  fxc subset gpui invokes; drives the system `d3dcompiler_47.dll`) via
+  `GPUI_FXC_PATH=<abs path to fxc.exe>`. Debug builds are unaffected either way.
 - **Cross-platform** (Windows/macOS/Linux). Avoid OS-only APIs; gate platform-specific code
   behind `#[cfg(target_os = ...)]`; watch per-OS native deps (e.g. Linux system libraries).
 - **Small install size is a hard requirement.** The release profile already sets `lto`,

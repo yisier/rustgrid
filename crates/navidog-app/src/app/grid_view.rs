@@ -1,4 +1,5 @@
 use super::*;
+use gpui::HitboxBehavior;
 
 impl GridView {
     pub(super) fn new(
@@ -29,9 +30,7 @@ impl GridView {
             date_picker: None,
             column_resize: None,
             sort_hover: None,
-            sort_search: None,
-            sort_combo_filter: String::new(),
-            sort_combo_highlight: 0,
+            sort_field_combos: BTreeMap::new(),
             filter_value_focus: Vec::new(),
             filter_value2_focus: Vec::new(),
             filter_active: None,
@@ -67,25 +66,23 @@ impl GridView {
                     .filter_field_combos
                     .values()
                     .chain(self.filter_operator_combos.values())
+                    .chain(self.sort_field_combos.values())
                     .cloned()
                     .collect();
                 for combo in combos {
                     combo.update(cx, |combo, cx| combo.set_theme(theme, cx));
-                }
-                if let Some(input) = self.sort_search.clone() {
-                    input.update(cx, |input, cx| input.set_theme(theme, cx));
                 }
             }
         }
         if self.cell_editor_focus_pending {
             if let Some(input) = self.cell_editor.as_ref().map(|editor| editor.input.clone()) {
                 let focus = input.read(cx).focus_handle();
-                window.focus(&focus);
+                window.focus(&focus, cx);
             }
             self.cell_editor_focus_pending = false;
         }
         if self.page_size_focus_pending {
-            window.focus(&self.page_size_focus);
+            window.focus(&self.page_size_focus, cx);
             self.page_size_focus_pending = false;
         }
         self.page_input_focused = self.page_input_focus.is_focused(window);
@@ -432,7 +429,7 @@ impl Render for GridView {
             },
         )
         .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::FitList)
-        .track_scroll(self.list_scroll.clone())
+        .track_scroll(&self.list_scroll)
         .flex_1()
         .min_h(px(0.0))
         .track_focus(&self.focus)
@@ -521,13 +518,17 @@ impl Render for GridView {
                 )
                 .child({
                     let weak = wheel_weak.clone();
+                    // The wheel handler must ignore events aimed at an overlay above the grid —
+                    // the combobox popup covers the window with `.occlude()`. A plain rectangle
+                    // test on the grid bounds cannot see that, so insert a hitbox and use gpui's
+                    // occlusion-aware `should_handle_scroll` instead.
                     canvas(
-                        |_, _, _| {},
-                        move |bounds, _state, window, _cx| {
+                        |bounds, window, _cx| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+                        move |_bounds, hitbox, window, _cx| {
                             window.on_mouse_event(
-                                move |event: &ScrollWheelEvent, phase, _window, cx| {
+                                move |event: &ScrollWheelEvent, phase, window, cx| {
                                     if phase != DispatchPhase::Capture
-                                        || !bounds.contains(&event.position)
+                                        || !hitbox.should_handle_scroll(window)
                                     {
                                         return;
                                     }
@@ -561,12 +562,6 @@ impl Render for GridView {
             .child(self.render_grid_controls(cx))
             .child(self.render_grid_status());
 
-        if self.state.show_toolbar
-            && self.state.sort_open
-            && let Some((rule, _)) = self.state.sort_combo.as_ref()
-        {
-            root = root.child(self.render_sort_combo_popup(*rule, cx));
-        }
         root.on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
             this.grid_hscroll_drag(event, cx);
             this.grid_vscroll_drag(event, cx);

@@ -31,7 +31,7 @@ impl GridView {
     pub(super) fn render_grid_hscrollbar(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
         let viewport = f32::from(self.hscroll.bounds().size.width);
-        let max = f32::from(self.hscroll.max_offset().width);
+        let max = f32::from(self.hscroll.max_offset().x);
         if max <= 0.0 {
             // Reserve the same height as a real scrollbar so the vertical track's viewport stays
             // constant whether or not the grid can scroll horizontally.
@@ -56,7 +56,7 @@ impl GridView {
     pub(super) fn grid_hscroll_begin(&mut self, mouse_x: Pixels, cx: &mut Context<'_, Self>) {
         let bounds = self.hscroll.bounds();
         let viewport = f32::from(bounds.size.width);
-        let max = f32::from(self.hscroll.max_offset().width);
+        let max = f32::from(self.hscroll.max_offset().x);
         let (thumb_w, travel) = scrollbar_thumb(viewport, max);
         if travel <= 0.0 {
             return;
@@ -88,7 +88,7 @@ impl GridView {
 
     pub(super) fn grid_hscroll_set(&self, relative: f32, grab: f32, cx: &mut Context<'_, Self>) {
         let viewport = f32::from(self.hscroll.bounds().size.width);
-        let max = f32::from(self.hscroll.max_offset().width);
+        let max = f32::from(self.hscroll.max_offset().x);
         let (_, travel) = scrollbar_thumb(viewport, max);
         if travel <= 0.0 {
             return;

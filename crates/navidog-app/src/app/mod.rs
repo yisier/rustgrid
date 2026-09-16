@@ -83,7 +83,7 @@ fn make_form_input(
         .on_tab(Rc::new(move |shift, window, cx| {
             let _ = tab.update(cx, |app, cx| {
                 if let Some(handle) = app.form_neighbor(field, shift, cx) {
-                    window.focus(&handle);
+                    window.focus(&handle, cx);
                 }
             });
         }))
@@ -308,9 +308,8 @@ struct GridView {
     column_resize: Option<ColumnResize>,
 
     sort_hover: Option<usize>,
-    sort_search: Option<Entity<TextInput>>,
-    sort_combo_filter: String,
-    sort_combo_highlight: usize,
+    /// The shared column dropdowns of the sort panel, keyed by draft rule index.
+    sort_field_combos: BTreeMap<usize, Entity<ComboBox>>,
 
     filter_value_focus: Vec<(Vec<usize>, FocusHandle)>,
     filter_value2_focus: Vec<(Vec<usize>, FocusHandle)>,
@@ -401,6 +400,18 @@ enum DeleteConfirm {
     Rows { grid_id: u64, rows: Vec<usize> },
     /// Delete a connection (and its open grids/query tabs).
     Connection { index: usize },
+}
+
+/// Which app dialog `Root` is currently hosting. AppView state stays the source of truth; this
+/// only tracks the last kind handed to `window.open_dialog` so the transition fires once.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DialogKind {
+    ConnectionForm,
+    DbDialog,
+    Password,
+    Error,
+    Confirm,
+    Options,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -498,18 +509,6 @@ pub struct AppView {
     db_sql_cursor: usize,
     db_sql_selecting: bool,
     form_inputs: Option<FormInputs>,
-    form_offset: Point<Pixels>,
-    form_dragging: bool,
-    form_drag_origin: Point<Pixels>,
-    form_drag_base: Point<Pixels>,
-    error_offset: Point<Pixels>,
-    error_dragging: bool,
-    error_drag_origin: Point<Pixels>,
-    error_drag_base: Point<Pixels>,
-    confirm_offset: Point<Pixels>,
-    confirm_dragging: bool,
-    confirm_drag_origin: Point<Pixels>,
-    confirm_drag_base: Point<Pixels>,
     caret_visible: bool,
     caret_blink_running: bool,
     password_prompt: Option<PasswordPrompt>,
@@ -520,6 +519,8 @@ pub struct AppView {
     object_search_input: Entity<TextInput>,
     delete_confirm: Option<DeleteConfirm>,
     error_dialog: Option<String>,
+    /// The kind of dialog last opened through `Root`, if any.
+    opened_dialog: Option<DialogKind>,
     window_bounds_subscription: Option<Subscription>,
     theme_setting: ThemeSetting,
     theme: Theme,
@@ -638,18 +639,6 @@ impl AppView {
             db_sql_cursor: 0,
             db_sql_selecting: false,
             form_inputs: None,
-            form_offset: Point::default(),
-            form_dragging: false,
-            form_drag_origin: Point::default(),
-            form_drag_base: Point::default(),
-            error_offset: Point::default(),
-            error_dragging: false,
-            error_drag_origin: Point::default(),
-            error_drag_base: Point::default(),
-            confirm_offset: Point::default(),
-            confirm_dragging: false,
-            confirm_drag_origin: Point::default(),
-            confirm_drag_base: Point::default(),
             caret_visible: true,
             caret_blink_running: false,
             password_prompt: None,
@@ -682,6 +671,7 @@ impl AppView {
             },
             delete_confirm: None,
             error_dialog: None,
+            opened_dialog: None,
             window_bounds_subscription: None,
             theme_setting,
             theme: Theme::dark(),
@@ -765,36 +755,6 @@ impl AppView {
         .flatten()
         {
             combo.update(cx, |combo, cx| combo.set_theme(theme, cx));
-        }
-    }
-
-    /// The drag handlers and current offset for the shared confirmation modal.
-    fn confirm_drag(&self, cx: &mut Context<'_, Self>) -> ui::DialogDrag {
-        ui::DialogDrag {
-            offset: self.confirm_offset,
-            on_start: Rc::new(cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                this.confirm_dragging = true;
-                this.confirm_drag_origin = event.position;
-                this.confirm_drag_base = this.confirm_offset;
-                cx.notify();
-            })),
-            on_move: Rc::new(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
-                if this.confirm_dragging {
-                    let dx = event.position.x - this.confirm_drag_origin.x;
-                    let dy = event.position.y - this.confirm_drag_origin.y;
-                    this.confirm_offset = Point {
-                        x: this.confirm_drag_base.x + dx,
-                        y: this.confirm_drag_base.y + dy,
-                    };
-                    cx.notify();
-                }
-            })),
-            on_end: Rc::new(cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
-                if this.confirm_dragging {
-                    this.confirm_dragging = false;
-                    cx.notify();
-                }
-            })),
         }
     }
 }
@@ -990,6 +950,20 @@ fn move_vertical(text: &str, offset: usize, delta: isize) -> usize {
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         self.theme = Theme::resolve(self.theme_setting, window.appearance());
+        // Keep gpui-kit's own theme in lockstep with the app palette so its components (and the
+        // shadcn tokens they read) follow the user's Light/Dark/System setting.
+        let want_dark = self.theme.is_dark();
+        if gpui_kit::component::Theme::global(cx).is_dark() != want_dark {
+            gpui_kit::component::Theme::change(
+                if want_dark {
+                    gpui_kit::component::ThemeMode::Dark
+                } else {
+                    gpui_kit::component::ThemeMode::Light
+                },
+                Some(window),
+                cx,
+            );
+        }
         self.sync_input_themes(cx);
         self.ensure_query_combos(cx);
         self.sync_db_combos(cx);
@@ -1011,13 +985,13 @@ impl Render for AppView {
         if self.password_focus_pending {
             if let Some(prompt) = self.password_prompt.as_ref() {
                 let handle = prompt.input.read(cx).focus_handle();
-                window.focus(&handle);
+                window.focus(&handle, cx);
             }
             self.password_focus_pending = false;
         }
 
         if self.query_focus_pending {
-            window.focus(&self.query_focus);
+            window.focus(&self.query_focus, cx);
             self.query_focus_pending = false;
         }
 
@@ -1082,29 +1056,9 @@ impl Render for AppView {
             root = root.child(self.render_tab_menu(menu, cx));
         }
 
-        if let Some(form) = self.form.as_ref() {
-            root = root.child(self.render_dialog(form, window, cx));
-        }
-
-        if let Some(dialog) = self.db_dialog.as_ref() {
-            root = root.child(self.render_db_dialog(dialog, window, cx));
-        }
-
-        if let Some(prompt) = self.password_prompt.as_ref() {
-            root = root.child(self.render_password_prompt(prompt, cx));
-        }
-
-        if let Some(message) = self.error_dialog.clone() {
-            root = root.child(self.render_error_dialog(&message, cx));
-        }
-
-        if let Some(confirm) = self.delete_confirm.as_ref() {
-            root = root.child(self.render_delete_confirm(confirm, cx));
-        }
-
-        if self.options_open {
-            root = root.child(self.render_options_dialog(cx));
-        }
+        // Dialogs are hosted by `Root` (opened imperatively); AppView state remains the source
+        // of truth and this reconciles it with the Root dialog stack.
+        self.sync_dialog(window, cx);
 
         self.query_editor_measured = self.active_query.is_some();
 

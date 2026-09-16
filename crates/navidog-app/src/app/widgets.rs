@@ -119,7 +119,7 @@ impl AppView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    window.focus(&this.db_sql_focus);
+                    window.focus(&this.db_sql_focus, cx);
                     let index = this.db_sql_index_for_position(event.position);
                     this.db_sql_anchor = index;
                     this.db_sql_cursor = index;
@@ -177,21 +177,13 @@ impl AppView {
         ui::dialog_button(id, label, primary, self.theme, on_click)
     }
 
-    pub(super) fn dialog_close_button(
-        &self,
-        id: &'static str,
-        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    ) -> Stateful<Div> {
-        ui::dialog_close_button(id, self.theme, on_click)
-    }
-
     pub(super) fn win_button(
         &self,
         id: impl Into<SharedString>,
         label: String,
         kind: ButtonKind,
         on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    ) -> Stateful<Div> {
+    ) -> impl IntoElement {
         ui::button(id, label, kind, self.theme, on_click)
     }
 
@@ -202,7 +194,7 @@ impl AppView {
         label: String,
         enabled: bool,
         on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    ) -> Stateful<Div> {
+    ) -> impl IntoElement {
         ui::toolbar_item(id, icon, label, enabled, self.theme, on_click)
     }
 
@@ -283,8 +275,6 @@ impl AppView {
                         cx.listener(move |this, _event, _window, cx| {
                             this.context_menu = None;
                             this.delete_confirm = Some(DeleteConfirm::Connection { index });
-                            this.confirm_offset = Point::default();
-                            this.confirm_dragging = false;
                             cx.notify();
                         }),
                     ))

@@ -16,6 +16,7 @@ navidog-core.workspace = true
 navidog-mysql.workspace = true
 navidog-config.workspace = true
 gpui.workspace = true
+gpui-kit.workspace = true
 rust-i18n.workspace = true
 sqlparser.workspace = true
 sqlformat.workspace = true

@@ -17,9 +17,8 @@ mod win_resize;
 
 use std::sync::Arc;
 
-use gpui::{
-    AppContext, Application, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size,
-};
+use gpui::{AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
+use gpui_kit::component::Root;
 use navidog_core::DriverRegistry;
 
 use crate::app::AppView;
@@ -46,7 +45,8 @@ fn main() {
     let settings = config.load_settings().unwrap_or_default();
     rust_i18n::set_locale(settings.language.locale());
 
-    Application::new().with_assets(Assets).run(move |cx| {
+    gpui_kit::application().with_assets(Assets).run(move |cx| {
+        gpui_kit::init(cx);
         let bounds = Bounds::centered(None, size(px(1100.0), px(720.0)), cx);
         let registry = registry.clone();
         let config = config.clone();
@@ -62,10 +62,12 @@ fn main() {
                 }),
                 ..Default::default()
             },
-            move |_window, cx| {
+            move |window, cx| {
                 #[cfg(target_os = "windows")]
-                win_resize::install(_window);
-                cx.new(|cx| AppView::new(registry.clone(), config.clone(), runtime.clone(), cx))
+                win_resize::install(window);
+                let view = cx
+                    .new(|cx| AppView::new(registry.clone(), config.clone(), runtime.clone(), cx));
+                cx.new(|cx| Root::new(view, window, cx))
             },
         )
         .expect("failed to open the main window");

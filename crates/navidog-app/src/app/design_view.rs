@@ -401,7 +401,7 @@ impl TableDesignView {
                     .collect::<Vec<_>>()
             },
         )
-        .track_scroll(self.list_scroll.clone())
+        .track_scroll(&self.list_scroll)
         .flex_1()
         .min_h(px(0.0));
 
@@ -849,7 +849,7 @@ impl TableDesignView {
     fn render_hscrollbar(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
         let viewport = f32::from(self.hscroll.bounds().size.width);
-        let max = f32::from(self.hscroll.max_offset().width);
+        let max = f32::from(self.hscroll.max_offset().x);
         if max <= 0.0 {
             return div().flex_none().h(px(14.0)).into_any_element();
         }
@@ -869,7 +869,7 @@ impl TableDesignView {
         let theme = self.theme;
         let handle = self.list_scroll.0.borrow().base_handle.clone();
         let viewport = f32::from(handle.bounds().size.height);
-        let max = f32::from(handle.max_offset().height);
+        let max = f32::from(handle.max_offset().y);
         if max <= 0.0 {
             return div().into_any_element();
         }
@@ -895,7 +895,7 @@ impl TableDesignView {
     fn hscroll_begin(&mut self, mouse_x: Pixels, cx: &mut Context<'_, Self>) {
         let bounds = self.hscroll.bounds();
         let viewport = f32::from(bounds.size.width);
-        let max = f32::from(self.hscroll.max_offset().width);
+        let max = f32::from(self.hscroll.max_offset().x);
         let (thumb_w, travel) = scrollbar_thumb(viewport, max);
         if travel <= 0.0 {
             return;
@@ -914,7 +914,7 @@ impl TableDesignView {
 
     fn hscroll_set(&self, relative: f32, grab: f32, cx: &mut Context<'_, Self>) {
         let viewport = f32::from(self.hscroll.bounds().size.width);
-        let max = f32::from(self.hscroll.max_offset().width);
+        let max = f32::from(self.hscroll.max_offset().x);
         let (_, travel) = scrollbar_thumb(viewport, max);
         if travel <= 0.0 {
             return;
@@ -930,7 +930,7 @@ impl TableDesignView {
         let handle = self.list_scroll.0.borrow().base_handle.clone();
         let bounds = handle.bounds();
         let viewport = f32::from(bounds.size.height);
-        let max = f32::from(handle.max_offset().height);
+        let max = f32::from(handle.max_offset().y);
         let (thumb_h, travel) = scrollbar_thumb(viewport, max);
         if travel <= 0.0 {
             return;
@@ -950,7 +950,7 @@ impl TableDesignView {
     fn vscroll_set(&self, relative: f32, grab: f32, cx: &mut Context<'_, Self>) {
         let handle = self.list_scroll.0.borrow().base_handle.clone();
         let viewport = f32::from(handle.bounds().size.height);
-        let max = f32::from(handle.max_offset().height);
+        let max = f32::from(handle.max_offset().y);
         let (_, travel) = scrollbar_thumb(viewport, max);
         if travel <= 0.0 {
             return;

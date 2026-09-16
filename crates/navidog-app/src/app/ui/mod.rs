@@ -5,13 +5,13 @@
 //! module. The rules (square corners, `Theme` colors, `ButtonKind` variants) are described in
 //! `AGENTS.md` under "UI conventions".
 
-use std::rc::Rc;
-
 use gpui::{
-    AnyElement, App, BoxShadow, ClickEvent, Div, FontWeight, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Stateful, Window,
-    div, prelude::*, px, relative, rgb, rgba, svg,
+    App, BoxShadow, ClickEvent, Div, FontWeight, IntoElement, Point, SharedString, Stateful,
+    Window, div, prelude::*, px, relative, rgb, rgba, svg,
 };
+
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::{Disableable, Icon, Selectable};
 
 use crate::theme::Theme;
 
@@ -27,56 +27,27 @@ pub(super) enum ButtonKind {
     Normal,
     Default,
     Selected,
+    /// Kept as part of the design-system vocabulary; no call site disables a push button today.
+    #[allow(dead_code)]
     Disabled,
 }
 
-/// The `(background, border, text)` colors for a button of `kind`.
-pub(super) fn button_colors(kind: ButtonKind, theme: Theme) -> (u32, u32, u32) {
-    match kind {
-        ButtonKind::Normal => (theme.button_bg, theme.button_border, theme.text),
-        ButtonKind::Default => (theme.button_bg, theme.button_default_border, theme.text),
-        ButtonKind::Selected => (
-            theme.tree_selected_bg,
-            theme.button_default_border,
-            theme.tree_selected_text,
-        ),
-        ButtonKind::Disabled => (theme.button_bg, theme.button_border, theme.text_muted),
-    }
-}
-
-/// A square push button, the single source of truth for button chrome.
+/// A push button, the single source of truth for button chrome. Backed by the gpui-kit
+/// (shadcn-style) button so dialog and command buttons match the rest of the UI kit.
 pub(super) fn button(
     id: impl Into<SharedString>,
     label: String,
     kind: ButtonKind,
-    theme: Theme,
+    _theme: Theme,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> Stateful<Div> {
-    let (background, border, text) = button_colors(kind, theme);
-    let enabled = kind != ButtonKind::Disabled;
-
-    div()
-        .id(id.into())
-        .flex()
-        .items_center()
-        .justify_center()
-        .px_3()
-        .h(px(24.0))
-        .text_size(px(12.0))
-        .cursor_pointer()
-        .bg(rgb(background))
-        .text_color(rgb(text))
-        .border_1()
-        .border_color(rgb(border))
-        .when(enabled, move |style| {
-            style.hover(move |style| {
-                style
-                    .bg(rgb(theme.button_hover_bg))
-                    .border_color(rgb(theme.button_default_border))
-            })
-        })
-        .on_click(on_click)
-        .child(label)
+) -> impl IntoElement {
+    let button = match kind {
+        ButtonKind::Normal => Button::new(id.into()).outline(),
+        ButtonKind::Default => Button::new(id.into()).primary(),
+        ButtonKind::Selected => Button::new(id.into()).secondary().selected(true),
+        ButtonKind::Disabled => Button::new(id.into()).outline().disabled(true),
+    };
+    button.compact().label(label).on_click(on_click)
 }
 
 /// A dialog push button; `primary` selects the default (accent-bordered) variant.
@@ -95,71 +66,118 @@ pub(super) fn dialog_button(
     button(id, label, kind, theme, on_click)
 }
 
-/// The square red-hover close button used by every dialog titlebar. The red is a legacy
-/// one-off, kept here so it is at least shared.
-pub(super) fn dialog_close_button(
-    id: &'static str,
-    theme: Theme,
-    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .justify_center()
-        .w(px(38.0))
-        .h_full()
-        .flex_none()
-        .cursor_pointer()
-        .text_size(px(12.0))
-        .text_color(rgb(theme.text))
-        .hover(|style| style.bg(rgb(0xc42b1c)).text_color(rgb(0xffffff)))
-        .on_click(on_click)
-        .child("✕")
-}
-
-/// A borderless icon+label item used by the main and object toolbars (flat, not a push
-/// button).
+/// A flat icon+label item used by the main and object toolbars, backed by the kit's ghost
+/// button so it picks up the shadcn hover/disabled states.
 pub(super) fn toolbar_item(
     id: impl Into<SharedString>,
     icon: &'static str,
     label: String,
     enabled: bool,
+    _theme: Theme,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    Button::new(id.into())
+        .ghost()
+        .compact()
+        .icon(Icon::default().path(icon))
+        .label(label)
+        .disabled(!enabled)
+        .on_click(on_click)
+}
+
+/// A small square icon button, the shared chrome for the filter/sort builders' row actions.
+/// `bordered` picks the raised face (button background + border) used for add buttons; otherwise
+/// it is a flat hover-highlighted icon.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn icon_button(
+    id: impl Into<SharedString>,
+    icon: &'static str,
+    color: u32,
+    width: f32,
+    height: f32,
+    bordered: bool,
     theme: Theme,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
-    let color = if enabled {
-        theme.text
-    } else {
-        theme.text_muted
-    };
-
+    let icon_size = width.min(height) * 0.58;
     div()
         .id(id.into())
         .flex()
-        .flex_row()
         .items_center()
-        .gap_1()
-        .px_2()
-        .h(px(24.0))
-        .rounded_sm()
-        .text_size(px(12.0))
-        .text_color(rgb(color))
-        .when(enabled, move |style| {
+        .justify_center()
+        .w(px(width))
+        .h(px(height))
+        .flex_none()
+        .when(bordered, move |style| {
             style
-                .cursor_pointer()
-                .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                .border_1()
+                .border_color(rgb(theme.border))
+                .bg(rgb(theme.button_bg))
+        })
+        .cursor_pointer()
+        .hover(move |style| {
+            let style = style.bg(rgb(theme.tree_hover_bg));
+            if bordered {
+                style.border_color(rgb(theme.button_default_border))
+            } else {
+                style
+            }
         })
         .on_click(on_click)
         .child(
             svg()
                 .path(icon)
-                .w(px(16.0))
-                .h(px(16.0))
+                .w(px(icon_size))
+                .h(px(icon_size))
                 .flex_none()
                 .text_color(rgb(color)),
         )
-        .child(label)
+}
+
+/// A two-option segmented toggle in a bordered pill (the filter builder's `并且 | 或者`). The
+/// whole widget is a single click target, so `on_click` toggles between the two options.
+pub(super) fn segmented_toggle(
+    id: impl Into<SharedString>,
+    first: String,
+    second: String,
+    second_active: bool,
+    width: f32,
+    theme: Theme,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    let mut toggle = div()
+        .id(id.into())
+        .flex()
+        .flex_row()
+        .items_center()
+        .w(px(width))
+        .h(px(20.0))
+        .flex_none()
+        .overflow_hidden()
+        .border_1()
+        .border_color(rgb(theme.button_border))
+        .bg(rgb(theme.button_bg))
+        .cursor_pointer()
+        .on_click(on_click);
+    for (label, active) in [(first, !second_active), (second, second_active)] {
+        toggle = toggle.child(
+            div()
+                .flex_1()
+                .h_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(11.0))
+                .when(active, move |style| {
+                    style.bg(rgb(theme.primary)).text_color(rgb(0xffffff))
+                })
+                .when(!active, move |style| {
+                    style.text_color(rgb(theme.text_muted))
+                })
+                .child(label),
+        );
+    }
+    toggle
 }
 
 /// A dialog tab: active merges with the page, inactive is a raised button face.
@@ -211,8 +229,15 @@ pub(super) fn main_separator(theme: Theme) -> impl IntoElement {
     separator(theme, 36.0)
 }
 
-/// A 14px check box glyph: filled primary when checked, empty input face otherwise.
+/// A stateless shadcn check box: 14px, 3px radius, primary fill when checked. It is drawn
+/// rather than using the kit's `Checkbox` because these appear inside rows that own the click
+/// and must keep their exact size (and a stateful element would need a unique id per row).
 pub(super) fn checkbox_box(checked: bool, theme: Theme) -> impl IntoElement {
+    let foreground = if theme.is_dark() {
+        theme.window_bg
+    } else {
+        0xffffff
+    };
     div()
         .w(px(14.0))
         .h(px(14.0))
@@ -220,226 +245,34 @@ pub(super) fn checkbox_box(checked: bool, theme: Theme) -> impl IntoElement {
         .flex()
         .items_center()
         .justify_center()
+        .rounded(px(3.0))
         .border_1()
-        .border_color(rgb(theme.border))
+        .border_color(rgb(if checked { theme.primary } else { theme.border }))
         .bg(rgb(if checked {
             theme.primary
         } else {
             theme.input_bg
         }))
-        .text_color(rgb(0xffffff))
+        .text_color(rgb(foreground))
+        .text_size(px(10.0))
         .child(if checked { "✓" } else { "" }.to_string())
 }
 
-/// The soft drop shadow behind every floating dialog.
+/// The soft drop shadow behind every floating surface (dialogs and popup menus).
 pub(super) fn dialog_shadow() -> Vec<BoxShadow> {
     vec![BoxShadow {
-        color: rgba(0x00000040).into(),
+        color: rgba(0x00000026).into(),
         offset: Point {
             x: px(0.0),
-            y: px(2.0),
+            y: px(6.0),
         },
-        blur_radius: px(8.0),
+        blur_radius: px(18.0),
         spread_radius: px(0.0),
+        inset: false,
     }]
 }
 
-/// The full-window modal scrim that centers a dialog frame. Dialogs are app-drawn overlays,
-/// never native windows (see `AGENTS.md`).
-pub(super) fn overlay(theme: Theme) -> Div {
-    div()
-        .absolute()
-        .inset_0()
-        .occlude()
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(rgba(theme.overlay))
-}
-
-/// The standard square floating dialog frame: `face` background, 1px neutral border, and the
-/// shared drop shadow. Callers add width/offset and children.
-pub(super) fn dialog_frame(theme: Theme, face: u32) -> Div {
-    div()
-        .relative()
-        .flex()
-        .flex_col()
-        .bg(rgb(face))
-        .border_1()
-        .border_color(rgb(theme.neutral))
-        .shadow(dialog_shadow())
-}
-
-/// The 28px titlebar of the compact message dialogs: dialog-face background with a bottom
-/// border. Callers add padding, the drag handler and children.
-pub(super) fn dialog_titlebar(theme: Theme) -> Div {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .h(px(28.0))
-        .flex_none()
-        .bg(rgb(theme.dialog_face))
-        .border_b_1()
-        .border_color(rgb(theme.border))
-}
-
-/// The 32px header of the large tabbed dialogs: dialog background, no bottom border, so it
-/// merges with the tab strip below. Callers add padding, the drag handler and children.
-pub(super) fn dialog_header(theme: Theme) -> Div {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .h(px(32.0))
-        .bg(rgb(theme.dialog_bg))
-}
-
-/// A shared dialog button callback.
-pub(super) type DialogCallback = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
-/// Shared mouse callbacks for dialog dragging.
-pub(super) type MouseDownCallback = Rc<dyn Fn(&MouseDownEvent, &mut Window, &mut App)>;
-pub(super) type MouseMoveCallback = Rc<dyn Fn(&MouseMoveEvent, &mut Window, &mut App)>;
-pub(super) type MouseUpCallback = Rc<dyn Fn(&MouseUpEvent, &mut Window, &mut App)>;
-
-/// Mouse-driven dragging for the app-drawn dialogs: the caller owns the offset and passes the
-/// three handlers that update it.
-pub(super) struct DialogDrag {
-    pub offset: Point<Pixels>,
-    pub on_start: MouseDownCallback,
-    pub on_move: MouseMoveCallback,
-    pub on_end: MouseUpCallback,
-}
-
-/// The Windows-style warning glyph: a warning-tinted triangle with a dark exclamation mark drawn
-/// on top. gpui renders an SVG as a single tinted layer, so the two colors are two overlaid SVGs
-/// that share the same 16x16 view box.
-fn warning_icon(size: f32, theme: Theme) -> impl IntoElement {
-    div()
-        .relative()
-        .flex_none()
-        .w(px(size))
-        .h(px(size))
-        .child(
-            svg()
-                .path("icons/warning.svg")
-                .size_full()
-                .text_color(rgb(theme.warning)),
-        )
-        .child(
-            svg()
-                .path("icons/warning_mark.svg")
-                .absolute()
-                .inset_0()
-                .text_color(rgb(0x1a1300)),
-        )
-}
-
-/// Content of a [`confirm_dialog`].
-pub(super) struct ConfirmDialog {
-    pub id: &'static str,
-    pub title: String,
-    pub message: String,
-    pub confirm_label: String,
-    pub cancel_label: String,
-}
-
-/// The single shared destructive-confirmation modal: an overlay with a draggable warning
-/// titlebar, a warning body and a `[Confirm] [Cancel]` footer. Every confirm in the app goes
-/// through this so the chrome and button order never drift.
-pub(super) fn confirm_dialog(
-    dialog: ConfirmDialog,
-    drag: DialogDrag,
-    theme: Theme,
-    on_confirm: DialogCallback,
-    on_cancel: DialogCallback,
-) -> AnyElement {
-    let ConfirmDialog {
-        id: base_id,
-        title,
-        message,
-        confirm_label,
-        cancel_label,
-    } = dialog;
-    let offset = drag.offset;
-    let drag_start = drag.on_start.clone();
-    let drag_move = drag.on_move.clone();
-    let drag_end = drag.on_end.clone();
-    let close_cancel = on_cancel.clone();
-    let titlebar = dialog_titlebar(theme)
-        .pl_3()
-        .on_mouse_down(MouseButton::Left, move |event, window, cx| {
-            drag_start(event, window, cx)
-        })
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_1()
-                .child(warning_icon(14.0, theme))
-                .child(div().text_size(px(12.5)).child(title)),
-        )
-        .child(dialog_close_button(
-            base_id,
-            theme,
-            move |event, window, cx| close_cancel(event, window, cx),
-        ));
-
-    let body = div()
-        .flex()
-        .flex_row()
-        .items_start()
-        .gap_3()
-        .px_4()
-        .py_5()
-        .child(warning_icon(28.0, theme))
-        .child(div().flex_1().text_size(px(12.5)).child(message));
-
-    let footer = div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_end()
-        .gap_2()
-        .px_4()
-        .pb_4()
-        .child(dialog_button(
-            format!("{base_id}-confirm"),
-            confirm_label,
-            false,
-            theme,
-            move |event, window, cx| on_confirm(event, window, cx),
-        ))
-        .child(dialog_button(
-            format!("{base_id}-cancel"),
-            cancel_label,
-            true,
-            theme,
-            move |event, window, cx| on_cancel(event, window, cx),
-        ));
-
-    overlay(theme)
-        .on_mouse_move(move |event, window, cx| drag_move(event, window, cx))
-        .on_mouse_up(MouseButton::Left, move |event, window, cx| {
-            drag_end(event, window, cx)
-        })
-        .child(
-            dialog_frame(theme, theme.dialog_bg)
-                .left(offset.x)
-                .top(offset.y)
-                .w(px(420.0))
-                .child(titlebar)
-                .child(body)
-                .child(footer),
-        )
-        .into_any_element()
-}
-
-/// The neutral input face shared by text fields, combos and dropdowns. Callers add layout,
-/// sizing, focus and children.
+/// The neutral input face shared by text fields, combos and dropdowns. Callers add layout,/// sizing, focus and children.
 pub(super) fn text_field(theme: Theme) -> Div {
     div()
         .bg(rgb(theme.input_bg))

@@ -46,7 +46,7 @@ impl GridView {
             }
         }
         self.selecting_cells = true;
-        window.focus(&self.focus);
+        window.focus(&self.focus, cx);
         cx.notify();
     }
 
@@ -395,7 +395,7 @@ impl GridView {
             input,
         });
         self.cell_editor_focus_pending = true;
-        window.focus(&focus);
+        window.focus(&focus, cx);
         if is_temporal {
             self.open_date_picker(row, col, &value, cx);
         }

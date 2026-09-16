@@ -32,7 +32,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "mysql", "tls-rustls-ring", "chrono"] }
 rust-i18n = "4"
 directories = "6"
-gpui = "0.2"
+gpui = { package = "gpui-pre", version = "0.3" }
+gpui-kit = "0.6"
 sqlparser = "0.62"
 sqlformat = "0.5"
 chacha20poly1305 = "0.11"

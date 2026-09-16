@@ -81,7 +81,7 @@ impl TabBar {
     }
 
     fn scroll_tabs(&mut self, delta: f32, cx: &mut Context<'_, Self>) {
-        let max = f32::from(self.scroll.max_offset().width);
+        let max = f32::from(self.scroll.max_offset().x);
         if max <= 0.0 {
             return;
         }
@@ -583,7 +583,7 @@ impl Render for TabBar {
 
         // The object tab is pinned; the arrows only appear (and wrap the scrollable tab strip)
         // when the open tabs no longer fit.
-        let needs_scroll = self.scroll.max_offset().width > px(0.0);
+        let needs_scroll = self.scroll.max_offset().x > px(0.0);
         let mut bar = div()
             .flex()
             .flex_row()

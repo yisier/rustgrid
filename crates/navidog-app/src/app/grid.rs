@@ -350,14 +350,14 @@ impl GridView {
         }
         if self.state.sort_open {
             self.state.sort_open = false;
-            self.state.sort_combo = None;
             self.state.sort_selected = None;
             self.state.sort_draft.clear();
+            self.sort_field_combos.clear();
         } else {
             self.state.sort_open = true;
             self.state.sort_draft = self.state.sort_rules.clone();
             self.state.sort_selected = (!self.state.sort_draft.is_empty()).then_some(0);
-            self.state.sort_combo = None;
+            self.sort_field_combos.clear();
         }
         cx.notify();
     }
@@ -401,13 +401,12 @@ impl GridView {
         let position = self.state.sort_draft.len();
         self.state.sort_draft.push(SortRule::new(column));
         self.state.sort_selected = Some(position);
-        self.state.sort_combo = None;
+        self.sort_field_combos.clear();
         cx.notify();
     }
 
     pub(super) fn sort_select_rule(&mut self, index: usize, cx: &mut Context<'_, Self>) {
         self.state.sort_selected = Some(index);
-        self.state.sort_combo = None;
         cx.notify();
     }
 
@@ -425,85 +424,43 @@ impl GridView {
         cx.notify();
     }
 
-    pub(super) fn sort_open_combo(
+    /// The shared drop-down for a sort rule's column, created lazily per rule index.
+    pub(super) fn sort_field_combo(
         &mut self,
         index: usize,
-        window: &mut Window,
         cx: &mut Context<'_, Self>,
-    ) {
-        let current = self
+    ) -> Entity<ComboBox> {
+        if let Some(entity) = self.sort_field_combos.get(&index) {
+            return entity.clone();
+        }
+        let theme = self.theme;
+        let weak = self.self_weak.clone();
+        let options: Vec<ComboOption> = self
+            .state
+            .columns
+            .iter()
+            .map(|column| ComboOption::plain(column.name.clone()))
+            .collect();
+        let selected = self
             .state
             .sort_draft
             .get(index)
             .map(|rule| rule.column.clone())
             .unwrap_or_default();
-        self.state.sort_selected = Some(index);
-        if self
-            .state
-            .sort_combo
-            .as_ref()
-            .is_some_and(|(open, _)| *open == index)
-        {
-            self.state.sort_combo = None;
-            cx.notify();
-            return;
-        }
-        let highlight = self
-            .state
-            .columns
-            .iter()
-            .position(|column| column.name == current)
-            .unwrap_or(0);
-        self.state.sort_combo = Some((index, current));
-        self.sort_combo_filter.clear();
-        self.sort_combo_highlight = highlight;
-        let theme = self.theme;
-        let weak = self.self_weak.clone();
-        let input = self
-            .sort_search
-            .get_or_insert_with(|| {
-                let change = weak.clone();
-                let submit = weak.clone();
-                let cancel = weak;
-                cx.new(move |cx| {
-                    TextInput::new(theme, "", TextInputOptions::default(), cx)
-                        .on_change(Rc::new(move |text, _window, cx| {
-                            let _ = change.update(cx, |grid, cx| {
-                                grid.sort_combo_filter = text.to_string();
-                                grid.sort_combo_highlight = 0;
-                                cx.notify();
-                            });
-                        }))
-                        .on_submit(Rc::new(move |_window, cx| {
-                            let _ = submit.update(cx, |grid, cx| grid.sort_confirm_combo(cx));
-                        }))
-                        .on_cancel(Rc::new(move |_window, cx| {
-                            let _ = cancel.update(cx, |grid, cx| grid.sort_cancel_combo(cx));
-                        }))
-                })
-            })
-            .clone();
-        input.update(cx, |input, cx| {
-            input.set_text("", cx);
-            input.set_placeholder(t!("grid.sort_search").to_string(), cx);
+        let entity = cx.new(move |cx| {
+            ComboBox::new(theme, options, selected, FILTER_FIELD_WIDTH, cx).on_select(Rc::new(
+                move |value, _window, cx| {
+                    let _ = weak.update(cx, |grid, cx| {
+                        grid.sort_choose_column(index, value.to_string(), cx);
+                    });
+                },
+            ))
         });
-        let focus = input.read(cx).focus_handle();
-        window.focus(&focus);
-        cx.notify();
+        self.sort_field_combos.insert(index, entity.clone());
+        entity
     }
 
-    /// The columns visible in the open popup after applying the type-ahead filter.
-    pub(super) fn sort_combo_matches(&self) -> Vec<String> {
-        let filter = self.sort_combo_filter.to_lowercase();
-        self.state
-            .columns
-            .iter()
-            .filter(|column| filter.is_empty() || column.name.to_lowercase().contains(&filter))
-            .map(|column| column.name.clone())
-            .collect()
-    }
-
-    /// Commit a column choice made by clicking or pressing Enter; the popup closes immediately.
+    /// Commit a column choice made in a sort rule's dropdown.
     pub(super) fn sort_choose_column(
         &mut self,
         index: usize,
@@ -513,43 +470,6 @@ impl GridView {
         if let Some(rule) = self.state.sort_draft.get_mut(index) {
             rule.column = column;
         }
-        self.state.sort_combo = None;
-        self.sort_combo_filter.clear();
-        cx.notify();
-    }
-
-    pub(super) fn sort_combo_key(&mut self, event: &KeyDownEvent, cx: &mut Context<'_, Self>) {
-        if self.state.sort_combo.is_none() {
-            return;
-        }
-        let count = self.sort_combo_matches().len();
-
-        match event.keystroke.key.as_str() {
-            "up" if count > 0 => {
-                self.sort_combo_highlight = self.sort_combo_highlight.saturating_sub(1);
-            }
-            "down" if count > 0 => {
-                self.sort_combo_highlight = (self.sort_combo_highlight + 1) % count;
-            }
-            _ => {}
-        }
-        self.sort_combo_highlight = self.sort_combo_highlight.min(count.saturating_sub(1));
-        cx.notify();
-    }
-
-    pub(super) fn sort_confirm_combo(&mut self, cx: &mut Context<'_, Self>) {
-        let matches = self.sort_combo_matches();
-        if let Some(column) = matches.get(self.sort_combo_highlight).cloned() {
-            let index = self.state.sort_combo.as_ref().map(|(i, _)| *i).unwrap_or(0);
-            self.sort_choose_column(index, column, cx);
-            return;
-        }
-        self.sort_cancel_combo(cx);
-    }
-
-    pub(super) fn sort_cancel_combo(&mut self, cx: &mut Context<'_, Self>) {
-        self.state.sort_combo = None;
-        self.sort_combo_filter.clear();
         cx.notify();
     }
 
@@ -557,7 +477,7 @@ impl GridView {
         if index < self.state.sort_draft.len() {
             self.state.sort_draft.remove(index);
         }
-        self.state.sort_combo = None;
+        self.sort_field_combos.clear();
         let len = self.state.sort_draft.len();
         self.state.sort_selected = match self.state.sort_selected {
             Some(selected) if selected >= len => len.checked_sub(1),
@@ -576,6 +496,7 @@ impl GridView {
             if target != selected {
                 self.state.sort_draft.swap(selected, target);
                 self.state.sort_selected = Some(target);
+                self.sort_field_combos.clear();
             }
         }
         cx.notify();
@@ -583,7 +504,6 @@ impl GridView {
 
     pub(super) fn sort_apply(&mut self, cx: &mut Context<'_, Self>) {
         self.state.sort_rules = self.state.sort_draft.clone();
-        self.state.sort_combo = None;
         self.state.page_index = 0;
         self.sync_page_input();
         self.load_page(cx);
@@ -898,7 +818,7 @@ impl GridView {
             .find(|(candidate, _)| *candidate == path)
             .map(|(_, handle)| handle.clone());
         if let Some(handle) = handle {
-            window.focus(&handle);
+            window.focus(&handle, cx);
         }
         cx.notify();
     }

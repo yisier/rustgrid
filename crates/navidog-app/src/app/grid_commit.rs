@@ -173,8 +173,6 @@ impl GridView {
         if let Some(app) = self.app.upgrade() {
             app.update(cx, |app, cx| {
                 app.delete_confirm = Some(DeleteConfirm::Rows { grid_id, rows });
-                app.confirm_offset = Point::default();
-                app.confirm_dragging = false;
                 cx.notify();
             });
         }

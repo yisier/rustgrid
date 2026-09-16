@@ -376,7 +376,7 @@ impl ObjectPane {
         let theme = self.theme;
         let bounds = self.scroll.bounds();
         let viewport = f32::from(bounds.size.width);
-        let max = f32::from(self.scroll.max_offset().width);
+        let max = f32::from(self.scroll.max_offset().x);
         let scroll = -f32::from(self.scroll.offset().x);
         let (thumb_left, thumb_len) = if max > 0.0 {
             scrollbar_fractions(viewport, max, scroll)
@@ -395,7 +395,7 @@ impl ObjectPane {
     fn hscroll_begin(&mut self, mouse_x: Pixels, cx: &mut Context<'_, Self>) {
         let bounds = self.scroll.bounds();
         let viewport = f32::from(bounds.size.width);
-        let max = f32::from(self.scroll.max_offset().width);
+        let max = f32::from(self.scroll.max_offset().x);
         let (thumb_w, travel) = scrollbar_thumb(viewport, max);
         if travel <= 0.0 {
             return;
@@ -427,7 +427,7 @@ impl ObjectPane {
 
     fn hscroll_set(&self, relative: f32, grab: f32, cx: &mut Context<'_, Self>) {
         let viewport = f32::from(self.scroll.bounds().size.width);
-        let max = f32::from(self.scroll.max_offset().width);
+        let max = f32::from(self.scroll.max_offset().x);
         let (_, travel) = scrollbar_thumb(viewport, max);
         if travel <= 0.0 {
             return;
@@ -574,7 +574,7 @@ impl Render for ObjectPane {
                 }),
             )
             .child(scroller);
-        if self.scroll.max_offset().width > px(0.0) {
+        if self.scroll.max_offset().x > px(0.0) {
             container = container.child(self.render_hscrollbar(cx));
         }
         container.into_any_element()

@@ -149,7 +149,7 @@ impl GridView {
         item
     }
 
-    pub(super) fn render_sort_panel(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+    pub(super) fn render_sort_panel(&mut self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
         let mut list = div()
             .id("sort-rule-list")
@@ -185,7 +185,8 @@ impl GridView {
                     ),
             );
         } else {
-            for (index, rule) in self.state.sort_draft.iter().enumerate() {
+            let draft = self.state.sort_draft.clone();
+            for (index, rule) in draft.iter().enumerate() {
                 list = list.child(self.render_sort_rule(index, rule, cx));
             }
             list = list.child(
@@ -196,35 +197,16 @@ impl GridView {
                     .px_1()
                     .h(px(22.0))
                     .flex_none()
-                    .child(
-                        div()
-                            .id("sort-add-row")
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .w(px(16.0))
-                            .h(px(16.0))
-                            .border_1()
-                            .border_color(rgb(theme.border))
-                            .bg(rgb(theme.button_bg))
-                            .cursor_pointer()
-                            .hover(move |style| {
-                                style
-                                    .bg(rgb(theme.tree_hover_bg))
-                                    .border_color(rgb(theme.button_default_border))
-                            })
-                            .on_click(
-                                cx.listener(|this, _event, _window, cx| this.sort_add_rule(cx)),
-                            )
-                            .child(
-                                svg()
-                                    .path("icons/plus.svg")
-                                    .w(px(10.0))
-                                    .h(px(10.0))
-                                    .flex_none()
-                                    .text_color(rgb(theme.text)),
-                            ),
-                    ),
+                    .child(ui::icon_button(
+                        "sort-add-row",
+                        "icons/plus.svg",
+                        theme.text,
+                        16.0,
+                        16.0,
+                        true,
+                        theme,
+                        cx.listener(|this, _event, _window, cx| this.sort_add_rule(cx)),
+                    )),
             );
         }
 
@@ -256,7 +238,7 @@ impl GridView {
     }
 
     pub(super) fn render_sort_rule(
-        &self,
+        &mut self,
         index: usize,
         rule: &SortRule,
         cx: &mut Context<'_, Self>,
@@ -264,6 +246,8 @@ impl GridView {
         let theme = self.theme;
         let selected = self.state.sort_selected == Some(index);
         let rule = rule.clone();
+        let combo = self.sort_field_combo(index, cx);
+        combo.update(cx, |combo, cx| combo.set_selected(rule.column.clone(), cx));
         div()
             .id(SharedString::from(format!("sort-rule-{index}")))
             .flex()
@@ -290,26 +274,7 @@ impl GridView {
                     }))
                     .child(checkbox_box(rule.enabled, theme)),
             )
-            .child(
-                ui::text_field(theme)
-                    .id(SharedString::from(format!("sort-field-{index}")))
-                    .flex()
-                    .items_center()
-                    .px_2()
-                    .h(px(20.0))
-                    .w(px(180.0))
-                    .flex_none()
-                    .text_size(px(12.0))
-                    .whitespace_nowrap()
-                    .overflow_hidden()
-                    .cursor_pointer()
-                    .hover(move |style| style.border_color(rgb(theme.button_default_border)))
-                    .on_click(cx.listener(move |this, _event, window, cx| {
-                        cx.stop_propagation();
-                        this.sort_open_combo(index, window, cx)
-                    }))
-                    .child(rule.column.clone()),
-            )
+            .child(combo)
             .child(
                 div()
                     .id(SharedString::from(format!("sort-direction-{index}")))
@@ -335,30 +300,19 @@ impl GridView {
                         t!("grid.sort_asc").to_string()
                     }),
             )
-            .child(
-                div()
-                    .id(SharedString::from(format!("sort-remove-{index}")))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .w(px(18.0))
-                    .h(px(18.0))
-                    .flex_none()
-                    .cursor_pointer()
-                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        cx.stop_propagation();
-                        this.sort_remove_rule(index, cx)
-                    }))
-                    .child(
-                        svg()
-                            .path("icons/cross.svg")
-                            .w(px(9.0))
-                            .h(px(9.0))
-                            .flex_none()
-                            .text_color(rgb(theme.danger)),
-                    ),
-            )
+            .child(ui::icon_button(
+                SharedString::from(format!("sort-remove-{index}")),
+                "icons/cross.svg",
+                theme.danger,
+                18.0,
+                18.0,
+                false,
+                theme,
+                cx.listener(move |this, _event, _window, cx| {
+                    cx.stop_propagation();
+                    this.sort_remove_rule(index, cx)
+                }),
+            ))
             .into_any_element()
     }
 
@@ -370,24 +324,16 @@ impl GridView {
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let theme = self.theme;
-        div()
-            .id(id)
-            .flex()
-            .items_center()
-            .justify_center()
-            .w(px(22.0))
-            .h(px(20.0))
-            .cursor_pointer()
-            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-            .on_click(cx.listener(move |this, _event, _window, cx| this.sort_move_rule(delta, cx)))
-            .child(
-                svg()
-                    .path(icon)
-                    .w(px(12.0))
-                    .h(px(12.0))
-                    .flex_none()
-                    .text_color(rgb(theme.text)),
-            )
+        ui::icon_button(
+            id,
+            icon,
+            theme.text,
+            22.0,
+            20.0,
+            false,
+            theme,
+            cx.listener(move |this, _event, _window, cx| this.sort_move_rule(delta, cx)),
+        )
     }
 
     pub(super) fn sort_apply_button(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
@@ -661,46 +607,17 @@ impl GridView {
     ) -> impl IntoElement {
         let theme = self.theme;
         let path = path.to_vec();
-        let mut toggle = div()
-            .id(SharedString::from(format!(
-                "filter-conjunction-{}",
-                filter_path_key(&path)
-            )))
-            .flex()
-            .flex_row()
-            .items_center()
-            .w(px(FILTER_TOGGLE_WIDTH))
-            .h(px(20.0))
-            .flex_none()
-            .overflow_hidden()
-            .rounded_md()
-            .border_1()
-            .border_color(rgb(theme.button_border))
-            .bg(rgb(theme.button_bg))
-            .cursor_pointer()
-            .on_click(cx.listener(move |this, _event, _window, cx| {
+        ui::segmented_toggle(
+            SharedString::from(format!("filter-conjunction-{}", filter_path_key(&path))),
+            t!(FilterConjunction::And.label_key()).to_string(),
+            t!(FilterConjunction::Or.label_key()).to_string(),
+            conjunction == FilterConjunction::Or,
+            FILTER_TOGGLE_WIDTH,
+            theme,
+            cx.listener(move |this, _event, _window, cx| {
                 this.filter_toggle_conjunction(path.clone(), cx);
-            }));
-        for option in [FilterConjunction::And, FilterConjunction::Or] {
-            let active = option == conjunction;
-            toggle = toggle.child(
-                div()
-                    .flex_1()
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(11.0))
-                    .when(active, move |style| {
-                        style.bg(rgb(theme.primary)).text_color(rgb(0xffffff))
-                    })
-                    .when(!active, move |style| {
-                        style.text_color(rgb(theme.text_muted))
-                    })
-                    .child(t!(option.label_key()).to_string()),
-            );
-        }
-        toggle
+            }),
+        )
     }
 
     fn render_filter_value(
@@ -816,29 +733,20 @@ impl GridView {
                 format!("filter-remove-{key}"),
             ),
         };
-        div()
-            .id(SharedString::from(id))
-            .flex()
-            .items_center()
-            .justify_center()
-            .w(px(18.0))
-            .h(px(18.0))
-            .flex_none()
-            .cursor_pointer()
-            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-            .on_click(cx.listener(move |this, _event, _window, cx| match action {
+        ui::icon_button(
+            SharedString::from(id),
+            icon,
+            color,
+            18.0,
+            18.0,
+            false,
+            theme,
+            cx.listener(move |this, _event, _window, cx| match action {
                 FilterAction::AddCondition => this.filter_add_condition(path.clone(), cx),
                 FilterAction::AddGroup => this.filter_add_group(path.clone(), cx),
                 FilterAction::Remove => this.filter_remove_node(path.clone(), cx),
-            }))
-            .child(
-                svg()
-                    .path(icon)
-                    .w(px(10.0))
-                    .h(px(10.0))
-                    .flex_none()
-                    .text_color(rgb(color)),
-            )
+            }),
+        )
     }
 
     fn filter_apply_button(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
@@ -865,113 +773,6 @@ impl GridView {
                     .text_color(rgb(theme.text_muted)),
             )
             .child(t!("grid.apply").to_string())
-    }
-
-    pub(super) fn render_sort_combo_popup(
-        &self,
-        rule_index: usize,
-        cx: &mut Context<'_, Self>,
-    ) -> AnyElement {
-        let theme = self.theme;
-        let matches = self.sort_combo_matches();
-        let highlight = self
-            .sort_combo_highlight
-            .min(matches.len().saturating_sub(1));
-
-        let mut search = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .px_1()
-            .py_1()
-            .h(px(24.0))
-            .flex_none()
-            .border_b_1()
-            .border_color(rgb(theme.border));
-        if let Some(input) = self.sort_search.clone() {
-            search = search.child(div().h(px(20.0)).flex_1().child(input));
-        }
-
-        let mut options = div()
-            .id("sort-combo-options")
-            .flex()
-            .flex_col()
-            .max_h(px(220.0))
-            .overflow_y_scroll();
-        for (position, name) in matches.iter().enumerate() {
-            let selected = position == highlight;
-            let option_name = name.clone();
-            let click_name = name.clone();
-            options = options.child(
-                div()
-                    .id(SharedString::from(format!("sort-option-{option_name}")))
-                    .flex()
-                    .items_center()
-                    .h(px(18.0))
-                    .px_2()
-                    .flex_none()
-                    .text_size(px(12.0))
-                    .whitespace_nowrap()
-                    .overflow_hidden()
-                    .cursor_pointer()
-                    .when(selected, move |style| {
-                        style
-                            .bg(rgb(theme.tree_selected_bg))
-                            .text_color(rgb(theme.tree_selected_text))
-                    })
-                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.sort_choose_column(rule_index, click_name.clone(), cx)
-                    }))
-                    .child(option_name),
-            );
-        }
-        let footer = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_center()
-            .gap_2()
-            .py_1()
-            .child(ui::dialog_button(
-                "sort-combo-ok",
-                t!("form.ok").to_string(),
-                true,
-                theme,
-                cx.listener(|this, _event, _window, cx| this.sort_confirm_combo(cx)),
-            ))
-            .child(ui::dialog_button(
-                "sort-combo-cancel",
-                t!("form.cancel").to_string(),
-                false,
-                theme,
-                cx.listener(|this, _event, _window, cx| this.sort_cancel_combo(cx)),
-            ));
-
-        let left = 40.0;
-        let top = 52.0 + rule_index as f32 * 24.0;
-        div()
-            .id("sort-combo-popup")
-            .on_key_down(cx.listener(|this, event, _window, cx| this.sort_combo_key(event, cx)))
-            .absolute()
-            .occlude()
-            .left(px(left))
-            .top(px(top))
-            .w(px(180.0))
-            .flex()
-            .flex_col()
-            .bg(rgb(theme.dialog_bg))
-            .border_1()
-            .border_color(rgb(theme.text_muted))
-            .shadow(dialog_shadow())
-            .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
-                this.sort_cancel_combo(cx);
-            }))
-            .child(search)
-            .child(options)
-            .child(div().h(px(1.0)).flex_none().bg(rgb(theme.border)))
-            .child(footer)
-            .into_any_element()
     }
 
     pub(super) fn render_grid_controls(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
@@ -1151,7 +952,7 @@ impl GridView {
             .cursor_text()
             .on_key_down(cx.listener(|this, event, _window, cx| this.page_input_key(event, cx)))
             .on_click(cx.listener(|this, _event, window, cx| {
-                window.focus(&this.page_input_focus);
+                window.focus(&this.page_input_focus, cx);
                 cx.notify();
             }))
             .child(self.page_input.clone())
@@ -1229,7 +1030,7 @@ impl GridView {
                     )
                     .on_click(cx.listener(move |this, _event, window, cx| {
                         this.page_size_input = page_size.to_string();
-                        window.focus(&this.page_size_focus);
+                        window.focus(&this.page_size_focus, cx);
                         cx.notify();
                     }))
                     .child(

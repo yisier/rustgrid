@@ -60,7 +60,10 @@ impl AssetSource for Assets {
             "icons/explain.svg" => Some(include_bytes!("../assets/icons/explain.svg")),
             _ => None,
         };
-        Ok(bytes.map(Cow::Borrowed))
+        match bytes {
+            Some(bytes) => Ok(Some(Cow::Borrowed(bytes))),
+            None => gpui_kit::assets::Assets.load(path),
+        }
     }
 
     fn list(&self, _path: &str) -> Result<Vec<SharedString>> {

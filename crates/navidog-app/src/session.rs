@@ -265,8 +265,6 @@ pub struct GridState {
     pub sort_open: bool,
     /// The panel's working copy of the rules while it is open; applied on `Apply`.
     pub sort_draft: Vec<SortRule>,
-    /// The open column-list popup: which draft rule it edits plus the highlighted candidate.
-    pub sort_combo: Option<(usize, String)>,
     /// The draft rule highlighted for reordering, if any.
     pub sort_selected: Option<usize>,
     /// The `WHERE` tree applied to the table when pages are fetched.

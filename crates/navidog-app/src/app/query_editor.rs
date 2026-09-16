@@ -319,7 +319,7 @@ impl AppView {
             },
         )
         .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::FitList)
-        .track_scroll(self.query_result_scroll.clone())
+        .track_scroll(&self.query_result_scroll)
         .flex_1()
         .min_h(px(0.0));
 
@@ -368,7 +368,7 @@ impl AppView {
         let Some(index) = self.active_query else {
             return;
         };
-        window.focus(&self.query_focus);
+        window.focus(&self.query_focus, cx);
         let position = self.query_editor_index_for_position(event.position);
         if let (Some(position), Some(tab)) = (position, self.queries.get_mut(index)) {
             if event.click_count >= 2 {
@@ -637,7 +637,7 @@ impl AppView {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        window.focus(&self.query_focus);
+        window.focus(&self.query_focus, cx);
         self.context_menu = Some(ContextMenu {
             target: ContextTarget::QueryEditor,
             position: event.position,

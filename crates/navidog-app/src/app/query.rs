@@ -590,7 +590,6 @@ impl AppView {
                     sort_rules: Vec::new(),
                     sort_open: false,
                     sort_draft: Vec::new(),
-                    sort_combo: None,
                     sort_selected: None,
                     filters: Vec::new(),
                     filter_open: false,

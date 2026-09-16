@@ -401,7 +401,7 @@ impl TableDesignView {
         self.select_field(row, cx);
         self.edit_blur = Some(cx.on_blur(&focus, window, |this, _window, cx| this.finish_edit(cx)));
         self.edit = Some(FieldEdit { row, column, input });
-        window.focus(&focus);
+        window.focus(&focus, cx);
         cx.notify();
     }
 
@@ -457,7 +457,7 @@ impl TableDesignView {
             .clone();
         input.update(cx, |input, cx| input.set_text("", cx));
         let focus = input.read(cx).focus_handle();
-        window.focus(&focus);
+        window.focus(&focus, cx);
         cx.notify();
     }
 
@@ -698,7 +698,7 @@ impl TableDesignView {
             });
 
             if succeeded && let Some(app) = app.upgrade() {
-                let _ = app.update(cx, |app, cx| {
+                app.update(cx, |app, cx| {
                     app.refresh_table_grids(&connection, &database, &table, cx);
                 });
             }

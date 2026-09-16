@@ -122,9 +122,7 @@ impl AppView {
         self.form = Some(form);
         self.test_status = TestStatus::Idle;
         self.context_menu = None;
-        self.form_offset = Point::default();
-        self.form_dragging = false;
-        window.focus(&name_focus);
+        window.focus(&name_focus, cx);
         cx.notify();
     }
 
@@ -602,7 +600,6 @@ impl AppView {
             sort_rules: Vec::new(),
             sort_open: false,
             sort_draft: Vec::new(),
-            sort_combo: None,
             sort_selected: None,
             filters: Vec::new(),
             filter_open: false,

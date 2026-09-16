@@ -44,8 +44,7 @@ impl AppView {
             name: String::new(),
             error: None,
         });
-        self.form_offset = Point::default();
-        window.focus(&focus);
+        window.focus(&focus, cx);
         cx.notify();
     }
 
@@ -74,7 +73,6 @@ impl AppView {
             error: None,
         });
         self.ensure_db_combos(cx);
-        self.form_offset = Point::default();
 
         let Some(connection) = self.connection_arc(connection_index) else {
             cx.notify();

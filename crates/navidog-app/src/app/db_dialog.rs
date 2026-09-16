@@ -1,42 +1,91 @@
 use super::*;
+use gpui_kit::component::WindowExt;
 
 impl AppView {
-    pub(super) fn render_db_dialog(
-        &self,
-        dialog: &DbDialog,
-        _window: &Window,
-        cx: &mut Context<'_, Self>,
-    ) -> AnyElement {
+    /// Opens the database dialog as a `Root`-managed modal.
+    pub(super) fn open_db_dialog(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let app = cx.entity();
+        window.open_dialog(cx, move |dialog, _window, cx| {
+            let (title, footer) = app.update(cx, |app, cx| {
+                (
+                    app.db_dialog_title(),
+                    app.db_dialog_footer(cx).into_any_element(),
+                )
+            });
+            let on_close = app.downgrade();
+            let content_app = app.clone();
+            dialog
+                .title(title)
+                .w(px(560.0))
+                .content(move |content, _window, cx| {
+                    let body =
+                        content_app.update(cx, |app, cx| app.db_dialog_body(cx).into_any_element());
+                    content.child(body)
+                })
+                .footer(footer)
+                .on_close(move |_, _, cx| {
+                    let _ = on_close.update(cx, |app, cx| app.db_cancel(cx));
+                })
+        });
+    }
+
+    pub(super) fn db_cancel(&mut self, cx: &mut Context<'_, Self>) {
+        self.db_dialog = None;
+        self.db_name_input = None;
+        cx.notify();
+    }
+
+    fn db_dialog_title(&self) -> String {
+        match self.db_dialog {
+            Some(DbDialog::New { .. }) => t!("database.new").to_string(),
+            Some(DbDialog::Edit { .. }) => t!("database.edit").to_string(),
+            Some(DbDialog::Delete { .. }) => t!("database.delete").to_string(),
+            None => String::new(),
+        }
+    }
+
+    fn db_dialog_footer(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let allow_ok = match self.db_dialog.as_ref() {
+            Some(DbDialog::Edit { loading, .. }) => !*loading,
+            Some(_) => true,
+            None => false,
+        };
+        let ok_label = if matches!(self.db_dialog, Some(DbDialog::Delete { .. })) {
+            t!("database.delete").to_string()
+        } else {
+            t!("form.ok").to_string()
+        };
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_end()
+            .w_full()
+            .gap_2()
+            .h(px(46.0))
+            .child(self.dialog_button(
+                "db-cancel",
+                t!("form.cancel").to_string(),
+                false,
+                cx.listener(|this, _event, _window, cx| this.db_cancel(cx)),
+            ))
+            .child(self.dialog_button(
+                "db-ok",
+                ok_label,
+                true,
+                cx.listener(move |this, _event, _window, cx| {
+                    if allow_ok {
+                        this.db_submit(cx);
+                    }
+                }),
+            ))
+    }
+
+    fn db_dialog_body(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
 
-        // Destructive actions use the shared confirmation modal rather than the form frame.
-        if let DbDialog::Delete { name, error, .. } = dialog {
-            let mut message = t!("database.delete_message", name = name).to_string();
-            if let Some(error) = error {
-                message = format!("{message} ({error})");
-            }
-            let drag = self.confirm_drag(cx);
-            return ui::confirm_dialog(
-                ui::ConfirmDialog {
-                    id: "database-delete",
-                    title: t!("database.delete").to_string(),
-                    message,
-                    confirm_label: t!("database.delete").to_string(),
-                    cancel_label: t!("form.cancel").to_string(),
-                },
-                drag,
-                theme,
-                Rc::new(cx.listener(|this, _event, _window, cx| this.db_submit(cx))),
-                Rc::new(cx.listener(|this, _event, _window, cx| {
-                    this.db_dialog = None;
-                    this.db_name_input = None;
-                    cx.notify();
-                })),
-            );
-        }
-
-        let (title, content, allow_ok): (String, AnyElement, bool) = match dialog {
-            DbDialog::New { error, .. } => {
+        match self.db_dialog.as_ref() {
+            Some(DbDialog::New { error, .. }) => {
                 let mut name_row = div().flex().flex_row().items_center().gap_2().child(
                     div()
                         .w(px(150.0))
@@ -47,25 +96,22 @@ impl AppView {
                 if let Some(input) = self.db_name_input.as_ref() {
                     name_row = name_row.child(div().w(px(300.0)).h(px(24.0)).child(input.clone()));
                 }
-                let body = div()
+                div()
                     .flex()
                     .flex_col()
                     .gap_2()
+                    .p_4()
                     .child(name_row)
-                    .child(db_error(error, theme));
-                (
-                    t!("database.new").to_string(),
-                    div().p_4().child(body).into_any_element(),
-                    true,
-                )
+                    .child(db_error(error, theme))
+                    .into_any_element()
             }
-            DbDialog::Edit {
+            Some(DbDialog::Edit {
                 name,
                 tab,
                 loading,
                 error,
                 ..
-            } => {
+            }) => {
                 let tabs = div()
                     .flex()
                     .flex_row()
@@ -160,7 +206,7 @@ impl AppView {
                                             MouseButton::Left,
                                             cx.listener(
                                                 |this, event: &MouseDownEvent, window, cx| {
-                                                    window.focus(&this.db_sql_focus);
+                                                    window.focus(&this.db_sql_focus, cx);
                                                     let index = this
                                                         .db_sql_index_for_position(event.position);
                                                     this.db_sql_anchor = index;
@@ -173,6 +219,26 @@ impl AppView {
                                         .on_key_down(cx.listener(|this, event, _window, cx| {
                                             this.db_sql_key(event, cx)
                                         }))
+                                        .on_mouse_move(cx.listener(
+                                            |this, event: &MouseMoveEvent, _window, cx| {
+                                                if this.db_sql_selecting {
+                                                    this.db_sql_cursor = this
+                                                        .db_sql_index_for_position(event.position);
+                                                    cx.notify();
+                                                }
+                                            },
+                                        ))
+                                        .on_mouse_up(
+                                            MouseButton::Left,
+                                            cx.listener(
+                                                |this, _event: &MouseUpEvent, _window, cx| {
+                                                    if this.db_sql_selecting {
+                                                        this.db_sql_selecting = false;
+                                                        cx.notify();
+                                                    }
+                                                },
+                                            ),
+                                        )
                                         .child(text),
                                 );
                             }
@@ -181,29 +247,25 @@ impl AppView {
                     }
                 };
 
-                (
-                    t!("database.edit").to_string(),
-                    div()
-                        .flex()
-                        .flex_col()
-                        .child(tabs)
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .h(px(300.0))
-                                .mx_2()
-                                .mb_2()
-                                .border_1()
-                                .border_color(rgb(theme.border))
-                                .bg(rgb(theme.dialog_bg))
-                                .child(page),
-                        )
-                        .into_any_element(),
-                    !*loading,
-                )
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(tabs)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .h(px(300.0))
+                            .mx_2()
+                            .mb_2()
+                            .border_1()
+                            .border_color(rgb(theme.border))
+                            .bg(rgb(theme.dialog_bg))
+                            .child(page),
+                    )
+                    .into_any_element()
             }
-            DbDialog::Delete { name, error, .. } => {
+            Some(DbDialog::Delete { name, error, .. }) => {
                 let body = div()
                     .flex()
                     .flex_col()
@@ -220,119 +282,12 @@ impl AppView {
                             .child(t!("database.delete_confirm").to_string()),
                     )
                     .child(db_error(error, theme));
-                (
-                    t!("database.delete").to_string(),
-                    div().p_4().child(body).into_any_element(),
-                    true,
-                )
+                div().p_4().child(body).into_any_element()
             }
-        };
-
-        ui::overlay(theme)
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
-                if this.db_sql_selecting {
-                    this.db_sql_cursor = this.db_sql_index_for_position(event.position);
-                    cx.notify();
-                } else if this.form_dragging {
-                    let dx = event.position.x - this.form_drag_origin.x;
-                    let dy = event.position.y - this.form_drag_origin.y;
-                    this.form_offset = Point {
-                        x: this.form_drag_base.x + dx,
-                        y: this.form_drag_base.y + dy,
-                    };
-                    cx.notify();
-                }
-            }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
-                    if this.form_dragging || this.db_sql_selecting {
-                        this.form_dragging = false;
-                        this.db_sql_selecting = false;
-                        cx.notify();
-                    }
-                }),
-            )
-            .child(
-                ui::dialog_frame(theme, theme.dialog_face)
-                    .left(self.form_offset.x)
-                    .top(self.form_offset.y)
-                    .w(px(520.0))
-                    .child(
-                        ui::dialog_header(theme)
-                            .pl_3()
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                                    this.form_dragging = true;
-                                    this.form_drag_origin = event.position;
-                                    this.form_drag_base = this.form_offset;
-                                    cx.notify();
-                                }),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap_1()
-                                    .child(
-                                        svg()
-                                            .path("icons/database.svg")
-                                            .w(px(14.0))
-                                            .h(px(14.0))
-                                            .flex_none()
-                                            .text_color(rgb(theme.text)),
-                                    )
-                                    .child(div().text_size(px(12.5)).child(title)),
-                            )
-                            .child(self.dialog_close_button(
-                                "db-close",
-                                cx.listener(|this, _event, _window, cx| {
-                                    this.db_dialog = None;
-                                    this.db_name_input = None;
-                                    cx.notify();
-                                }),
-                            )),
-                    )
-                    .child(content)
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .justify_end()
-                            .gap_2()
-                            .h(px(46.0))
-                            .px_3()
-                            .border_t_1()
-                            .border_color(rgb(theme.border))
-                            .child(self.dialog_button(
-                                "db-cancel",
-                                t!("form.cancel").to_string(),
-                                false,
-                                cx.listener(|this, _event, _window, cx| {
-                                    this.db_dialog = None;
-                                    this.db_name_input = None;
-                                    cx.notify();
-                                }),
-                            ))
-                            .child(self.dialog_button(
-                                "db-ok",
-                                t!("form.ok").to_string(),
-                                true,
-                                cx.listener(move |this, _event, _window, cx| {
-                                    if allow_ok {
-                                        this.db_submit(cx);
-                                    }
-                                }),
-                            )),
-                    ),
-            )
-            .into_any_element()
+            None => div().into_any_element(),
+        }
     }
 }
-
 /// A labelled editable drop-down row (`label: [combo]`), with the combo entity rendered as-is.
 fn db_combo_row(label: String, combo: Option<Entity<ComboBox>>) -> Div {
     let mut row = div().flex().flex_row().items_center().gap_2().child(

@@ -1,4 +1,5 @@
 use super::*;
+use gpui_kit::component::WindowExt;
 
 fn language_label(setting: LanguageSetting) -> String {
     match setting {
@@ -140,35 +141,33 @@ impl AppView {
         }
     }
 
-    pub(super) fn render_options_dialog(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let theme = self.theme;
+    /// Opens the options dialog as a `Root`-managed modal.
+    pub(super) fn open_options_dialog(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let app = cx.entity();
+        window.open_dialog(cx, move |dialog, _window, cx| {
+            let footer = app.update(cx, |app, cx| {
+                app.options_dialog_footer(cx).into_any_element()
+            });
+            let on_close = app.downgrade();
+            let content_app = app.clone();
+            dialog
+                .title(t!("options.title").to_string())
+                .w(px(640.0))
+                .content(move |content, _window, cx| {
+                    let body = content_app
+                        .update(cx, |app, cx| app.options_dialog_body(cx).into_any_element());
+                    content.child(body)
+                })
+                .footer(footer)
+                .on_close(move |_, _, cx| {
+                    let _ = on_close.update(cx, |app, cx| app.close_options(cx));
+                })
+        });
+    }
 
-        let header = ui::dialog_header(theme)
-            .px_3()
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        svg()
-                            .path("icons/gear.svg")
-                            .w(px(14.0))
-                            .h(px(14.0))
-                            .flex_none()
-                            .text_color(rgb(theme.text)),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.5))
-                            .child(t!("options.title").to_string()),
-                    ),
-            )
-            .child(self.dialog_close_button(
-                "options-close",
-                cx.listener(|this, _event, _window, cx| this.close_options(cx)),
-            ));
+    /// The options dialog body: the category nav plus the general page.
+    fn options_dialog_body(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let theme = self.theme;
 
         let nav = div()
             .flex()
@@ -294,15 +293,24 @@ impl AppView {
             )
             .child(div().flex_1());
 
-        let footer = div()
+        div()
+            .flex()
+            .flex_row()
+            .h(px(400.0))
+            .child(nav)
+            .child(content)
+    }
+
+    /// The options dialog footer: reset-to-default on the left, OK/Cancel on the right.
+    fn options_dialog_footer(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let theme = self.theme;
+        div()
             .flex()
             .flex_row()
             .items_center()
             .justify_between()
+            .w_full()
             .h(px(48.0))
-            .px_3()
-            .border_t_1()
-            .border_color(rgb(theme.border))
             .child(self.dialog_button(
                 "options-default",
                 t!("options.default").to_string(),
@@ -331,21 +339,7 @@ impl AppView {
                         false,
                         cx.listener(|this, _event, _window, cx| this.close_options(cx)),
                     )),
-            );
-
-        ui::overlay(theme).child(
-            ui::dialog_frame(theme, theme.dialog_bg)
-                .w(px(640.0))
-                .child(header)
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .h(px(400.0))
-                        .child(nav)
-                        .child(content),
-                )
-                .child(footer),
-        )
+            )
+            .text_color(rgb(theme.text))
     }
 }
