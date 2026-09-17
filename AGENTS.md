@@ -227,9 +227,10 @@ shadcn chrome described above. Implemented today:
    syntax highlighting and keyword/table completion, `Beautify SQL`, run arbitrary SQL against a
    chosen connection + database, `Explain`, and a result grid that reuses the table grid
    (controls, scrollbars, status, and in-place editing when a single table can be inferred).
-6. Right-clicking a table in the object list offers Open/Design plus Drop Table, Empty Table
-   (`DELETE FROM`), Truncate Table and Rename; Drop/Empty/Truncate go through the shared confirm
-   dialog and Rename through a one-field prompt. These run through `Connection`
+6. Right-clicking a table (in the object list or the connection tree) offers Open/Design plus Drop
+   Table, Empty Table (`DELETE FROM`), Truncate Table and Rename; Drop/Empty/Truncate go through
+   the shared confirm dialog, while Rename (or `F2` on the selection) edits the name **in place**
+   in the row that started it. These run through `Connection`
    (`drop_table`/`empty_table`/`truncate_table`/`rename_table`), never as raw SQL written in the UI.
 
 Still out of scope: a second database engine, and the disabled placeholder UI (the

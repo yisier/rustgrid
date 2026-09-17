@@ -432,9 +432,12 @@ impl AppView {
     ) {
         let app = cx.weak_entity();
         let theme = self.theme;
-        self.object_pane = Some(
-            cx.new(|_| ObjectPane::new(app, connection_index, database_index, category, theme)),
-        );
+        self.rename_edit = None;
+        self.rename_blur = None;
+        self.object_pane =
+            Some(cx.new(|cx| {
+                ObjectPane::new(app, connection_index, database_index, category, theme, cx)
+            }));
     }
 
     pub(super) fn toggle_category(

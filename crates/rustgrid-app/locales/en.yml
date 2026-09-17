@@ -64,8 +64,6 @@ object.empty_confirm: "Delete every row in the table \"%{name}\"? This cannot be
 object.empty_button: "Delete All Rows"
 object.truncate_confirm: "Truncate the table \"%{name}\"? Every row will be removed and cannot be recovered."
 object.truncate_button: "Truncate Table"
-object.rename_label: "New name"
-object.rename_button: "Rename"
 main.tables: "Tables"
 main.connection: "Connection"
 main.new_query: "New Query"

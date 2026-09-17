@@ -105,13 +105,33 @@ struct PasswordPrompt {
     save_password: bool,
 }
 
-/// The "rename table" dialog state. `new_name` mirrors the input's text so `submit_rename`
-/// never reads the entity back during its own change callback.
-struct RenamePrompt {
+/// Which pane's row owns the in-place rename editor. The object list and the connection tree can
+/// both list the same table, so the editor is drawn in exactly one of them.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RowPane {
+    Objects,
+    Tree,
+}
+
+/// The "rename table" in-place editor. `new_name` mirrors the input's text so `submit_rename`
+/// never reads the entity back during its own change callback. `AppView` owns the state (both
+/// panes render `input` in the row named by [`RowPane`]) so the two lists share one commit path.
+struct RenameEdit {
+    pane: RowPane,
     connection_index: usize,
     database_index: usize,
     old_name: String,
     new_name: String,
+    input: Entity<TextInput>,
+}
+
+/// What a pane needs to draw the editor in the right row; `None` while the editor belongs to the
+/// other pane.
+#[derive(Clone)]
+struct RenameRow {
+    connection_index: usize,
+    database_index: usize,
+    old_name: String,
     input: Entity<TextInput>,
 }
 
@@ -203,6 +223,8 @@ enum ContextTarget {
         database_index: usize,
         name: String,
         is_view: bool,
+        /// Which pane the row was right-clicked in, so Rename edits the name in place there.
+        pane: RowPane,
     },
     QueryEditor,
 }
@@ -268,6 +290,8 @@ struct ObjectPane {
     selected: Option<String>,
     scroll: ScrollHandle,
     hscroll_grab: Option<f32>,
+    /// Focus target for the list, so F2 reaches [`AppView::begin_rename_table`].
+    focus: FocusHandle,
     theme: Theme,
 }
 
@@ -285,6 +309,13 @@ struct TreePane {
     app: WeakEntity<AppView>,
     scroll: ScrollHandle,
     selected: Option<String>,
+    /// The selected table row (`connection_index`, `database_index`, name, is_view), so F2 knows
+    /// what to rename. `None` when the selection is a connection/database/category row.
+    selected_table: Option<(usize, usize, String, bool)>,
+    /// The in-place rename editor to draw in the matching row this frame, if it belongs here.
+    rename_row: Option<RenameRow>,
+    /// Focus target for the tree, so F2 reaches [`AppView::begin_rename_table`].
+    focus: FocusHandle,
     theme: Theme,
 }
 
@@ -453,7 +484,6 @@ enum DialogKind {
     ConnectionForm,
     DbDialog,
     Password,
-    Rename,
     Error,
     Confirm,
     Options,
@@ -558,7 +588,8 @@ pub struct AppView {
     caret_blink_running: bool,
     password_prompt: Option<PasswordPrompt>,
     password_focus_pending: bool,
-    rename_prompt: Option<RenamePrompt>,
+    rename_edit: Option<RenameEdit>,
+    rename_blur: Option<Subscription>,
     rename_focus_pending: bool,
     page_size: u64,
     limit_records: bool,
@@ -690,7 +721,7 @@ impl AppView {
             menu_popup_anchor: Rc::new(RefCell::new(Point::default())),
             object_pane: None,
             tab_bar: cx.new(|_| TabBar::new(app.clone())),
-            tree_pane: cx.new(|_| TreePane::new(app.clone())),
+            tree_pane: cx.new(|cx| TreePane::new(app.clone(), cx)),
             main_tab: MainTab::Tables,
             db_dialog: None,
             db_charset_combo: None,
@@ -707,7 +738,8 @@ impl AppView {
             caret_blink_running: false,
             password_prompt: None,
             password_focus_pending: false,
-            rename_prompt: None,
+            rename_edit: None,
+            rename_blur: None,
             rename_focus_pending: false,
             page_size: 1000,
             limit_records: true,
@@ -788,6 +820,49 @@ impl AppView {
                 pane.theme = theme;
                 cx.notify();
             });
+        }
+    }
+
+    /// The rename editor's row data for `pane`, or `None` while the editor belongs to the other
+    /// pane (or no editor is open).
+    fn rename_row(&self, pane: RowPane) -> Option<RenameRow> {
+        self.rename_edit
+            .as_ref()
+            .filter(|edit| edit.pane == pane)
+            .map(|edit| RenameRow {
+                connection_index: edit.connection_index,
+                database_index: edit.database_index,
+                old_name: edit.old_name.clone(),
+                input: edit.input.clone(),
+            })
+    }
+
+    /// Re-render the pane that draws the rename editor. Deferred on purpose: the rename can be
+    /// committed from inside that same pane's update (a row click while editing), where notifying
+    /// it synchronously would re-enter the borrowed entity.
+    fn notify_rename_pane(&self, pane: RowPane, cx: &mut Context<'_, Self>) {
+        match pane {
+            RowPane::Objects => {
+                if let Some(target) = self.object_pane.clone() {
+                    cx.defer(move |cx| target.update(cx, |_, cx| cx.notify()));
+                }
+            }
+            RowPane::Tree => {
+                let target = self.tree_pane.clone();
+                cx.defer(move |cx| target.update(cx, |_, cx| cx.notify()));
+            }
+        }
+    }
+
+    /// The focus handle of the pane drawing the rename editor, so the list keeps the keyboard and
+    /// F2 keeps working once the editor closes.
+    fn rename_owner_focus(&self, cx: &App) -> Option<FocusHandle> {
+        match self.rename_edit.as_ref()?.pane {
+            RowPane::Objects => self
+                .object_pane
+                .as_ref()
+                .map(|pane| pane.read(cx).focus_handle()),
+            RowPane::Tree => Some(self.tree_pane.read(cx).focus_handle()),
         }
     }
 
@@ -918,6 +993,10 @@ impl AppView {
         if let Some(prompt) = self.password_prompt.as_ref() {
             prompt
                 .input
+                .update(cx, |input, cx| input.set_theme(theme, cx));
+        }
+        if let Some(edit) = self.rename_edit.as_ref() {
+            edit.input
                 .update(cx, |input, cx| input.set_theme(theme, cx));
         }
         for design in &self.designs {
@@ -1192,8 +1271,8 @@ impl Render for AppView {
         }
 
         if self.rename_focus_pending {
-            if let Some(prompt) = self.rename_prompt.as_ref() {
-                let handle = prompt.input.read(cx).focus_handle();
+            if let Some(edit) = self.rename_edit.as_ref() {
+                let handle = edit.input.read(cx).focus_handle();
                 window.focus(&handle, cx);
             }
             self.rename_focus_pending = false;

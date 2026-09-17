@@ -140,13 +140,61 @@ fn snapshot_connections(app: &AppView) -> Vec<TreeConnection> {
 }
 
 impl TreePane {
-    pub(super) fn new(app: WeakEntity<AppView>) -> Self {
+    pub(super) fn new(app: WeakEntity<AppView>, cx: &mut Context<'_, Self>) -> Self {
         Self {
             app,
             scroll: ScrollHandle::new(),
             selected: None,
+            selected_table: None,
+            rename_row: None,
+            focus: cx.focus_handle(),
             theme: Theme::dark(),
         }
+    }
+
+    pub(super) fn focus_handle(&self) -> FocusHandle {
+        self.focus.clone()
+    }
+
+    /// F2 starts editing the selected table's name in place.
+    fn tree_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let keystroke = &event.keystroke;
+        if keystroke.modifiers.control
+            || keystroke.modifiers.platform
+            || keystroke.modifiers.alt
+            || !keystroke.key.eq_ignore_ascii_case("f2")
+        {
+            return;
+        }
+        let Some((connection_index, database_index, name, is_view)) = self.selected_table.clone()
+        else {
+            return;
+        };
+        cx.stop_propagation();
+        let Some(app) = self.app.upgrade() else {
+            return;
+        };
+        app.update(cx, |app, cx| {
+            app.begin_rename_table(
+                RowPane::Tree,
+                connection_index,
+                database_index,
+                name,
+                is_view,
+                window,
+                cx,
+            );
+            app.notify_rename_pane(RowPane::Tree, cx);
+        });
+        cx.notify();
+    }
+
+    /// Commit an open in-place rename (e.g. before a click moves the selection elsewhere).
+    fn commit_pending_rename(&self, cx: &mut Context<'_, Self>) {
+        let Some(app) = self.app.upgrade() else {
+            return;
+        };
+        app.update(cx, |app, cx| app.submit_rename(cx));
     }
 
     fn render_connection(
@@ -196,7 +244,10 @@ impl TreePane {
                     .text_color(rgb(theme.tree_selected_text))
             })
             .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-            .on_click(cx.listener(move |this, event, _window, cx| {
+            .on_click(cx.listener(move |this, event, window, cx| {
+                this.commit_pending_rename(cx);
+                this.selected_table = None;
+                window.focus(&this.focus, cx);
                 this.selected = Some(format!("conn-{index}"));
                 let double_click =
                     matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2);
@@ -306,7 +357,10 @@ impl TreePane {
                     .text_color(rgb(theme.tree_selected_text))
             })
             .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-            .on_click(cx.listener(move |this, event, _window, cx| {
+            .on_click(cx.listener(move |this, event, window, cx| {
+                this.commit_pending_rename(cx);
+                this.selected_table = None;
+                window.focus(&this.focus, cx);
                 this.selected = Some(format!("db-{connection_index}-{database_index}"));
                 let double_click =
                     matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2);
@@ -443,7 +497,10 @@ impl TreePane {
                     .text_color(rgb(theme.tree_selected_text))
             })
             .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-            .on_click(cx.listener(move |this, _event, _window, cx| {
+            .on_click(cx.listener(move |this, _event, window, cx| {
+                this.commit_pending_rename(cx);
+                this.selected_table = None;
+                window.focus(&this.focus, cx);
                 this.selected = Some(click_id.clone());
                 let _ = app.update(cx, |app, cx| {
                     app.toggle_category(connection_index, database_index, category, cx);
@@ -504,6 +561,27 @@ impl TreePane {
         let app = self.app.clone();
         let menu_app = self.app.clone();
         let menu_name = table.name.clone();
+        // The row being renamed draws the in-place editor instead of its label, so a bare
+        // (transparent) editor never ghosts the old name behind the caret.
+        let rename = self.rename_row.as_ref().filter(|row| {
+            row.connection_index == connection_index
+                && row.database_index == database_index
+                && row.old_name == table.name
+        });
+        let editing_here = rename.is_some();
+        let label: AnyElement = match rename {
+            Some(row) => div()
+                .flex_1()
+                .min_w(px(0.0))
+                .h(px(20.0))
+                .child(row.input.clone())
+                .into_any_element(),
+            None => div()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .child(table.name.clone())
+                .into_any_element(),
+        };
 
         div()
             .id(SharedString::from(table_id))
@@ -523,7 +601,18 @@ impl TreePane {
                     .text_color(rgb(theme.tree_selected_text))
             })
             .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-            .on_click(cx.listener(move |this, _event, _window, cx| {
+            .on_click(cx.listener(move |this, _event, window, cx| {
+                if editing_here {
+                    return;
+                }
+                this.commit_pending_rename(cx);
+                this.selected_table = Some((
+                    connection_index,
+                    database_index,
+                    table_name.clone(),
+                    is_view,
+                ));
+                window.focus(&this.focus, cx);
                 this.selected = Some(click_id.clone());
                 let _ = app.update(cx, |app, cx| {
                     app.select_table(
@@ -537,10 +626,17 @@ impl TreePane {
             }))
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    if editing_here {
+                        return;
+                    }
+                    this.commit_pending_rename(cx);
+                    window.focus(&this.focus, cx);
                     this.selected = Some(format!(
                         "tbl-{connection_index}-{database_index}-{table_index}"
                     ));
+                    this.selected_table =
+                        Some((connection_index, database_index, menu_name.clone(), is_view));
                     let _ = menu_app.update(cx, |app, cx| {
                         app.context_menu = Some(ContextMenu {
                             target: ContextTarget::Table {
@@ -548,6 +644,7 @@ impl TreePane {
                                 database_index,
                                 name: menu_name.clone(),
                                 is_view,
+                                pane: RowPane::Tree,
                             },
                             position: event.position,
                         });
@@ -569,25 +666,25 @@ impl TreePane {
                     theme.icon_table
                 },
             ))
-            .child(
-                div()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .child(table.name.clone()),
-            )
+            .child(label)
     }
 }
 
 impl Render for TreePane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let (theme, connections) = {
+        let (theme, connections, rename) = {
             let Some(app) = self.app.upgrade() else {
                 return div().into_any_element();
             };
             let app = app.read(cx);
-            (app.theme, snapshot_connections(app))
+            (
+                app.theme,
+                snapshot_connections(app),
+                app.rename_row(RowPane::Tree),
+            )
         };
         self.theme = theme;
+        self.rename_row = rename;
 
         let mut list = div().flex().flex_col();
         if connections.is_empty() {
@@ -611,6 +708,24 @@ impl Render for TreePane {
             .py_1()
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                this.tree_key(event, window, cx);
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseDownEvent, window, cx| {
+                    // Clicking the tree background takes focus so F2 works. While the rename
+                    // editor is open the input owns the keyboard; its blur subscription commits.
+                    if !this
+                        .app
+                        .upgrade()
+                        .is_some_and(|app| app.read(cx).rename_edit.is_some())
+                    {
+                        window.focus(&this.focus, cx);
+                    }
+                }),
+            )
             .child(list)
             .into_any_element()
     }

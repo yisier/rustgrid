@@ -64,8 +64,6 @@ object.empty_confirm: "确定要清空表“%{name}”中的所有记录吗？�
 object.empty_button: "清空表"
 object.truncate_confirm: "确定要截断表“%{name}”吗？所有记录将被删除且无法恢复。"
 object.truncate_button: "截断表"
-object.rename_label: "新名称"
-object.rename_button: "重命名"
 main.tables: "表"
 main.connection: "连接"
 main.new_query: "新建查询"

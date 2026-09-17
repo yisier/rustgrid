@@ -280,6 +280,7 @@ impl ObjectPane {
         database_index: usize,
         category: Category,
         theme: Theme,
+        cx: &mut Context<'_, Self>,
     ) -> Self {
         Self {
             app,
@@ -289,6 +290,7 @@ impl ObjectPane {
             selected: None,
             scroll: ScrollHandle::new(),
             hscroll_grab: None,
+            focus: cx.focus_handle(),
             theme,
         }
     }
@@ -314,6 +316,7 @@ impl ObjectPane {
         &self,
         tables: Option<Loadable<Vec<rustgrid_core::TableInfo>>>,
         search: &str,
+        rename: Option<RenameRow>,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let theme = self.theme;
@@ -361,7 +364,7 @@ impl ObjectPane {
                         column = div().flex().flex_col();
                         count = 0;
                     }
-                    column = column.child(self.render_item(table, cx));
+                    column = column.child(self.render_item(table, rename.as_ref(), cx));
                     count += 1;
                 }
                 if count > 0 {
@@ -442,17 +445,39 @@ impl ObjectPane {
     fn render_item(
         &self,
         table: &rustgrid_core::TableInfo,
+        rename: Option<&RenameRow>,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let theme = self.theme;
         let is_view = matches!(table.kind, rustgrid_core::ObjectKind::View);
         let selected = self.selected.as_deref() == Some(table.name.as_str());
+        let connection_index = self.connection_index;
+        let database_index = self.database_index;
         let name = table.name.clone();
         let open_name = name.clone();
         let menu_name = name.clone();
         let menu_app = self.app.clone();
-        let connection_index = self.connection_index;
-        let database_index = self.database_index;
+        // The row being renamed draws the in-place editor instead of its label. Its own label is
+        // skipped so a bare (transparent) editor never ghosts the old name behind the caret.
+        let rename = rename.filter(|row| {
+            row.connection_index == connection_index
+                && row.database_index == database_index
+                && row.old_name == table.name
+        });
+        let editing_here = rename.is_some();
+        let label: AnyElement = match rename {
+            Some(row) => div()
+                .flex_1()
+                .min_w(px(0.0))
+                .h(px(OBJECT_ROW_HEIGHT - 2.0))
+                .child(row.input.clone())
+                .into_any_element(),
+            None => div()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .child(name)
+                .into_any_element(),
+        };
 
         div()
             .id(SharedString::from(format!(
@@ -474,9 +499,14 @@ impl ObjectPane {
                     .text_color(rgb(theme.tree_selected_text))
             })
             .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-            .on_click(cx.listener(move |this, event, _window, cx| {
+            .on_click(cx.listener(move |this, event, window, cx| {
+                if editing_here {
+                    return;
+                }
                 let double_click =
                     matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2);
+                this.commit_pending_rename(cx);
+                window.focus(&this.focus, cx);
                 this.select_object(open_name.clone(), cx);
                 if double_click {
                     this.open_selected_object(cx);
@@ -484,7 +514,12 @@ impl ObjectPane {
             }))
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    if editing_here {
+                        return;
+                    }
+                    this.commit_pending_rename(cx);
+                    window.focus(&this.focus, cx);
                     this.selected = Some(menu_name.clone());
                     let _ = menu_app.update(cx, |app, cx| {
                         app.context_menu = Some(ContextMenu {
@@ -493,6 +528,7 @@ impl ObjectPane {
                                 database_index,
                                 name: menu_name.clone(),
                                 is_view,
+                                pane: RowPane::Objects,
                             },
                             position: event.position,
                         });
@@ -513,7 +549,64 @@ impl ObjectPane {
                     theme.icon_table
                 },
             ))
-            .child(div().overflow_hidden().whitespace_nowrap().child(name))
+            .child(label)
+    }
+
+    /// Commit an open in-place rename (e.g. before the click moves selection elsewhere).
+    fn commit_pending_rename(&self, cx: &mut Context<'_, Self>) {
+        let Some(app) = self.app.upgrade() else {
+            return;
+        };
+        app.update(cx, |app, cx| app.submit_rename(cx));
+    }
+
+    /// F2 starts editing the selected object's name in place.
+    fn object_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let keystroke = &event.keystroke;
+        if keystroke.modifiers.control
+            || keystroke.modifiers.platform
+            || keystroke.modifiers.alt
+            || !keystroke.key.eq_ignore_ascii_case("f2")
+        {
+            return;
+        }
+        let Some(name) = self.selected.clone() else {
+            return;
+        };
+        cx.stop_propagation();
+        self.begin_rename(name, window, cx);
+    }
+
+    /// Ask `AppView` to open the in-place rename editor for `name` in this pane's row.
+    fn begin_rename(&mut self, name: String, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let connection_index = self.connection_index;
+        let database_index = self.database_index;
+        let is_view = self.category == Category::Views;
+        let Some(app) = self.app.upgrade() else {
+            return;
+        };
+        app.update(cx, |app, cx| {
+            app.begin_rename_table(
+                RowPane::Objects,
+                connection_index,
+                database_index,
+                name,
+                is_view,
+                window,
+                cx,
+            );
+            app.notify_rename_pane(RowPane::Objects, cx);
+        });
+        cx.notify();
+    }
+
+    pub(super) fn focus_handle(&self) -> FocusHandle {
+        self.focus.clone()
     }
 
     fn select_object(&mut self, name: String, cx: &mut Context<'_, Self>) {
@@ -542,7 +635,7 @@ impl ObjectPane {
 
 impl Render for ObjectPane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let (search, tables) = {
+        let (search, tables, rename) = {
             let Some(app) = self.app.upgrade() else {
                 return div().into_any_element();
             };
@@ -560,10 +653,14 @@ impl Render for ObjectPane {
                     Loadable::Failed(error) => Loadable::Failed(error.clone()),
                     Loadable::Loaded(items) => Loadable::Loaded(items.clone()),
                 });
-            (app.object_search.clone(), tables)
+            (
+                app.object_search.clone(),
+                tables,
+                app.rename_row(RowPane::Objects),
+            )
         };
 
-        let body = self.render_body(tables, &search, cx);
+        let body = self.render_body(tables, &search, rename, cx);
 
         let scroller = div()
             .id("object-scroll")
@@ -577,12 +674,31 @@ impl Render for ObjectPane {
             .child(body);
 
         let mut container = div()
+            .id("object-list")
             .flex()
             .flex_col()
             .flex_1()
             .min_w(px(0.0))
             .min_h(px(0.0))
             .overflow_hidden()
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                this.object_key(event, window, cx);
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseDownEvent, window, cx| {
+                    // Clicking the list background takes focus so F2 works. While the rename
+                    // editor is open the input owns the keyboard; its blur subscription commits.
+                    if !this
+                        .app
+                        .upgrade()
+                        .is_some_and(|app| app.read(cx).rename_edit.is_some())
+                    {
+                        window.focus(&this.focus, cx);
+                    }
+                }),
+            )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
                 this.hscroll_drag(event, cx);
             }))

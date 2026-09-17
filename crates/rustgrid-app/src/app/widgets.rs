@@ -381,10 +381,12 @@ impl AppView {
                 database_index,
                 name,
                 is_view,
+                pane,
             } => {
                 let ci = *connection_index;
                 let di = *database_index;
                 let is_view = *is_view;
+                let pane = *pane;
                 let open_name = name.clone();
                 let design_name = name.clone();
                 let drop_name = name.clone();
@@ -469,7 +471,8 @@ impl AppView {
                             t!("object.rename_table").to_string(),
                             cx.listener(move |this, _event, window, cx| {
                                 this.context_menu = None;
-                                this.open_rename_table(
+                                this.begin_rename_table(
+                                    pane,
                                     ci,
                                     di,
                                     rename_name.clone(),
@@ -477,6 +480,8 @@ impl AppView {
                                     window,
                                     cx,
                                 );
+                                this.notify_rename_pane(pane, cx);
+                                cx.notify();
                             }),
                         ));
                 }

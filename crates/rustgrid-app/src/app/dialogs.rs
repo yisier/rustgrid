@@ -28,8 +28,6 @@ impl AppView {
             Some(DialogKind::DbDialog)
         } else if self.password_prompt.is_some() {
             Some(DialogKind::Password)
-        } else if self.rename_prompt.is_some() {
-            Some(DialogKind::Rename)
         } else if self.error_dialog.is_some() {
             Some(DialogKind::Error)
         } else if self.delete_confirm.is_some() {
@@ -52,7 +50,6 @@ impl AppView {
             Some(DialogKind::ConnectionForm) => self.open_connection_form_dialog(window, cx),
             Some(DialogKind::DbDialog) => self.open_db_dialog(window, cx),
             Some(DialogKind::Password) => self.open_password_prompt(window, cx),
-            Some(DialogKind::Rename) => self.open_rename_dialog(window, cx),
             Some(DialogKind::Error) => self.open_error_dialog(window, cx),
             Some(DialogKind::Confirm) => self.open_confirm_dialog(window, cx),
             Some(DialogKind::Options) => self.open_options_dialog(window, cx),
@@ -481,108 +478,12 @@ impl AppView {
         });
     }
 
-    /// Open the "rename table" prompt (a single text field, no confirmation step).
-    fn open_rename_dialog(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        let app = cx.entity();
-        window.open_dialog(cx, move |dialog, window, cx| {
-            let Some((title, input)) = app.update(cx, |app, _| {
-                app.rename_prompt.as_ref().map(|prompt| {
-                    (
-                        format!("{} - {}", t!("object.rename_table"), prompt.old_name),
-                        prompt.input.clone(),
-                    )
-                })
-            }) else {
-                return dialog.title(String::new());
-            };
-            let theme = app.read(cx).theme;
-            let on_ok = app.downgrade();
-            let on_cancel = app.downgrade();
-            let on_close = app.downgrade();
-            let footer_ok = app.downgrade();
-            let footer_cancel = app.downgrade();
-            let focused = Rc::new(Cell::new(false));
-
-            dialog
-                .title(title)
-                .margin_top(centered_margin_top(window, 210.0))
-                .footer(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .justify_end()
-                        .gap_2()
-                        .w_full()
-                        .child(ui::button(
-                            "rename-cancel",
-                            t!("form.cancel").to_string(),
-                            ButtonKind::Normal,
-                            theme,
-                            move |_event, _window, cx| {
-                                let _ = footer_cancel.update(cx, |app, cx| {
-                                    app.rename_prompt = None;
-                                    cx.notify();
-                                });
-                            },
-                        ))
-                        .child(ui::button(
-                            "rename-ok",
-                            t!("object.rename_button").to_string(),
-                            ButtonKind::Default,
-                            theme,
-                            move |_event, _window, cx| {
-                                let _ = footer_ok.update(cx, |app, cx| app.submit_rename(cx));
-                            },
-                        )),
-                )
-                .content(move |content, window, cx| {
-                    if !focused.get() {
-                        focused.set(true);
-                        let handle = input.read(cx).focus_handle();
-                        window.focus(&handle, cx);
-                    }
-                    content.child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .child(t!("object.rename_label").to_string()),
-                            )
-                            .child(div().h(px(28.0)).child(input.clone())),
-                    )
-                })
-                .button_props(
-                    DialogButtonProps::default()
-                        .ok_text(t!("object.rename_button").to_string())
-                        .cancel_text(t!("form.cancel").to_string())
-                        .show_cancel(true)
-                        .on_ok(move |_, _, cx| {
-                            let _ = on_ok.update(cx, |app, cx| app.submit_rename(cx));
-                            true
-                        })
-                        .on_cancel(move |_, _, cx| {
-                            let _ = on_cancel.update(cx, |app, cx| {
-                                app.rename_prompt = None;
-                                cx.notify();
-                            });
-                            true
-                        }),
-                )
-                .on_close(move |_, _, cx| {
-                    let _ = on_close.update(cx, |app, cx| {
-                        app.rename_prompt = None;
-                        cx.notify();
-                    });
-                })
-        });
-    }
-
-    /// Open the rename prompt for a table, pre-filled with its current name.
-    pub(super) fn open_rename_table(
+    /// Start the in-place "rename table" editor for one row, pre-filled with its current name and
+    /// focused. The row itself is drawn by the pane named in `pane`, which the caller notifies.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn begin_rename_table(
         &mut self,
+        pane: RowPane,
         connection_index: usize,
         database_index: usize,
         old_name: String,
@@ -590,60 +491,108 @@ impl AppView {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
+        if self.rename_edit.is_some()
+            || !self.table_exists(connection_index, database_index, &old_name)
+        {
+            return;
+        }
         let theme = self.theme;
         let weak = cx.weak_entity();
         let change = weak.clone();
         let submit = weak.clone();
+        let cancel = weak.clone();
         let initial = old_name.clone();
         let input = cx.new(move |cx| {
             TextInput::new(
                 theme,
                 initial,
                 TextInputOptions {
-                    placeholder: SharedString::from(t!("object.rename_label").to_string()),
+                    bare: true,
+                    text_size: Some(12.0),
                     ..Default::default()
                 },
                 cx,
             )
             .on_change(Rc::new(move |text, _window, cx| {
                 let _ = change.update(cx, |app, cx| {
-                    if let Some(prompt) = app.rename_prompt.as_mut() {
-                        prompt.new_name = text.to_string();
+                    if let Some(edit) = app.rename_edit.as_mut() {
+                        edit.new_name = text.to_string();
                     }
                     cx.notify();
                 });
             }))
-            .on_submit(Rc::new(move |_window, cx| {
-                let _ = submit.update(cx, |app, cx| app.submit_rename(cx));
+            .on_submit(Rc::new(move |window, cx| {
+                let _ = submit.update(cx, |app, cx| {
+                    let owner = app.rename_owner_focus(cx);
+                    app.submit_rename(cx);
+                    if let Some(owner) = owner {
+                        window.focus(&owner, cx);
+                    }
+                });
+            }))
+            .on_cancel(Rc::new(move |window, cx| {
+                let _ = cancel.update(cx, |app, cx| {
+                    let owner = app.rename_owner_focus(cx);
+                    app.rename_edit = None;
+                    app.rename_blur = None;
+                    if let Some(owner) = owner {
+                        window.focus(&owner, cx);
+                    }
+                    cx.notify();
+                });
             }))
         });
         let focus = input.read(cx).focus_handle();
-        self.rename_prompt = Some(RenamePrompt {
+        self.rename_edit = Some(RenameEdit {
+            pane,
             connection_index,
             database_index,
             old_name: old_name.clone(),
             new_name: old_name,
             input,
         });
+        // Clicking away is a commit, like the grid's in-place cell editor.
+        self.rename_blur = Some(cx.on_blur(&focus, window, |app, _window, cx| {
+            if app.rename_edit.is_some() {
+                app.submit_rename(cx);
+            }
+        }));
         self.rename_focus_pending = true;
         window.focus(&focus, cx);
         cx.notify();
     }
 
-    /// Apply the rename prompt, rejecting an empty or unchanged name.
+    /// Whether the loaded object list still holds a table with this name — F2 on a stale
+    /// selection (after a rename/drop) must not open an editor for a row that is gone.
+    fn table_exists(&self, connection_index: usize, database_index: usize, name: &str) -> bool {
+        self.connections
+            .get(connection_index)
+            .and_then(|node| match &node.databases {
+                Loadable::Loaded(databases) => databases.get(database_index),
+                _ => None,
+            })
+            .is_some_and(|database| {
+                matches!(&database.tables, Loadable::Loaded(tables)
+                    if tables.iter().any(|table| table.name == name))
+            })
+    }
+
+    /// Commit the in-place rename: reject an empty or unchanged name, otherwise run the rename.
     pub(super) fn submit_rename(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(prompt) = self.rename_prompt.take() else {
+        let Some(edit) = self.rename_edit.take() else {
             return;
         };
-        let new_name = prompt.new_name.trim().to_string();
-        if new_name.is_empty() || new_name == prompt.old_name {
+        self.rename_blur = None;
+        self.notify_rename_pane(edit.pane, cx);
+        let new_name = edit.new_name.trim().to_string();
+        if new_name.is_empty() || new_name == edit.old_name {
             cx.notify();
             return;
         }
         self.rename_table(
-            prompt.connection_index,
-            prompt.database_index,
-            prompt.old_name,
+            edit.connection_index,
+            edit.database_index,
+            edit.old_name,
             new_name,
             cx,
         );
