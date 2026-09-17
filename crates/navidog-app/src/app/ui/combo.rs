@@ -16,9 +16,9 @@ use gpui::{
     px, rgb,
 };
 use gpui_kit::component::Icon;
-use gpui_kit::component::Sizable;
 use gpui_kit::component::combobox::{Combobox, ComboboxEvent, ComboboxState};
 use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
+use gpui_kit::component::{FocusableExt, Sizable};
 
 use crate::theme::Theme;
 
@@ -237,7 +237,8 @@ impl Render for ComboBox {
             .menu_width(px(self.width))
             .cleanable(false)
             .disabled(!self.enabled)
-            .small();
+            .focus_ring(false)
+            .xsmall();
         if let Some((icon, color)) = self.icon {
             combo = combo.icon(Icon::default().path(icon).text_color(rgb(color)));
         }

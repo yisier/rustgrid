@@ -91,6 +91,9 @@ impl GridView {
         delta: f32,
         cx: &mut Context<'_, Self>,
     ) -> bool {
+        // The date picker is an absolute overlay anchored to a row; scrolling would leave it
+        // floating over unrelated rows, so dismiss it instead.
+        self.date_picker = None;
         let handle = self.list_scroll.0.borrow().base_handle.clone();
         let bounds = handle.bounds();
         let rows = self.state.rows.len();
@@ -359,25 +362,34 @@ impl GridView {
         let weak = self.self_weak.clone();
         let initial_text = value.clone();
         let input = cx.new(move |cx| {
-            TextInput::new(theme, initial_text, TextInputOptions::default(), cx)
-                .on_change(Rc::new({
-                    let weak = weak.clone();
-                    move |text, _window, cx| {
-                        let _ = weak.update(cx, |grid, cx| grid.cell_editor_changed(text, cx));
-                    }
-                }))
-                .on_submit(Rc::new({
-                    let weak = weak.clone();
-                    move |_window, cx| {
-                        let _ = weak.update(cx, |grid, cx| grid.finish_cell_editor(cx));
-                    }
-                }))
-                .on_cancel(Rc::new({
-                    let weak = weak.clone();
-                    move |_window, cx| {
-                        let _ = weak.update(cx, |grid, cx| grid.cancel_editor(cx));
-                    }
-                }))
+            TextInput::new(
+                theme,
+                initial_text,
+                TextInputOptions {
+                    bare: true,
+                    text_size: Some(12.5),
+                    ..Default::default()
+                },
+                cx,
+            )
+            .on_change(Rc::new({
+                let weak = weak.clone();
+                move |text, _window, cx| {
+                    let _ = weak.update(cx, |grid, cx| grid.cell_editor_changed(text, cx));
+                }
+            }))
+            .on_submit(Rc::new({
+                let weak = weak.clone();
+                move |_window, cx| {
+                    let _ = weak.update(cx, |grid, cx| grid.finish_cell_editor(cx));
+                }
+            }))
+            .on_cancel(Rc::new({
+                let weak = weak.clone();
+                move |_window, cx| {
+                    let _ = weak.update(cx, |grid, cx| grid.cancel_editor(cx));
+                }
+            }))
         });
         let focus = input.read(cx).focus_handle();
         input.update(cx, |input, cx| input.set_padding_left(0.0, cx));

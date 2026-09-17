@@ -54,6 +54,19 @@ pub trait Connection: Send + Sync {
 
     async fn drop_database(&self, name: &str) -> Result<()>;
 
+    /// Drop a table.
+    async fn drop_table(&self, database: &str, table: &str) -> Result<()>;
+
+    /// Delete every row of a table (DML, so it is transactional/logged and can be rolled back).
+    async fn empty_table(&self, database: &str, table: &str) -> Result<()>;
+
+    /// Truncate a table (DDL): much faster than [`Connection::empty_table`] but cannot be rolled
+    /// back on most engines.
+    async fn truncate_table(&self, database: &str, table: &str) -> Result<()>;
+
+    /// Rename a table within its database.
+    async fn rename_table(&self, database: &str, table: &str, new_name: &str) -> Result<()>;
+
     async fn database_defaults(&self, name: &str) -> Result<(String, String)>;
 
     async fn character_sets(&self) -> Result<Vec<String>>;

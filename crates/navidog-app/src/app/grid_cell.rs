@@ -1,40 +1,6 @@
 use super::*;
 
 impl GridView {
-    pub(super) fn render_cell_editor(&self, _cx: &mut Context<'_, Self>) -> AnyElement {
-        let Some(editor) = self.cell_editor.as_ref() else {
-            return div().into_any_element();
-        };
-        let width = self
-            .state
-            .column_widths
-            .get(editor.col)
-            .copied()
-            .unwrap_or(GRID_COLUMN_WIDTH)
-            .max(80.0);
-        let left: f32 = GRID_GUTTER_WIDTH
-            + self
-                .state
-                .column_widths
-                .iter()
-                .take(editor.col)
-                .sum::<f32>();
-        let offset_y = f32::from(self.list_scroll.0.borrow().base_handle.offset().y);
-        let top = GRID_ROW_HEIGHT + editor.row as f32 * GRID_ROW_HEIGHT + offset_y;
-        let input = editor.input.clone();
-
-        div()
-            .id("cell-editor")
-            .absolute()
-            .occlude()
-            .left(px(left))
-            .top(px(top))
-            .w(px(width))
-            .h(px(GRID_ROW_HEIGHT))
-            .child(input)
-            .into_any_element()
-    }
-
     pub(super) fn render_date_picker(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let Some(picker) = self.date_picker.as_ref() else {
             return div().into_any_element();
@@ -218,19 +184,13 @@ impl GridView {
                     )),
             );
 
-        div()
+        ui::popup_panel(theme)
             .id("date-picker")
-            .absolute()
-            .occlude()
             .left(px(left))
             .top(px(top))
             .w(px(width))
             .p_2()
-            .flex()
-            .flex_col()
             .gap_1()
-            .bg(rgb(theme.dialog_bg))
-            .border_1()
             .border_color(rgb(theme.text_muted))
             .child(header)
             .child(calendar)

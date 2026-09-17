@@ -61,9 +61,6 @@ impl AppView {
             .flex_col()
             .w(px(180.0))
             .py_1()
-            .bg(rgb(theme.dialog_bg))
-            .border_1()
-            .border_color(rgb(theme.border))
             .child(self.context_item(
                 "tools-options",
                 t!("menu.options").to_string(),
@@ -73,11 +70,9 @@ impl AppView {
                 }),
             ));
 
-        div()
-            .absolute()
+        ui::popup_panel(theme)
             .left(anchor.x)
             .top(anchor.y)
-            .occlude()
             .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
                 this.tools_menu_open = false;
                 cx.notify();

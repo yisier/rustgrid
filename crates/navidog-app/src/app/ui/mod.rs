@@ -11,7 +11,7 @@ use gpui::{
 };
 
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::{Disableable, Icon, Selectable};
+use gpui_kit::component::{Disableable, Selectable, Sizable};
 
 use crate::theme::Theme;
 
@@ -26,6 +26,7 @@ pub(crate) use text_input::{TextInput, TextInputOptions};
 pub(super) enum ButtonKind {
     Normal,
     Default,
+    Danger,
     Selected,
     /// Kept as part of the design-system vocabulary; no call site disables a push button today.
     #[allow(dead_code)]
@@ -44,6 +45,7 @@ pub(super) fn button(
     let button = match kind {
         ButtonKind::Normal => Button::new(id.into()).outline(),
         ButtonKind::Default => Button::new(id.into()).primary(),
+        ButtonKind::Danger => Button::new(id.into()).danger(),
         ButtonKind::Selected => Button::new(id.into()).secondary().selected(true),
         ButtonKind::Disabled => Button::new(id.into()).outline().disabled(true),
     };
@@ -68,21 +70,42 @@ pub(super) fn dialog_button(
 
 /// A flat icon+label item used by the main and object toolbars, backed by the kit's ghost
 /// button so it picks up the shadcn hover/disabled states.
+///
+/// The kit's own button typography (16px at the default size) is larger than the app's chrome, so
+/// the content is supplied as explicit children: a 16px icon and a 12px label.
 pub(super) fn toolbar_item(
     id: impl Into<SharedString>,
     icon: &'static str,
     label: String,
     enabled: bool,
-    _theme: Theme,
+    theme: Theme,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    let color = if enabled {
+        theme.text
+    } else {
+        theme.text_muted
+    };
     Button::new(id.into())
         .ghost()
         .compact()
-        .icon(Icon::default().path(icon))
-        .label(label)
+        .small()
         .disabled(!enabled)
         .on_click(on_click)
+        .child(
+            svg()
+                .path(icon)
+                .w(px(16.0))
+                .h(px(16.0))
+                .flex_none()
+                .text_color(rgb(color)),
+        )
+        .child(
+            div()
+                .text_size(px(12.0))
+                .text_color(rgb(color))
+                .child(label),
+        )
 }
 
 /// A small square icon button, the shared chrome for the filter/sort builders' row actions.
@@ -256,6 +279,29 @@ pub(super) fn checkbox_box(checked: bool, theme: Theme) -> impl IntoElement {
         .text_color(rgb(foreground))
         .text_size(px(10.0))
         .child(if checked { "✓" } else { "" }.to_string())
+}
+
+/// The shared chrome for an app-drawn floating surface (popup menus, dropdown lists, pickers):
+/// absolutely positioned with the dialog face, a border and the soft shadow.
+///
+/// It also sets `.occlude()`, which is the important part: gpui dispatches `ScrollWheelEvent` to
+/// *every* scrollable hitbox under the cursor (each `overflow_*` container handles it without
+/// stopping propagation), so a popup list that overlays a scrollable pane would scroll both.
+/// `.occlude()` makes every hitbox behind the popup report `should_handle_scroll() == false`
+/// (see `HitboxBehavior::BlockMouse`), leaving only the popup's own list scrollable.
+///
+/// Every app-drawn floating surface must be built on this helper so that behaviour stays global —
+/// do not hand-roll `div().absolute()` popups, and do not drop the occlusion.
+pub(super) fn popup_panel(theme: Theme) -> Div {
+    div()
+        .absolute()
+        .occlude()
+        .flex()
+        .flex_col()
+        .bg(rgb(theme.dialog_bg))
+        .border_1()
+        .border_color(rgb(theme.border))
+        .shadow(dialog_shadow())
 }
 
 /// The soft drop shadow behind every floating surface (dialogs and popup menus).

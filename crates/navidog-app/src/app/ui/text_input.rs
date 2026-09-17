@@ -13,12 +13,18 @@ use std::rc::Rc;
 
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, KeyDownEvent, SharedString, Subscription, Window,
-    div, prelude::*, rgb,
+    div, prelude::*, px, rgb,
 };
 use gpui_kit::component::Icon;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::{FocusableExt, Sizable, Size};
 
 use crate::theme::Theme;
+
+/// Base text size for the app's text inputs. gpui-kit's `Size::Small` typography is larger than
+/// the app's chrome (which inherits 12.5px), so every input is pinned to this unless a caller
+/// overrides it via [`TextInputOptions::text_size`].
+pub(crate) const DEFAULT_TEXT_SIZE: f32 = 12.5;
 
 /// Called with the current text after every edit.
 pub(crate) type TextChangeCallback = Rc<dyn Fn(&str, &mut Window, &mut App) + 'static>;
@@ -41,6 +47,15 @@ pub(crate) struct TextInputOptions {
     pub icon_color: Option<u32>,
     /// Shows a clear (`✕`) button while the field has text.
     pub clearable: bool,
+    /// Renders the field frameless: no background or border, and no inner padding. Used by the
+    /// in-place cell editors, which must blend into the grid/design cell instead of looking like a
+    /// native input box floating over it.
+    pub bare: bool,
+    /// Overrides [`DEFAULT_TEXT_SIZE`] (e.g. the 12px table-designer cells).
+    pub text_size: Option<f32>,
+    /// Overrides the kit control size (default `Size::Small`, i.e. 24px). Compact popup fields
+    /// pass `Size::XSmall` (20px) to match the dropdowns.
+    pub size: Option<Size>,
 }
 
 /// A queued mutation that must run on the next render, where a `Window` is available.
@@ -56,6 +71,9 @@ pub(crate) struct TextInput {
     icon: Option<&'static str>,
     icon_color: Option<u32>,
     clearable: bool,
+    bare: bool,
+    text_size: Option<f32>,
+    size: Option<Size>,
     /// The entity's own focus handle. Callers focus this one; the render pass forwards focus to
     /// the inner gpui-kit state.
     focus: FocusHandle,
@@ -92,6 +110,9 @@ impl TextInput {
             icon: options.icon,
             icon_color: options.icon_color,
             clearable: options.clearable,
+            bare: options.bare,
+            text_size: options.text_size,
+            size: options.size,
             focus: cx.focus_handle(),
             state: None,
             subscriptions: Vec::new(),
@@ -269,9 +290,16 @@ impl Render for TextInput {
 
         let mut input = Input::new(&state)
             .h_full()
-            .bordered(true)
-            .appearance(true)
-            .cleanable(self.clearable);
+            .with_size(self.size.unwrap_or(Size::Small))
+            .bordered(!self.bare)
+            .appearance(!self.bare)
+            .focus_ring(false)
+            .cleanable(self.clearable)
+            .text_size(px(self.text_size.unwrap_or(DEFAULT_TEXT_SIZE)));
+        if self.bare {
+            // Blend into the cell: no inset, so the caret and text line up with the cell text.
+            input = input.px(px(0.0)).py(px(0.0));
+        }
         if let Some(icon) = self.icon {
             input = input.prefix(
                 Icon::default()

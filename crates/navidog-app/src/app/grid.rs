@@ -134,6 +134,12 @@ impl AppView {
                 }
             }
             DeleteConfirm::Connection { index } => self.delete_connection(index, cx),
+            DeleteConfirm::Table {
+                connection_index,
+                database_index,
+                name,
+                operation,
+            } => self.run_table_operation(connection_index, database_index, name, operation, cx),
         }
         cx.notify();
     }

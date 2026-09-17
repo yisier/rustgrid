@@ -133,7 +133,8 @@ touching UI code.
   (`AppView::render_main_tab`) and the object toolbar (`AppView::toolbar_item`) are borderless
   icon+label items (ghost buttons) with thin `toolbar_separator`s between them — do **not**
   style them with borders or filled buttons. `win_button`/`dialog_button` are for push buttons
-  inside dialogs.
+  inside dialogs. `ui::toolbar_item` supplies the content as explicit children (16px icon, 12px
+  label) because gpui-kit's default button typography (16px) is too large for the app's chrome.
 - **The object list (Tables/Views) follows Navicat's layout.** It is column-major: items are
   chunked into columns of `object_rows_per_column()` (derived from the scroll viewport height,
   `OBJECT_ROW_HEIGHT` per row) so a column fills top-to-bottom and then wraps to the next column
@@ -143,7 +144,34 @@ touching UI code.
   (it only scrolls and reserves space), so the list ships its own horizontal scrollbar
   (`render_object_hscrollbar`, driven by `object_scroll`); keep it in sync when touching the
   object list.
-- Keep dialog controls compact: 12px text, ~24px-high buttons, compact text fields.
+- **Floating popups must be built with `ui::popup_panel`.** gpui dispatches `ScrollWheelEvent`
+  to *every* scrollable hitbox under the cursor — each `overflow_*` container handles it and none
+  stops propagation — so a popup whose list overlays a scrollable pane scrolls **both** it and the
+  pane behind it. The only fix is hitbox behavior: a `BlockMouse` hitbox (`.occlude()`) makes all
+  hitboxes behind it report `should_handle_scroll() == false`. `ui::popup_panel(theme)` is the
+  single shared builder for app-drawn floating surfaces (dropdown lists, menus, pickers): it sets
+  `absolute` + `.occlude()` + the dialog face/border/shadow, so scrolling inside a popup never
+  scrolls the view underneath. Never hand-roll a `div().absolute()` popup; build it on
+  `popup_panel`. gpui-kit's own `Combobox`/`Select`/`Popover` already occlude, so they are fine.
+- **Dropdowns share one style: search on top, a check mark on the selected row.** gpui-kit's
+  `Combobox` (via `ui::ComboBox`) already renders a searchable list and a right-aligned check that
+  is invisible when unselected (so rows never shift). `ui::ComboBox` is pinned to the kit's
+  `Size::XSmall` (20px, 12px text) so every dropdown in the project is the same compact size; do
+  not override it per call site. The table designer's type dropdown
+  (`design_view.rs::render_type_combo`) is hand-built and must mirror this: a 20px `ui::TextInput`
+  search (`TextInputOptions { size: Some(Size::XSmall), .. }`) above 20px rows, and an
+  `icons/check.svg` on the right of the selected row, `opacity(0)` on the others.
+- Keep dialog controls compact: 12px text, ~24px-high buttons, compact text fields. gpui-kit's
+  sizing defaults are larger than the app's metrics, so `ui::TextInput` renders the kit input at
+  `Size::Small`, disables the kit's focus ring (the "shadow" that otherwise floats over the field)
+  and pins the text to `DEFAULT_TEXT_SIZE` (12.5px); in-place cell editors (grid/table designer)
+  additionally pass `TextInputOptions { bare: true, text_size: Some(..) }`, which drops the kit's
+  background, border and inner padding so the field blends into its cell. The grid renders its
+  editor **inside** the editing cell (`editing_cell` in `grid_view.rs`) instead of as an absolute
+  overlay, and skips that cell's own text — so a transparent `bare` editor never ghosts, and
+  scrolling the list moves the editor with its row instead of leaving it floating at a stale
+  offset. A selected grid cell paints `Theme::grid_selection_bg` (blue) with
+  `grid_selection_text`.
 - Embed bitmap images with `img(ImageSource::Resource(Resource::Embedded("name".into())))`.
   Calling `img("name")` treats the bare filename as a **URI** and fails with
   `Failed to load asset ... loading image asset from "name"`.
@@ -199,6 +227,10 @@ shadcn chrome described above. Implemented today:
    syntax highlighting and keyword/table completion, `Beautify SQL`, run arbitrary SQL against a
    chosen connection + database, `Explain`, and a result grid that reuses the table grid
    (controls, scrollbars, status, and in-place editing when a single table can be inferred).
+6. Right-clicking a table in the object list offers Open/Design plus Drop Table, Empty Table
+   (`DELETE FROM`), Truncate Table and Rename; Drop/Empty/Truncate go through the shared confirm
+   dialog and Rename through a one-field prompt. These run through `Connection`
+   (`drop_table`/`empty_table`/`truncate_table`/`rename_table`), never as raw SQL written in the UI.
 
 Still out of scope: a second database engine, and the disabled placeholder UI (the
 `Functions`/`Users`/`Backups` main tabs, the `Design/New/Delete Table`, `Import/Export` toolbar
@@ -215,7 +247,10 @@ do not build those features early.
   **path** (`Vec<usize>`, indices from the root) — keep that in sync when adding node operations.
   `navidog-mysql::filter_clause` and `session.rs::filter_display_clause` recurse over the tree,
   skip disabled/incomplete nodes, drop groups left empty, and must keep bind order identical to the
-  rendered `?` placeholders.
+  rendered `?` placeholders. Row layout: the first condition of a group is flush left (no
+  conjunction gutter); later conditions show the `并且/或者` toggle in that gutter. A group's
+  boundary row reuses the group's indent, centres its controls under the operator (`=`) column, and
+  reveals the `+`/`−` group actions only on hover (`group_hover`).
 
 - `navidog-mysql::map_connect_error` flags authentication failures as
   `navidog_core::Error::Authentication` by checking `MySqlDatabaseError::number()`

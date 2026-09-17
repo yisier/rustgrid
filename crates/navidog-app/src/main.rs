@@ -21,7 +21,7 @@ use gpui::{AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px,
 use gpui_kit::component::Root;
 use navidog_core::DriverRegistry;
 
-use crate::app::AppView;
+use crate::app::{AppShell, AppView};
 use crate::assets::Assets;
 use crate::runtime::Runtime;
 
@@ -67,7 +67,8 @@ fn main() {
                 win_resize::install(window);
                 let view = cx
                     .new(|cx| AppView::new(registry.clone(), config.clone(), runtime.clone(), cx));
-                cx.new(|cx| Root::new(view, window, cx))
+                let shell = cx.new(|_| AppShell::new(view));
+                cx.new(|cx| Root::new(shell, window, cx))
             },
         )
         .expect("failed to open the main window");

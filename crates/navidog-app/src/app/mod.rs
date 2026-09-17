@@ -32,8 +32,8 @@ use crate::sql::{self, SqlSpan, SqlToken};
 use crate::theme::Theme;
 
 use ui::{
-    ButtonKind, ComboBox, ComboOption, TextInput, TextInputOptions, checkbox_box, dialog_shadow,
-    form_tab, main_separator, scrollbar_fractions, scrollbar_thumb, toolbar_separator,
+    ButtonKind, ComboBox, ComboOption, TextInput, TextInputOptions, checkbox_box, form_tab,
+    main_separator, scrollbar_fractions, scrollbar_thumb, toolbar_separator,
 };
 
 /// The six text inputs of the connection form, created when the form opens. Order follows
@@ -95,6 +95,16 @@ struct PasswordPrompt {
     input: Entity<TextInput>,
     password: String,
     save_password: bool,
+}
+
+/// The "rename table" dialog state. `new_name` mirrors the input's text so `submit_rename`
+/// never reads the entity back during its own change callback.
+struct RenamePrompt {
+    connection_index: usize,
+    database_index: usize,
+    old_name: String,
+    new_name: String,
+    input: Entity<TextInput>,
 }
 
 /// Build the masked password field for the password prompt. The plaintext mirrors into
@@ -179,6 +189,12 @@ enum ContextTarget {
     Database {
         connection_index: usize,
         database_index: usize,
+    },
+    Table {
+        connection_index: usize,
+        database_index: usize,
+        name: String,
+        is_view: bool,
     },
     QueryEditor,
 }
@@ -400,6 +416,20 @@ enum DeleteConfirm {
     Rows { grid_id: u64, rows: Vec<usize> },
     /// Delete a connection (and its open grids/query tabs).
     Connection { index: usize },
+    /// A destructive table operation.
+    Table {
+        connection_index: usize,
+        database_index: usize,
+        name: String,
+        operation: TableOperation,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum TableOperation {
+    Drop,
+    Empty,
+    Truncate,
 }
 
 /// Which app dialog `Root` is currently hosting. AppView state stays the source of truth; this
@@ -409,6 +439,7 @@ enum DialogKind {
     ConnectionForm,
     DbDialog,
     Password,
+    Rename,
     Error,
     Confirm,
     Options,
@@ -513,6 +544,8 @@ pub struct AppView {
     caret_blink_running: bool,
     password_prompt: Option<PasswordPrompt>,
     password_focus_pending: bool,
+    rename_prompt: Option<RenamePrompt>,
+    rename_focus_pending: bool,
     page_size: u64,
     limit_records: bool,
     object_search: String,
@@ -550,12 +583,15 @@ mod options;
 mod query;
 mod query_editor;
 mod query_view;
+mod shell;
 mod sidebar;
 mod tabs;
 mod toolbar;
 mod tree;
 mod ui;
 mod widgets;
+
+pub use shell::AppShell;
 
 impl AppView {
     pub fn new(
@@ -643,6 +679,8 @@ impl AppView {
             caret_blink_running: false,
             password_prompt: None,
             password_focus_pending: false,
+            rename_prompt: None,
+            rename_focus_pending: false,
             page_size: 1000,
             limit_records: true,
             object_search: String::new(),
@@ -988,6 +1026,14 @@ impl Render for AppView {
                 window.focus(&handle, cx);
             }
             self.password_focus_pending = false;
+        }
+
+        if self.rename_focus_pending {
+            if let Some(prompt) = self.rename_prompt.as_ref() {
+                let handle = prompt.input.read(cx).focus_handle();
+                window.focus(&handle, cx);
+            }
+            self.rename_focus_pending = false;
         }
 
         if self.query_focus_pending {

@@ -163,19 +163,13 @@ impl AppView {
         if let Some(completion) = self.query_completion.as_ref()
             && let Some((x, y)) = caret_offset
         {
-            let mut list = div()
+            let mut list = ui::popup_panel(theme)
                 .id("query-completion")
-                .absolute()
                 .left(px(f32::from(x) + text_left))
                 .top(px(f32::from(y) + QUERY_EDITOR_PAD + 18.0))
                 .w(px(220.0))
                 .max_h(px(210.0))
                 .overflow_y_scroll()
-                .flex()
-                .flex_col()
-                .bg(rgb(theme.dialog_bg))
-                .border_1()
-                .border_color(rgb(theme.border))
                 .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
                     cx.stop_propagation();
                 });

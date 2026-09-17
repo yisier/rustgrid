@@ -624,4 +624,182 @@ impl AppView {
         self.query_completion = None;
         cx.notify();
     }
+
+    /// Run a confirmed destructive table operation and refresh the object list afterwards.
+    pub(super) fn run_table_operation(
+        &mut self,
+        connection_index: usize,
+        database_index: usize,
+        name: String,
+        operation: TableOperation,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(connection) = self.connection_arc(connection_index) else {
+            return;
+        };
+        let Some(database) = self.database_name(connection_index, database_index) else {
+            return;
+        };
+
+        let runtime = self.runtime.clone();
+        let close_connection = connection.clone();
+        let close_database = database.clone();
+        let close_name = name.clone();
+        cx.spawn(async move |this, cx| {
+            let result = match runtime
+                .spawn(async move {
+                    match operation {
+                        TableOperation::Drop => connection.drop_table(&database, &name).await,
+                        TableOperation::Empty => connection.empty_table(&database, &name).await,
+                        TableOperation::Truncate => {
+                            connection.truncate_table(&database, &name).await
+                        }
+                    }
+                })
+                .await
+            {
+                Ok(inner) => inner,
+                Err(error) => Err(Error::other(error)),
+            };
+
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok(()) => {
+                        match operation {
+                            // The table is gone: close its grids/designer.
+                            TableOperation::Drop => {
+                                view.close_table_views(
+                                    &close_connection,
+                                    &close_database,
+                                    &close_name,
+                                    cx,
+                                );
+                            }
+                            // Still there but empty: re-fetch the open grids.
+                            TableOperation::Empty | TableOperation::Truncate => {
+                                view.refresh_table_grids(
+                                    &close_connection,
+                                    &close_database,
+                                    &close_name,
+                                    cx,
+                                );
+                            }
+                        }
+                        view.reload_tables(connection_index, database_index, cx);
+                    }
+                    Err(error) => view.error_dialog = Some(error.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Rename a table (or view) and refresh the object list.
+    pub(super) fn rename_table(
+        &mut self,
+        connection_index: usize,
+        database_index: usize,
+        old_name: String,
+        new_name: String,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(connection) = self.connection_arc(connection_index) else {
+            return;
+        };
+        let Some(database) = self.database_name(connection_index, database_index) else {
+            return;
+        };
+
+        let runtime = self.runtime.clone();
+        let close_connection = connection.clone();
+        let close_database = database.clone();
+        let close_old_name = old_name.clone();
+        cx.spawn(async move |this, cx| {
+            let result = match runtime
+                .spawn(async move {
+                    connection
+                        .rename_table(&database, &old_name, &new_name)
+                        .await
+                })
+                .await
+            {
+                Ok(inner) => inner,
+                Err(error) => Err(Error::other(error)),
+            };
+
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok(()) => {
+                        // The old table no longer exists under its former name.
+                        view.close_table_views(
+                            &close_connection,
+                            &close_database,
+                            &close_old_name,
+                            cx,
+                        );
+                        view.reload_tables(connection_index, database_index, cx);
+                    }
+                    Err(error) => view.error_dialog = Some(error.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Re-fetch a database's table list, e.g. after a table was dropped or renamed.
+    pub(super) fn reload_tables(
+        &mut self,
+        connection_index: usize,
+        database_index: usize,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(connection) = self.connection_arc(connection_index) else {
+            return;
+        };
+        let Some(database) = self.database_name(connection_index, database_index) else {
+            return;
+        };
+        self.load_tables(connection_index, database_index, connection, database, cx);
+    }
+
+    /// Close every grid and designer tab for one table (used when the table is dropped/renamed).
+    pub(super) fn close_table_views(
+        &mut self,
+        connection: &Arc<dyn Connection>,
+        database: &str,
+        table: &str,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let active_grid_id = self.active_grid_id(cx);
+        self.grids.retain(|grid| {
+            let grid = grid.read(cx);
+            !(grid.state.sql.is_none()
+                && grid.state.database == database
+                && grid.state.table == table
+                && Arc::ptr_eq(&grid.state.connection, connection))
+        });
+        self.active_grid = active_grid_id.and_then(|id| {
+            self.grids
+                .iter()
+                .position(|grid| grid.read(cx).state.id == id)
+        });
+
+        let active_design_id = self
+            .active_design
+            .and_then(|index| self.designs.get(index))
+            .map(|design| design.read(cx).id);
+        self.designs.retain(|design| {
+            let design = design.read(cx);
+            !(design.database == database
+                && design.table == table
+                && Arc::ptr_eq(&design.connection, connection))
+        });
+        self.active_design = active_design_id.and_then(|id| {
+            self.designs
+                .iter()
+                .position(|design| design.read(cx).id == id)
+        });
+    }
 }

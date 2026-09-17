@@ -449,6 +449,8 @@ impl ObjectPane {
         let selected = self.selected.as_deref() == Some(table.name.as_str());
         let name = table.name.clone();
         let open_name = name.clone();
+        let menu_name = name.clone();
+        let menu_app = self.app.clone();
         let connection_index = self.connection_index;
         let database_index = self.database_index;
 
@@ -480,6 +482,25 @@ impl ObjectPane {
                     this.open_selected_object(cx);
                 }
             }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    this.selected = Some(menu_name.clone());
+                    let _ = menu_app.update(cx, |app, cx| {
+                        app.context_menu = Some(ContextMenu {
+                            target: ContextTarget::Table {
+                                connection_index,
+                                database_index,
+                                name: menu_name.clone(),
+                                is_view,
+                            },
+                            position: event.position,
+                        });
+                        cx.notify();
+                    });
+                    cx.notify();
+                }),
+            )
             .child(tree_icon(
                 if is_view {
                     "icons/views.svg"

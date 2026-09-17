@@ -38,6 +38,21 @@ impl MysqlConnection {
 
         Err(Error::Query("unexpected COUNT result".to_string()))
     }
+
+    /// Run a table-scoped DDL statement (`DROP TABLE` / `TRUNCATE TABLE`) through the text
+    /// protocol, which MySQL requires for DDL.
+    async fn run_table_ddl(&self, verb: &str, database: &str, table: &str) -> Result<()> {
+        let sql = format!(
+            "{verb} {}.{}",
+            quote_identifier(database),
+            quote_identifier(table)
+        );
+        sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+            .execute(&self.pool)
+            .await
+            .map_err(map_query_error)?;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -319,6 +334,42 @@ impl Connection for MysqlConnection {
 
     async fn drop_database(&self, name: &str) -> Result<()> {
         let sql = format!("DROP DATABASE {}", quote_identifier(name));
+        sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+            .execute(&self.pool)
+            .await
+            .map_err(map_query_error)?;
+        Ok(())
+    }
+
+    async fn drop_table(&self, database: &str, table: &str) -> Result<()> {
+        self.run_table_ddl("DROP TABLE", database, table).await
+    }
+
+    async fn empty_table(&self, database: &str, table: &str) -> Result<()> {
+        let sql = format!(
+            "DELETE FROM {}.{}",
+            quote_identifier(database),
+            quote_identifier(table)
+        );
+        sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+            .execute(&self.pool)
+            .await
+            .map_err(map_query_error)?;
+        Ok(())
+    }
+
+    async fn truncate_table(&self, database: &str, table: &str) -> Result<()> {
+        self.run_table_ddl("TRUNCATE TABLE", database, table).await
+    }
+
+    async fn rename_table(&self, database: &str, table: &str, new_name: &str) -> Result<()> {
+        let sql = format!(
+            "RENAME TABLE {}.{} TO {}.{}",
+            quote_identifier(database),
+            quote_identifier(table),
+            quote_identifier(database),
+            quote_identifier(new_name)
+        );
         sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
             .execute(&self.pool)
             .await

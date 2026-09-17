@@ -490,6 +490,8 @@ impl GridView {
             .flex_none()
             .when(depth > 0, |row| row.pl(px(depth as f32 * 16.0 + 4.0)));
 
+        // The first condition has no leading conjunction, but keeps the gutter as blank space so
+        // its field column stays aligned with the later rows' `并且/或者` toggle.
         row = row.child(if first {
             div()
                 .w(px(FILTER_TOGGLE_WIDTH))
@@ -545,7 +547,8 @@ impl GridView {
 
     /// A group's boundary row, rendered after its conditions. The toggle sets the conjunction of
     /// the next group; `+` inserts a new group after this one and `−` removes this group. The row
-    /// starts at the field column so the controls sit under the operator column.
+    /// keeps the same left indent as the group's conditions and centres its controls under the
+    /// operator column; the `+`/`−` actions only appear while the row is hovered.
     fn render_filter_group_control(
         &mut self,
         group_path: &[usize],
@@ -555,6 +558,8 @@ impl GridView {
     ) -> AnyElement {
         let group_path: Vec<usize> = group_path.to_vec();
         let key = filter_path_key(&group_path);
+        let hover_group = SharedString::from(format!("filter-group-hover-{key}"));
+
         let mut controls = div()
             .flex()
             .flex_row()
@@ -563,22 +568,27 @@ impl GridView {
             .gap_1()
             .w(px(FILTER_OPERATOR_WIDTH))
             .flex_none();
-        match next_path {
-            Some(next_path) => {
-                let conjunction = filter_node(&self.state.filter_draft, &next_path)
-                    .map(FilterNode::conjunction)
-                    .unwrap_or_default();
-                controls =
-                    controls.child(self.filter_conjunction_toggle(&next_path, conjunction, cx));
-            }
-            None => controls = controls.child(div().w(px(FILTER_TOGGLE_WIDTH)).flex_none()),
+        if let Some(next_path) = next_path {
+            let conjunction = filter_node(&self.state.filter_draft, &next_path)
+                .map(FilterNode::conjunction)
+                .unwrap_or_default();
+            controls = controls.child(self.filter_conjunction_toggle(&next_path, conjunction, cx));
         }
-        controls = controls
-            .child(self.filter_row_action(&group_path, FilterAction::AddGroup, cx))
-            .child(self.filter_row_action(&group_path, FilterAction::Remove, cx));
+        controls = controls.child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .opacity(0.0)
+                .group_hover(hover_group.clone(), |style| style.opacity(1.0))
+                .child(self.filter_row_action(&group_path, FilterAction::AddGroup, cx))
+                .child(self.filter_row_action(&group_path, FilterAction::Remove, cx)),
+        );
 
         div()
             .id(SharedString::from(format!("filter-group-{key}")))
+            .group(hover_group)
             .flex()
             .flex_row()
             .items_center()
@@ -587,12 +597,7 @@ impl GridView {
             .pl(px((depth + 1) as f32 * 16.0 + 4.0))
             .h(px(24.0))
             .flex_none()
-            .child(
-                div()
-                    .w(px(FILTER_TOGGLE_WIDTH))
-                    .flex_none()
-                    .into_any_element(),
-            )
+            .child(div().w(px(FILTER_TOGGLE_WIDTH)).flex_none())
             .child(div().w(px(FILTER_FIELD_WIDTH)).flex_none())
             .child(controls)
             .child(div().flex_1())

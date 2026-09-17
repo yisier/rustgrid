@@ -282,6 +282,13 @@ impl Render for GridView {
             .date_picker
             .as_ref()
             .map(|picker| (picker.row, picker.col));
+        // The cell being edited, with its live input entity. The editor is rendered *inside* that
+        // cell (below) rather than as an overlay, so it scrolls with the rows and can never be left
+        // floating at a stale offset; the cell's own text is replaced by it.
+        let editing_cell = self
+            .cell_editor
+            .as_ref()
+            .map(|editor| (editor.row, editor.col, editor.input.clone()));
         let preview = self
             .cell_editor
             .as_ref()
@@ -324,7 +331,7 @@ impl Render for GridView {
                                     .w(px(GRID_GUTTER_WIDTH))
                                     .flex_none()
                                     .bg(rgb(if row_selected {
-                                        theme.tree_selected_bg
+                                        theme.grid_selection_bg
                                     } else {
                                         base_background
                                     }))
@@ -338,7 +345,7 @@ impl Render for GridView {
                                                 .h(px(7.0))
                                                 .flex_none()
                                                 .text_color(rgb(if row_selected {
-                                                    theme.tree_selected_text
+                                                    theme.grid_selection_text
                                                 } else {
                                                     theme.primary
                                                 })),
@@ -355,7 +362,7 @@ impl Render for GridView {
                                 .filter(|(cells, _)| cells.contains(&(row_index, index)))
                                 .map(|(_, value)| value.clone());
                             let cell_background = if selected {
-                                theme.tree_selected_bg
+                                theme.grid_selection_bg
                             } else if edited.is_some() || previewed.is_some() {
                                 theme.cell_edit_bg
                             } else {
@@ -415,13 +422,21 @@ impl Render for GridView {
                             }
                             if selected {
                                 cell_element =
-                                    cell_element.text_color(rgb(theme.tree_selected_text));
+                                    cell_element.text_color(rgb(theme.grid_selection_text));
                             } else if is_null {
                                 cell_element = cell_element
                                     .text_color(rgb(theme.text_null))
                                     .font_weight(FontWeight::THIN);
                             }
-                            row_element = row_element.child(cell_element.child(display));
+                            match &editing_cell {
+                                Some((row, col, input)) if (*row, *col) == (row_index, index) => {
+                                    cell_element = cell_element.child(input.clone());
+                                }
+                                _ => {
+                                    cell_element = cell_element.child(display);
+                                }
+                            }
+                            row_element = row_element.child(cell_element);
                         }
                         row_element
                     })
@@ -477,7 +492,6 @@ impl Render for GridView {
                     )
                     .child(header)
                     .child(list)
-                    .child(self.render_cell_editor(cx))
                     .child(self.render_date_picker(cx)),
             );
 

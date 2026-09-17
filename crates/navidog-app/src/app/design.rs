@@ -1,5 +1,6 @@
 use super::*;
 
+use gpui_kit::component::Size;
 use navidog_core::{ColumnDef, TableSchema};
 
 /// A row of the field grid, shared by the header and every row.
@@ -387,11 +388,19 @@ impl TableDesignView {
         let weak = self.self_weak.clone();
         let theme = self.theme;
         let input = cx.new(move |cx| {
-            TextInput::new(theme, value, TextInputOptions::default(), cx).on_change(Rc::new(
-                move |text, _window, cx| {
-                    let _ = weak.update(cx, |view, cx| view.set_field_value(row, column, text, cx));
+            TextInput::new(
+                theme,
+                value,
+                TextInputOptions {
+                    bare: true,
+                    text_size: Some(12.0),
+                    ..Default::default()
                 },
-            ))
+                cx,
+            )
+            .on_change(Rc::new(move |text, _window, cx| {
+                let _ = weak.update(cx, |view, cx| view.set_field_value(row, column, text, cx));
+            }))
         });
         let focus = input.read(cx).focus_handle();
         input.update(cx, |input, cx| input.set_padding_left(0.0, cx));
@@ -436,22 +445,31 @@ impl TableDesignView {
                 let submit = weak.clone();
                 let cancel = weak;
                 cx.new(move |cx| {
-                    TextInput::new(theme, "", TextInputOptions::default(), cx)
-                        .on_change(Rc::new(move |text, _window, cx| {
-                            let _ = change.update(cx, |view, cx| {
-                                view.type_query = text.to_string();
-                                cx.notify();
-                            });
-                        }))
-                        .on_submit(Rc::new(move |_window, cx| {
-                            let _ = submit.update(cx, |view, cx| view.select_first_type(cx));
-                        }))
-                        .on_cancel(Rc::new(move |_window, cx| {
-                            let _ = cancel.update(cx, |view, cx| {
-                                view.type_combo = None;
-                                cx.notify();
-                            });
-                        }))
+                    TextInput::new(
+                        theme,
+                        "",
+                        TextInputOptions {
+                            size: Some(Size::XSmall),
+                            text_size: Some(12.0),
+                            ..Default::default()
+                        },
+                        cx,
+                    )
+                    .on_change(Rc::new(move |text, _window, cx| {
+                        let _ = change.update(cx, |view, cx| {
+                            view.type_query = text.to_string();
+                            cx.notify();
+                        });
+                    }))
+                    .on_submit(Rc::new(move |_window, cx| {
+                        let _ = submit.update(cx, |view, cx| view.select_first_type(cx));
+                    }))
+                    .on_cancel(Rc::new(move |_window, cx| {
+                        let _ = cancel.update(cx, |view, cx| {
+                            view.type_combo = None;
+                            cx.notify();
+                        });
+                    }))
                 })
             })
             .clone();

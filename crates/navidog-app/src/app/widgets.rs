@@ -13,7 +13,7 @@ impl AppView {
         let mut content = div()
             .flex()
             .flex_col()
-            .gap_2()
+            .gap_3()
             .px_4()
             .py_3()
             .child(
@@ -217,7 +217,7 @@ impl AppView {
                 .child(label),
         );
         if let Some(input) = input {
-            row = row.child(div().w(px(width)).h(px(22.0)).child(input));
+            row = row.child(div().w(px(width)).h(px(24.0)).child(input));
         }
         row
     }
@@ -229,14 +229,7 @@ impl AppView {
     ) -> impl IntoElement {
         let theme = self.theme;
 
-        let mut items = div()
-            .flex()
-            .flex_col()
-            .w(px(170.0))
-            .p_0p5()
-            .bg(rgb(theme.dialog_bg))
-            .border_1()
-            .border_color(rgb(theme.border));
+        let mut items = div().flex().flex_col().w(px(170.0)).p_0p5();
 
         match &menu.target {
             ContextTarget::Connection(index) => {
@@ -383,6 +376,111 @@ impl AppView {
                         }),
                     ));
             }
+            ContextTarget::Table {
+                connection_index,
+                database_index,
+                name,
+                is_view,
+            } => {
+                let ci = *connection_index;
+                let di = *database_index;
+                let is_view = *is_view;
+                let open_name = name.clone();
+                let design_name = name.clone();
+                let drop_name = name.clone();
+                let empty_name = name.clone();
+                let truncate_name = name.clone();
+                let rename_name = name.clone();
+
+                items = items
+                    .child(self.context_item(
+                        "table-open",
+                        t!("object.open_table").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            let Some(database) = this.database_name(ci, di) else {
+                                return;
+                            };
+                            this.select_table(ci, database, open_name.clone(), is_view, cx);
+                        }),
+                    ))
+                    .child(self.context_item(
+                        "table-design",
+                        t!("object.design_table").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            let Some(database) = this.database_name(ci, di) else {
+                                return;
+                            };
+                            this.open_design_table(ci, database, design_name.clone(), is_view, cx);
+                        }),
+                    ));
+
+                // Views have no rows of their own and are dropped with `DROP VIEW`, so only the
+                // table-only operations are offered here.
+                if !is_view {
+                    items = items
+                        .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                        .child(self.context_item(
+                            "table-drop",
+                            t!("object.delete_table").to_string(),
+                            cx.listener(move |this, _event, _window, cx| {
+                                this.context_menu = None;
+                                this.delete_confirm = Some(DeleteConfirm::Table {
+                                    connection_index: ci,
+                                    database_index: di,
+                                    name: drop_name.clone(),
+                                    operation: TableOperation::Drop,
+                                });
+                                cx.notify();
+                            }),
+                        ))
+                        .child(self.context_item(
+                            "table-empty",
+                            t!("object.empty_table").to_string(),
+                            cx.listener(move |this, _event, _window, cx| {
+                                this.context_menu = None;
+                                this.delete_confirm = Some(DeleteConfirm::Table {
+                                    connection_index: ci,
+                                    database_index: di,
+                                    name: empty_name.clone(),
+                                    operation: TableOperation::Empty,
+                                });
+                                cx.notify();
+                            }),
+                        ))
+                        .child(self.context_item(
+                            "table-truncate",
+                            t!("object.truncate_table").to_string(),
+                            cx.listener(move |this, _event, _window, cx| {
+                                this.context_menu = None;
+                                this.delete_confirm = Some(DeleteConfirm::Table {
+                                    connection_index: ci,
+                                    database_index: di,
+                                    name: truncate_name.clone(),
+                                    operation: TableOperation::Truncate,
+                                });
+                                cx.notify();
+                            }),
+                        ))
+                        .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                        .child(self.context_item(
+                            "table-rename",
+                            t!("object.rename_table").to_string(),
+                            cx.listener(move |this, _event, window, cx| {
+                                this.context_menu = None;
+                                this.open_rename_table(
+                                    ci,
+                                    di,
+                                    rename_name.clone(),
+                                    is_view,
+                                    window,
+                                    cx,
+                                );
+                            }),
+                        ));
+                }
+            }
             ContextTarget::QueryEditor => {
                 items = items
                     .child(self.context_item(
@@ -439,12 +537,9 @@ impl AppView {
             }
         }
 
-        div()
-            .absolute()
+        ui::popup_panel(theme)
             .left(menu.position.x)
             .top(menu.position.y)
-            .occlude()
-            .shadow(dialog_shadow())
             .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
                 this.context_menu = None;
                 cx.notify();
@@ -464,9 +559,6 @@ impl AppView {
             .flex_col()
             .w(px(170.0))
             .p_0p5()
-            .bg(rgb(theme.dialog_bg))
-            .border_1()
-            .border_color(rgb(theme.border))
             .child(self.context_item(
                 "tab-close",
                 t!("tab.close").to_string(),
@@ -483,12 +575,9 @@ impl AppView {
                 cx.listener(|this, _event, _window, cx| this.close_all_tabs(cx)),
             ));
 
-        div()
-            .absolute()
+        ui::popup_panel(theme)
             .left(menu.position.x)
             .top(menu.position.y)
-            .occlude()
-            .shadow(dialog_shadow())
             .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
                 this.tab_menu = None;
                 cx.notify();

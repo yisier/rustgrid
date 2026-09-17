@@ -797,8 +797,11 @@ impl TableDesignView {
                         "design-type-option-{data_type}"
                     )))
                     .flex()
+                    .flex_row()
                     .items_center()
-                    .h(px(22.0))
+                    .justify_between()
+                    .gap_1()
+                    .h(px(20.0))
                     .px_2()
                     .flex_none()
                     .text_size(px(12.0))
@@ -812,22 +815,24 @@ impl TableDesignView {
                     .on_click(move |_event, _window, cx| {
                         let _ = weak.update(cx, |view, cx| view.select_type(row, data_type, cx));
                     })
-                    .child(data_type.to_string()),
+                    .child(data_type.to_string())
+                    .child(
+                        svg()
+                            .path("icons/check.svg")
+                            .w(px(12.0))
+                            .h(px(12.0))
+                            .flex_none()
+                            .text_color(rgb(theme.tree_selected_text))
+                            .opacity(if selected { 1.0 } else { 0.0 }),
+                    ),
             );
         }
 
-        let mut popup = div()
+        let mut popup = ui::popup_panel(theme)
             .id("design-type-list")
-            .absolute()
             .left(anchor.x)
             .top(anchor.y)
             .w(px(FIELD_TYPE_WIDTH))
-            .flex()
-            .flex_col()
-            .bg(rgb(theme.dialog_bg))
-            .border_1()
-            .border_color(rgb(theme.border))
-            .shadow(dialog_shadow())
             .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
                 this.type_combo = None;
                 cx.notify();

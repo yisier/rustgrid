@@ -11,6 +11,14 @@ use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::component::dialog::DialogButtonProps;
 
+/// gpui-kit anchors a dialog at 10% of the window height, which leaves short dialogs stranded near
+/// the top. Compute a top margin that centres a dialog of roughly `dialog_height` instead — the
+/// exact height is only known after layout, so callers pass an estimate.
+fn centered_margin_top(window: &Window, dialog_height: f32) -> Pixels {
+    let viewport = window.viewport_size().height;
+    ((viewport - px(dialog_height)) * 0.5).max(px(24.0))
+}
+
 impl AppView {
     /// Reconciles AppView dialog state with the `Root`-owned dialog stack. Called every render.
     pub(super) fn sync_dialog(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
@@ -20,6 +28,8 @@ impl AppView {
             Some(DialogKind::DbDialog)
         } else if self.password_prompt.is_some() {
             Some(DialogKind::Password)
+        } else if self.rename_prompt.is_some() {
+            Some(DialogKind::Rename)
         } else if self.error_dialog.is_some() {
             Some(DialogKind::Error)
         } else if self.delete_confirm.is_some() {
@@ -42,6 +52,7 @@ impl AppView {
             Some(DialogKind::ConnectionForm) => self.open_connection_form_dialog(window, cx),
             Some(DialogKind::DbDialog) => self.open_db_dialog(window, cx),
             Some(DialogKind::Password) => self.open_password_prompt(window, cx),
+            Some(DialogKind::Rename) => self.open_rename_dialog(window, cx),
             Some(DialogKind::Error) => self.open_error_dialog(window, cx),
             Some(DialogKind::Confirm) => self.open_confirm_dialog(window, cx),
             Some(DialogKind::Options) => self.open_options_dialog(window, cx),
@@ -212,13 +223,35 @@ impl AppView {
 
     fn open_error_dialog(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let app = cx.entity();
-        window.open_dialog(cx, move |dialog, _window, cx| {
+        window.open_dialog(cx, move |dialog, window, cx| {
             let message = app.update(cx, |app, _| app.error_dialog.clone().unwrap_or_default());
+            let theme = app.read(cx).theme;
             let on_ok = app.downgrade();
             let on_close = app.downgrade();
+            let footer_ok = app.downgrade();
             dialog
                 .title(t!("error.title").to_string())
+                .margin_top(centered_margin_top(window, 170.0))
                 .content(move |content, _window, _cx| content.child(message.clone()))
+                .footer(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .justify_end()
+                        .w_full()
+                        .child(ui::button(
+                            "error-ok",
+                            t!("form.ok").to_string(),
+                            ButtonKind::Default,
+                            theme,
+                            move |_event, _window, cx| {
+                                let _ = footer_ok.update(cx, |app, cx| {
+                                    app.error_dialog = None;
+                                    cx.notify();
+                                });
+                            },
+                        )),
+                )
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text(t!("form.ok").to_string())
@@ -242,14 +275,46 @@ impl AppView {
 
     fn open_confirm_dialog(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let app = cx.entity();
-        window.open_dialog(cx, move |dialog, _window, cx| {
+        window.open_dialog(cx, move |dialog, window, cx| {
             let (title, message, confirm_label) = app.update(cx, |app, _| app.confirm_texts());
+            let theme = app.read(cx).theme;
             let on_ok = app.downgrade();
             let on_cancel = app.downgrade();
             let on_close = app.downgrade();
+            let footer_ok = app.downgrade();
+            let footer_cancel = app.downgrade();
+            let ok_label = confirm_label.clone();
+
             dialog
                 .title(title)
+                .margin_top(centered_margin_top(window, 180.0))
                 .content(move |content, _window, _cx| content.child(message.clone()))
+                .footer(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .justify_end()
+                        .gap_2()
+                        .w_full()
+                        .child(ui::button(
+                            "confirm-cancel",
+                            t!("form.cancel").to_string(),
+                            ButtonKind::Normal,
+                            theme,
+                            move |_event, _window, cx| {
+                                let _ = footer_cancel.update(cx, |app, cx| app.cancel_delete(cx));
+                            },
+                        ))
+                        .child(ui::button(
+                            "confirm-ok",
+                            ok_label,
+                            ButtonKind::Danger,
+                            theme,
+                            move |_event, _window, cx| {
+                                let _ = footer_ok.update(cx, |app, cx| app.confirm_delete(cx));
+                            },
+                        )),
+                )
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text(confirm_label)
@@ -273,7 +338,7 @@ impl AppView {
 
     fn open_password_prompt(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let app = cx.entity();
-        window.open_dialog(cx, move |dialog, _window, cx| {
+        window.open_dialog(cx, move |dialog, window, cx| {
             let (title, input) = app.update(cx, |app, _| {
                 let prompt = app.password_prompt.as_ref().expect("password prompt");
                 let name = app
@@ -286,15 +351,48 @@ impl AppView {
                     prompt.input.clone(),
                 )
             });
+            let theme = app.read(cx).theme;
             let toggle = app.downgrade();
             let on_ok = app.downgrade();
             let on_cancel = app.downgrade();
             let on_close = app.downgrade();
+            let footer_ok = app.downgrade();
+            let footer_cancel = app.downgrade();
             let focused = Rc::new(Cell::new(false));
             let content_app = app.clone();
 
             dialog
                 .title(title)
+                .margin_top(centered_margin_top(window, 240.0))
+                .footer(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .justify_end()
+                        .gap_2()
+                        .w_full()
+                        .child(ui::button(
+                            "password-cancel",
+                            t!("form.cancel").to_string(),
+                            ButtonKind::Normal,
+                            theme,
+                            move |_event, _window, cx| {
+                                let _ = footer_cancel.update(cx, |app, cx| {
+                                    app.password_prompt = None;
+                                    cx.notify();
+                                });
+                            },
+                        ))
+                        .child(ui::button(
+                            "password-ok",
+                            t!("form.ok").to_string(),
+                            ButtonKind::Default,
+                            theme,
+                            move |_event, _window, cx| {
+                                let _ = footer_ok.update(cx, |app, cx| app.submit_password(cx));
+                            },
+                        )),
+                )
                 .content(move |content, window, cx| {
                     let (save_password, theme) = content_app.update(cx, |app, _| {
                         let save = app
@@ -363,6 +461,172 @@ impl AppView {
         });
     }
 
+    /// Open the "rename table" prompt (a single text field, no confirmation step).
+    fn open_rename_dialog(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let app = cx.entity();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let (title, input) = app.update(cx, |app, _| {
+                let prompt = app.rename_prompt.as_ref().expect("rename prompt");
+                (
+                    format!("{} - {}", t!("object.rename_table"), prompt.old_name),
+                    prompt.input.clone(),
+                )
+            });
+            let theme = app.read(cx).theme;
+            let on_ok = app.downgrade();
+            let on_cancel = app.downgrade();
+            let on_close = app.downgrade();
+            let footer_ok = app.downgrade();
+            let footer_cancel = app.downgrade();
+            let focused = Rc::new(Cell::new(false));
+
+            dialog
+                .title(title)
+                .margin_top(centered_margin_top(window, 210.0))
+                .footer(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .justify_end()
+                        .gap_2()
+                        .w_full()
+                        .child(ui::button(
+                            "rename-cancel",
+                            t!("form.cancel").to_string(),
+                            ButtonKind::Normal,
+                            theme,
+                            move |_event, _window, cx| {
+                                let _ = footer_cancel.update(cx, |app, cx| {
+                                    app.rename_prompt = None;
+                                    cx.notify();
+                                });
+                            },
+                        ))
+                        .child(ui::button(
+                            "rename-ok",
+                            t!("object.rename_button").to_string(),
+                            ButtonKind::Default,
+                            theme,
+                            move |_event, _window, cx| {
+                                let _ = footer_ok.update(cx, |app, cx| app.submit_rename(cx));
+                            },
+                        )),
+                )
+                .content(move |content, window, cx| {
+                    if !focused.get() {
+                        focused.set(true);
+                        let handle = input.read(cx).focus_handle();
+                        window.focus(&handle, cx);
+                    }
+                    content.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .child(t!("object.rename_label").to_string()),
+                            )
+                            .child(div().h(px(28.0)).child(input.clone())),
+                    )
+                })
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text(t!("object.rename_button").to_string())
+                        .cancel_text(t!("form.cancel").to_string())
+                        .show_cancel(true)
+                        .on_ok(move |_, _, cx| {
+                            let _ = on_ok.update(cx, |app, cx| app.submit_rename(cx));
+                            true
+                        })
+                        .on_cancel(move |_, _, cx| {
+                            let _ = on_cancel.update(cx, |app, cx| {
+                                app.rename_prompt = None;
+                                cx.notify();
+                            });
+                            true
+                        }),
+                )
+                .on_close(move |_, _, cx| {
+                    let _ = on_close.update(cx, |app, cx| {
+                        app.rename_prompt = None;
+                        cx.notify();
+                    });
+                })
+        });
+    }
+
+    /// Open the rename prompt for a table, pre-filled with its current name.
+    pub(super) fn open_rename_table(
+        &mut self,
+        connection_index: usize,
+        database_index: usize,
+        old_name: String,
+        _is_view: bool,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let theme = self.theme;
+        let weak = cx.weak_entity();
+        let change = weak.clone();
+        let submit = weak.clone();
+        let initial = old_name.clone();
+        let input = cx.new(move |cx| {
+            TextInput::new(
+                theme,
+                initial,
+                TextInputOptions {
+                    placeholder: SharedString::from(t!("object.rename_label").to_string()),
+                    ..Default::default()
+                },
+                cx,
+            )
+            .on_change(Rc::new(move |text, _window, cx| {
+                let _ = change.update(cx, |app, cx| {
+                    if let Some(prompt) = app.rename_prompt.as_mut() {
+                        prompt.new_name = text.to_string();
+                    }
+                    cx.notify();
+                });
+            }))
+            .on_submit(Rc::new(move |_window, cx| {
+                let _ = submit.update(cx, |app, cx| app.submit_rename(cx));
+            }))
+        });
+        let focus = input.read(cx).focus_handle();
+        self.rename_prompt = Some(RenamePrompt {
+            connection_index,
+            database_index,
+            old_name: old_name.clone(),
+            new_name: old_name,
+            input,
+        });
+        self.rename_focus_pending = true;
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    /// Apply the rename prompt, rejecting an empty or unchanged name.
+    pub(super) fn submit_rename(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(prompt) = self.rename_prompt.take() else {
+            return;
+        };
+        let new_name = prompt.new_name.trim().to_string();
+        if new_name.is_empty() || new_name == prompt.old_name {
+            cx.notify();
+            return;
+        }
+        self.rename_table(
+            prompt.connection_index,
+            prompt.database_index,
+            prompt.old_name,
+            new_name,
+            cx,
+        );
+        cx.notify();
+    }
+
     /// The title/message/confirm label for the pending destructive action.
     fn confirm_texts(&self) -> (String, String, String) {
         match self.delete_confirm.as_ref() {
@@ -384,6 +648,32 @@ impl AppView {
                     t!("connection.delete_title").to_string(),
                     t!("connection.delete_confirm", name = name).to_string(),
                     t!("connection.delete_button").to_string(),
+                )
+            }
+            Some(DeleteConfirm::Table {
+                name, operation, ..
+            }) => {
+                let (title_key, message_key, button_key) = match operation {
+                    TableOperation::Drop => (
+                        "object.delete_table",
+                        "object.drop_confirm",
+                        "object.drop_button",
+                    ),
+                    TableOperation::Empty => (
+                        "object.empty_table",
+                        "object.empty_confirm",
+                        "object.empty_button",
+                    ),
+                    TableOperation::Truncate => (
+                        "object.truncate_table",
+                        "object.truncate_confirm",
+                        "object.truncate_button",
+                    ),
+                };
+                (
+                    t!(title_key).to_string(),
+                    t!(message_key, name = name.clone()).to_string(),
+                    t!(button_key).to_string(),
                 )
             }
             None => (String::new(), String::new(), t!("form.ok").to_string()),
