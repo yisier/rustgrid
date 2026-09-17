@@ -1,0 +1,17 @@
+[package]
+name = "rustgrid-mysql"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+rustgrid-core.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+sqlx.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

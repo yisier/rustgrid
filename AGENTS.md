@@ -6,13 +6,13 @@ not a later refactor.
 
 ## Repository layout (Cargo workspace)
 
-- `crates/navidog-core` — engine-agnostic domain: `Driver`/`Connection` traits, models
+- `crates/rustgrid-core` — engine-agnostic domain: `Driver`/`Connection` traits, models
   (`CellValue`, `ConnectionProfile`, `TablePage`, ...), `Error`, `DriverRegistry`.
   **No sqlx / GPUI / OS dependencies here.**
-- `crates/navidog-mysql` — the only compiled-in driver; implements the core traits with sqlx.
-- `crates/navidog-config` — versioned settings/profiles plus encrypted secret storage in the
+- `crates/rustgrid-mysql` — the only compiled-in driver; implements the core traits with sqlx.
+- `crates/rustgrid-config` — versioned settings/profiles plus encrypted secret storage in the
   OS config dir (`connections.json`, `settings.json`, `secrets.json`).
-- `crates/navidog-app` — GPUI binary `navidog`: `src/app/` is the view/render layer, split
+- `crates/rustgrid-app` — GPUI binary `rustgrid`: `src/app/` is the view/render layer, split
   by feature (`mod.rs` holds `AppView`, its state, the `Render` entry, free helpers and
   tests; the rest are `impl AppView` submodules: `tree`, `database`, `db_dialog`, `objects`,
   `sidebar`, `tabs`, `toolbar`, `query`, `query_view`, `query_editor`, `grid`, `grid_input`,
@@ -52,18 +52,18 @@ not a later refactor.
 
 - **After every code change, ALWAYS build automatically before finishing** (do not wait to be
   asked): run `cargo fmt --all` then `cargo build` (use the GNU toolchain env vars in Gotchas on
-  Windows). A faster `cargo check -p navidog-app` (or `cargo check --workspace`) may be used while
+  Windows). A faster `cargo check -p rustgrid-app` (or `cargo check --workspace`) may be used while
   iterating; finish with `cargo build`. Debug builds do not need the shader toolchain below.
 - `cargo check --workspace` / `cargo build`
-- `cargo run -p navidog-app` (produced binary is `navidog`)
-- Release build (`cargo build --release -p navidog-app`) normally needs no shader toolchain
+- `cargo run -p rustgrid-app` (produced binary is `rustgrid`)
+- Release build (`cargo build --release -p rustgrid-app`) normally needs no shader toolchain
   (gpui-kit enables `runtime_shaders`). If that ever changes, see Gotchas: build the fallback
   shim once with `gcc -O2 -o fxc.exe tools/fxc-shim/fxc.c -lkernel32`, then run cargo with
   `GPUI_FXC_PATH=<abs path to fxc.exe>` (plus the GNU toolchain env vars below).
 - `cargo test --workspace`
-- Live MySQL integration test (ignored by default): set `NAVIDOG_MYSQL_PASSWORD` (and
-  optionally `NAVIDOG_MYSQL_HOST`/`PORT`/`USER`/`DATABASE`), then
-  `cargo test -p navidog-mysql -- --ignored`. It exercises connect, catalog listing, paging,
+- Live MySQL integration test (ignored by default): set `RUSTGRID_MYSQL_PASSWORD` (and
+  optionally `RUSTGRID_MYSQL_HOST`/`PORT`/`USER`/`DATABASE`), then
+  `cargo test -p rustgrid-mysql -- --ignored`. It exercises connect, catalog listing, paging,
   and the auth-failure mapping against a real server.
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo fmt --all`
@@ -76,15 +76,15 @@ not a later refactor.
 Keep engine-specific code out of the UI/app layers. Adding a second engine must not require
 touching UI code.
 
-- **Engine abstraction.** UI depends only on `navidog_core::{Driver, Connection}` and core
+- **Engine abstraction.** UI depends only on `rustgrid_core::{Driver, Connection}` and core
   models — never on `sqlx::MySql*` types or raw SQL strings.
 - **Driver loading.** `DriverRegistry` plus the `DriverSource` trait are the loader boundary.
   Future runtime driver installation adds a `DriverSource`; keep each driver in its own crate
   so it can be built/distributed independently. Do not assume a single bundled driver.
 - **Internationalization.** Route every user-facing string through `t!`. Keys live in
-  `crates/navidog-app/locales/{en,zh-CN}.yml` and must be added to **all** locale files.
+  `crates/rustgrid-app/locales/{en,zh-CN}.yml` and must be added to **all** locale files.
   `t!` returns `Cow<'_, str>`; call `.to_string()` before handing it to a gpui element.
-- **Config storage.** Use `navidog_config::ConfigStore`. It owns three files under the OS
+- **Config storage.** Use `rustgrid_config::ConfigStore`. It owns three files under the OS
   config dir: `connections.json` (`CURRENT_VERSION`), `settings.json` (`SETTINGS_VERSION`),
   and encrypted `secrets.json` + `secret.key`. Bump the matching version and extend `migrate()`
   when a schema changes. **Passwords never live in a profile** — they are keyed by profile
@@ -245,18 +245,18 @@ do not build those features early.
   parenthesized). Each node carries its own `FilterConjunction` (how it joins its previous sibling),
   so a group may mix `AND`/`OR`; the root is an implicit list. UI rows are addressed by a node
   **path** (`Vec<usize>`, indices from the root) — keep that in sync when adding node operations.
-  `navidog-mysql::filter_clause` and `session.rs::filter_display_clause` recurse over the tree,
+  `rustgrid-mysql::filter_clause` and `session.rs::filter_display_clause` recurse over the tree,
   skip disabled/incomplete nodes, drop groups left empty, and must keep bind order identical to the
   rendered `?` placeholders. Row layout: the first condition of a group is flush left (no
   conjunction gutter); later conditions show the `并且/或者` toggle in that gutter. A group's
   boundary row reuses the group's indent, centres its controls under the operator (`=`) column, and
   reveals the `+`/`−` group actions only on hover (`group_hover`).
 
-- `navidog-mysql::map_connect_error` flags authentication failures as
-  `navidog_core::Error::Authentication` by checking `MySqlDatabaseError::number()`
+- `rustgrid-mysql::map_connect_error` flags authentication failures as
+  `rustgrid_core::Error::Authentication` by checking `MySqlDatabaseError::number()`
   (1044/1045/1698) — **not** `DatabaseError::code()`, which returns the SQLSTATE (e.g.
   `28000`). The app keys its password prompt off this variant.
-- `navidog-mysql::decode_cell` uses sqlx's **checked** `try_get` (which enforces
+- `rustgrid-mysql::decode_cell` uses sqlx's **checked** `try_get` (which enforces
   `Type::compatible`) for every known type, then falls back to `try_get_unchecked::<Vec<u8>>`
   + UTF-8 for text-encoded types (DECIMAL, JSON) and raw bytes otherwise. Do not reorder to
   put `String` first or use `try_get_unchecked` for numeric/binary types: checked decoding is
@@ -269,7 +269,7 @@ do not build those features early.
   statement and MySQL rejects it with `1295 ... not supported in the prepared statement
   protocol yet`. Reserve `sqlx::query` for parameterized DML/`SELECT`.
 - The query editor runs arbitrary SQL through `Connection::execute_query`
-  (`navidog-mysql`), which uses the text protocol on a **pinned pooled connection** (so `USE db`
+  (`rustgrid-mysql`), which uses the text protocol on a **pinned pooled connection** (so `USE db`
   and the statement share a session). Since MySQL cannot tell the caller whether a statement
   returns rows ahead of time, `returns_result_set` classifies it by the leading keyword: that path
   uses `raw_sql(..).fetch_all` (falling back to `prepare` for column metadata on a 0-row result),
@@ -284,7 +284,7 @@ do not build those features early.
 - DB work is tokio-based but gpui's executor is not tokio. Inside `cx.spawn`, run sqlx
   futures through `Runtime::spawn` and `.await` the returned `JoinHandle` (see
   `app.rs`). Awaiting sqlx directly in a gpui task panics with "there is no reactor running".
-- Stored passwords are encrypted with XChaCha20-Poly1305 (`navidog-config/src/secrets.rs`);
+- Stored passwords are encrypted with XChaCha20-Poly1305 (`rustgrid-config/src/secrets.rs`);
   `secrets.json` holds ciphertext keyed by profile `id` and `secret.key` holds the key. The
   profile JSON must stay password-free (a test asserts the plaintext never hits disk).
 - **Windows needs a linker and a C compiler** (sqlx's `ring`). On this machine the MSVC
@@ -292,7 +292,7 @@ do not build those features early.
   `RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-gnu`,
   `CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=gcc`, `CC=gcc` (MinGW-w64 `gcc` is on `PATH`).
   A plain `cargo build` fails with `linker link.exe not found`. With the GNU toolchain the
-  host *is* the GNU target, so the binary lands at `target/debug/navidog.exe` (not under a
+  host *is* the GNU target, so the binary lands at `target/debug/rustgrid.exe` (not under a
   triple-named subdirectory).
 - Keep GPUI usage close to the shapes verified in `main.rs` and the `ui/` wrappers.
   `main.rs` opens the window as `gpui_kit::application().with_assets(Assets).run(|cx| { gpui_kit::init(cx); … })`

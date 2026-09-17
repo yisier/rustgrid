@@ -14,7 +14,7 @@
  *   gcc -O2 -o fxc.exe tools/fxc-shim/fxc.c -lkernel32
  *
  * Then point gpui at it before a release build:
- *   GPUI_FXC_PATH=<abs path to fxc.exe> cargo build --release -p navidog-app
+ *   GPUI_FXC_PATH=<abs path to fxc.exe> cargo build --release -p rustgrid-app
  */
 
 #include <windows.h>

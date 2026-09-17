@@ -1,10 +1,10 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/navidog-core",
-    "crates/navidog-mysql",
-    "crates/navidog-config",
-    "crates/navidog-app",
+    "crates/rustgrid-core",
+    "crates/rustgrid-mysql",
+    "crates/rustgrid-config",
+    "crates/rustgrid-app",
 ]
 
 [workspace.package]
@@ -12,13 +12,13 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.94"
 license = "Apache-2.0"
-repository = "https://github.com/yisier/navidog"
+repository = "https://github.com/yisier/rustgrid"
 authors = ["yisier"]
 
 [workspace.dependencies]
-navidog-core = { path = "crates/navidog-core" }
-navidog-mysql = { path = "crates/navidog-mysql" }
-navidog-config = { path = "crates/navidog-config" }
+rustgrid-core = { path = "crates/rustgrid-core" }
+rustgrid-mysql = { path = "crates/rustgrid-mysql" }
+rustgrid-config = { path = "crates/rustgrid-config" }
 
 async-trait = "0.1"
 chrono = "0.4"

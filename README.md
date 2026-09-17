@@ -1,15 +1,15 @@
 English | [简体中文](README_zh.md)
 
-# Navidog
+# RustGrid
 
 > A Navicat-compatible database GUI — migrate with zero cost and zero learning curve.
 
-Navidog is a cross-platform (Windows / macOS / Linux) database management tool built with
+RustGrid is a cross-platform (Windows / macOS / Linux) database management tool built with
 **Rust + GPUI**. It follows Navicat's layout and interaction conventions, so you can switch
 from Navicat without re-learning anything: the connection tree, object panes, toolbars and
 dialogs all behave the way you already expect.
 
-## Why Navidog
+## Why RustGrid
 
 - **Zero-cost migration from Navicat** — familiar connection tree, object lists, toolbars and dialogs.
 - **Same habits, no learning curve** — interactions mirror Navicat's workflow.
@@ -18,12 +18,12 @@ dialogs all behave the way you already expect.
 
 ## Not a WebView
 
-Navidog is a native application rendered directly on the GPU with GPUI — it is **not** a
+RustGrid is a native application rendered directly on the GPU with GPUI — it is **not** a
 WebView/Electron-style app. Many database GUI tools embed a browser engine (Chromium,
 Electron, WebView2, or a similar web runtime) and draw their interface with HTML/CSS/JS.
-Navidog does not.
+RustGrid does not.
 
-|                          | WebView / Electron-based tools                     | Navidog                                              |
+|                          | WebView / Electron-based tools                     | RustGrid                                              |
 | ------------------------ | -------------------------------------------------- | ---------------------------------------------------- |
 | UI stack                 | HTML/CSS/JS inside an embedded browser             | Native GPUI elements rendered on the GPU             |
 | Runtime                  | Bundles a browser engine or relies on a system WebView | No browser engine; a single native binary        |
@@ -31,14 +31,14 @@ Navidog does not.
 | Look and feel            | Web widgets                                        | Native desktop look (classic window / dialog style)  |
 | System integration       | Runs inside a web sandbox                          | Direct integration with native OS windows            |
 
-Because there is no browser engine to ship or load, Navidog does not require WebView2 on
+Because there is no browser engine to ship or load, RustGrid does not require WebView2 on
 Windows, WebKitGTK on Linux, or any other system web runtime, and it renders consistently
 across platforms. The result feels like a native desktop application rather than a web page
 inside a window.
 
 ## Supported databases (roadmap)
 
-Navidog is designed around an engine-agnostic driver layer, so adding a new database only
+RustGrid is designed around an engine-agnostic driver layer, so adding a new database only
 means adding a driver — the UI stays the same.
 
 | Engine      | Status                                    |
@@ -49,7 +49,7 @@ means adding a driver — the UI stays the same.
 | Oracle      | Planned                                   |
 | SQLite      | Planned                                   |
 
-> Navidog is iterating rapidly. **MySQL support is currently under active development.** The
+> RustGrid is iterating rapidly. **MySQL support is currently under active development.** The
 > current build can already connect, browse databases/tables/views, manage databases
 > (create/edit/delete with charset and collation) and preview table data with pagination.
 
@@ -67,12 +67,12 @@ means adding a driver — the UI stays the same.
 Prerequisite: Rust stable (edition 2024; the toolchain is pinned in `rust-toolchain.toml`).
 
 ```bash
-git clone https://github.com/yisier/navidog.git
-cd navidog
-cargo run -p navidog-app
+git clone https://github.com/yisier/rustgrid.git
+cd rustgrid
+cargo run -p rustgrid-app
 ```
 
-The produced binary is named `navidog`.
+The produced binary is named `rustgrid`.
 
 On Windows a linker and C compiler are required (for sqlx's `ring`). The default MSVC
 toolchain works when MSVC Build Tools are installed. Otherwise use the GNU toolchain:
@@ -81,15 +81,15 @@ toolchain works when MSVC Build Tools are installed. Otherwise use the GNU toolc
 $env:RUSTUP_TOOLCHAIN="stable-x86_64-pc-windows-gnu"
 $env:CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="gcc"
 $env:CC="gcc"
-cargo run -p navidog-app
+cargo run -p rustgrid-app
 ```
 
 ## Project layout (Cargo workspace)
 
-- `crates/navidog-core` — engine-agnostic domain: driver/connection traits and models.
-- `crates/navidog-mysql` — MySQL driver implementation.
-- `crates/navidog-config` — versioned settings/profiles and encrypted secret storage.
-- `crates/navidog-app` — the GPUI desktop application (binary `navidog`).
+- `crates/rustgrid-core` — engine-agnostic domain: driver/connection traits and models.
+- `crates/rustgrid-mysql` — MySQL driver implementation.
+- `crates/rustgrid-config` — versioned settings/profiles and encrypted secret storage.
+- `crates/rustgrid-app` — the GPUI desktop application (binary `rustgrid`).
 
 ## License
 

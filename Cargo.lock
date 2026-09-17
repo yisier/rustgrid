@@ -4241,60 +4241,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "navidog-app"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "embed-resource",
- "gpui-kit",
- "gpui-pre",
- "navidog-config",
- "navidog-core",
- "navidog-mysql",
- "raw-window-handle",
- "rust-i18n",
- "sqlformat",
- "sqlparser",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "windows 0.61.3",
-]
-
-[[package]]
-name = "navidog-config"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "chacha20poly1305",
- "directories",
- "navidog-core",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "navidog-core"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "serde",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "navidog-mysql"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "navidog-core",
- "sqlx",
- "tokio",
-]
-
-[[package]]
 name = "ndk-sys"
 version = "0.6.0+11769913"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6019,6 +5965,60 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
 dependencies = [
  "semver",
+]
+
+[[package]]
+name = "rustgrid-app"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "embed-resource",
+ "gpui-kit",
+ "gpui-pre",
+ "raw-window-handle",
+ "rust-i18n",
+ "rustgrid-config",
+ "rustgrid-core",
+ "rustgrid-mysql",
+ "sqlformat",
+ "sqlparser",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "windows 0.61.3",
+]
+
+[[package]]
+name = "rustgrid-config"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chacha20poly1305",
+ "directories",
+ "rustgrid-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "rustgrid-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "rustgrid-mysql"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "rustgrid-core",
+ "sqlx",
+ "tokio",
 ]
 
 [[package]]
