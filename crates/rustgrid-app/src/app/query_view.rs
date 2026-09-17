@@ -31,15 +31,6 @@ impl AppView {
             ))
             .child(toolbar_separator(theme))
             .child(self.query_tool_button(
-                "query-builder",
-                "icons/query_builder.svg",
-                t!("query.builder").to_string(),
-                theme.text,
-                theme.text,
-                false,
-                |_, _, _| {},
-            ))
-            .child(self.query_tool_button(
                 "query-format",
                 "icons/format_sql.svg",
                 t!("query.format").to_string(),
@@ -47,15 +38,6 @@ impl AppView {
                 theme.text,
                 true,
                 cx.listener(|this, _event, _window, cx| this.format_query(cx)),
-            ))
-            .child(self.query_tool_button(
-                "query-snippets",
-                "icons/snippets.svg",
-                t!("query.snippets").to_string(),
-                theme.text,
-                theme.text,
-                false,
-                |_, _, _| {},
             ));
 
         let has_connection = query
@@ -92,9 +74,7 @@ impl AppView {
                 theme.text,
                 theme.icon_connection,
                 run_enabled,
-                cx.listener(move |this, _event, _window, cx| {
-                    this.run_query(false, has_selection, cx)
-                }),
+                cx.listener(move |this, _event, _window, cx| this.run_query(has_selection, cx)),
             ))
             .child(self.query_tool_button(
                 "query-stop",
@@ -104,15 +84,6 @@ impl AppView {
                 theme.danger,
                 query.running,
                 cx.listener(|this, _event, _window, cx| this.stop_query(cx)),
-            ))
-            .child(self.query_tool_button(
-                "query-explain",
-                "icons/explain.svg",
-                t!("query.explain").to_string(),
-                theme.text,
-                theme.text,
-                run_enabled,
-                cx.listener(|this, _event, _window, cx| this.run_query(true, false, cx)),
             ));
 
         let editor = self.render_query_editor(query, cx).into_any_element();

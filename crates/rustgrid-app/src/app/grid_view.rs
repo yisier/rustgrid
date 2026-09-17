@@ -28,6 +28,7 @@ impl GridView {
             cell_editor_blur_subscription: None,
             cell_editor_focus_pending: false,
             date_picker: None,
+            inserts: Vec::new(),
             column_resize: None,
             sort_hover: None,
             sort_field_combos: BTreeMap::new(),
@@ -277,7 +278,17 @@ impl Render for GridView {
         let selection = self.state.selection;
         let edits = self.state.edits.clone();
         let rows = self.state.rows.clone();
+        let inserts = self.inserts.clone();
+        let data_rows = rows.len();
         let column_count = widths.len();
+        // A plain press is about to open the in-place editor on release, so paint that cell as an
+        // input right away instead of flashing the blue selection fill. A drag switches to a cell
+        // selection (`cell_dragged`), which then paints normally.
+        let pressed = self.cell_press;
+        let dragged = self.cell_dragged;
+        // Used to route the Tab/Shift+Tab cell actions from inside the (weak-context) list
+        // closure back into `GridView`.
+        let action_weak = self.self_weak.clone();
         let editing_temporal = self
             .date_picker
             .as_ref()
@@ -297,11 +308,13 @@ impl Render for GridView {
         let widths = Arc::new(widths);
         let list = uniform_list(
             SharedString::from(format!("grid-rows-{}", self.state.id)),
-            rows.len(),
+            data_rows + inserts.len(),
             move |range, _window, _cx| {
                 range
                     .map(|row_index| {
-                        let row = &rows[row_index];
+                        // Rows past the loaded page are pending inserts (gutter `*`, unset cells).
+                        let insert =
+                            (row_index >= data_rows).then(|| &inserts[row_index - data_rows]);
                         let base_background = if row_index % 2 == 1 {
                             theme.row_alt_bg
                         } else {
@@ -337,7 +350,7 @@ impl Render for GridView {
                                     }))
                                     .border_r_1()
                                     .border_color(rgb(theme.border))
-                                    .when(current_row, move |gutter| {
+                                    .when(insert.is_none() && current_row, move |gutter| {
                                         gutter.child(
                                             svg()
                                                 .path("icons/row_marker.svg")
@@ -350,30 +363,68 @@ impl Render for GridView {
                                                     theme.primary
                                                 })),
                                         )
+                                    })
+                                    .when(insert.is_some(), move |gutter| {
+                                        gutter.child(
+                                            div()
+                                                .text_size(px(12.0))
+                                                .font_weight(FontWeight::BOLD)
+                                                .text_color(rgb(if row_selected {
+                                                    theme.grid_selection_text
+                                                } else {
+                                                    theme.primary
+                                                }))
+                                                .child("*"),
+                                        )
                                     }),
                             );
-                        for (index, cell) in row.iter().enumerate() {
+                        for index in 0..column_count {
                             let width = widths.get(index).copied().unwrap_or(GRID_COLUMN_WIDTH);
                             let selected = selection
                                 .is_some_and(|selection| selection.contains(row_index, index));
-                            let edited = edits.get(&(row_index, index));
+                            // A pending insert row's staged value (`None` = explicit NULL).
+                            let staged = insert.and_then(|row| row.get(&index));
+                            let edited = if insert.is_some() {
+                                None
+                            } else {
+                                edits.get(&(row_index, index))
+                            };
                             let previewed = preview
                                 .as_ref()
                                 .filter(|(cells, _)| cells.contains(&(row_index, index)))
                                 .map(|(_, value)| value.clone());
-                            let cell_background = if selected {
+                            // The cell that owns the in-place editor reads as a plain input: no
+                            // selection fill behind the transparent editor.
+                            let editing_here = matches!(
+                                &editing_cell,
+                                Some((row, col, _)) if (*row, *col) == (row_index, index)
+                            );
+                            let pressing_here = !dragged && pressed == Some((row_index, index));
+                            let cell_background = if editing_here || pressing_here {
+                                theme.input_bg
+                            } else if selected {
                                 theme.grid_selection_bg
-                            } else if edited.is_some() || previewed.is_some() {
+                            } else if edited.is_some() || staged.is_some() || previewed.is_some() {
                                 theme.cell_edit_bg
                             } else {
                                 base_background
                             };
-                            let is_null = match (edited, &previewed) {
-                                (Some(Some(_)), _) | (_, Some(_)) => false,
-                                (Some(None), _) => true,
-                                (None, None) => matches!(cell, CellValue::Null),
+                            let is_null = if insert.is_some() {
+                                !matches!(staged, Some(Some(_)))
+                            } else {
+                                let cell = rows[row_index].get(index);
+                                match (edited, &previewed) {
+                                    (Some(Some(_)), _) | (_, Some(_)) => false,
+                                    (Some(None), _) => true,
+                                    (None, None) => matches!(cell, Some(CellValue::Null)),
+                                }
                             };
-                            let display = if let Some(value) = previewed {
+                            let display = if insert.is_some() {
+                                match staged {
+                                    Some(Some(value)) => value.clone(),
+                                    _ => "(Null)".to_string(),
+                                }
+                            } else if let Some(value) = previewed {
                                 value
                             } else {
                                 match edited {
@@ -383,7 +434,7 @@ impl Render for GridView {
                                         if is_null {
                                             "(Null)".to_string()
                                         } else {
-                                            cell.as_display()
+                                            rows[row_index][index].as_display()
                                         }
                                     }
                                 }
@@ -420,13 +471,32 @@ impl Render for GridView {
                                         .child("…"),
                                 );
                             }
-                            if selected {
+                            if editing_here || pressing_here {
+                                // The in-place editor reads as a normal field, not as a null cell.
+                                cell_element = cell_element.text_color(rgb(theme.text));
+                            } else if selected {
                                 cell_element =
                                     cell_element.text_color(rgb(theme.grid_selection_text));
                             } else if is_null {
                                 cell_element = cell_element
                                     .text_color(rgb(theme.text_null))
                                     .font_weight(FontWeight::THIN);
+                            }
+                            if editing_here {
+                                let next_weak = action_weak.clone();
+                                let prev_weak = action_weak.clone();
+                                cell_element = cell_element
+                                    .key_context(GRID_CELL_CONTEXT)
+                                    .on_action(move |_: &NextCell, window, cx| {
+                                        let _ = next_weak.update(cx, |grid, cx| {
+                                            grid.cell_editor_tab(false, window, cx);
+                                        });
+                                    })
+                                    .on_action(move |_: &PrevCell, window, cx| {
+                                        let _ = prev_weak.update(cx, |grid, cx| {
+                                            grid.cell_editor_tab(true, window, cx);
+                                        });
+                                    });
                             }
                             match &editing_cell {
                                 Some((row, col, input)) if (*row, *col) == (row_index, index) => {
@@ -511,12 +581,14 @@ impl Render for GridView {
                 .relative()
                 .flex()
                 .flex_1()
+                .min_w(px(0.0))
                 .min_h(px(0.0))
                 .child(
                     div()
                         .flex()
                         .flex_row()
                         .flex_1()
+                        .min_w(px(0.0))
                         .min_h(px(0.0))
                         .child(
                             div()
@@ -547,7 +619,7 @@ impl Render for GridView {
                                         return;
                                     }
                                     let delta = match event.delta {
-                                        ScrollDelta::Lines(delta) => delta.y,
+                                        ScrollDelta::Lines(delta) => delta.y * GRID_ROW_HEIGHT,
                                         ScrollDelta::Pixels(delta) => f32::from(delta.y),
                                     };
                                     if delta == 0.0 {

@@ -377,12 +377,7 @@ impl AppView {
         cx.notify();
     }
 
-    pub(super) fn run_query(
-        &mut self,
-        explain: bool,
-        selected_only: bool,
-        cx: &mut Context<'_, Self>,
-    ) {
+    pub(super) fn run_query(&mut self, selected_only: bool, cx: &mut Context<'_, Self>) {
         let Some(index) = self.active_query else {
             return;
         };
@@ -400,22 +395,14 @@ impl AppView {
         if original.is_empty() {
             return;
         }
-        let executable = if explain {
-            format!("EXPLAIN {}", original.trim_end_matches(';').trim())
-        } else {
-            original.clone()
-        };
+        let executable = original.clone();
         let database = tab.database.clone();
         let connection_name = tab
             .connection_index
             .and_then(|connection_index| self.connections.get(connection_index))
             .map(|node| node.profile.name.clone())
             .unwrap_or_default();
-        let inferred = if explain {
-            None
-        } else {
-            sql::infer_single_table(&original)
-        };
+        let inferred = sql::infer_single_table(&original);
         let Some(connection) = tab.connection_index.and_then(|i| self.connection_arc(i)) else {
             let old = self.queries.get(index).and_then(|tab| tab.grid_id);
             if let Some(old) = old

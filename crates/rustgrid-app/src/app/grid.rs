@@ -146,6 +146,41 @@ impl AppView {
 }
 
 impl GridView {
+    /// The number of rows the grid paints: the loaded page plus any pending insert rows.
+    pub(super) fn display_row_count(&self) -> usize {
+        self.state.rows.len() + self.inserts.len()
+    }
+
+    /// The staged value of a cell, whether it is an existing row's pending edit or a pending
+    /// insert row's value. `Some(None)` means an explicit `NULL`; `None` means no staged value.
+    pub(super) fn staged_value(&self, row: usize, col: usize) -> Option<&Option<String>> {
+        let data_rows = self.state.rows.len();
+        if row < data_rows {
+            self.state.edits.get(&(row, col))
+        } else {
+            self.inserts.get(row - data_rows)?.get(&col)
+        }
+    }
+
+    /// Append a blank insert row (the "+" button), select its first cell and reveal it.
+    pub(super) fn add_insert_row(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        if !self.state.editable || self.state.loading || self.state.columns.is_empty() {
+            return;
+        }
+        // Repeatedly pressing "+" right after an untouched row should just refocus it.
+        if !self.inserts.last().is_some_and(|row| row.is_empty()) {
+            self.inserts.push(BTreeMap::new());
+        }
+        if self.cell_editor.is_some() {
+            self.finish_cell_editor(cx);
+        }
+        let row = self.display_row_count() - 1;
+        self.state.selection = Some(CellSelection::new(row, 0));
+        self.list_scroll.scroll_to_item(row, ScrollStrategy::Bottom);
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
     pub(super) fn load_page(&mut self, cx: &mut Context<'_, Self>) {
         if self.state.sql.is_some() {
             self.reload_query(cx);
@@ -156,6 +191,7 @@ impl GridView {
         self.state.error = None;
         self.state.selection = None;
         self.state.edits.clear();
+        self.inserts.clear();
 
         let connection = self.state.connection.clone();
         let database = self.state.database.clone();
@@ -214,6 +250,15 @@ impl GridView {
                 }
                 grid.sync_page_input();
                 cx.notify();
+                // The scroll extents are only known after this frame's paint, so schedule one
+                // more frame to reveal the scrollbars without waiting for a hover/resize.
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(32))
+                        .await;
+                    let _ = this.update(cx, |_, cx| cx.notify());
+                })
+                .detach();
             });
         })
         .detach();
@@ -229,6 +274,7 @@ impl GridView {
         self.state.error = None;
         self.state.selection = None;
         self.state.edits.clear();
+        self.inserts.clear();
         self.cell_editor = None;
         self.cell_editor_blur_subscription = None;
         self.date_picker = None;
@@ -273,6 +319,15 @@ impl GridView {
                 }
                 grid.sync_page_input();
                 cx.notify();
+                // Same as `load_page`: measure the scroll extents on a follow-up frame so the
+                // scrollbars show up as soon as the results paint.
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(32))
+                        .await;
+                    let _ = this.update(cx, |_, cx| cx.notify());
+                })
+                .detach();
             });
         })
         .detach();
@@ -900,6 +955,8 @@ impl GridView {
                 app.limit_records = !app.limit_records;
                 cx.notify();
             });
+            // The grid is cached and reads `limit_records` from `AppView`; push the change.
+            cx.notify();
         }
     }
 

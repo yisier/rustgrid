@@ -8,6 +8,20 @@ impl GridView {
         cx: &mut Context<'_, Self>,
     ) {
         if self.cell_editor.is_some() {
+            // The in-place editor owns the mouse inside its own cell: let gpui-kit's input place
+            // the caret and drag-select text instead of driving a cell selection under it.
+            let editing_here = self.grid_hit(event.position).is_some_and(|hit| match hit {
+                GridHit::Cell(row, col) => self
+                    .cell_editor
+                    .as_ref()
+                    .is_some_and(|editor| editor.row == row && editor.col == col),
+                GridHit::Gutter(_) => false,
+            });
+            if editing_here {
+                self.cell_press = None;
+                self.selecting_cells = false;
+                return;
+            }
             self.finish_cell_editor(cx);
         }
         self.date_picker = None;
@@ -21,7 +35,7 @@ impl GridView {
         match hit {
             GridHit::Gutter(row) => {
                 self.cell_press = None;
-                if !self.state.rows.is_empty() {
+                if self.display_row_count() > 0 {
                     self.state.selection = Some(CellSelection {
                         anchor: (row, 0),
                         cursor: (row, column_count.saturating_sub(1)),
@@ -57,14 +71,17 @@ impl GridView {
         let Some(hit) = self.grid_hit(event.position) else {
             return;
         };
+        let mut changed = false;
         if let GridHit::Cell(row, col) = hit
             && self.cell_press != Some((row, col))
+            && !self.cell_dragged
         {
             self.cell_dragged = true;
+            changed = true;
         }
-        if let Some(selection) = self.state.selection {
+        let next = self.state.selection.map(|selection| {
             let (start_row, _) = selection.rows();
-            self.state.selection = Some(match hit {
+            match hit {
                 GridHit::Gutter(row) => CellSelection {
                     anchor: (start_row, 0),
                     cursor: (row, self.state.columns.len().saturating_sub(1)),
@@ -73,18 +90,27 @@ impl GridView {
                     anchor: selection.anchor,
                     cursor: (row, col),
                 },
-            });
+            }
+        });
+        if let Some(next) = next
+            && self.state.selection != Some(next)
+        {
+            self.state.selection = Some(next);
+            changed = true;
         }
-        cx.notify();
+        // A pointer move within the same cell changes nothing on screen; only notify on a real
+        // change so a drag does not re-render the whole window for every pixel.
+        if changed {
+            cx.notify();
+        }
     }
 
-    /// Scroll the grid one row in response to a wheel notch, moving the selected row with the
-    /// viewport. Returns `true` when the event was consumed.
+    /// Scroll the grid by `delta` pixels (`> 0` scrolls toward the top) in response to the wheel,
+    /// keeping the selected row inside the viewport. Returns `true` when the event was consumed.
     ///
-    /// The viewport moves directly instead of the view snapping to the selection, so wheeling
-    /// continues from wherever the scrollbar left the view. A selection that is currently
-    /// off-screen moves to the edge row that scrolls into view rather than dragging the view
-    /// back to it.
+    /// Scrolling is pixel-based so trackpads and high-resolution wheels move smoothly instead of
+    /// jumping a whole row per event. A selection that is currently off-screen moves to the edge
+    /// row that scrolls into view rather than dragging the view back to it.
     pub(super) fn scroll_grid_selection(
         &mut self,
         _position: Point<Pixels>,
@@ -94,52 +120,92 @@ impl GridView {
         // The date picker is an absolute overlay anchored to a row; scrolling would leave it
         // floating over unrelated rows, so dismiss it instead.
         self.date_picker = None;
-        let handle = self.list_scroll.0.borrow().base_handle.clone();
-        let bounds = handle.bounds();
-        let rows = self.state.rows.len();
-        if rows == 0 {
+        // Scrolling is an implicit "done": commit and close the in-place editor so the view can
+        // move without a stale editor floating over another row.
+        if self.cell_editor.is_some() {
+            self.finish_cell_editor(cx);
+        }
+        let rows = self.display_row_count();
+        if rows == 0 || delta == 0.0 {
             return false;
         }
-
-        let step: isize = if delta > 0.0 { -1 } else { 1 };
-        let viewport_h = f32::from(bounds.size.height);
+        let handle = self.list_scroll.0.borrow().base_handle.clone();
+        let viewport_h = f32::from(handle.bounds().size.height);
         if viewport_h <= 0.0 {
             return false;
         }
-        // Derive the maximum scroll from the known row count instead of gpui's cached
-        // `max_offset` (which can be a frame behind right after a scrollbar drag) so wheeling
-        // never becomes stuck.
-        let max = (rows as f32 * GRID_ROW_HEIGHT - viewport_h).max(0.0);
+        // Prefer gpui's measured max, but fall back to the row count for the first frame after a
+        // page loads (the handle is replaced and its extents are not measured until paint). This
+        // keeps wheeling from getting stuck right after loading.
+        let mut max = f32::from(handle.max_offset().y);
         if max <= 0.0 {
-            return false;
+            max = (rows as f32 * GRID_ROW_HEIGHT - viewport_h).max(0.0);
+        }
+        if max <= 0.0 {
+            // No vertical overflow (every row is visible): the wheel moves the selected cell
+            // up/down instead of scrolling. With no selection, pan horizontally so a short but
+            // wide table's off-screen columns are still reachable.
+            if let Some(selection) = self.state.selection {
+                // One wheel notch moves the selection a single row, regardless of how many
+                // "lines" the OS reports for that notch.
+                let steps: isize = if delta > 0.0 { -1 } else { 1 };
+                let (row, col) = selection.cursor;
+                let new_row = (row as isize + steps).clamp(0, rows as isize - 1) as usize;
+                if new_row == row {
+                    return false;
+                }
+                self.state.selection = Some(CellSelection {
+                    anchor: (new_row, col),
+                    cursor: (new_row, col),
+                });
+                cx.notify();
+                return true;
+            }
+            return self.scroll_grid_horizontal(delta, cx);
         }
         let scroll = -f32::from(handle.offset().y);
-        let visible = (viewport_h / GRID_ROW_HEIGHT).floor().max(1.0) as usize;
-        let first = (scroll / GRID_ROW_HEIGHT).round() as isize;
-        let max_first = ((max / GRID_ROW_HEIGHT).round() as isize).max(0);
-        let new_scroll =
-            ((first + step).clamp(0, max_first) as f32 * GRID_ROW_HEIGHT).clamp(0.0, max);
+        let new_scroll = (scroll - delta).clamp(0.0, max);
         if (new_scroll - scroll).abs() < 0.5 {
             // Already at the top/bottom.
             return false;
         }
-
-        let new_first = (new_scroll / GRID_ROW_HEIGHT).round() as usize;
-        let new_last = (new_first + visible.saturating_sub(1)).min(rows - 1);
         let x = handle.offset().x;
         handle.set_offset(Point::new(x, px(-new_scroll)));
 
-        // Keep the cursor row inside the viewport, moving it to the edge if it scrolled away.
+        // Keep the cursor row inside the viewport, moving it to the nearest edge if it scrolled
+        // away (rather than dragging the view back to it).
         if let Some(selection) = self.state.selection {
             let (row, col) = selection.cursor;
-            let moved = (row as isize + step).clamp(0, rows as isize - 1) as usize;
-            let new_row = moved.clamp(new_first, new_last);
-            self.state.selection = Some(CellSelection {
-                anchor: (new_row, col),
-                cursor: (new_row, col),
-            });
+            let first = (new_scroll / GRID_ROW_HEIGHT).floor() as usize;
+            let visible = (viewport_h / GRID_ROW_HEIGHT).ceil() as usize;
+            let last = (first + visible).min(rows);
+            if row < first || row >= last {
+                let new_row = row.clamp(first, last.saturating_sub(1));
+                self.state.selection = Some(CellSelection {
+                    anchor: (new_row, col),
+                    cursor: (new_row, col),
+                });
+            }
         }
 
+        cx.notify();
+        true
+    }
+
+    /// Fallback wheel behavior when the grid cannot scroll vertically: pan horizontally so a
+    /// short but wide table's off-screen columns are still reachable.
+    fn scroll_grid_horizontal(&mut self, delta: f32, cx: &mut Context<'_, Self>) -> bool {
+        let max = f32::from(self.hscroll.max_offset().x);
+        if max <= 0.0 {
+            return false;
+        }
+        let scroll = -f32::from(self.hscroll.offset().x);
+        let new_scroll = (scroll - delta).clamp(0.0, max);
+        if (new_scroll - scroll).abs() < 0.5 {
+            return false;
+        }
+        let y = self.hscroll.offset().y;
+        self.hscroll.set_offset(Point::new(px(-new_scroll), y));
         cx.notify();
         true
     }
@@ -183,7 +249,7 @@ impl GridView {
     }
 
     pub(super) fn grid_hit(&self, position: Point<Pixels>) -> Option<GridHit> {
-        if self.state.rows.is_empty() {
+        if self.display_row_count() == 0 {
             return None;
         }
         let handle = self.list_scroll.0.borrow().base_handle.clone();
@@ -191,14 +257,15 @@ impl GridView {
         if bounds.size.width <= px(0.0) || bounds.size.height <= px(0.0) {
             return None;
         }
-        let local_x = f32::from(position.x) - f32::from(bounds.left());
+        let local_x =
+            f32::from(position.x) - f32::from(bounds.left()) - f32::from(self.hscroll.offset().x);
         let local_y =
             f32::from(position.y) - f32::from(bounds.top()) - f32::from(handle.offset().y);
         if local_x < 0.0 || local_y < 0.0 {
             return None;
         }
         let row = (local_y / GRID_ROW_HEIGHT).floor() as usize;
-        if row >= self.state.rows.len() {
+        if row >= self.display_row_count() {
             return None;
         }
         if local_x < GRID_GUTTER_WIDTH {
@@ -220,14 +287,21 @@ impl GridView {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        if self.cell_editor.is_some() || self.date_picker.is_some() {
-            return;
-        }
         let keystroke = &event.keystroke;
         if keystroke.modifiers.control || keystroke.modifiers.platform {
-            if keystroke.key.eq_ignore_ascii_case("z") {
+            // Save works while the in-place editor holds focus too (the key bubbles up to here).
+            if keystroke.key.eq_ignore_ascii_case("s") {
+                self.save_grid(cx);
+                cx.stop_propagation();
+            } else if self.cell_editor.is_none()
+                && self.date_picker.is_none()
+                && keystroke.key.eq_ignore_ascii_case("z")
+            {
                 self.undo_edit(cx);
             }
+            return;
+        }
+        if self.cell_editor.is_some() || self.date_picker.is_some() {
             return;
         }
         let Some((row, col)) = self.state.selection.map(|s| s.cursor) else {
@@ -236,7 +310,7 @@ impl GridView {
 
         match keystroke.key.as_str() {
             "up" | "down" | "left" | "right" => {
-                let row_count = self.state.rows.len();
+                let row_count = self.display_row_count();
                 let col_count = self.state.columns.len();
                 if row_count == 0 || col_count == 0 {
                     return;
@@ -301,9 +375,19 @@ impl GridView {
         if cells.is_empty() {
             return;
         }
+        let data_rows = self.state.rows.len();
         let mut action = Vec::new();
         for (row, col) in cells {
-            if row >= self.state.rows.len() || col >= self.state.columns.len() {
+            if col >= self.state.columns.len() {
+                continue;
+            }
+            if row >= data_rows {
+                // Pending insert rows have no undo stack: clearing just stages an explicit NULL.
+                if let Some(insert) = self.inserts.get_mut(row - data_rows)
+                    && insert.get(&col) != Some(&None)
+                {
+                    insert.insert(col, None);
+                }
                 continue;
             }
             if !self.state.edits.contains_key(&(row, col))
@@ -335,16 +419,23 @@ impl GridView {
         cx: &mut Context<'_, Self>,
     ) {
         let (row, col) = cell;
-        if !self.state.editable || row >= self.state.rows.len() || col >= self.state.columns.len() {
+        if !self.state.editable
+            || row >= self.display_row_count()
+            || col >= self.state.columns.len()
+        {
             return;
         }
         let value = self
-            .state
-            .edits
-            .get(&(row, col))
+            .staged_value(row, col)
             .cloned()
             .flatten()
-            .unwrap_or_else(|| self.state.rows[row][col].as_edit_string());
+            .unwrap_or_else(|| {
+                if row < self.state.rows.len() {
+                    self.state.rows[row][col].as_edit_string()
+                } else {
+                    String::new()
+                }
+            });
         let is_temporal = is_temporal_type(&self.state.columns[col].data_type);
         let cells = self
             .state
@@ -470,15 +561,16 @@ impl GridView {
     /// Stage the current cell edit, then auto-commit single-cell edits to the database.
     /// Batch edits stay pending until the user presses the commit button.
     pub(super) fn finish_cell_editor(&mut self, cx: &mut Context<'_, Self>) {
-        let multi = self
-            .cell_editor
-            .as_ref()
-            .is_some_and(|editor| editor.cells.len() > 1);
-        if self.cell_editor.is_none() {
+        let data_rows = self.state.rows.len();
+        let Some(editor) = self.cell_editor.as_ref() else {
             return;
-        }
+        };
+        let multi = editor.cells.len() > 1;
+        // A single-cell edit on an existing row auto-commits; a pending insert row waits for Save
+        // (the checkmark or Ctrl+S) so a whole new row is inserted in one statement.
+        let only_data_rows = editor.row < data_rows;
         self.commit_editor(cx);
-        if !multi {
+        if !multi && only_data_rows {
             self.commit_edits(cx);
         }
     }
@@ -488,9 +580,36 @@ impl GridView {
         let Some(editor) = self.cell_editor.take() else {
             return;
         };
+        let data_rows = self.state.rows.len();
         let mut action = Vec::new();
         for (row, col) in editor.cells {
-            if row >= self.state.rows.len() || col >= self.state.columns.len() {
+            if col >= self.state.columns.len() {
+                continue;
+            }
+            if row >= data_rows {
+                // Stage into the pending insert row instead of the existing-row edit map.
+                let Some(insert) = self.inserts.get_mut(row - data_rows) else {
+                    continue;
+                };
+                let previous = insert.get(&col).cloned();
+                let staged = if editor.value.is_empty() && previous.is_none() {
+                    None
+                } else if editor.value.is_empty() {
+                    Some(None)
+                } else {
+                    Some(Some(editor.value.clone()))
+                };
+                if previous == staged {
+                    continue;
+                }
+                match staged {
+                    Some(value) => {
+                        insert.insert(col, value);
+                    }
+                    None => {
+                        insert.remove(&col);
+                    }
+                }
                 continue;
             }
             let previous = self.state.edits.get(&(row, col)).cloned();
@@ -518,6 +637,58 @@ impl GridView {
                 self.state.undo.remove(0);
             }
         }
+        cx.notify();
+    }
+
+    /// Tab in a cell editor: stage the current value and open the editor on the next (or, with
+    /// Shift, previous) cell, wrapping to the following/previous row. The value is left pending
+    /// rather than auto-committed so a whole row's edits are saved together with the checkmark.
+    pub(super) fn cell_editor_tab(
+        &mut self,
+        backwards: bool,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(editor) = self.cell_editor.as_ref() else {
+            return;
+        };
+        let (row, col) = (editor.row, editor.col);
+        self.commit_editor(cx);
+
+        let column_count = self.state.columns.len();
+        let row_count = self.display_row_count();
+        if column_count == 0 || row_count == 0 {
+            return;
+        }
+
+        let (next_row, next_col) = if backwards {
+            if col > 0 {
+                (row, col - 1)
+            } else if row > 0 {
+                (row - 1, column_count - 1)
+            } else {
+                (row, col)
+            }
+        } else if col + 1 < column_count {
+            (row, col + 1)
+        } else if row + 1 < row_count {
+            (row + 1, 0)
+        } else {
+            (row, col)
+        };
+
+        if (next_row, next_col) == (row, col) {
+            // Already at the last cell: Tab simply closes the editor.
+            cx.notify();
+            return;
+        }
+
+        self.state.selection = Some(CellSelection::new(next_row, next_col));
+        if next_row != row {
+            self.list_scroll
+                .scroll_to_item(next_row, ScrollStrategy::Nearest);
+        }
+        self.begin_edit((next_row, next_col), None, window, cx);
         cx.notify();
     }
 

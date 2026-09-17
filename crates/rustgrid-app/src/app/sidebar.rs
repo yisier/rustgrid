@@ -13,7 +13,9 @@ impl AppView {
             .bg(rgb(theme.sidebar_bg))
             .border_r_1()
             .border_color(rgb(theme.border))
-            .child(self.tree_pane.clone())
+            .child(self.tree_pane.clone().cached(cached_style(|d| {
+                d.flex().flex_col().flex_1().min_h(px(0.0)).w_full()
+            })))
             .child(self.render_sidebar_footer())
     }
 
@@ -500,6 +502,8 @@ impl TreePane {
         let database_name = database_name.to_string();
         let click_id = table_id.clone();
         let app = self.app.clone();
+        let menu_app = self.app.clone();
+        let menu_name = table.name.clone();
 
         div()
             .id(SharedString::from(table_id))
@@ -531,6 +535,27 @@ impl TreePane {
                     );
                 });
             }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    this.selected = Some(format!(
+                        "tbl-{connection_index}-{database_index}-{table_index}"
+                    ));
+                    let _ = menu_app.update(cx, |app, cx| {
+                        app.context_menu = Some(ContextMenu {
+                            target: ContextTarget::Table {
+                                connection_index,
+                                database_index,
+                                name: menu_name.clone(),
+                                is_view,
+                            },
+                            position: event.position,
+                        });
+                        cx.notify();
+                    });
+                    cx.notify();
+                }),
+            )
             .child(chevron_spacer())
             .child(tree_icon(
                 if is_view {

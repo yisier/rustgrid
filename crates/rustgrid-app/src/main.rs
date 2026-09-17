@@ -47,6 +47,9 @@ fn main() {
 
     gpui_kit::application().with_assets(Assets).run(move |cx| {
         gpui_kit::init(cx);
+        // Dialogs (and gpui-kit's other animated chrome) should appear in place rather than
+        // sliding/fading in; this is the engine's global switch for that.
+        cx.set_reduce_motion(true);
         let bounds = Bounds::centered(None, size(px(1100.0), px(720.0)), cx);
         let registry = registry.clone();
         let config = config.clone();

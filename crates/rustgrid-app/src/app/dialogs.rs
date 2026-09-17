@@ -232,7 +232,24 @@ impl AppView {
             dialog
                 .title(t!("error.title").to_string())
                 .margin_top(centered_margin_top(window, 170.0))
-                .content(move |content, _window, _cx| content.child(message.clone()))
+                .content(move |content, _window, _cx| {
+                    content.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_start()
+                            .gap_3()
+                            .child(
+                                svg()
+                                    .path("icons/circle-x.svg")
+                                    .w(px(18.0))
+                                    .h(px(18.0))
+                                    .flex_none()
+                                    .text_color(rgb(theme.danger)),
+                            )
+                            .child(div().flex_1().min_w(px(0.0)).child(message.clone())),
+                    )
+                })
                 .footer(
                     div()
                         .flex()
@@ -339,18 +356,21 @@ impl AppView {
     fn open_password_prompt(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let app = cx.entity();
         window.open_dialog(cx, move |dialog, window, cx| {
-            let (title, input) = app.update(cx, |app, _| {
-                let prompt = app.password_prompt.as_ref().expect("password prompt");
-                let name = app
-                    .connections
-                    .get(prompt.index)
-                    .map(|node| node.profile.name.clone())
-                    .unwrap_or_default();
-                (
-                    format!("{}: {}", t!("password.title"), name),
-                    prompt.input.clone(),
-                )
-            });
+            let Some((title, input)) = app.update(cx, |app, _| {
+                app.password_prompt.as_ref().map(|prompt| {
+                    let name = app
+                        .connections
+                        .get(prompt.index)
+                        .map(|node| node.profile.name.clone())
+                        .unwrap_or_default();
+                    (
+                        format!("{}: {}", t!("password.title"), name),
+                        prompt.input.clone(),
+                    )
+                })
+            }) else {
+                return dialog.title(String::new());
+            };
             let theme = app.read(cx).theme;
             let toggle = app.downgrade();
             let on_ok = app.downgrade();
@@ -465,13 +485,16 @@ impl AppView {
     fn open_rename_dialog(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let app = cx.entity();
         window.open_dialog(cx, move |dialog, window, cx| {
-            let (title, input) = app.update(cx, |app, _| {
-                let prompt = app.rename_prompt.as_ref().expect("rename prompt");
-                (
-                    format!("{} - {}", t!("object.rename_table"), prompt.old_name),
-                    prompt.input.clone(),
-                )
-            });
+            let Some((title, input)) = app.update(cx, |app, _| {
+                app.rename_prompt.as_ref().map(|prompt| {
+                    (
+                        format!("{} - {}", t!("object.rename_table"), prompt.old_name),
+                        prompt.input.clone(),
+                    )
+                })
+            }) else {
+                return dialog.title(String::new());
+            };
             let theme = app.read(cx).theme;
             let on_ok = app.downgrade();
             let on_cancel = app.downgrade();

@@ -53,11 +53,8 @@ impl AssetSource for Assets {
             "icons/search.svg" => Some(include_bytes!("../assets/icons/search.svg")),
             "icons/row_marker.svg" => Some(include_bytes!("../assets/icons/row_marker.svg")),
             "icons/save.svg" => Some(include_bytes!("../assets/icons/save.svg")),
-            "icons/query_builder.svg" => Some(include_bytes!("../assets/icons/query_builder.svg")),
             "icons/format_sql.svg" => Some(include_bytes!("../assets/icons/format_sql.svg")),
-            "icons/snippets.svg" => Some(include_bytes!("../assets/icons/snippets.svg")),
             "icons/run.svg" => Some(include_bytes!("../assets/icons/run.svg")),
-            "icons/explain.svg" => Some(include_bytes!("../assets/icons/explain.svg")),
             _ => None,
         };
         match bytes {

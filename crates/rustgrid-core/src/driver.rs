@@ -2,8 +2,8 @@ use async_trait::async_trait;
 
 use crate::error::Result;
 use crate::model::{
-    ColumnInfo, ConnectionConfig, DatabaseInfo, DriverId, PageRequest, QueryResult, RowUpdate,
-    TableInfo, TablePage, TableSchema,
+    ColumnInfo, ConnectionConfig, DatabaseInfo, DriverId, PageRequest, QueryResult, RowInsert,
+    RowUpdate, TableInfo, TablePage, TableSchema,
 };
 
 #[async_trait]
@@ -34,6 +34,11 @@ pub trait Connection: Send + Sync {
     -> Result<TablePage>;
 
     async fn update_rows(&self, database: &str, table: &str, updates: &[RowUpdate]) -> Result<()>;
+
+    /// Insert new rows into `table`. Each row carries the columns to set; columns not listed take
+    /// their default (or stay unset, e.g. for `AUTO_INCREMENT`). A `None` value is an explicit
+    /// `NULL`. Implementations should insert atomically.
+    async fn insert_rows(&self, database: &str, table: &str, rows: &[RowInsert]) -> Result<()>;
 
     /// Delete the rows identified by `keys`: each entry is one row's key columns
     /// (`(column, value)` pairs). Implementations should delete atomically.

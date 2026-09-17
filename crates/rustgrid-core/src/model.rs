@@ -395,6 +395,13 @@ pub struct RowUpdate {
     pub keys: Vec<(String, String)>,
 }
 
+/// A single-row insert: `(column, value)` assignments. A `None` value is an explicit SQL `NULL`;
+/// columns not listed take their default (or stay unset, e.g. for `AUTO_INCREMENT`).
+#[derive(Debug, Clone)]
+pub struct RowInsert {
+    pub values: Vec<(String, Option<String>)>,
+}
+
 /// One column of a table as shown by the table designer. Engine-agnostic: the driver translates
 /// this to (and from) its own catalog and DDL syntax.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

@@ -488,7 +488,7 @@ impl AppView {
                         t!("query.run_selected").to_string(),
                         cx.listener(|this, _event, _window, cx| {
                             this.context_menu = None;
-                            this.run_query(false, true, cx);
+                            this.run_query(true, cx);
                         }),
                     ))
                     .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))

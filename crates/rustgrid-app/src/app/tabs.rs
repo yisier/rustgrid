@@ -11,11 +11,20 @@ impl AppView {
         let body: AnyElement = if let Some(design) =
             self.active_design.and_then(|index| self.designs.get(index))
         {
-            design.clone().into_any_element()
+            design
+                .clone()
+                .cached(cached_style(|d| {
+                    d.flex().flex_col().flex_1().min_w(px(0.0)).min_h(px(0.0))
+                }))
+                .into_any_element()
         } else if let Some(query) = self.active_query.and_then(|index| self.queries.get(index)) {
             self.render_query_view(query, window, cx).into_any_element()
         } else if let Some(grid) = self.active_grid.and_then(|index| self.grids.get(index)) {
-            grid.clone().into_any_element()
+            grid.clone()
+                .cached(cached_style(|d| {
+                    d.flex().flex_col().flex_1().min_w(px(0.0)).min_h(px(0.0))
+                }))
+                .into_any_element()
         } else if let Some(pane) = self.object_pane.clone() {
             div()
                 .flex()
@@ -52,7 +61,9 @@ impl AppView {
             .overflow_hidden()
             .bg(rgb(theme.editor_bg));
         if has_tabs {
-            content = content.child(self.tab_bar.clone());
+            content = content.child(self.tab_bar.clone().cached(cached_style(|d| {
+                d.flex().flex_row().h(px(30.0)).flex_none().w_full()
+            })));
         }
         content.child(
             div()

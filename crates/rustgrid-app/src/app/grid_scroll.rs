@@ -5,7 +5,7 @@ impl GridView {
         let theme = self.theme;
         let handle = self.list_scroll.0.borrow().base_handle.clone();
         let viewport = f32::from(handle.bounds().size.height);
-        let max = (self.state.rows.len() as f32 * GRID_ROW_HEIGHT - viewport).max(0.0);
+        let max = (self.display_row_count() as f32 * GRID_ROW_HEIGHT - viewport).max(0.0);
         if max <= 0.0 {
             return div().into_any_element();
         }
@@ -104,7 +104,7 @@ impl GridView {
         let handle = self.list_scroll.0.borrow().base_handle.clone();
         let bounds = handle.bounds();
         let viewport = f32::from(bounds.size.height);
-        let max = (self.state.rows.len() as f32 * GRID_ROW_HEIGHT - viewport).max(0.0);
+        let max = (self.display_row_count() as f32 * GRID_ROW_HEIGHT - viewport).max(0.0);
         let (thumb_h, travel) = scrollbar_thumb(viewport, max);
         if travel <= 0.0 {
             return;
@@ -138,7 +138,7 @@ impl GridView {
     pub(super) fn grid_vscroll_set(&self, relative: f32, grab: f32, cx: &mut Context<'_, Self>) {
         let handle = self.list_scroll.0.borrow().base_handle.clone();
         let viewport = f32::from(handle.bounds().size.height);
-        let max = (self.state.rows.len() as f32 * GRID_ROW_HEIGHT - viewport).max(0.0);
+        let max = (self.display_row_count() as f32 * GRID_ROW_HEIGHT - viewport).max(0.0);
         let (_, travel) = scrollbar_thumb(viewport, max);
         if travel <= 0.0 {
             return;

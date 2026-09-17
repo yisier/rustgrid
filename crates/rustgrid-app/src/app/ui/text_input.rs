@@ -16,7 +16,7 @@ use gpui::{
     div, prelude::*, px, rgb,
 };
 use gpui_kit::component::Icon;
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState, Position};
 use gpui_kit::component::{FocusableExt, Sizable, Size};
 
 use crate::theme::Theme;
@@ -218,6 +218,18 @@ impl TextInput {
             }));
 
         self.state = Some(state);
+        // Callers often focus the wrapper right after creating it, before its lazy inner state
+        // exists (in-place cell editors, form fields, prompts). `on_focus` above only fires when
+        // focus *changes*, so forward the already-held focus now or the field is never typable.
+        // Put the caret at the end (rather than the default start) so the field opens ready to
+        // keep typing, like a plain input.
+        if self.focus.is_focused(window) {
+            let state = self.state.clone().expect("text input state");
+            let end = self.initial_text.chars().count() as u32;
+            state.update(cx, |state, cx| {
+                state.set_cursor_position(Position::new(0, end), window, cx);
+            });
+        }
     }
 
     /// Applies queued mutations and dispatches queued callbacks, all of which need a `Window`.

@@ -120,7 +120,7 @@ impl CategoryExpansion {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CellSelection {
     pub anchor: (usize, usize),
     pub cursor: (usize, usize),

@@ -3,8 +3,8 @@ use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use rustgrid_core::{
     CellValue, ColumnDef, ColumnInfo, Connection, DatabaseInfo, DriverId, Error, FilterCondition,
     FilterConjunction, FilterNode, FilterOperator, ForeignKeyDef, IndexDef, ObjectKind,
-    PageRequest, QueryResult, Result, RowUpdate, TableInfo, TableOptions, TablePage, TableSchema,
-    TriggerDef,
+    PageRequest, QueryResult, Result, RowInsert, RowUpdate, TableInfo, TableOptions, TablePage,
+    TableSchema, TriggerDef,
 };
 use sqlx::mysql::{MySqlColumn, MySqlRow};
 use sqlx::{
@@ -218,6 +218,48 @@ impl Connection for MysqlConnection {
                 query = query.bind(value.clone());
             }
             for (_, value) in &update.keys {
+                query = query.bind(value.clone());
+            }
+            query
+                .execute(&mut *transaction)
+                .await
+                .map_err(map_query_error)?;
+        }
+
+        transaction.commit().await.map_err(map_query_error)?;
+        Ok(())
+    }
+
+    async fn insert_rows(&self, database: &str, table: &str, rows: &[RowInsert]) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        let qualified = format!("{}.{}", quote_identifier(database), quote_identifier(table));
+        let mut transaction = self.pool.begin().await.map_err(map_query_error)?;
+
+        for row in rows {
+            if row.values.is_empty() {
+                // Every column takes its default (`AUTO_INCREMENT`, `DEFAULT`, ...).
+                let sql = format!("INSERT INTO {qualified} () VALUES ()");
+                sqlx::query(sqlx::AssertSqlSafe(sql))
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(map_query_error)?;
+                continue;
+            }
+
+            let columns = row
+                .values
+                .iter()
+                .map(|(column, _)| quote_identifier(column))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let placeholders = vec!["?"; row.values.len()].join(", ");
+            let sql = format!("INSERT INTO {qualified} ({columns}) VALUES ({placeholders})");
+
+            let mut query = sqlx::query(sqlx::AssertSqlSafe(sql));
+            for (_, value) in &row.values {
                 query = query.bind(value.clone());
             }
             query

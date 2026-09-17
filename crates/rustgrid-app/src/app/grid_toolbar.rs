@@ -812,8 +812,10 @@ impl GridView {
                         "grid-add",
                         "icons/plus.svg",
                         theme.icon_connection,
-                        false,
-                        |_, _, _| {},
+                        self.state.editable
+                            && !self.state.loading
+                            && !self.state.columns.is_empty(),
+                        cx.listener(|this, _event, window, cx| this.add_insert_row(window, cx)),
                     ))
                     .child(self.grid_icon_button(
                         "grid-delete",
@@ -828,14 +830,18 @@ impl GridView {
                         "grid-commit",
                         "icons/check.svg",
                         theme.icon_connection,
-                        !self.state.edits.is_empty(),
-                        cx.listener(|this, _event, _window, cx| this.commit_edits(cx)),
+                        self.cell_editor.is_some()
+                            || !self.state.edits.is_empty()
+                            || !self.inserts.is_empty(),
+                        cx.listener(|this, _event, _window, cx| this.save_grid(cx)),
                     ))
                     .child(self.grid_icon_button(
                         "grid-rollback",
                         "icons/cross.svg",
                         theme.danger,
-                        !self.state.edits.is_empty(),
+                        self.cell_editor.is_some()
+                            || !self.state.edits.is_empty()
+                            || !self.inserts.is_empty(),
                         cx.listener(|this, _event, _window, cx| this.cancel_edits(cx)),
                     ))
                     .child(self.grid_icon_button(

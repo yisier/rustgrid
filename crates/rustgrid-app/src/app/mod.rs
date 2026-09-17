@@ -9,17 +9,17 @@ use chrono::{Datelike, NaiveDate, NaiveDateTime, Timelike};
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, DispatchPhase, Div,
     ElementInputHandler, Entity, EntityInputHandler, FocusHandle, FontWeight, HighlightStyle,
-    ImageSource, KeyDownEvent, ListHorizontalSizingBehavior, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Resource, ScrollDelta, ScrollHandle,
-    ScrollWheelEvent, SharedString, Stateful, StyledText, Subscription, Svg, TextLayout,
-    UTF16Selection, UniformListScrollHandle, WeakEntity, Window, WindowControlArea, canvas,
-    deferred, div, img, prelude::*, px, rgb, svg, uniform_list,
+    ImageSource, KeyBinding, KeyDownEvent, ListHorizontalSizingBehavior, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Resource, ScrollDelta,
+    ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, Stateful, StyledText,
+    Subscription, Svg, TextLayout, UTF16Selection, UniformListScrollHandle, WeakEntity, Window,
+    WindowControlArea, canvas, deferred, div, img, prelude::*, px, rgb, svg, uniform_list,
 };
 use rustgrid_config::{AppSettings, ConfigStore, LanguageSetting, ThemeSetting};
 use rustgrid_core::{
     CellValue, Connection, ConnectionConfig, DriverRegistry, Error, FilterCondition,
     FilterConjunction, FilterGroup, FilterNode, FilterOperator, PageRequest, QueryResult,
-    RowUpdate,
+    RowInsert, RowUpdate,
 };
 
 use crate::form::{ConnectionForm, FORM_FIELDS, FormField};
@@ -35,6 +35,14 @@ use ui::{
     ButtonKind, ComboBox, ComboOption, TextInput, TextInputOptions, checkbox_box, form_tab,
     main_separator, scrollbar_fractions, scrollbar_thumb, toolbar_separator,
 };
+
+// Cell-navigation actions for the in-place grid editor. gpui-kit's `Root` binds `tab`/`shift-tab`
+// to focus traversal in the `"Root"` context, and key bindings run before `on_key_down`; binding
+// the same keys in a deeper context (the editing cell) takes precedence and moves the editor.
+gpui::actions!(grid, [NextCell, PrevCell]);
+
+/// Key context applied to the cell that owns the in-place editor.
+const GRID_CELL_CONTEXT: &str = "GridCell";
 
 /// The six text inputs of the connection form, created when the form opens. Order follows
 /// [`FORM_FIELDS`] so `FormField as usize` indexes the array.
@@ -320,6 +328,12 @@ struct GridView {
     cell_editor_focus_pending: bool,
     date_picker: Option<DatePicker>,
 
+    /// Pending rows added with the "+" button that have not been written to the database yet.
+    /// They render after `state.rows` (gutter `*`) and are flushed by Save. Each row maps a
+    /// column index to its staged value: `None` is an explicit SQL `NULL`, an absent entry means
+    /// the column is left to its default.
+    inserts: Vec<BTreeMap<usize, Option<String>>>,
+
     /// The column edge being dragged, with the pointer x and width captured on mouse-down.
     column_resize: Option<ColumnResize>,
 
@@ -557,11 +571,19 @@ pub struct AppView {
     window_bounds_subscription: Option<Subscription>,
     theme_setting: ThemeSetting,
     theme: Theme,
+    /// Theme last pushed into the managed inputs/combos, so `sync_input_themes` can skip when
+    /// nothing changed instead of updating every input on every frame.
+    synced_input_theme: Option<Theme>,
     language: LanguageSetting,
     options_open: bool,
     options_theme: ThemeSetting,
     options_language: LanguageSetting,
     language_combo: Option<Entity<ComboBox>>,
+    /// Last data revision handed to the cached `TreePane` / `TabBar`, so they re-render only when
+    /// what they read from `AppView` actually changed (they are embedded with `.cached`, which
+    /// otherwise freezes them until they are explicitly notified).
+    tree_revision: u64,
+    tab_revision: u64,
 }
 
 mod database;
@@ -623,6 +645,12 @@ impl AppView {
         let settings = config.load_settings().unwrap_or_default();
         let theme_setting = settings.theme;
         let language = settings.language;
+        // Claim Tab inside the cell editor so it advances to the next cell rather than moving
+        // window focus (which is what the `Root` context binds it to).
+        cx.bind_keys([
+            KeyBinding::new("tab", NextCell, Some(GRID_CELL_CONTEXT)),
+            KeyBinding::new("shift-tab", PrevCell, Some(GRID_CELL_CONTEXT)),
+        ]);
         let app = cx.weak_entity();
 
         Self {
@@ -713,11 +741,14 @@ impl AppView {
             window_bounds_subscription: None,
             theme_setting,
             theme: Theme::dark(),
+            synced_input_theme: None,
             language,
             options_open: false,
             options_theme: theme_setting,
             options_language: language,
             language_combo: None,
+            tree_revision: 0,
+            tab_revision: 0,
         }
     }
 
@@ -760,6 +791,116 @@ impl AppView {
         }
     }
 
+    /// Re-render every open grid. Their cached subtrees don't observe `AppView`, so changes they
+    /// read from it (theme, window size) must be pushed explicitly.
+    fn notify_grids(&self, cx: &mut Context<'_, Self>) {
+        for grid in &self.grids {
+            grid.update(cx, |_, cx| cx.notify());
+        }
+    }
+
+    /// A cheap revision of everything [`TreePane`] reads from `AppView`. Notifying the tree only
+    /// when this changes lets it stay cached across unrelated frames (e.g. grid scrolling).
+    fn tree_revision(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.theme.is_dark().hash(&mut hasher);
+        self.connections.len().hash(&mut hasher);
+        for node in &self.connections {
+            node.profile.name.hash(&mut hasher);
+            match &node.status {
+                ConnectionStatus::Connected(_) => 0u8.hash(&mut hasher),
+                ConnectionStatus::Connecting => 1u8.hash(&mut hasher),
+                ConnectionStatus::Failed(error) => {
+                    2u8.hash(&mut hasher);
+                    error.hash(&mut hasher);
+                }
+                ConnectionStatus::Disconnected => 3u8.hash(&mut hasher),
+            }
+            node.expanded.hash(&mut hasher);
+            match &node.databases {
+                Loadable::Idle => 0u8.hash(&mut hasher),
+                Loadable::Loading => 1u8.hash(&mut hasher),
+                Loadable::Failed(error) => {
+                    2u8.hash(&mut hasher);
+                    error.hash(&mut hasher);
+                }
+                Loadable::Loaded(databases) => {
+                    3u8.hash(&mut hasher);
+                    databases.len().hash(&mut hasher);
+                    for database in databases {
+                        database.name.hash(&mut hasher);
+                        database.opened.hash(&mut hasher);
+                        database.expanded.hash(&mut hasher);
+                        for category in Category::ALL {
+                            database.categories.get(category).hash(&mut hasher);
+                        }
+                        if database.expanded {
+                            match &database.tables {
+                                Loadable::Idle => 0u8.hash(&mut hasher),
+                                Loadable::Loading => 1u8.hash(&mut hasher),
+                                Loadable::Failed(error) => {
+                                    2u8.hash(&mut hasher);
+                                    error.hash(&mut hasher);
+                                }
+                                Loadable::Loaded(tables) => {
+                                    3u8.hash(&mut hasher);
+                                    tables.len().hash(&mut hasher);
+                                    for table in tables {
+                                        table.name.hash(&mut hasher);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        hasher.finish()
+    }
+
+    /// A cheap revision of everything [`TabBar`] reads from `AppView`.
+    fn tab_revision(&self, cx: &App) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.theme.is_dark().hash(&mut hasher);
+        self.active_grid.hash(&mut hasher);
+        self.active_design.hash(&mut hasher);
+        self.active_query.hash(&mut hasher);
+        self.grids.len().hash(&mut hasher);
+        for grid in &self.grids {
+            let grid = grid.read(cx);
+            grid.state.id.hash(&mut hasher);
+            grid.state.sql.is_some().hash(&mut hasher);
+        }
+        self.designs.len().hash(&mut hasher);
+        for design in &self.designs {
+            let design = design.read(cx);
+            design.id.hash(&mut hasher);
+            design.dirty.hash(&mut hasher);
+            design.is_view.hash(&mut hasher);
+        }
+        self.queries.len().hash(&mut hasher);
+        for query in &self.queries {
+            query.id.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    /// Re-render the cached long-lived children only when their inputs changed.
+    fn sync_cached_children(&mut self, cx: &mut Context<'_, Self>) {
+        let tree_revision = self.tree_revision();
+        if tree_revision != self.tree_revision {
+            self.tree_revision = tree_revision;
+            self.tree_pane.update(cx, |_, cx| cx.notify());
+        }
+        let tab_revision = self.tab_revision(cx);
+        if tab_revision != self.tab_revision {
+            self.tab_revision = tab_revision;
+            self.tab_bar.update(cx, |_, cx| cx.notify());
+        }
+    }
+
     /// Push the resolved theme into every managed [`TextInput`] so the fields track light/dark
     /// changes. `TextInput::set_theme` only notifies when the value actually changed.
     fn sync_input_themes(&mut self, cx: &mut Context<'_, Self>) {
@@ -795,6 +936,13 @@ impl AppView {
             combo.update(cx, |combo, cx| combo.set_theme(theme, cx));
         }
     }
+}
+
+/// A layout style for `Entity::cached`, built from the same `div()` DSL used elsewhere. Caching
+/// skips measuring the child, so the caller must describe its slot (e.g. `flex_1`/`size_full`).
+fn cached_style(build: impl FnOnce(Div) -> Div) -> gpui::StyleRefinement {
+    let mut element = build(div());
+    std::mem::take(element.style())
 }
 
 fn db_error(error: &Option<String>, theme: Theme) -> AnyElement {
@@ -1002,7 +1150,13 @@ impl Render for AppView {
                 cx,
             );
         }
-        self.sync_input_themes(cx);
+        if self.synced_input_theme != Some(self.theme) {
+            self.sync_input_themes(cx);
+            // Cached grids/designers don't see a parent re-render, so push the new theme to them.
+            self.notify_grids(cx);
+            self.synced_input_theme = Some(self.theme);
+        }
+        self.sync_cached_children(cx);
         self.ensure_query_combos(cx);
         self.sync_db_combos(cx);
         self.sync_query_combos(cx);
@@ -1014,9 +1168,18 @@ impl Render for AppView {
         // count is recomputed from the freshly measured scroll viewport.
         if self.window_bounds_subscription.is_none() {
             self.window_bounds_subscription =
-                Some(cx.observe_window_bounds(window, |_this, window, cx| {
+                Some(cx.observe_window_bounds(window, |this, window, cx| {
+                    // The cached object pane / grids don't re-render on their own when the
+                    // viewport changes, so notify them (the pane's rows-per-column and the
+                    // grids' scrollbar extents depend on it).
+                    this.notify_object_pane(cx);
+                    this.notify_grids(cx);
                     cx.notify();
-                    cx.on_next_frame(window, |_this, _window, cx| cx.notify());
+                    cx.on_next_frame(window, |this, _window, cx| {
+                        this.notify_object_pane(cx);
+                        this.notify_grids(cx);
+                        cx.notify();
+                    });
                 }));
         }
 

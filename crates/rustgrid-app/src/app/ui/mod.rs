@@ -388,7 +388,7 @@ pub(super) fn vscrollbar_track(
         .w(px(14.0))
         .h_full()
         .overflow_hidden()
-        .bg(rgb(theme.toolbar_bg))
+        .bg(rgb(theme.scroll_track))
         .border_l_1()
         .border_color(rgb(theme.border))
         .cursor_pointer()
@@ -399,7 +399,7 @@ pub(super) fn vscrollbar_track(
                 .top(relative(thumb_top))
                 .w(px(12.0))
                 .h(relative(thumb_len))
-                .bg(rgb(theme.button_border)),
+                .bg(rgb(theme.scroll_thumb)),
         )
 }
 
@@ -417,7 +417,7 @@ pub(super) fn hscrollbar_track(
         .w_full()
         .h(px(14.0))
         .overflow_hidden()
-        .bg(rgb(theme.toolbar_bg))
+        .bg(rgb(theme.scroll_track))
         .border_t_1()
         .border_color(rgb(theme.border))
         .cursor_pointer()
@@ -428,6 +428,6 @@ pub(super) fn hscrollbar_track(
                 .top(px(1.0))
                 .w(relative(thumb_len))
                 .h(px(12.0))
-                .bg(rgb(theme.button_border)),
+                .bg(rgb(theme.scroll_thumb)),
         )
 }

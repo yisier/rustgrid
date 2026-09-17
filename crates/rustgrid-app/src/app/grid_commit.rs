@@ -72,9 +72,39 @@ impl GridView {
         self.cancel_editor(cx);
     }
 
+    /// Save: stage the in-place editor (if any), then write every pending insert and edit.
+    pub(super) fn save_grid(&mut self, cx: &mut Context<'_, Self>) {
+        if self.cell_editor.is_some() {
+            self.commit_editor(cx);
+        }
+        let inserts = self.collect_inserts();
+        let updates = self.collect_updates();
+        self.flush_changes(inserts, updates, cx);
+    }
+
+    /// Auto-commit the pending edits to existing rows (single-cell edits), without inserts.
     pub(super) fn commit_edits(&mut self, cx: &mut Context<'_, Self>) {
+        let updates = self.collect_updates();
+        self.flush_changes(Vec::new(), updates, cx);
+    }
+
+    /// Build the pending insert rows as engine-agnostic [`RowInsert`]s.
+    fn collect_inserts(&self) -> Vec<RowInsert> {
+        self.inserts
+            .iter()
+            .map(|row| RowInsert {
+                values: row
+                    .iter()
+                    .map(|(&col, value)| (self.state.columns[col].name.clone(), value.clone()))
+                    .collect(),
+            })
+            .collect()
+    }
+
+    /// Build the pending existing-row edits as engine-agnostic [`RowUpdate`]s.
+    fn collect_updates(&self) -> Vec<RowUpdate> {
         if self.state.edits.is_empty() {
-            return;
+            return Vec::new();
         }
 
         let primary_keys: Vec<usize> = self
@@ -115,6 +145,19 @@ impl GridView {
                 .collect();
             updates.push(RowUpdate { set, keys });
         }
+        updates
+    }
+
+    /// Write the pending inserts and updates in one transaction-ish pass, then reload the page.
+    fn flush_changes(
+        &mut self,
+        inserts: Vec<RowInsert>,
+        updates: Vec<RowUpdate>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if inserts.is_empty() && updates.is_empty() {
+            return;
+        }
 
         let connection = self.state.connection.clone();
         let database = self.state.database.clone();
@@ -123,7 +166,15 @@ impl GridView {
 
         cx.spawn(async move |this, cx| {
             let result = match runtime
-                .spawn(async move { connection.update_rows(&database, &table, &updates).await })
+                .spawn(async move {
+                    if !inserts.is_empty() {
+                        connection.insert_rows(&database, &table, &inserts).await?;
+                    }
+                    if !updates.is_empty() {
+                        connection.update_rows(&database, &table, &updates).await?;
+                    }
+                    Ok::<(), Error>(())
+                })
                 .await
             {
                 Ok(inner) => inner,
@@ -148,6 +199,7 @@ impl GridView {
 
     pub(super) fn cancel_edits(&mut self, cx: &mut Context<'_, Self>) {
         self.state.edits.clear();
+        self.inserts.clear();
         self.state.selection = None;
         self.cell_editor = None;
         self.cell_editor_blur_subscription = None;
@@ -163,10 +215,24 @@ impl GridView {
             return;
         };
         let (start, end) = selection.rows();
-        let rows: Vec<usize> = (start..=end)
-            .filter(|row| *row < self.state.rows.len())
-            .collect();
+        // Pending insert rows are not in the database yet: discard the selected ones outright
+        // (highest index first so the remaining indices stay valid).
+        let data_rows = self.state.rows.len();
+        let mut removed = false;
+        for row in (start..=end).rev() {
+            if row >= data_rows {
+                let index = row - data_rows;
+                if index < self.inserts.len() {
+                    self.inserts.remove(index);
+                    removed = true;
+                }
+            }
+        }
+        let rows: Vec<usize> = (start..=end).filter(|row| *row < data_rows).collect();
         if rows.is_empty() {
+            if removed {
+                cx.notify();
+            }
             return;
         }
         let grid_id = self.state.id;
