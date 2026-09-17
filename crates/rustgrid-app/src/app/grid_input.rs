@@ -257,8 +257,15 @@ impl GridView {
         if bounds.size.width <= px(0.0) || bounds.size.height <= px(0.0) {
             return None;
         }
-        let local_x =
-            f32::from(position.x) - f32::from(bounds.left()) - f32::from(self.hscroll.offset().x);
+        // The list's own bounds are already translated by the parent's horizontal scroll, so the
+        // horizontal offset must be applied against the scroll viewport instead — subtracting both
+        // would double-count it and land the hit a few columns to the right when scrolled.
+        let viewport = self.hscroll.bounds();
+        let local_x = if viewport.size.width > px(0.0) {
+            f32::from(position.x) - f32::from(viewport.left()) - f32::from(self.hscroll.offset().x)
+        } else {
+            f32::from(position.x) - f32::from(bounds.left())
+        };
         let local_y =
             f32::from(position.y) - f32::from(bounds.top()) - f32::from(handle.offset().y);
         if local_x < 0.0 || local_y < 0.0 {
@@ -577,6 +584,9 @@ impl GridView {
 
     pub(super) fn commit_editor(&mut self, cx: &mut Context<'_, Self>) {
         self.cell_editor_blur_subscription = None;
+        // The calendar is an absolute overlay: it must not outlive the editor, or it keeps
+        // floating over (and swallowing clicks aimed at) the rows.
+        self.date_picker = None;
         let Some(editor) = self.cell_editor.take() else {
             return;
         };
