@@ -149,6 +149,17 @@ impl TextInput {
         self.focus.clone()
     }
 
+    /// Focus the field, forwarding to the inner gpui-kit input when its lazily-created state
+    /// already exists. Focusing the wrapper handle beforehand is not enough once the dialog's
+    /// focus handling has moved on: the wrapper has no input handler, so keystrokes would be lost.
+    pub(crate) fn focus_state(&self, window: &mut Window, cx: &mut App) {
+        if let Some(state) = self.state.clone() {
+            state.update(cx, |state, cx| state.focus(window, cx));
+        } else {
+            self.focus.focus(window, cx);
+        }
+    }
+
     pub(crate) fn on_change(mut self, callback: TextChangeCallback) -> Self {
         self.on_change = Some(callback);
         self

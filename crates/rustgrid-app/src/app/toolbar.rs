@@ -205,6 +205,7 @@ impl AppView {
         self.active_grid = None;
         self.active_query = None;
         self.active_design = None;
+        self.saved_query_selected = None;
         cx.notify();
     }
 }

@@ -28,6 +28,8 @@ impl AppView {
             Some(DialogKind::DbDialog)
         } else if self.password_prompt.is_some() {
             Some(DialogKind::Password)
+        } else if self.save_query_dialog.is_some() {
+            Some(DialogKind::SaveQuery)
         } else if self.error_dialog.is_some() {
             Some(DialogKind::Error)
         } else if self.delete_confirm.is_some() {
@@ -50,6 +52,7 @@ impl AppView {
             Some(DialogKind::ConnectionForm) => self.open_connection_form_dialog(window, cx),
             Some(DialogKind::DbDialog) => self.open_db_dialog(window, cx),
             Some(DialogKind::Password) => self.open_password_prompt(window, cx),
+            Some(DialogKind::SaveQuery) => self.open_save_query_dialog(window, cx),
             Some(DialogKind::Error) => self.open_error_dialog(window, cx),
             Some(DialogKind::Confirm) => self.open_confirm_dialog(window, cx),
             Some(DialogKind::Options) => self.open_options_dialog(window, cx),
@@ -478,6 +481,108 @@ impl AppView {
         });
     }
 
+    /// Opens the "save query" dialog as a `Root`-managed modal. The dialog body reads its state
+    /// back from `AppView` each frame, so the name field and location picker stay live.
+    fn open_save_query_dialog(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let app = cx.entity();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let (title, footer) = app.update(cx, |app, cx| {
+                (
+                    t!("query.save_title").to_string(),
+                    app.save_query_dialog_footer(cx).into_any_element(),
+                )
+            });
+            let on_close = app.downgrade();
+            let content_app = app.clone();
+            let focused = Rc::new(Cell::new(false));
+            dialog
+                .title(title)
+                .w(px(460.0))
+                .margin_top(centered_margin_top(window, 240.0))
+                .content(move |content, window, cx| {
+                    let body = content_app.update(cx, |app, cx| {
+                        app.save_query_dialog_body(cx).into_any_element()
+                    });
+                    if !focused.get() {
+                        focused.set(true);
+                        if let Some(input) = content_app.read(cx).query_name_input.clone() {
+                            input.update(cx, |input, cx| input.focus_state(window, cx));
+                        }
+                    }
+                    content.child(body)
+                })
+                .footer(footer)
+                .on_close(move |_, _, cx| {
+                    let _ = on_close.update(cx, |app, cx| app.cancel_save_query(cx));
+                })
+        });
+    }
+
+    fn save_query_dialog_body(&self, _cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let Some(dialog) = self.save_query_dialog.as_ref() else {
+            return div().into_any_element();
+        };
+
+        let mut name_row = div().flex().flex_col().gap_1().child(
+            div()
+                .text_size(px(12.0))
+                .child(t!("query.enter_name").to_string()),
+        );
+        if let Some(input) = self.query_name_input.as_ref() {
+            name_row = name_row.child(div().w_full().h(px(26.0)).child(input.clone()));
+        }
+
+        let mut location = div().flex().flex_col().gap_1().child(
+            div()
+                .text_size(px(12.0))
+                .child(t!("query.save_location").to_string()),
+        );
+        if let Some(combo) = self.save_location_combo.as_ref() {
+            location = location.child(div().w_full().child(combo.clone()));
+        }
+
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_4()
+            .child(name_row)
+            .child(location);
+        if let Some(error) = dialog.error.as_ref() {
+            body = body.child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme.danger))
+                    .child(error.clone()),
+            );
+        }
+        body.into_any_element()
+    }
+
+    fn save_query_dialog_footer(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_end()
+            .w_full()
+            .gap_2()
+            .h(px(46.0))
+            .child(self.dialog_button(
+                "save-query-cancel",
+                t!("form.cancel").to_string(),
+                false,
+                cx.listener(|this, _event, _window, cx| this.cancel_save_query(cx)),
+            ))
+            .child(self.dialog_button(
+                "save-query-ok",
+                t!("form.ok").to_string(),
+                true,
+                cx.listener(|this, _event, _window, cx| this.submit_save_query(cx)),
+            ))
+    }
+
     /// Start the in-place "rename table" editor for one row, pre-filled with its current name and
     /// focused. The row itself is drawn by the pane named in `pane`, which the caller notifies.
     #[allow(clippy::too_many_arguments)]
@@ -646,6 +751,18 @@ impl AppView {
                     t!(title_key).to_string(),
                     t!(message_key, name = name.clone()).to_string(),
                     t!(button_key).to_string(),
+                )
+            }
+            Some(DeleteConfirm::SavedQuery { index }) => {
+                let name = self
+                    .saved_queries
+                    .get(*index)
+                    .map(|saved| saved.name.clone())
+                    .unwrap_or_default();
+                (
+                    t!("query.delete_title").to_string(),
+                    t!("query.delete_confirm", name = name).to_string(),
+                    t!("query.delete_button").to_string(),
                 )
             }
             None => (String::new(), String::new(), t!("form.ok").to_string()),

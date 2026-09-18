@@ -166,7 +166,7 @@ impl Render for GridView {
                 .iter()
                 .find(|rule| rule.enabled && rule.column == column.name)
                 .map(|rule| rule.descending);
-            let selected_column = self.state.selection.is_some_and(|selection| {
+            let selected_column = self.state.selection.as_ref().is_some_and(|selection| {
                 let (start, end) = selection.cols();
                 index >= start && index <= end
             });
@@ -232,10 +232,8 @@ impl Render for GridView {
                 .on_click(cx.listener(move |this, _event, _window, cx| {
                     let rows = this.state.rows.len();
                     if rows > 0 && index < this.state.columns.len() {
-                        this.state.selection = Some(CellSelection {
-                            anchor: (rows - 1, index),
-                            cursor: (0, index),
-                        });
+                        this.state.selection =
+                            Some(CellSelection::single((rows - 1, index), (0, index)));
                     }
                     this.selecting_cells = false;
                     cx.notify();
@@ -275,7 +273,7 @@ impl Render for GridView {
             header = header.child(cell);
         }
 
-        let selection = self.state.selection;
+        let selection = self.state.selection.clone();
         let edits = self.state.edits.clone();
         let rows = self.state.rows.clone();
         let inserts = self.inserts.clone();
@@ -320,7 +318,7 @@ impl Render for GridView {
                         } else {
                             theme.editor_bg
                         };
-                        let row_selected = selection.is_some_and(|selection| {
+                        let row_selected = selection.as_ref().is_some_and(|selection| {
                             let (start_row, end_row) = selection.rows();
                             let (start_col, end_col) = selection.cols();
                             row_index >= start_row
@@ -328,8 +326,9 @@ impl Render for GridView {
                                 && start_col == 0
                                 && end_col + 1 == column_count
                         });
-                        let current_row =
-                            selection.is_some_and(|selection| selection.cursor.0 == row_index);
+                        let current_row = selection
+                            .as_ref()
+                            .is_some_and(|selection| selection.active_cursor().0 == row_index);
                         let mut row_element = div()
                             .flex()
                             .flex_row()
@@ -381,6 +380,7 @@ impl Render for GridView {
                         for index in 0..column_count {
                             let width = widths.get(index).copied().unwrap_or(GRID_COLUMN_WIDTH);
                             let selected = selection
+                                .as_ref()
                                 .is_some_and(|selection| selection.contains(row_index, index));
                             // A pending insert row's staged value (`None` = explicit NULL).
                             let staged = insert.and_then(|row| row.get(&index));
@@ -618,16 +618,26 @@ impl Render for GridView {
                                     {
                                         return;
                                     }
-                                    let delta = match event.delta {
-                                        ScrollDelta::Lines(delta) => delta.y * GRID_ROW_HEIGHT,
-                                        ScrollDelta::Pixels(delta) => f32::from(delta.y),
+                                    let (dx, dy) = match event.delta {
+                                        ScrollDelta::Lines(delta) => {
+                                            (delta.x * GRID_ROW_HEIGHT, delta.y * GRID_ROW_HEIGHT)
+                                        }
+                                        ScrollDelta::Pixels(delta) => {
+                                            (f32::from(delta.x), f32::from(delta.y))
+                                        }
                                     };
-                                    if delta == 0.0 {
+                                    if dx == 0.0 && dy == 0.0 {
                                         return;
                                     }
                                     let position = event.position;
                                     let _ = weak.update(cx, |this, cx| {
-                                        if this.scroll_grid_selection(position, delta, cx) {
+                                        // A horizontal trackpad swipe pans the columns; the
+                                        // vertical wheel keeps driving vertical scrolling.
+                                        let horizontal =
+                                            dx != 0.0 && this.scroll_grid_columns(dx, cx);
+                                        let vertical = dy != 0.0
+                                            && this.scroll_grid_selection(position, dy, cx);
+                                        if horizontal || vertical {
                                             cx.stop_propagation();
                                         }
                                     });

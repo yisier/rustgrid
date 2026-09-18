@@ -52,6 +52,19 @@ pub struct ConnectionConfig {
     pub options: BTreeMap<String, String>,
 }
 
+/// A named SQL query saved by the user. Queries are filed under a connection (by profile id, so
+/// they survive reordering/renaming the connection) and a database name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedQuery {
+    pub name: String,
+    pub sql: String,
+    /// The `ConnectionProfile::id` the query belongs to.
+    pub connection_id: String,
+    /// The database the query is filed under. Empty when the connection has no database.
+    #[serde(default)]
+    pub database: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatabaseInfo {
     pub name: String,
@@ -115,6 +128,16 @@ impl CellValue {
         match self {
             CellValue::Null => String::new(),
             _ => self.as_display(),
+        }
+    }
+
+    /// The value as an edit parameter: `None` for SQL `NULL`, otherwise the display string. Used
+    /// for key columns so a `NULL` key becomes `IS NULL` instead of binding an empty string (which
+    /// MySQL rejects for numeric columns).
+    pub fn as_edit_value(&self) -> Option<String> {
+        match self {
+            CellValue::Null => None,
+            _ => Some(self.as_display()),
         }
     }
 }
@@ -389,10 +412,11 @@ pub struct TablePage {
 }
 
 /// A single-row update: `SET` assignments plus the key columns used in the `WHERE` clause.
+/// A `None` key value means SQL `NULL` (rendered as `IS NULL`).
 #[derive(Debug, Clone)]
 pub struct RowUpdate {
     pub set: Vec<(String, Option<String>)>,
-    pub keys: Vec<(String, String)>,
+    pub keys: Vec<(String, Option<String>)>,
 }
 
 /// A single-row insert: `(column, value)` assignments. A `None` value is an explicit SQL `NULL`;

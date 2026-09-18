@@ -207,7 +207,10 @@ impl Connection for MysqlConnection {
                 update
                     .keys
                     .iter()
-                    .map(|(column, _)| format!("{} = ?", quote_identifier(column)))
+                    .map(|(column, value)| match value {
+                        Some(_) => format!("{} = ?", quote_identifier(column)),
+                        None => format!("{} IS NULL", quote_identifier(column)),
+                    })
                     .collect::<Vec<_>>()
                     .join(" AND ")
             };
@@ -218,7 +221,9 @@ impl Connection for MysqlConnection {
                 query = query.bind(value.clone());
             }
             for (_, value) in &update.keys {
-                query = query.bind(value.clone());
+                if let Some(value) = value {
+                    query = query.bind(value.clone());
+                }
             }
             query
                 .execute(&mut *transaction)
@@ -276,7 +281,7 @@ impl Connection for MysqlConnection {
         &self,
         database: &str,
         table: &str,
-        keys: &[Vec<(String, String)>],
+        keys: &[Vec<(String, Option<String>)>],
     ) -> Result<()> {
         if keys.is_empty() {
             return Ok(());
@@ -291,14 +296,19 @@ impl Connection for MysqlConnection {
             }
             let where_clause = row_keys
                 .iter()
-                .map(|(column, _)| format!("{} = ?", quote_identifier(column)))
+                .map(|(column, value)| match value {
+                    Some(_) => format!("{} = ?", quote_identifier(column)),
+                    None => format!("{} IS NULL", quote_identifier(column)),
+                })
                 .collect::<Vec<_>>()
                 .join(" AND ");
             let sql = format!("DELETE FROM {qualified} WHERE {where_clause} LIMIT 1");
 
             let mut query = sqlx::query(sqlx::AssertSqlSafe(sql));
             for (_, value) in row_keys {
-                query = query.bind(value.clone());
+                if let Some(value) = value {
+                    query = query.bind(value.clone());
+                }
             }
             query
                 .execute(&mut *transaction)

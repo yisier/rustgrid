@@ -120,13 +120,14 @@ impl CategoryExpansion {
     }
 }
 
+/// One rectangular block of cells (a drag/shift selection).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct CellSelection {
+pub struct CellRange {
     pub anchor: (usize, usize),
     pub cursor: (usize, usize),
 }
 
-impl CellSelection {
+impl CellRange {
     pub fn new(row: usize, col: usize) -> Self {
         Self {
             anchor: (row, col),
@@ -153,17 +154,103 @@ impl CellSelection {
         let (start_col, end_col) = self.cols();
         row >= start_row && row <= end_row && col >= start_col && col <= end_col
     }
+}
 
+/// An Excel-like selection: one or more rectangular ranges. `active` indexes the range that a
+/// shift-click or drag extends, and whose `cursor` is the "current" cell.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CellSelection {
+    pub ranges: Vec<CellRange>,
+    pub active: usize,
+}
+
+impl CellSelection {
+    pub fn new(row: usize, col: usize) -> Self {
+        Self {
+            ranges: vec![CellRange::new(row, col)],
+            active: 0,
+        }
+    }
+
+    pub fn single(anchor: (usize, usize), cursor: (usize, usize)) -> Self {
+        Self {
+            ranges: vec![CellRange { anchor, cursor }],
+            active: 0,
+        }
+    }
+
+    /// The range that shift/drag extends.
+    pub fn active(&self) -> &CellRange {
+        &self.ranges[self.active.min(self.ranges.len().saturating_sub(1))]
+    }
+
+    pub fn active_cursor(&self) -> (usize, usize) {
+        self.active().cursor
+    }
+
+    pub fn contains(&self, row: usize, col: usize) -> bool {
+        self.ranges.iter().any(|range| range.contains(row, col))
+    }
+
+    /// Overall bounding rows across every range (used for status/headers).
+    pub fn rows(&self) -> (usize, usize) {
+        self.ranges
+            .iter()
+            .fold((usize::MAX, 0), |(min, max), range| {
+                let (start, end) = range.rows();
+                (min.min(start), max.max(end))
+            })
+    }
+
+    /// Overall bounding columns across every range.
+    pub fn cols(&self) -> (usize, usize) {
+        self.ranges
+            .iter()
+            .fold((usize::MAX, 0), |(min, max), range| {
+                let (start, end) = range.cols();
+                (min.min(start), max.max(end))
+            })
+    }
+
+    /// Every selected cell, de-duplicated across ranges.
     pub fn cells(&self) -> Vec<(usize, usize)> {
-        let (start_row, end_row) = self.rows();
-        let (start_col, end_col) = self.cols();
-        let mut cells = Vec::new();
-        for row in start_row..=end_row {
-            for col in start_col..=end_col {
-                cells.push((row, col));
+        let mut cells: Vec<(usize, usize)> = Vec::new();
+        for range in &self.ranges {
+            let (start_row, end_row) = range.rows();
+            let (start_col, end_col) = range.cols();
+            for row in start_row..=end_row {
+                for col in start_col..=end_col {
+                    if !cells.contains(&(row, col)) {
+                        cells.push((row, col));
+                    }
+                }
             }
         }
         cells
+    }
+
+    /// The distinct row indices touched by any range, sorted ascending.
+    pub fn row_indices(&self) -> Vec<usize> {
+        let mut rows = std::collections::BTreeSet::new();
+        for range in &self.ranges {
+            let (start, end) = range.rows();
+            for row in start..=end {
+                rows.insert(row);
+            }
+        }
+        rows.into_iter().collect()
+    }
+
+    /// The distinct column indices touched by any range, sorted ascending.
+    pub fn col_indices(&self) -> Vec<usize> {
+        let mut cols = std::collections::BTreeSet::new();
+        for range in &self.ranges {
+            let (start, end) = range.cols();
+            for col in start..=end {
+                cols.insert(col);
+            }
+        }
+        cols.into_iter().collect()
     }
 }
 
@@ -171,6 +258,8 @@ impl CellSelection {
 /// offsets into it, so they can be matched against `TextLayout` indices directly.
 pub struct QueryTab {
     pub id: u64,
+    /// The saved query name, once this tab was saved to (or opened from) the saved-query list.
+    pub name: Option<String>,
     pub connection_index: Option<usize>,
     pub database: Option<String>,
     pub sql: String,
@@ -189,6 +278,7 @@ impl QueryTab {
     pub fn new(id: u64) -> Self {
         Self {
             id,
+            name: None,
             connection_index: None,
             database: None,
             sql: String::new(),

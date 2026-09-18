@@ -11,13 +11,15 @@ use gpui::{
 };
 
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::{Disableable, Selectable, Sizable};
+use gpui_kit::component::{Disableable, Selectable, Sizable, Size};
 
 use crate::theme::Theme;
 
+mod calendar;
 mod combo;
 mod text_input;
 
+pub(crate) use calendar::compact_calendar;
 pub(crate) use combo::{ComboBox, ComboOption};
 pub(crate) use text_input::{TextInput, TextInputOptions};
 
@@ -39,6 +41,34 @@ pub(super) fn button(
     id: impl Into<SharedString>,
     label: String,
     kind: ButtonKind,
+    theme: Theme,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    sized_button(id, label, kind, Size::Medium, theme, on_click)
+}
+
+/// A compact dialog button (24px, matching the toolbar items) for the app's floating popups,
+/// where the dialog-sized 32px button crowds the surface.
+pub(super) fn popup_button(
+    id: impl Into<SharedString>,
+    label: String,
+    primary: bool,
+    theme: Theme,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let kind = if primary {
+        ButtonKind::Default
+    } else {
+        ButtonKind::Normal
+    };
+    sized_button(id, label, kind, Size::Small, theme, on_click)
+}
+
+fn sized_button(
+    id: impl Into<SharedString>,
+    label: String,
+    kind: ButtonKind,
+    size: Size,
     _theme: Theme,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
@@ -49,7 +79,11 @@ pub(super) fn button(
         ButtonKind::Selected => Button::new(id.into()).secondary().selected(true),
         ButtonKind::Disabled => Button::new(id.into()).outline().disabled(true),
     };
-    button.compact().label(label).on_click(on_click)
+    button
+        .compact()
+        .with_size(size)
+        .label(label)
+        .on_click(on_click)
 }
 
 /// A dialog push button; `primary` selects the default (accent-bordered) variant.

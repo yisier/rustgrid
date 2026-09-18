@@ -68,7 +68,7 @@ cd rustgrid
 cargo run -p rustgrid-app
 ```
 
-生成的二进制文件名为 `rustgrid`。
+生成的二进制文件名为 `RustGrid`。
 
 在 Windows 上需要链接器和 C 编译器（sqlx 的 `ring` 依赖）。安装了 MSVC Build Tools 时，
 默认的 MSVC 工具链即可。否则请使用 GNU 工具链：
@@ -85,7 +85,7 @@ cargo run -p rustgrid-app
 - `crates/rustgrid-core` —— 与引擎无关的领域层：驱动 / 连接 trait 与模型。
 - `crates/rustgrid-mysql` —— MySQL 驱动实现。
 - `crates/rustgrid-config` —— 带版本号的设置 / 连接配置，以及加密的密钥存储。
-- `crates/rustgrid-app` —— GPUI 桌面应用（二进制 `rustgrid`）。
+- `crates/rustgrid-app` —— GPUI 桌面应用（二进制 `RustGrid`）。
 
 ## 开源协议
 

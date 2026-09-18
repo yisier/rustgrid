@@ -409,6 +409,7 @@ impl AppView {
                 }
                 _ => match self.main_tab {
                     MainTab::Views => Category::Views,
+                    MainTab::Queries => Category::Queries,
                     _ => Category::Tables,
                 },
             };
@@ -434,6 +435,7 @@ impl AppView {
         let theme = self.theme;
         self.rename_edit = None;
         self.rename_blur = None;
+        self.saved_query_selected = None;
         self.object_pane =
             Some(cx.new(|cx| {
                 ObjectPane::new(app, connection_index, database_index, category, theme, cx)
@@ -475,6 +477,7 @@ impl AppView {
         match category {
             Category::Tables => self.main_tab = MainTab::Tables,
             Category::Views => self.main_tab = MainTab::Views,
+            Category::Queries => self.main_tab = MainTab::Queries,
             _ => {}
         }
         cx.notify();

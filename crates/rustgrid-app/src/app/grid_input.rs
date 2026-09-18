@@ -32,27 +32,42 @@ impl GridView {
         };
         let column_count = self.state.columns.len();
         self.cell_dragged = false;
+        let ctrl = event.modifiers.control || event.modifiers.platform;
         match hit {
             GridHit::Gutter(row) => {
                 self.cell_press = None;
-                if self.display_row_count() > 0 {
-                    self.state.selection = Some(CellSelection {
-                        anchor: (row, 0),
-                        cursor: (row, column_count.saturating_sub(1)),
-                    });
+                if self.display_row_count() == 0 {
+                    self.selecting_cells = false;
+                    cx.notify();
+                    return;
+                }
+                let last = column_count.saturating_sub(1);
+                if event.modifiers.shift {
+                    if let Some(selection) = self.state.selection.as_mut() {
+                        let active = &mut selection.ranges[selection.active];
+                        active.cursor = (row, last);
+                    } else {
+                        self.state.selection = Some(CellSelection::single((row, 0), (row, last)));
+                    }
+                } else if ctrl {
+                    self.add_or_remove_range(row, 0, row, last);
+                } else {
+                    self.state.selection = Some(CellSelection::single((row, 0), (row, last)));
                 }
             }
             GridHit::Cell(row, col) => {
                 if event.modifiers.shift {
                     self.cell_press = None;
-                    if let Some(selection) = self.state.selection {
-                        self.state.selection = Some(CellSelection {
-                            anchor: selection.anchor,
-                            cursor: (row, col),
-                        });
+                    if let Some(selection) = self.state.selection.as_mut() {
+                        let active = &mut selection.ranges[selection.active];
+                        active.cursor = (row, col);
                     } else {
                         self.state.selection = Some(CellSelection::new(row, col));
                     }
+                } else if ctrl {
+                    // Excel-like: Ctrl+click toggles the cell in/out of the selection.
+                    self.cell_press = None;
+                    self.add_or_remove_range(row, col, row, col);
                 } else {
                     self.state.selection = Some(CellSelection::new(row, col));
                     self.cell_press = Some((row, col));
@@ -62,6 +77,49 @@ impl GridView {
         self.selecting_cells = true;
         window.focus(&self.focus, cx);
         cx.notify();
+    }
+
+    /// Add a range spanning `(start_row, start_col)..=(end_row, end_col)` to the selection, or
+    /// remove the range that already contains that cell (Ctrl+click toggle).
+    fn add_or_remove_range(
+        &mut self,
+        anchor_row: usize,
+        anchor_col: usize,
+        cursor_row: usize,
+        cursor_col: usize,
+    ) {
+        if self.state.selection.is_none() {
+            self.state.selection = Some(CellSelection::single(
+                (anchor_row, anchor_col),
+                (cursor_row, cursor_col),
+            ));
+            return;
+        }
+        let empty = {
+            let Some(selection) = self.state.selection.as_mut() else {
+                return;
+            };
+            if let Some(position) = selection
+                .ranges
+                .iter()
+                .position(|range| range.contains(anchor_row, anchor_col))
+            {
+                selection.ranges.remove(position);
+            } else {
+                selection.ranges.push(CellRange {
+                    anchor: (anchor_row, anchor_col),
+                    cursor: (cursor_row, cursor_col),
+                });
+                selection.active = selection.ranges.len() - 1;
+            }
+            if !selection.ranges.is_empty() {
+                selection.active = selection.active.min(selection.ranges.len() - 1);
+            }
+            selection.ranges.is_empty()
+        };
+        if empty {
+            self.state.selection = None;
+        }
     }
 
     pub(super) fn grid_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<'_, Self>) {
@@ -79,24 +137,31 @@ impl GridView {
             self.cell_dragged = true;
             changed = true;
         }
-        let next = self.state.selection.map(|selection| {
-            let (start_row, _) = selection.rows();
-            match hit {
-                GridHit::Gutter(row) => CellSelection {
-                    anchor: (start_row, 0),
-                    cursor: (row, self.state.columns.len().saturating_sub(1)),
-                },
-                GridHit::Cell(row, col) => CellSelection {
-                    anchor: selection.anchor,
-                    cursor: (row, col),
-                },
+        let column_count = self.state.columns.len();
+        match hit {
+            GridHit::Gutter(row) => {
+                let first = self
+                    .state
+                    .selection
+                    .as_ref()
+                    .map(|selection| selection.rows().0)
+                    .unwrap_or(row);
+                let last = column_count.saturating_sub(1);
+                let next = CellSelection::single((first, 0), (row, last));
+                if self.state.selection.as_ref() != Some(&next) {
+                    self.state.selection = Some(next);
+                    changed = true;
+                }
             }
-        });
-        if let Some(next) = next
-            && self.state.selection != Some(next)
-        {
-            self.state.selection = Some(next);
-            changed = true;
+            GridHit::Cell(row, col) => {
+                if let Some(selection) = self.state.selection.as_mut() {
+                    let active = &mut selection.ranges[selection.active];
+                    if active.cursor != (row, col) {
+                        active.cursor = (row, col);
+                        changed = true;
+                    }
+                }
+            }
         }
         // A pointer move within the same cell changes nothing on screen; only notify on a real
         // change so a drag does not re-render the whole window for every pixel.
@@ -117,14 +182,7 @@ impl GridView {
         delta: f32,
         cx: &mut Context<'_, Self>,
     ) -> bool {
-        // The date picker is an absolute overlay anchored to a row; scrolling would leave it
-        // floating over unrelated rows, so dismiss it instead.
-        self.date_picker = None;
-        // Scrolling is an implicit "done": commit and close the in-place editor so the view can
-        // move without a stale editor floating over another row.
-        if self.cell_editor.is_some() {
-            self.finish_cell_editor(cx);
-        }
+        self.end_transient_editing(cx);
         let rows = self.display_row_count();
         if rows == 0 || delta == 0.0 {
             return false;
@@ -145,23 +203,20 @@ impl GridView {
             // No vertical overflow (every row is visible): the wheel moves the selected cell
             // up/down instead of scrolling. With no selection, pan horizontally so a short but
             // wide table's off-screen columns are still reachable.
-            if let Some(selection) = self.state.selection {
+            if let Some(selection) = self.state.selection.as_ref() {
                 // One wheel notch moves the selection a single row, regardless of how many
                 // "lines" the OS reports for that notch.
                 let steps: isize = if delta > 0.0 { -1 } else { 1 };
-                let (row, col) = selection.cursor;
+                let (row, col) = selection.active_cursor();
                 let new_row = (row as isize + steps).clamp(0, rows as isize - 1) as usize;
                 if new_row == row {
                     return false;
                 }
-                self.state.selection = Some(CellSelection {
-                    anchor: (new_row, col),
-                    cursor: (new_row, col),
-                });
+                self.state.selection = Some(CellSelection::single((new_row, col), (new_row, col)));
                 cx.notify();
                 return true;
             }
-            return self.scroll_grid_horizontal(delta, cx);
+            return self.scroll_grid_columns(delta, cx);
         }
         let scroll = -f32::from(handle.offset().y);
         let new_scroll = (scroll - delta).clamp(0.0, max);
@@ -174,17 +229,14 @@ impl GridView {
 
         // Keep the cursor row inside the viewport, moving it to the nearest edge if it scrolled
         // away (rather than dragging the view back to it).
-        if let Some(selection) = self.state.selection {
-            let (row, col) = selection.cursor;
+        if let Some(selection) = self.state.selection.as_ref() {
+            let (row, col) = selection.active_cursor();
             let first = (new_scroll / GRID_ROW_HEIGHT).floor() as usize;
             let visible = (viewport_h / GRID_ROW_HEIGHT).ceil() as usize;
             let last = (first + visible).min(rows);
             if row < first || row >= last {
                 let new_row = row.clamp(first, last.saturating_sub(1));
-                self.state.selection = Some(CellSelection {
-                    anchor: (new_row, col),
-                    cursor: (new_row, col),
-                });
+                self.state.selection = Some(CellSelection::single((new_row, col), (new_row, col)));
             }
         }
 
@@ -192,9 +244,21 @@ impl GridView {
         true
     }
 
-    /// Fallback wheel behavior when the grid cannot scroll vertically: pan horizontally so a
-    /// short but wide table's off-screen columns are still reachable.
-    fn scroll_grid_horizontal(&mut self, delta: f32, cx: &mut Context<'_, Self>) -> bool {
+    /// Scrolling is an implicit "done": dismiss the date picker (an absolute overlay anchored to
+    /// a row would otherwise float over unrelated rows) and commit/close the in-place editor so
+    /// it cannot stay anchored to a row that is moving away.
+    fn end_transient_editing(&mut self, cx: &mut Context<'_, Self>) {
+        self.date_picker = None;
+        if self.cell_editor.is_some() {
+            self.finish_cell_editor(cx);
+        }
+    }
+
+    /// Pan the columns by `delta` pixels (`> 0` scrolls toward the first column), for a horizontal
+    /// trackpad swipe. Also used as the wheel fallback when the grid cannot scroll vertically, so
+    /// a short but wide table's off-screen columns are still reachable.
+    pub(super) fn scroll_grid_columns(&mut self, delta: f32, cx: &mut Context<'_, Self>) -> bool {
+        self.end_transient_editing(cx);
         let max = f32::from(self.hscroll.max_offset().x);
         if max <= 0.0 {
             return false;
@@ -311,7 +375,12 @@ impl GridView {
         if self.cell_editor.is_some() || self.date_picker.is_some() {
             return;
         }
-        let Some((row, col)) = self.state.selection.map(|s| s.cursor) else {
+        let Some((row, col)) = self
+            .state
+            .selection
+            .as_ref()
+            .map(|selection| selection.active_cursor())
+        else {
             return;
         };
 
@@ -377,6 +446,7 @@ impl GridView {
         let cells = self
             .state
             .selection
+            .as_ref()
             .map(|selection| selection.cells())
             .unwrap_or_default();
         if cells.is_empty() {
@@ -447,6 +517,7 @@ impl GridView {
         let cells = self
             .state
             .selection
+            .as_ref()
             .filter(|selection| selection.contains(row, col))
             .map(|selection| selection.cells())
             .unwrap_or_else(|| vec![(row, col)]);
@@ -507,7 +578,7 @@ impl GridView {
         self.cell_editor_focus_pending = true;
         window.focus(&focus, cx);
         if is_temporal {
-            self.open_date_picker(row, col, &value, cx);
+            self.open_date_picker(row, col, &value, window, cx);
         }
         cx.notify();
     }
@@ -525,21 +596,36 @@ impl GridView {
         row: usize,
         col: usize,
         value: &str,
+        window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
         let data_type = self.state.columns[col].data_type.to_ascii_lowercase();
         let has_time = data_type.contains("datetime") || data_type.contains("timestamp");
         let base = parse_datetime(value).unwrap_or_else(|| chrono::Local::now().naive_local());
+        let date = NaiveDate::from_ymd_opt(base.year(), base.month(), base.day())
+            .unwrap_or_else(|| chrono::Local::now().date_naive());
+        let calendar = cx.new(|cx| {
+            let mut state = CalendarState::new(window, cx);
+            state.set_date(date, window, cx);
+            state
+        });
+        let subscription = cx.subscribe(&calendar, |this, _calendar, event: &CalendarEvent, cx| {
+            if let CalendarEvent::Selected(date) = event
+                && date.is_some()
+            {
+                this.sync_date_picker_to_editor(cx);
+            }
+            cx.notify();
+        });
         self.date_picker = Some(DatePicker {
             row,
             col,
-            year: base.year(),
-            month: base.month(),
-            day: base.day(),
             hour: base.hour(),
             minute: base.minute(),
             second: base.second(),
             has_time,
+            calendar,
+            _subscription: subscription,
         });
         cx.notify();
     }
@@ -549,13 +635,21 @@ impl GridView {
         let Some(picker) = self.date_picker.as_ref() else {
             return;
         };
+        let Some(date) = picker.calendar.read(cx).date().start() else {
+            return;
+        };
         let value = if picker.has_time {
             format!(
                 "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-                picker.year, picker.month, picker.day, picker.hour, picker.minute, picker.second
+                date.year(),
+                date.month(),
+                date.day(),
+                picker.hour,
+                picker.minute,
+                picker.second
             )
         } else {
-            format!("{:04}-{:02}-{:02}", picker.year, picker.month, picker.day)
+            format!("{:04}-{:02}-{:02}", date.year(), date.month(), date.day())
         };
         if let Some(editor) = self.cell_editor.as_mut() {
             editor.value = value.clone();

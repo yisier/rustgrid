@@ -25,6 +25,15 @@ impl AppView {
                     d.flex().flex_col().flex_1().min_w(px(0.0)).min_h(px(0.0))
                 }))
                 .into_any_element()
+        } else if self.main_tab == MainTab::Queries {
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .overflow_hidden()
+                .child(self.render_query_object_toolbar(cx))
+                .child(self.render_saved_queries(cx))
+                .into_any_element()
         } else if let Some(pane) = self.object_pane.clone() {
             div()
                 .flex()
@@ -34,15 +43,6 @@ impl AppView {
                 .child(self.render_object_toolbar(&pane, cx))
                 .child(pane.clone())
                 .child(self.render_object_status(&pane, cx))
-                .into_any_element()
-        } else if self.main_tab == MainTab::Queries {
-            div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .overflow_hidden()
-                .child(self.render_query_object_toolbar(cx))
-                .child(div().flex_1())
                 .into_any_element()
         } else {
             div().into_any_element()
@@ -184,10 +184,14 @@ impl TabBar {
         theme: Theme,
         index: usize,
         id: u64,
+        name: Option<String>,
         active: bool,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
-        let title = format!("{} - {}", t!("query.untitled"), t!("common.query"));
+        let title = match name {
+            Some(name) => format!("{name} - {}", t!("common.query")),
+            None => format!("{} - {}", t!("query.untitled"), t!("common.query")),
+        };
         let tab_id = SharedString::from(format!("query-tab-{id}"));
         let close_id = SharedString::from(format!("query-tab-close-{id}"));
         let activate = self.app.clone();
@@ -510,11 +514,11 @@ impl Render for TabBar {
                     Some((index, grid.state.id, title, grid.state.is_view))
                 })
                 .collect();
-            let query_tabs: Vec<(usize, u64)> = app
+            let query_tabs: Vec<(usize, u64, Option<String>)> = app
                 .queries
                 .iter()
                 .enumerate()
-                .map(|(index, query)| (index, query.id))
+                .map(|(index, query)| (index, query.id, query.name.clone()))
                 .collect();
             let design_tabs: Vec<(usize, u64, String, bool)> = app
                 .designs
@@ -588,8 +592,15 @@ impl Render for TabBar {
                 cx,
             ));
         }
-        for (index, id) in query_tabs {
-            strip = strip.child(self.query_tab(theme, index, id, active_query == Some(index), cx));
+        for (index, id, name) in query_tabs {
+            strip = strip.child(self.query_tab(
+                theme,
+                index,
+                id,
+                name,
+                active_query == Some(index),
+                cx,
+            ));
         }
 
         // The object tab is pinned; the arrows only appear (and wrap the scrollable tab strip)

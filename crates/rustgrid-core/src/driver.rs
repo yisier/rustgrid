@@ -41,12 +41,13 @@ pub trait Connection: Send + Sync {
     async fn insert_rows(&self, database: &str, table: &str, rows: &[RowInsert]) -> Result<()>;
 
     /// Delete the rows identified by `keys`: each entry is one row's key columns
-    /// (`(column, value)` pairs). Implementations should delete atomically.
+    /// (`(column, value)` pairs, `None` meaning SQL `NULL`). Implementations should delete
+    /// atomically.
     async fn delete_rows(
         &self,
         database: &str,
         table: &str,
-        keys: &[Vec<(String, String)>],
+        keys: &[Vec<(String, Option<String>)>],
     ) -> Result<()>;
 
     /// Run an arbitrary SQL statement (or script) in the context of `database`, if given.

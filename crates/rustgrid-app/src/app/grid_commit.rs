@@ -1,33 +1,6 @@
 use super::*;
 
 impl GridView {
-    pub(super) fn date_picker_shift_month(&mut self, delta: i32, cx: &mut Context<'_, Self>) {
-        if let Some(picker) = self.date_picker.as_mut() {
-            let mut month = picker.month as i32 + delta;
-            let mut year = picker.year;
-            while month < 1 {
-                month += 12;
-                year -= 1;
-            }
-            while month > 12 {
-                month -= 12;
-                year += 1;
-            }
-            picker.month = month as u32;
-            picker.year = year;
-            picker.day = picker.day.min(days_in_month(year, picker.month));
-        }
-        cx.notify();
-    }
-
-    pub(super) fn date_picker_select_day(&mut self, day: u32, cx: &mut Context<'_, Self>) {
-        if let Some(picker) = self.date_picker.as_mut() {
-            picker.day = day;
-        }
-        self.sync_date_picker_to_editor(cx);
-        cx.notify();
-    }
-
     pub(super) fn date_picker_shift_time(
         &mut self,
         field: usize,
@@ -45,12 +18,16 @@ impl GridView {
         cx.notify();
     }
 
-    pub(super) fn date_picker_today(&mut self, cx: &mut Context<'_, Self>) {
+    pub(super) fn date_picker_today(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let now = chrono::Local::now().naive_local();
+        let Some(picker) = self.date_picker.as_ref() else {
+            return;
+        };
+        let calendar = picker.calendar.clone();
+        if let Some(today) = NaiveDate::from_ymd_opt(now.year(), now.month(), now.day()) {
+            calendar.update(cx, |calendar, cx| calendar.set_date(today, window, cx));
+        }
         if let Some(picker) = self.date_picker.as_mut() {
-            picker.year = now.year();
-            picker.month = now.month();
-            picker.day = now.day();
             picker.hour = now.hour();
             picker.minute = now.minute();
             picker.second = now.second();
@@ -140,7 +117,7 @@ impl GridView {
                 .filter_map(|&col| {
                     row_values
                         .get(col)
-                        .map(|value| (self.state.columns[col].name.clone(), value.as_edit_string()))
+                        .map(|value| (self.state.columns[col].name.clone(), value.as_edit_value()))
                 })
                 .collect();
             updates.push(RowUpdate { set, keys });
@@ -182,7 +159,7 @@ impl GridView {
             };
 
             let _ = this.update(cx, |grid, cx| match result {
-                Ok(()) => grid.load_page(cx),
+                Ok(()) => grid.reload_after_write(cx),
                 Err(error) => {
                     let message = match error {
                         Error::Query(text) => text,
@@ -211,16 +188,16 @@ impl GridView {
         if self.state.sql.is_some() {
             return;
         }
-        let Some(selection) = self.state.selection else {
-            return;
+        let selected_rows = match self.state.selection.as_ref() {
+            Some(selection) => selection.row_indices(),
+            None => return,
         };
-        let (start, end) = selection.rows();
         // Pending insert rows are not in the database yet: discard the selected ones outright
         // (highest index first so the remaining indices stay valid).
         let data_rows = self.state.rows.len();
         let mut removed = false;
-        for row in (start..=end).rev() {
-            if row >= data_rows {
+        for row in selected_rows.iter().rev() {
+            if *row >= data_rows {
                 let index = row - data_rows;
                 if index < self.inserts.len() {
                     self.inserts.remove(index);
@@ -228,7 +205,10 @@ impl GridView {
                 }
             }
         }
-        let rows: Vec<usize> = (start..=end).filter(|row| *row < data_rows).collect();
+        let rows: Vec<usize> = selected_rows
+            .into_iter()
+            .filter(|row| *row < data_rows)
+            .collect();
         if rows.is_empty() {
             if removed {
                 cx.notify();
@@ -265,12 +245,12 @@ impl GridView {
             let Some(values) = self.state.rows.get(*row) else {
                 continue;
             };
-            let row_keys: Vec<(String, String)> = key_columns
+            let row_keys: Vec<(String, Option<String>)> = key_columns
                 .iter()
                 .filter_map(|&col| {
                     values
                         .get(col)
-                        .map(|value| (self.state.columns[col].name.clone(), value.as_edit_string()))
+                        .map(|value| (self.state.columns[col].name.clone(), value.as_edit_value()))
                 })
                 .collect();
             if !row_keys.is_empty() {
@@ -296,7 +276,7 @@ impl GridView {
             };
 
             let _ = this.update(cx, |grid, cx| match result {
-                Ok(()) => grid.load_page(cx),
+                Ok(()) => grid.reload_after_write(cx),
                 Err(error) => {
                     let message = match error {
                         Error::Query(text) => text,

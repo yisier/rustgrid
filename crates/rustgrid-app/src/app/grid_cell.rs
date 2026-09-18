@@ -6,7 +6,7 @@ impl GridView {
             return div().into_any_element();
         };
         let theme = self.theme;
-        let width = 232.0f32;
+        let width = 192.0f32;
         let content_width: f32 = GRID_GUTTER_WIDTH + self.state.column_widths.iter().sum::<f32>();
         let cell_left: f32 = GRID_GUTTER_WIDTH
             + self
@@ -20,110 +20,19 @@ impl GridView {
         let offset_y = f32::from(handle.offset().y);
         let viewport_h = f32::from(handle.bounds().size.height);
         let cell_top = GRID_ROW_HEIGHT + picker.row as f32 * GRID_ROW_HEIGHT + offset_y;
-        let popup_h = if picker.has_time { 296.0 } else { 264.0 };
+        let popup_h = if picker.has_time { 248.0 } else { 210.0 };
         let top = if cell_top + GRID_ROW_HEIGHT + popup_h > GRID_ROW_HEIGHT + viewport_h {
             (cell_top - popup_h).max(GRID_ROW_HEIGHT)
         } else {
             cell_top + GRID_ROW_HEIGHT
         };
 
-        let title = t!("grid.year_month", year = picker.year, month = picker.month).to_string();
-        let header = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .child(
-                div()
-                    .id("date-prev")
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .w(px(20.0))
-                    .h(px(20.0))
-                    .cursor_pointer()
-                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-                    .on_click(cx.listener(|this, _event, _window, cx| {
-                        this.date_picker_shift_month(-1, cx);
-                    }))
-                    .child("‹"),
-            )
-            .child(div().text_size(px(12.0)).child(title))
-            .child(
-                div()
-                    .id("date-next")
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .w(px(20.0))
-                    .h(px(20.0))
-                    .cursor_pointer()
-                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-                    .on_click(cx.listener(|this, _event, _window, cx| {
-                        this.date_picker_shift_month(1, cx);
-                    }))
-                    .child("›"),
-            );
+        // The date grid, its day/month/year views and all navigation come from gpui-kit's
+        // calendar (through the compact `ui` wrapper); only the time-of-day row and the footer
+        // are app-drawn.
+        let calendar = ui::compact_calendar(&picker.calendar);
 
-        let first_weekday = NaiveDate::from_ymd_opt(picker.year, picker.month, 1)
-            .map(|date| date.weekday().num_days_from_monday() as i32)
-            .unwrap_or(0);
-        let days = days_in_month(picker.year, picker.month) as i32;
         let now = chrono::Local::now().naive_local();
-
-        let mut weekdays = div().flex().flex_row();
-        for label in weekday_labels() {
-            weekdays = weekdays.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .w(px(28.0))
-                    .h(px(18.0))
-                    .text_size(px(10.0))
-                    .text_color(rgb(theme.text_muted))
-                    .child(label),
-            );
-        }
-
-        let mut calendar = div().flex().flex_col().items_center().child(weekdays);
-        for week in 0..6 {
-            let mut row = div().flex().flex_row();
-            for weekday in 0..7 {
-                let day_number = week * 7 + weekday - first_weekday;
-                if day_number < 0 || day_number >= days {
-                    row = row.child(div().w(px(28.0)).h(px(22.0)));
-                    continue;
-                }
-                let day = day_number as u32 + 1;
-                let is_selected = day == picker.day;
-                let is_today =
-                    now.year() == picker.year && now.month() == picker.month && now.day() == day;
-                row = row.child(
-                    div()
-                        .id(SharedString::from(format!("date-day-{day}")))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .w(px(28.0))
-                        .h(px(22.0))
-                        .text_size(px(11.0))
-                        .cursor_pointer()
-                        .when(is_selected, |style| {
-                            style.bg(rgb(theme.primary)).text_color(rgb(0xffffff))
-                        })
-                        .when(!is_selected && is_today, |style| {
-                            style.border_1().border_color(rgb(theme.primary))
-                        })
-                        .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-                        .on_click(cx.listener(move |this, _event, _window, cx| {
-                            this.date_picker_select_day(day, cx);
-                        }))
-                        .child(day.to_string()),
-                );
-            }
-            calendar = calendar.child(row);
-        }
 
         let mut time_row = div()
             .flex()
@@ -151,8 +60,8 @@ impl GridView {
                     .text_size(px(11.0))
                     .cursor_pointer()
                     .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-                    .on_click(cx.listener(|this, _event, _window, cx| {
-                        this.date_picker_today(cx);
+                    .on_click(cx.listener(|this, _event, window, cx| {
+                        this.date_picker_today(window, cx);
                     }))
                     .child(format!(
                         "{}: {}/{}/{}",
@@ -168,14 +77,14 @@ impl GridView {
                     .flex_row()
                     .items_center()
                     .gap_2()
-                    .child(ui::dialog_button(
+                    .child(ui::popup_button(
                         "date-cancel",
                         t!("form.cancel").to_string(),
                         false,
                         theme,
                         cx.listener(|this, _event, _window, cx| this.date_picker_cancel(cx)),
                     ))
-                    .child(ui::dialog_button(
+                    .child(ui::popup_button(
                         "date-ok",
                         t!("form.ok").to_string(),
                         true,
@@ -192,7 +101,11 @@ impl GridView {
             .p_2()
             .gap_1()
             .border_color(rgb(theme.text_muted))
-            .child(header)
+            // gpui moves focus to any element with a tracked focus handle on mouse-down. The
+            // kit's calendar root (and its OK/Cancel buttons) are focusable, so without this
+            // the in-place editor would blur and auto-commit on the first click. Suppressing
+            // the default keeps focus in the editor until OK/Cancel/click-away.
+            .capture_any_mouse_down(|_event, window, _cx| window.prevent_default())
             .child(calendar)
             .child(time_row)
             .child(footer)

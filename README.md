@@ -72,7 +72,7 @@ cd rustgrid
 cargo run -p rustgrid-app
 ```
 
-The produced binary is named `rustgrid`.
+The produced binary is named `RustGrid`.
 
 On Windows a linker and C compiler are required (for sqlx's `ring`). The default MSVC
 toolchain works when MSVC Build Tools are installed. Otherwise use the GNU toolchain:
@@ -89,7 +89,7 @@ cargo run -p rustgrid-app
 - `crates/rustgrid-core` — engine-agnostic domain: driver/connection traits and models.
 - `crates/rustgrid-mysql` — MySQL driver implementation.
 - `crates/rustgrid-config` — versioned settings/profiles and encrypted secret storage.
-- `crates/rustgrid-app` — the GPUI desktop application (binary `rustgrid`).
+- `crates/rustgrid-app` — the GPUI desktop application (binary `RustGrid`).
 
 ## License
 

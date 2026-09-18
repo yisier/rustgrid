@@ -868,4 +868,397 @@ impl AppView {
         *cache = Some((text.to_string(), spans.clone()));
         spans
     }
+
+    // ------------------------------------------------------------------------------------------
+    // Saved queries: named SQL documents listed under the Queries main tab.
+    // ------------------------------------------------------------------------------------------
+
+    /// Open the "save query" dialog for the active editor tab, pre-filled with its current name
+    /// and save location.
+    pub(super) fn begin_save_query(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let Some(index) = self.active_query else {
+            return;
+        };
+        let Some(tab) = self.queries.get(index) else {
+            return;
+        };
+        let name = tab.name.clone().unwrap_or_default();
+        let connection_index = tab
+            .connection_index
+            .or_else(|| self.default_query_connection(cx));
+        let database = tab
+            .database
+            .clone()
+            .or_else(|| connection_index.and_then(|i| self.default_query_database(i, cx)))
+            .unwrap_or_default();
+
+        let theme = self.theme;
+        let weak = cx.weak_entity();
+        let change = weak.clone();
+        let submit = weak.clone();
+        let cancel = weak.clone();
+        let initial_name = name.clone();
+        let input = cx.new(move |cx| {
+            TextInput::new(theme, initial_name.clone(), TextInputOptions::default(), cx)
+                .on_change(Rc::new(move |text, _window, cx| {
+                    let _ = change.update(cx, |app, cx| {
+                        if let Some(dialog) = app.save_query_dialog.as_mut() {
+                            dialog.name = text.to_string();
+                            dialog.error = None;
+                        }
+                        cx.notify();
+                    });
+                }))
+                .on_submit(Rc::new(move |_window, cx| {
+                    let _ = submit.update(cx, |app, cx| app.submit_save_query(cx));
+                }))
+                .on_cancel(Rc::new(move |_window, cx| {
+                    let _ = cancel.update(cx, |app, cx| app.cancel_save_query(cx));
+                }))
+        });
+        input.update(cx, |input, cx| input.focus_state(window, cx));
+        self.query_name_input = Some(input);
+
+        if self.save_location_combo.is_none() {
+            let weak = cx.weak_entity();
+            let combo = cx.new(|cx| {
+                ComboBox::new(theme, Vec::new(), String::new(), 380.0, cx).on_select(Rc::new(
+                    move |value, _window, cx| {
+                        let _ = weak.update(cx, |app, cx| app.save_location_selected(value, cx));
+                    },
+                ))
+            });
+            combo.update(cx, |combo, cx| {
+                combo.set_icon("icons/database.svg", theme.icon_database, cx);
+            });
+            self.save_location_combo = Some(combo);
+        }
+
+        self.save_query_dialog = Some(SaveQueryDialog {
+            tab_index: index,
+            name,
+            connection_index,
+            database,
+            error: None,
+        });
+        self.save_query_focus_pending = true;
+        cx.notify();
+    }
+
+    /// Build the dropdown rows for the save-location picker, one per (connection, database) pair.
+    /// Connections whose databases are not loaded yet contribute a single connection-only row; the
+    /// current location is always present so the picker never shows an empty selection.
+    pub(super) fn query_save_location_options(
+        &self,
+        connection_index: Option<usize>,
+        database: &str,
+    ) -> Vec<(String, String)> {
+        let mut options: Vec<(String, String)> = Vec::new();
+        for (index, node) in self.connections.iter().enumerate() {
+            match &node.databases {
+                Loadable::Loaded(databases) if !databases.is_empty() => {
+                    for entry in databases {
+                        options.push((
+                            encode_save_location(index, &entry.name),
+                            format!("{}/{}", node.profile.name, entry.name),
+                        ));
+                    }
+                }
+                _ => options.push((encode_save_location(index, ""), node.profile.name.clone())),
+            }
+        }
+        if let Some(index) = connection_index {
+            let value = encode_save_location(index, database);
+            if !options.iter().any(|(candidate, _)| *candidate == value) {
+                let name = self
+                    .connections
+                    .get(index)
+                    .map(|node| node.profile.name.clone())
+                    .unwrap_or_default();
+                let label = if database.is_empty() {
+                    name
+                } else {
+                    format!("{name}/{database}")
+                };
+                options.insert(0, (value, label));
+            }
+        }
+        options
+    }
+
+    pub(super) fn sync_save_location_combo(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(dialog) = self.save_query_dialog.as_ref() else {
+            return;
+        };
+        let connection_index = dialog.connection_index;
+        let database = dialog.database.clone();
+        let options: Vec<ComboOption> = self
+            .query_save_location_options(connection_index, &database)
+            .into_iter()
+            .map(|(value, label)| ComboOption::new(value, label))
+            .collect();
+        let selected = connection_index
+            .map(|index| encode_save_location(index, &database))
+            .unwrap_or_default();
+        let placeholder = t!("query.save_location").to_string();
+        if let Some(combo) = self.save_location_combo.clone() {
+            combo.update(cx, |combo, cx| {
+                combo.set_options(options, cx);
+                combo.set_placeholder(placeholder, cx);
+                combo.set_selected(selected, cx);
+            });
+        }
+    }
+
+    pub(super) fn save_location_selected(&mut self, value: &str, cx: &mut Context<'_, Self>) {
+        let Some((connection_index, database)) = decode_save_location(value) else {
+            return;
+        };
+        if let Some(dialog) = self.save_query_dialog.as_mut() {
+            dialog.connection_index = Some(connection_index);
+            dialog.database = database;
+            dialog.error = None;
+        }
+        cx.notify();
+    }
+
+    pub(super) fn cancel_save_query(&mut self, cx: &mut Context<'_, Self>) {
+        self.save_query_dialog = None;
+        self.query_name_input = None;
+        cx.notify();
+    }
+
+    pub(super) fn submit_save_query(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(dialog) = self.save_query_dialog.as_ref() else {
+            return;
+        };
+        let name = dialog.name.trim().to_string();
+        let tab_index = dialog.tab_index;
+        let connection_index = dialog.connection_index;
+        let database = dialog.database.clone();
+
+        if name.is_empty() {
+            self.save_query_error(t!("query.name_required").to_string(), cx);
+            return;
+        }
+        let Some(connection_id) = connection_index
+            .and_then(|index| self.connections.get(index))
+            .map(|node| node.profile.id.clone())
+        else {
+            self.save_query_error(t!("query.no_location").to_string(), cx);
+            return;
+        };
+        let Some(sql) = self.queries.get(tab_index).map(|tab| tab.sql.clone()) else {
+            return;
+        };
+
+        match self.saved_queries.iter().position(|saved| {
+            saved.name == name && saved.connection_id == connection_id && saved.database == database
+        }) {
+            Some(position) => {
+                self.saved_queries[position].sql = sql;
+                self.saved_query_selected = Some(position);
+            }
+            None => {
+                self.saved_queries.push(SavedQuery {
+                    name: name.clone(),
+                    sql,
+                    connection_id,
+                    database: database.clone(),
+                });
+                self.saved_query_selected = Some(self.saved_queries.len() - 1);
+            }
+        }
+        let _ = self.config.save_queries(&self.saved_queries);
+
+        if let Some(tab) = self.queries.get_mut(tab_index) {
+            tab.name = Some(name);
+            // Keep the editor bound to the location it was filed under, so a later save does not
+            // duplicate it under the tab's previous connection.
+            tab.connection_index = connection_index;
+            tab.database = (!database.is_empty()).then(|| database.clone());
+        }
+        if let Some(connection_index) = connection_index
+            && !matches!(
+                self.connections
+                    .get(connection_index)
+                    .map(|node| &node.status),
+                Some(ConnectionStatus::Connected(_))
+            )
+        {
+            self.connect(connection_index, cx);
+        }
+        self.save_query_dialog = None;
+        self.query_name_input = None;
+        self.main_tab = MainTab::Queries;
+        cx.notify();
+    }
+
+    fn save_query_error(&mut self, message: String, cx: &mut Context<'_, Self>) {
+        if let Some(dialog) = self.save_query_dialog.as_mut() {
+            dialog.error = Some(message);
+        }
+        cx.notify();
+    }
+
+    /// The display name of the connection a saved query belongs to (falls back to the stored id
+    /// when the connection no longer exists).
+    pub(super) fn saved_query_connection_name(&self, saved: &SavedQuery) -> String {
+        self.connections
+            .iter()
+            .find(|node| node.profile.id == saved.connection_id)
+            .map(|node| node.profile.name.clone())
+            .unwrap_or_else(|| saved.connection_id.clone())
+    }
+
+    /// The query-list scope taken from the connection tree's selection:
+    /// - `Some((connection_id, Some(database)))` when a database is selected,
+    /// - `Some((connection_id, None))` when only a connection is selected (all of its databases),
+    /// - `None` when the selection is neither (categories/tables), which shows every saved query.
+    pub(super) fn saved_query_filter(&self, cx: &App) -> Option<(String, Option<String>)> {
+        let selected = self.tree_pane.read(cx).selected.clone()?;
+        if let Some(rest) = selected.strip_prefix("conn-") {
+            let index: usize = rest.parse().ok()?;
+            let connection_id = self.connections.get(index)?.profile.id.clone();
+            return Some((connection_id, None));
+        }
+        if let Some(rest) = selected.strip_prefix("db-") {
+            let mut parts = rest.splitn(2, '-');
+            let connection_index: usize = parts.next()?.parse().ok()?;
+            let database_index: usize = parts.next()?.parse().ok()?;
+            let connection_id = self.connections.get(connection_index)?.profile.id.clone();
+            let database = self.database_name(connection_index, database_index);
+            return Some((connection_id, database));
+        }
+        None
+    }
+
+    /// Toggle the saved-query list sort on a column: first click ascending, a second click on the
+    /// same column flips the direction.
+    pub(super) fn toggle_saved_query_sort(
+        &mut self,
+        column: SavedQueryColumn,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.saved_query_sort = match self.saved_query_sort {
+            Some((current, descending)) if current == column => Some((column, !descending)),
+            _ => Some((column, false)),
+        };
+        cx.notify();
+    }
+
+    /// Open a saved query in a new editor tab (or activate the tab that already shows it).
+    pub(super) fn open_saved_query(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        let Some(saved) = self.saved_queries.get(index).cloned() else {
+            return;
+        };
+        let connection_index = self
+            .connections
+            .iter()
+            .position(|node| node.profile.id == saved.connection_id);
+        let database = (!saved.database.is_empty()).then(|| saved.database.clone());
+
+        let existing = self.queries.iter().position(|tab| {
+            tab.name.as_deref() == Some(saved.name.as_str())
+                && tab.connection_index == connection_index
+                && tab.database.as_deref() == database.as_deref()
+        });
+        if let Some(existing) = existing {
+            self.activate_query(existing, cx);
+            return;
+        }
+
+        self.open_query_with(connection_index, database, cx);
+        if let Some(active) = self.active_query
+            && let Some(tab) = self.queries.get_mut(active)
+        {
+            tab.sql = saved.sql;
+            tab.name = Some(saved.name);
+            tab.caret = tab.sql.len();
+            tab.anchor = tab.caret;
+        }
+        if let Some(connection_index) = connection_index
+            && !matches!(
+                self.connections
+                    .get(connection_index)
+                    .map(|node| &node.status),
+                Some(ConnectionStatus::Connected(_))
+            )
+        {
+            self.connect(connection_index, cx);
+        }
+        cx.notify();
+    }
+
+    /// Ask for confirmation before deleting a saved query.
+    pub(super) fn confirm_delete_saved_query(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        if index >= self.saved_queries.len() {
+            return;
+        }
+        self.delete_confirm = Some(DeleteConfirm::SavedQuery { index });
+        cx.notify();
+    }
+
+    pub(super) fn delete_saved_query(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        if index >= self.saved_queries.len() {
+            return;
+        }
+        self.saved_queries.remove(index);
+        let _ = self.config.save_queries(&self.saved_queries);
+        self.saved_query_selected = None;
+        cx.notify();
+    }
+}
+
+/// Separator joining the connection index and database name in a save-location option value.
+const SAVE_LOCATION_SEP: char = '\u{1f}';
+
+fn encode_save_location(connection_index: usize, database: &str) -> String {
+    format!("{connection_index}{SAVE_LOCATION_SEP}{database}")
+}
+
+fn decode_save_location(value: &str) -> Option<(usize, String)> {
+    let (connection, database) = value.split_once(SAVE_LOCATION_SEP)?;
+    Some((connection.parse().ok()?, database.to_string()))
+}
+
+/// Whether a saved query passes the current tree scope (`None` = show everything).
+impl AppView {
+    pub(super) fn saved_query_matches(
+        &self,
+        saved: &SavedQuery,
+        filter: &Option<(String, Option<String>)>,
+    ) -> bool {
+        match filter {
+            None => true,
+            Some((connection_id, None)) => &saved.connection_id == connection_id,
+            Some((connection_id, Some(database))) => {
+                &saved.connection_id == connection_id && &saved.database == database
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn save_location_round_trips() {
+        let value = encode_save_location(3, "inventec_mx_wms");
+        assert_eq!(
+            decode_save_location(&value),
+            Some((3, "inventec_mx_wms".to_string()))
+        );
+        assert_eq!(
+            decode_save_location(&encode_save_location(0, "")),
+            Some((0, String::new()))
+        );
+    }
+
+    #[test]
+    fn save_location_rejects_malformed_values() {
+        assert_eq!(decode_save_location("no-separator"), None);
+        assert_eq!(decode_save_location("not-a-number\u{1f}db"), None);
+    }
 }

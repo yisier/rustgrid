@@ -19,17 +19,21 @@ use rustgrid_config::{AppSettings, ConfigStore, LanguageSetting, ThemeSetting};
 use rustgrid_core::{
     CellValue, Connection, ConnectionConfig, DriverRegistry, Error, FilterCondition,
     FilterConjunction, FilterGroup, FilterNode, FilterOperator, PageRequest, QueryResult,
-    RowInsert, RowUpdate,
+    RowInsert, RowUpdate, SavedQuery,
 };
 
 use crate::form::{ConnectionForm, FORM_FIELDS, FormField};
 use crate::runtime::Runtime;
 use crate::session::{
-    Category, CategoryExpansion, CellSelection, ConnectionNode, ConnectionStatus, DatabaseNode,
-    GridState, Loadable, QueryTab, SortRule, compute_column_widths,
+    Category, CategoryExpansion, CellRange, CellSelection, ConnectionNode, ConnectionStatus,
+    DatabaseNode, GridState, Loadable, QueryTab, SortRule, compute_column_widths,
 };
 use crate::sql::{self, SqlSpan, SqlToken};
 use crate::theme::Theme;
+
+// The date half of the in-place date/time picker is gpui-kit's calendar (day, month and year
+// views, navigation, selection and localization); only the time-of-day row is app-drawn.
+use gpui_kit::component::calendar::{CalendarEvent, CalendarState};
 
 use ui::{
     ButtonKind, ComboBox, ComboOption, TextInput, TextInputOptions, checkbox_box, form_tab,
@@ -103,6 +107,18 @@ struct PasswordPrompt {
     input: Entity<TextInput>,
     password: String,
     save_password: bool,
+}
+
+/// State of the "save query" dialog: the tab being saved, its (editable) name, the chosen save
+/// location, and an inline validation error.
+struct SaveQueryDialog {
+    /// Index into `AppView::queries` of the tab being saved.
+    tab_index: usize,
+    name: String,
+    /// The selected connection, indexed into `AppView::connections`.
+    connection_index: Option<usize>,
+    database: String,
+    error: Option<String>,
 }
 
 /// Which pane's row owns the in-place rename editor. The object list and the connection tree can
@@ -437,13 +453,15 @@ enum GridHit {
 struct DatePicker {
     row: usize,
     col: usize,
-    year: i32,
-    month: u32,
-    day: u32,
     hour: u32,
     minute: u32,
     second: u32,
     has_time: bool,
+    /// The date half, owned by gpui-kit's calendar: day/month/year views, navigation and the
+    /// selected date all live here (the calendar is the source of truth for the date).
+    calendar: Entity<CalendarState>,
+    /// Keeps the calendar's selection event wired for as long as the picker is open.
+    _subscription: Subscription,
 }
 
 /// An in-progress drag of a grid column's right edge.
@@ -468,6 +486,8 @@ enum DeleteConfirm {
         name: String,
         operation: TableOperation,
     },
+    /// Delete a saved query from the saved-query list.
+    SavedQuery { index: usize },
 }
 
 #[derive(Clone, Copy)]
@@ -484,6 +504,7 @@ enum DialogKind {
     ConnectionForm,
     DbDialog,
     Password,
+    SaveQuery,
     Error,
     Confirm,
     Options,
@@ -499,6 +520,14 @@ enum MainTab {
     Backups,
 }
 
+/// A sortable column of the saved-query list under the Queries main tab.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SavedQueryColumn {
+    Name,
+    Connection,
+    Database,
+}
+
 const MAIN_TABS: [(MainTab, &str, &str); 6] = [
     (MainTab::Tables, "icons/tables.svg", "main.tables"),
     (MainTab::Views, "icons/views.svg", "main.views"),
@@ -512,6 +541,10 @@ const PANEL_WIDTH: f32 = 620.0;
 const FIELD_LABEL_WIDTH: f32 = 96.0;
 const OBJECT_ROW_HEIGHT: f32 = 20.0;
 const OBJECT_BOTTOM_MARGIN: f32 = 20.0;
+/// Fixed column widths of the saved-query list (query name / connection / database).
+const SAVED_QUERY_NAME_WIDTH: f32 = 200.0;
+const SAVED_QUERY_CONNECTION_WIDTH: f32 = 160.0;
+const SAVED_QUERY_DATABASE_WIDTH: f32 = 160.0;
 const GRID_ROW_HEIGHT: f32 = 24.0;
 const GRID_COLUMN_WIDTH: f32 = 120.0;
 /// Fixed column widths of a filter condition row. The filter builder's group boundary row reuses
@@ -542,6 +575,18 @@ pub struct AppView {
     next_design_id: u64,
     active_query: Option<usize>,
     next_query_id: u64,
+    /// Saved, named queries loaded from `queries.json`.
+    saved_queries: Vec<SavedQuery>,
+    /// The saved query highlighted in the Queries list, indexed into `saved_queries`.
+    saved_query_selected: Option<usize>,
+    /// The saved-query list sort: which column and whether it is descending. `None` keeps the
+    /// stored (insertion) order.
+    saved_query_sort: Option<(SavedQueryColumn, bool)>,
+    /// The open "save query" dialog, if any.
+    save_query_dialog: Option<SaveQueryDialog>,
+    query_name_input: Option<Entity<TextInput>>,
+    save_location_combo: Option<Entity<ComboBox>>,
+    save_query_focus_pending: bool,
     query_focus: FocusHandle,
     query_focus_pending: bool,
     query_editor_focused: bool,
@@ -676,6 +721,7 @@ impl AppView {
         let settings = config.load_settings().unwrap_or_default();
         let theme_setting = settings.theme;
         let language = settings.language;
+        let saved_queries = config.load_queries().unwrap_or_default();
         // Claim Tab inside the cell editor so it advances to the next cell rather than moving
         // window focus (which is what the `Root` context binds it to).
         cx.bind_keys([
@@ -696,6 +742,13 @@ impl AppView {
             next_design_id: 0,
             active_query: None,
             next_query_id: 0,
+            saved_queries,
+            saved_query_selected: None,
+            saved_query_sort: None,
+            save_query_dialog: None,
+            query_name_input: None,
+            save_location_combo: None,
+            save_query_focus_pending: false,
             query_focus: cx.focus_handle(),
             query_focus_pending: false,
             query_editor_focused: false,
@@ -958,6 +1011,7 @@ impl AppView {
         self.queries.len().hash(&mut hasher);
         for query in &self.queries {
             query.id.hash(&mut hasher);
+            query.name.hash(&mut hasher);
         }
         hasher.finish()
     }
@@ -999,6 +1053,9 @@ impl AppView {
             edit.input
                 .update(cx, |input, cx| input.set_theme(theme, cx));
         }
+        if let Some(input) = self.query_name_input.as_ref() {
+            input.update(cx, |input, cx| input.set_theme(theme, cx));
+        }
         for design in &self.designs {
             design.update(cx, |design, cx| design.set_theme(theme, cx));
         }
@@ -1007,6 +1064,7 @@ impl AppView {
             self.db_collation_combo.as_ref(),
             self.query_connection_combo.as_ref(),
             self.query_database_combo.as_ref(),
+            self.save_location_combo.as_ref(),
             self.language_combo.as_ref(),
         ]
         .into_iter()
@@ -1239,6 +1297,7 @@ impl Render for AppView {
         self.ensure_query_combos(cx);
         self.sync_db_combos(cx);
         self.sync_query_combos(cx);
+        self.sync_save_location_combo(cx);
         self.sync_language_combo(cx);
         let theme = self.theme;
 
@@ -1276,6 +1335,17 @@ impl Render for AppView {
                 window.focus(&handle, cx);
             }
             self.rename_focus_pending = false;
+        }
+
+        if self.save_query_focus_pending {
+            self.save_query_focus_pending = false;
+            // The dialog opens on a later frame, so focus the field once more after that frame;
+            // by then its lazily-created inner input state exists and will actually take input.
+            if let Some(input) = self.query_name_input.clone() {
+                cx.on_next_frame(window, move |_this, window, cx| {
+                    input.update(cx, |input, cx| input.focus_state(window, cx));
+                });
+            }
         }
 
         if self.query_focus_pending {
@@ -1534,35 +1604,8 @@ fn parse_datetime(value: &str) -> Option<NaiveDateTime> {
     None
 }
 
-fn days_in_month(year: i32, month: u32) -> u32 {
-    match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 => {
-            if is_leap_year(year) {
-                29
-            } else {
-                28
-            }
-        }
-        _ => 30,
-    }
-}
-
-fn is_leap_year(year: i32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
-}
-
 fn wrap_unit(value: u32, delta: i32, modulus: u32) -> u32 {
     (value as i32 + delta).rem_euclid(modulus as i32) as u32
-}
-
-fn weekday_labels() -> [&'static str; 7] {
-    if rust_i18n::locale().starts_with("zh") {
-        ["一", "二", "三", "四", "五", "六", "日"]
-    } else {
-        ["M", "T", "W", "T", "F", "S", "S"]
-    }
 }
 
 #[cfg(test)]
@@ -1606,5 +1649,29 @@ mod tests {
         assert_eq!(move_vertical(text, 9, -1), 6);
         assert_eq!(move_vertical(text, 5, -1), 0);
         assert_eq!(move_vertical(text, 10, 1), text.len());
+    }
+
+    #[test]
+    fn multi_range_selection_unions_cells() {
+        let mut selection = CellSelection::new(0, 0);
+        selection.ranges.push(CellRange::new(2, 2));
+        selection.active = selection.ranges.len() - 1;
+        assert!(selection.contains(0, 0));
+        assert!(selection.contains(2, 2));
+        assert!(!selection.contains(1, 1));
+        assert_eq!(selection.row_indices(), vec![0, 2]);
+        assert_eq!(selection.col_indices(), vec![0, 2]);
+        assert_eq!(selection.cells().len(), 2);
+        assert_eq!(selection.active_cursor(), (2, 2));
+    }
+
+    #[test]
+    fn rectangular_selection_covers_block() {
+        let selection = CellSelection::single((1, 1), (2, 3));
+        assert_eq!(selection.rows(), (1, 2));
+        assert_eq!(selection.cols(), (1, 3));
+        assert_eq!(selection.cells().len(), 6);
+        assert!(selection.contains(2, 3));
+        assert!(!selection.contains(0, 1));
     }
 }

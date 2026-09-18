@@ -5,13 +5,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use directories::ProjectDirs;
-use rustgrid_core::ConnectionProfile;
+use rustgrid_core::{ConnectionProfile, SavedQuery};
 use serde::{Deserialize, Serialize};
 
 const CURRENT_VERSION: u32 = 1;
 const PROFILES_FILE: &str = "connections.json";
 const SETTINGS_VERSION: u32 = 2;
 const SETTINGS_FILE: &str = "settings.json";
+const QUERIES_VERSION: u32 = 1;
+const QUERIES_FILE: &str = "queries.json";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -93,6 +95,22 @@ pub struct AppSettings {
     pub language: LanguageSetting,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct QueriesFile {
+    version: u32,
+    #[serde(default)]
+    queries: Vec<SavedQuery>,
+}
+
+impl Default for QueriesFile {
+    fn default() -> Self {
+        Self {
+            version: QUERIES_VERSION,
+            queries: Vec::new(),
+        }
+    }
+}
+
 impl ConfigStore {
     pub fn new() -> ConfigResult<Self> {
         let dirs = ProjectDirs::from("", "", "rustgrid").ok_or(ConfigError::NoConfigDir)?;
@@ -111,6 +129,10 @@ impl ConfigStore {
 
     pub fn settings_path(&self) -> PathBuf {
         self.root.join(SETTINGS_FILE)
+    }
+
+    pub fn queries_path(&self) -> PathBuf {
+        self.root.join(QUERIES_FILE)
     }
 
     pub fn load_profiles(&self) -> ConfigResult<Vec<ConnectionProfile>> {
@@ -164,6 +186,27 @@ impl ConfigStore {
         };
         let contents = serde_json::to_string_pretty(&file)?;
         fs::write(self.settings_path(), contents)?;
+        Ok(())
+    }
+
+    pub fn load_queries(&self) -> ConfigResult<Vec<SavedQuery>> {
+        let path = self.queries_path();
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let contents = fs::read_to_string(path)?;
+        let file: QueriesFile = serde_json::from_str(&contents)?;
+        Ok(file.queries)
+    }
+
+    pub fn save_queries(&self, queries: &[SavedQuery]) -> ConfigResult<()> {
+        fs::create_dir_all(&self.root)?;
+        let file = QueriesFile {
+            version: QUERIES_VERSION,
+            queries: queries.to_vec(),
+        };
+        let contents = serde_json::to_string_pretty(&file)?;
+        fs::write(self.queries_path(), contents)?;
         Ok(())
     }
 }

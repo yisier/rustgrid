@@ -140,6 +140,7 @@ impl AppView {
                 name,
                 operation,
             } => self.run_table_operation(connection_index, database_index, name, operation, cx),
+            DeleteConfirm::SavedQuery { index } => self.delete_saved_query(index, cx),
         }
         cx.notify();
     }
@@ -181,9 +182,20 @@ impl GridView {
         cx.notify();
     }
 
+    /// Load the current page, resetting the scroll position (page navigation, sort, filter).
     pub(super) fn load_page(&mut self, cx: &mut Context<'_, Self>) {
+        self.load_page_inner(true, cx);
+    }
+
+    /// Reload the current page without moving the view: used after a write and by the Refresh
+    /// button, so the user keeps their scroll position.
+    pub(super) fn reload_after_write(&mut self, cx: &mut Context<'_, Self>) {
+        self.load_page_inner(false, cx);
+    }
+
+    fn load_page_inner(&mut self, reset_scroll: bool, cx: &mut Context<'_, Self>) {
         if self.state.sql.is_some() {
-            self.reload_query(cx);
+            self.reload_query(reset_scroll, cx);
             return;
         }
 
@@ -241,8 +253,9 @@ impl GridView {
                         grid.state.rows = Arc::new(page.rows);
                         grid.state.total_rows = page.total_rows;
                         grid.state.error = None;
-                        grid.list_scroll = UniformListScrollHandle::new();
-                        grid.hscroll.set_offset(Point::default());
+                        if reset_scroll {
+                            grid.reset_scroll();
+                        }
                     }
                     Err(error) => {
                         grid.state.error = Some(error.to_string());
@@ -264,12 +277,21 @@ impl GridView {
         .detach();
     }
 
-    fn reload_query(&mut self, cx: &mut Context<'_, Self>) {
+    /// Put the grid back at the top-left. Used when the row set changes identity (page turn,
+    /// sort/filter); `reload_after_write` skips it so a write or refresh does not jump the view.
+    fn reset_scroll(&mut self) {
+        self.list_scroll = UniformListScrollHandle::new();
+        self.hscroll.set_offset(Point::default());
+    }
+
+    fn reload_query(&mut self, reset_scroll: bool, cx: &mut Context<'_, Self>) {
         let Some(sql) = self.state.sql.clone() else {
             return;
         };
         let connection = self.state.connection.clone();
         let database = self.state.database.clone();
+        let table = self.state.table.clone();
+        let editable = self.state.editable;
         self.state.loading = true;
         self.state.error = None;
         self.state.selection = None;
@@ -283,9 +305,10 @@ impl GridView {
         let runtime = self.runtime.clone();
         cx.spawn(async move |this, cx| {
             let query_database = (!database.is_empty()).then(|| database.clone());
+            let query_connection = connection.clone();
             let result = match runtime
                 .spawn(async move {
-                    connection
+                    query_connection
                         .execute_query(query_database.as_deref(), &sql)
                         .await
                 })
@@ -295,10 +318,43 @@ impl GridView {
                 Err(error) => Err(Error::other(error)),
             };
 
+            // `execute_query` only returns result-set metadata, so re-attach the catalog's
+            // primary-key/data-type flags. Without them a later edit would use every column as
+            // the row key, binding `NULL` numeric columns as `''` (MySQL 1292).
+            let catalog_columns = if editable && !table.is_empty() {
+                let column_connection = connection.clone();
+                let column_database = database.clone();
+                let column_table = table.clone();
+                match runtime
+                    .spawn(async move {
+                        column_connection
+                            .columns(&column_database, &column_table)
+                            .await
+                    })
+                    .await
+                {
+                    Ok(inner) => inner.ok(),
+                    Err(_) => None,
+                }
+            } else {
+                None
+            };
+
             let _ = this.update(cx, |grid, cx| {
                 grid.state.loading = false;
                 match result {
-                    Ok(query_result) => {
+                    Ok(mut query_result) => {
+                        if let Some(catalog_columns) = catalog_columns {
+                            for column in query_result.columns.iter_mut() {
+                                if let Some(found) = catalog_columns
+                                    .iter()
+                                    .find(|candidate| candidate.name == column.name)
+                                {
+                                    column.primary_key = found.primary_key;
+                                    column.data_type = found.data_type.clone();
+                                }
+                            }
+                        }
                         let total = query_result.rows.len() as u64;
                         if !grid.state.manual_column_widths
                             || grid.state.column_widths.len() != query_result.columns.len()
@@ -312,8 +368,9 @@ impl GridView {
                         grid.state.page_index = 0;
                         grid.state.page_size = total.max(1);
                         grid.state.error = None;
-                        grid.list_scroll = UniformListScrollHandle::new();
-                        grid.hscroll.set_offset(Point::default());
+                        if reset_scroll {
+                            grid.reset_scroll();
+                        }
                     }
                     Err(error) => grid.state.error = Some(error.to_string()),
                 }
@@ -402,7 +459,7 @@ impl GridView {
     }
 
     pub(super) fn refresh(&mut self, cx: &mut Context<'_, Self>) {
-        self.load_page(cx);
+        self.reload_after_write(cx);
     }
 
     pub(super) fn toggle_sort_panel(&mut self, cx: &mut Context<'_, Self>) {

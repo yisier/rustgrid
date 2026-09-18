@@ -8,7 +8,7 @@ repository.workspace = true
 authors.workspace = true
 
 [[bin]]
-name = "rustgrid"
+name = "RustGrid"
 path = "src/main.rs"
 
 [dependencies]

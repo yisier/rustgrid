@@ -407,7 +407,7 @@ impl AppView {
     pub(super) fn query_editor_key(
         &mut self,
         event: &KeyDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
         let Some(index) = self.active_query else {
@@ -503,6 +503,11 @@ impl AppView {
                     // Only Ctrl+Space is handled here (manual completion); plain space is
                     // delivered by the platform input handler.
                     self.refresh_query_completion(true);
+                    cx.stop_propagation();
+                    return;
+                }
+                "s" => {
+                    self.begin_save_query(window, cx);
                     cx.stop_propagation();
                     return;
                 }

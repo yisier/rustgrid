@@ -1087,16 +1087,25 @@ impl GridView {
             )
             .to_string()
         });
-        let message = match self.state.selection {
+        let message = match self.state.selection.as_ref() {
             Some(selection) => {
                 let (start_row, end_row) = selection.rows();
                 let (start_col, end_col) = selection.cols();
-                t!(
-                    "grid.selection_info",
-                    rows = end_row - start_row + 1,
-                    cols = end_col - start_col + 1
-                )
-                .to_string()
+                if selection.ranges.len() > 1 {
+                    t!(
+                        "grid.selection_info",
+                        rows = selection.row_indices().len(),
+                        cols = selection.col_indices().len()
+                    )
+                    .to_string()
+                } else {
+                    t!(
+                        "grid.selection_info",
+                        rows = end_row - start_row + 1,
+                        cols = end_col - start_col + 1
+                    )
+                    .to_string()
+                }
             }
             None => self.state.sql(),
         };

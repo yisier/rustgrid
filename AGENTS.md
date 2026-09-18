@@ -12,7 +12,7 @@ not a later refactor.
 - `crates/rustgrid-mysql` — the only compiled-in driver; implements the core traits with sqlx.
 - `crates/rustgrid-config` — versioned settings/profiles plus encrypted secret storage in the
   OS config dir (`connections.json`, `settings.json`, `secrets.json`).
-- `crates/rustgrid-app` — GPUI binary `rustgrid`: `src/app/` is the view/render layer, split
+- `crates/rustgrid-app` — GPUI binary `RustGrid`: `src/app/` is the view/render layer, split
   by feature (`mod.rs` holds `AppView`, its state, the `Render` entry, free helpers and
   tests; the rest are `impl AppView` submodules: `tree`, `database`, `db_dialog`, `objects`,
   `sidebar`, `tabs`, `toolbar`, `query`, `query_view`, `query_editor`, `grid`, `grid_input`,
@@ -55,7 +55,7 @@ not a later refactor.
   Windows). A faster `cargo check -p rustgrid-app` (or `cargo check --workspace`) may be used while
   iterating; finish with `cargo build`. Debug builds do not need the shader toolchain below.
 - `cargo check --workspace` / `cargo build`
-- `cargo run -p rustgrid-app` (produced binary is `rustgrid`)
+- `cargo run -p rustgrid-app` (produced binary is `RustGrid`)
 - Release build (`cargo build --release -p rustgrid-app`) normally needs no shader toolchain
   (gpui-kit enables `runtime_shaders`). If that ever changes, see Gotchas: build the fallback
   shim once with `gcc -O2 -o fxc.exe tools/fxc-shim/fxc.c -lkernel32`, then run cargo with
@@ -172,6 +172,13 @@ touching UI code.
   scrolling the list moves the editor with its row instead of leaving it floating at a stale
   offset. A selected grid cell paints `Theme::grid_selection_bg` (blue) with
   `grid_selection_text`.
+- Grid selection is **Excel-like and multi-range**: `CellSelection` holds `Vec<CellRange>` plus an
+  `active` index, and a cell is painted selected when any range contains it. Plain click starts a
+  new single-cell range (and opens the editor on release), **Shift+click/drag** moves the active
+  range's `cursor`, and **Ctrl/Cmd+click** toggles the clicked cell's range in/out
+  (`add_or_remove_range`). Anything that reads a "selection" — status bar, delete, `set_selection_null`,
+  multi-cell edit, header highlight — must go through `contains`/`cells`/`row_indices`/`col_indices`
+  rather than assuming a single rectangle.
 - Embed bitmap images with `img(ImageSource::Resource(Resource::Embedded("name".into())))`.
   Calling `img("name")` treats the bare filename as a **URI** and fails with
   `Failed to load asset ... loading image asset from "name"`.
@@ -209,10 +216,25 @@ element types. Two kinds of upgrade:
 - **UI widget reference — `longbridge/gpui-kit`** (https://github.com/longbridge/gpui-kit,
   formerly `gpui-component`, **Apache-2.0**). It **is** a dependency of this workspace (the
   `gpui-kit` facade, see Tech stack): use its components rather than hand-drawing controls, and
-  when a widget is still missing (date picker, toast, tooltip, virtualized table, ...) prefer
+  when a widget is still missing (toast, tooltip, virtualized table, ...) prefer
   wiring the kit's component over porting an implementation. Only fall back to porting upstream
   code when the kit genuinely lacks the widget; keep ports under `src/app/ui/` and retain the
   upstream Apache-2.0 attribution. Upgrade procedure and blast radius: "Upgrading gpui-kit".
+- **The grid's in-place date/time picker reuses the kit's `Calendar`.** `DatePicker` holds an
+  `Entity<CalendarState>` (`gpui_kit::component::calendar`) as the source of truth for the date
+  and subscribes to `CalendarEvent::Selected`; `grid_cell.rs::render_date_picker` renders it and
+  only app-draws the time-of-day spinner row and the today/OK/Cancel footer. Do not hand-roll the
+  calendar again. The kit's styled `Calendar` facade is sized for a full popup (28px cells), so
+  `ui/calendar.rs::compact_calendar` wraps the **unstyled** `gpui_base::Calendar` and overrides
+  the cell metrics through its `Calendar::item` hook (the styled facade exposes no item hook);
+  the localized labels come from the app's own `calendar.week.*` / `calendar.month.*` entries in
+  `locales/{en,zh-CN}.yml`, because the kit's `Calendar.*` translations live in the kit's
+  `rust-i18n` backend and are not reachable from the app's `t!`. The kit's `DatePicker`/`Date`
+  model is date-only (`NaiveDate`), so it cannot represent `datetime`/`timestamp` values by
+  itself — that is why time stays app-drawn. Keep that popup from stealing focus: gpui focuses
+  any `track_focus` element on mouse-down (the calendar root and the kit buttons are focusable),
+  which would blur the cell editor and auto-commit, so the popup calls
+  `capture_any_mouse_down(|_, window, _| window.prevent_default())`.
 
 ## Scope (do not exceed)
 
@@ -232,10 +254,18 @@ shadcn chrome described above. Implemented today:
    the shared confirm dialog, while Rename (or `F2` on the selection) edits the name **in place**
    in the row that started it. These run through `Connection`
    (`drop_table`/`empty_table`/`truncate_table`/`rename_table`), never as raw SQL written in the UI.
+7. Saving named queries: `Save` (or `Ctrl+S`) in the query editor opens a dialog for the query
+   name and save location (connection + database). Saved queries are listed under the `Queries`
+   main tab in a **sortable three-column list** (query name / connection / database; click a header
+   to sort). The list is scoped by the connection tree's selection — a selected database shows only
+   that database's queries, a selected connection shows all of its databases, and any other
+   selection shows every saved query. Rows open with a double-click and are deleted through the
+   shared confirm dialog. They persist in the config dir's `queries.json` (`SavedQuery`, keyed by
+   connection profile id + database name).
 
 Still out of scope: a second database engine, and the disabled placeholder UI (the
 `Functions`/`Users`/`Backups` main tabs, the `Design/New/Delete Table`, `Import/Export` toolbar
-buttons, and the query editor's `Save`/`Query Builder`/`Snippets` items are deliberate stubs —
+buttons, and the query editor's `Query Builder`/`Snippets` items are deliberate stubs —
 leave them disabled unless asked). The abstractions above are what make more engines cheap later —
 do not build those features early.
 
@@ -265,6 +295,15 @@ do not build those features early.
 - sqlx 0.9's `sqlx::query` only accepts `&'static str` (the `SqlSafeStr` bound). A
   dynamically built query must be wrapped: `sqlx::query(sqlx::AssertSqlSafe(sql))`. Keep
   identifiers escaped (`quote_identifier`) and use bind parameters for all values.
+- Grid writes identify a row by its primary key, falling back to **every column** when the table
+  has no primary key (`GridState` column `primary_key` flags). Key values are
+  `Option<String>` (`CellValue::as_edit_value`): `None` is SQL `NULL` and must render `IS NULL`,
+  never be bound as an empty string — binding `''` for a numeric `NULL` column fails with
+  `1292 Truncated incorrect INTEGER value: ''`. The same applies to `delete_rows` keys.
+  `Connection::execute_query` only returns result-set metadata, so editable query grids re-attach
+  the catalog's `primary_key`/`data_type` flags both on first run (`run_query`) **and on every
+  reload** (`GridView::reload_query`); missing the reload path silently degrades edits to the
+  every-column key and reintroduces the `1292` above.
 - MySQL DDL (`CREATE`/`DROP`/`ALTER DATABASE`) **must** run through the text protocol:
   `sqlx::raw_sql(sqlx::AssertSqlSafe(sql)).execute(&pool)`. Using `sqlx::query` prepares the
   statement and MySQL rejects it with `1295 ... not supported in the prepared statement
@@ -293,7 +332,7 @@ do not build those features early.
   `RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-gnu`,
   `CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=gcc`, `CC=gcc` (MinGW-w64 `gcc` is on `PATH`).
   A plain `cargo build` fails with `linker link.exe not found`. With the GNU toolchain the
-  host *is* the GNU target, so the binary lands at `target/debug/rustgrid.exe` (not under a
+  host *is* the GNU target, so the binary lands at `target/debug/RustGrid.exe` (not under a
   triple-named subdirectory).
 - Keep GPUI usage close to the shapes verified in `main.rs` and the `ui/` wrappers.
   `main.rs` opens the window as `gpui_kit::application().with_assets(Assets).run(|cx| { gpui_kit::init(cx); … })`

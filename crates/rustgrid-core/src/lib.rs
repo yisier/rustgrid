@@ -8,7 +8,7 @@ pub use error::{Error, Result};
 pub use model::{
     CellValue, ColumnDef, ColumnInfo, ConnectionConfig, ConnectionProfile, DatabaseInfo, DriverId,
     FilterCondition, FilterConjunction, FilterGroup, FilterNode, FilterOperator, ForeignKeyDef,
-    IndexDef, ObjectKind, PageRequest, QueryResult, RowInsert, RowUpdate, SortColumn, TableInfo,
-    TableOptions, TablePage, TableSchema, TriggerDef,
+    IndexDef, ObjectKind, PageRequest, QueryResult, RowInsert, RowUpdate, SavedQuery, SortColumn,
+    TableInfo, TableOptions, TablePage, TableSchema, TriggerDef,
 };
 pub use registry::{DriverRegistry, DriverSource};

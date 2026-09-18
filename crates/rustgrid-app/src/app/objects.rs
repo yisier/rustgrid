@@ -124,6 +124,11 @@ impl AppView {
     /// The object toolbar shown for the `Queries` category, including when no database is open.
     pub(super) fn render_query_object_toolbar(&self, cx: &mut Context<'_, Self>) -> Div {
         let theme = self.theme;
+        let filter = self.saved_query_filter(cx);
+        let delete_enabled = self
+            .saved_query_selected
+            .and_then(|index| self.saved_queries.get(index))
+            .is_some_and(|saved| self.saved_query_matches(saved, &filter));
         div()
             .flex()
             .flex_row()
@@ -152,8 +157,12 @@ impl AppView {
                         "obj-delete-query",
                         "icons/delete_table.svg",
                         t!("connection.delete").to_string(),
-                        false,
-                        |_, _, _| {},
+                        delete_enabled,
+                        cx.listener(|this, _event, _window, cx| {
+                            if let Some(index) = this.saved_query_selected {
+                                this.confirm_delete_saved_query(index, cx);
+                            }
+                        }),
                     )),
             )
             .child(self.render_object_search(cx))
