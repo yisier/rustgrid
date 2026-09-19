@@ -14,7 +14,7 @@ use gpui_kit::component::dialog::DialogButtonProps;
 /// gpui-kit anchors a dialog at 10% of the window height, which leaves short dialogs stranded near
 /// the top. Compute a top margin that centres a dialog of roughly `dialog_height` instead — the
 /// exact height is only known after layout, so callers pass an estimate.
-fn centered_margin_top(window: &Window, dialog_height: f32) -> Pixels {
+pub(super) fn centered_margin_top(window: &Window, dialog_height: f32) -> Pixels {
     let viewport = window.viewport_size().height;
     ((viewport - px(dialog_height)) * 0.5).max(px(24.0))
 }
@@ -26,6 +26,8 @@ impl AppView {
             Some(DialogKind::ConnectionForm)
         } else if self.db_dialog.is_some() {
             Some(DialogKind::DbDialog)
+        } else if self.create_table_dialog.is_some() {
+            Some(DialogKind::CreateTable)
         } else if self.password_prompt.is_some() {
             Some(DialogKind::Password)
         } else if self.save_query_dialog.is_some() {
@@ -36,6 +38,10 @@ impl AppView {
             Some(DialogKind::Confirm)
         } else if self.options_open {
             Some(DialogKind::Options)
+        } else if self.new_backup_dialog.is_some() {
+            Some(DialogKind::NewBackup)
+        } else if self.restore_dialog.is_some() {
+            Some(DialogKind::RestoreBackup)
         } else {
             None
         };
@@ -51,11 +57,14 @@ impl AppView {
         match desired {
             Some(DialogKind::ConnectionForm) => self.open_connection_form_dialog(window, cx),
             Some(DialogKind::DbDialog) => self.open_db_dialog(window, cx),
+            Some(DialogKind::CreateTable) => self.open_create_table_modal(window, cx),
             Some(DialogKind::Password) => self.open_password_prompt(window, cx),
             Some(DialogKind::SaveQuery) => self.open_save_query_dialog(window, cx),
             Some(DialogKind::Error) => self.open_error_dialog(window, cx),
             Some(DialogKind::Confirm) => self.open_confirm_dialog(window, cx),
             Some(DialogKind::Options) => self.open_options_dialog(window, cx),
+            Some(DialogKind::NewBackup) => self.open_new_backup_dialog(window, cx),
+            Some(DialogKind::RestoreBackup) => self.open_restore_backup_dialog(window, cx),
             None => {}
         }
     }
@@ -583,6 +592,141 @@ impl AppView {
             ))
     }
 
+    /// Opens the "new table" name prompt for a designer. `initial` pre-fills the field (e.g. after
+    /// a failed create so the retry keeps the name).
+    pub(super) fn open_create_table_dialog(
+        &mut self,
+        design_id: u64,
+        initial: String,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let weak = cx.weak_entity();
+        let input = make_create_table_input(self.theme, initial.clone(), &weak, cx);
+        self.create_table_input = Some(input);
+        self.create_table_dialog = Some(CreateTableDialog {
+            design_id,
+            name: initial,
+            error: None,
+        });
+        cx.notify();
+    }
+
+    fn open_create_table_modal(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let app = cx.entity();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let (title, footer) = app.update(cx, |app, cx| {
+                (
+                    t!("object.new_table").to_string(),
+                    app.create_table_dialog_footer(cx).into_any_element(),
+                )
+            });
+            let on_close = app.downgrade();
+            let content_app = app.clone();
+            let focused = Rc::new(Cell::new(false));
+            dialog
+                .title(title)
+                .w(px(420.0))
+                .margin_top(centered_margin_top(window, 160.0))
+                .content(move |content, window, cx| {
+                    let body = content_app.update(cx, |app, cx| {
+                        app.create_table_dialog_body(cx).into_any_element()
+                    });
+                    if !focused.get() {
+                        focused.set(true);
+                        if let Some(input) = content_app.read(cx).create_table_input.clone() {
+                            input.update(cx, |input, cx| input.focus_state(window, cx));
+                        }
+                    }
+                    content.child(body)
+                })
+                .footer(footer)
+                .on_close(move |_, _, cx| {
+                    let _ = on_close.update(cx, |app, cx| app.cancel_create_table(cx));
+                })
+        });
+    }
+
+    fn create_table_dialog_body(&self, _cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let Some(dialog) = self.create_table_dialog.as_ref() else {
+            return div().into_any_element();
+        };
+        let mut body = div().flex().flex_col().gap_2().p_4().child(
+            div()
+                .text_size(px(12.0))
+                .child(t!("design.enter_table_name").to_string()),
+        );
+        if let Some(input) = self.create_table_input.as_ref() {
+            body = body.child(div().w_full().h(px(26.0)).child(input.clone()));
+        }
+        if let Some(error) = dialog.error.as_ref() {
+            body = body.child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme.danger))
+                    .child(error.clone()),
+            );
+        }
+        body.into_any_element()
+    }
+
+    fn create_table_dialog_footer(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_end()
+            .w_full()
+            .gap_2()
+            .h(px(46.0))
+            .child(self.dialog_button(
+                "create-table-cancel",
+                t!("form.cancel").to_string(),
+                false,
+                cx.listener(|this, _event, _window, cx| this.cancel_create_table(cx)),
+            ))
+            .child(self.dialog_button(
+                "create-table-ok",
+                t!("form.ok").to_string(),
+                true,
+                cx.listener(|this, _event, _window, cx| this.submit_create_table(cx)),
+            ))
+    }
+
+    pub(super) fn cancel_create_table(&mut self, cx: &mut Context<'_, Self>) {
+        self.create_table_dialog = None;
+        self.create_table_input = None;
+        cx.notify();
+    }
+
+    /// Validate the entered name and hand it to the requesting designer to actually create it.
+    pub(super) fn submit_create_table(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(dialog) = self.create_table_dialog.take() else {
+            return;
+        };
+        let name = dialog.name.trim().to_string();
+        if !is_valid_identifier(&name) {
+            self.create_table_dialog = Some(CreateTableDialog {
+                design_id: dialog.design_id,
+                name,
+                error: Some(t!("database.invalid_name").to_string()),
+            });
+            cx.notify();
+            return;
+        }
+
+        self.create_table_input = None;
+        if let Some(design) = self
+            .designs
+            .iter()
+            .find(|design| design.read(cx).id == dialog.design_id)
+            .cloned()
+        {
+            design.update(cx, |design, cx| design.save_new(name, cx));
+        }
+        cx.notify();
+    }
+
     /// Start the in-place "rename table" editor for one row, pre-filled with its current name and
     /// focused. The row itself is drawn by the pane named in `pane`, which the caller notifies.
     #[allow(clippy::too_many_arguments)]
@@ -763,6 +907,49 @@ impl AppView {
                     t!("query.delete_title").to_string(),
                     t!("query.delete_confirm", name = name).to_string(),
                     t!("query.delete_button").to_string(),
+                )
+            }
+            Some(DeleteConfirm::BackupFile { index }) => {
+                let name = self
+                    .backup_files
+                    .get(*index)
+                    .map(|file| file.name.clone())
+                    .unwrap_or_default();
+                (
+                    t!("backup.delete_title").to_string(),
+                    t!("backup.delete_file_confirm", name = name).to_string(),
+                    t!("backup.delete_button").to_string(),
+                )
+            }
+            Some(DeleteConfirm::BackupConfig { index }) => {
+                let name = self
+                    .backup_configs
+                    .get(*index)
+                    .map(|config| config.name.clone())
+                    .unwrap_or_default();
+                (
+                    t!("backup.delete_title").to_string(),
+                    t!("backup.delete_config_confirm", name = name).to_string(),
+                    t!("backup.delete_button").to_string(),
+                )
+            }
+            Some(DeleteConfirm::DesignRows { kind, .. }) => {
+                let (message_key, button_key) = match kind {
+                    DesignDeleteKind::Fields => {
+                        ("design.confirm_delete_field", "design.delete_field")
+                    }
+                    DesignDeleteKind::Indexes => {
+                        ("design.confirm_delete_index", "design.delete_index")
+                    }
+                    DesignDeleteKind::ForeignKeys => (
+                        "design.confirm_delete_foreign_key",
+                        "design.delete_foreign_key",
+                    ),
+                };
+                (
+                    t!("design.delete_title").to_string(),
+                    t!(message_key).to_string(),
+                    t!(button_key).to_string(),
                 )
             }
             None => (String::new(), String::new(), t!("form.ok").to_string()),

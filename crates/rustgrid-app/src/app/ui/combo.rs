@@ -68,6 +68,9 @@ type ComboState = ComboboxState<ComboDelegate>;
 pub(crate) struct ComboBox {
     theme: Theme,
     width: f32,
+    /// When set, the trigger field is pinned to this width instead of sizing to its content
+    /// (the dropdown menu always uses `width`).
+    field_width: Option<f32>,
     enabled: bool,
     placeholder: SharedString,
     icon: Option<(&'static str, u32)>,
@@ -94,6 +97,7 @@ impl ComboBox {
         Self {
             theme,
             width,
+            field_width: None,
             enabled: true,
             placeholder: SharedString::default(),
             icon: None,
@@ -110,6 +114,12 @@ impl ComboBox {
 
     pub(crate) fn on_select(mut self, callback: ComboSelectCallback) -> Self {
         self.on_select = Some(callback);
+        self
+    }
+
+    /// Pins the trigger field to a fixed width, so an empty selection does not collapse it.
+    pub(crate) fn field_width(mut self, width: f32) -> Self {
+        self.field_width = Some(width);
         self
     }
 
@@ -243,6 +253,10 @@ impl Render for ComboBox {
             combo = combo.icon(Icon::default().path(icon).text_color(rgb(color)));
         }
 
-        div().child(combo)
+        let mut container = div();
+        if let Some(width) = self.field_width {
+            container = container.w(px(width));
+        }
+        container.child(combo)
     }
 }

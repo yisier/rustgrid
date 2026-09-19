@@ -28,8 +28,10 @@ impl AppView {
             return self.render_query_object_toolbar(cx);
         }
         let design_enabled = category == Category::Tables && open_enabled;
+        let new_enabled = category == Category::Tables;
         let pane_for_open = pane.clone();
         let pane_for_design = pane.clone();
+        let pane_for_new = pane.clone();
         div()
             .flex()
             .flex_row()
@@ -90,8 +92,19 @@ impl AppView {
                         "obj-new",
                         "icons/new_table.svg",
                         t!("object.new_table").to_string(),
-                        false,
-                        |_, _, _| {},
+                        new_enabled,
+                        cx.listener(move |this, _event, _window, cx| {
+                            let (connection_index, database_index) = {
+                                let pane = pane_for_new.read(cx);
+                                (pane.connection_index, pane.database_index)
+                            };
+                            let Some(database) =
+                                this.database_name(connection_index, database_index)
+                            else {
+                                return;
+                            };
+                            this.open_new_table(connection_index, database, cx);
+                        }),
                     ))
                     .child(toolbar_separator(theme))
                     .child(self.toolbar_item(

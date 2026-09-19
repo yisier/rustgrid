@@ -26,6 +26,7 @@ impl AssetSource for Assets {
             "icons/functions.svg" => Some(include_bytes!("../assets/icons/functions.svg")),
             "icons/queries.svg" => Some(include_bytes!("../assets/icons/queries.svg")),
             "icons/backups.svg" => Some(include_bytes!("../assets/icons/backups.svg")),
+            "icons/events.svg" => Some(include_bytes!("../assets/icons/events.svg")),
             "icons/chevron-right.svg" => Some(include_bytes!("../assets/icons/chevron-right.svg")),
             "icons/chevron-down.svg" => Some(include_bytes!("../assets/icons/chevron-down.svg")),
             "icons/arrow-up.svg" => Some(include_bytes!("../assets/icons/arrow-up.svg")),

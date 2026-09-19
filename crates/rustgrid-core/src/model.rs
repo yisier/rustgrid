@@ -512,6 +512,120 @@ pub struct TableSchema {
     pub options: TableOptions,
 }
 
+/// The kind of database object a backup can contain. Mirrors Navicat's object-selection
+/// categories (tables, views, functions, events). Stored procedures are grouped with
+/// functions, exactly as Navicat's backup profile does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BackupObjectKind {
+    Table,
+    View,
+    Function,
+    Event,
+}
+
+impl BackupObjectKind {
+    /// Every kind, in the order the backup object tree presents them.
+    pub const ALL: [BackupObjectKind; 4] = [
+        BackupObjectKind::Table,
+        BackupObjectKind::View,
+        BackupObjectKind::Function,
+        BackupObjectKind::Event,
+    ];
+
+    /// The i18n key for the kind's plural label.
+    pub fn label_key(self) -> &'static str {
+        match self {
+            BackupObjectKind::Table => "backup.kind.tables",
+            BackupObjectKind::View => "backup.kind.views",
+            BackupObjectKind::Function => "backup.kind.functions",
+            BackupObjectKind::Event => "backup.kind.events",
+        }
+    }
+}
+
+/// One object dumped for a backup: its `CREATE` statement plus (for tables) the column names
+/// and one pre-rendered SQL value tuple per row. The tuple rendering lives in the driver so the
+/// container stays engine-agnostic and the values stay valid literals for that engine.
+#[derive(Debug, Clone)]
+pub struct ObjectDump {
+    pub name: String,
+    pub kind: BackupObjectKind,
+    /// The object's `CREATE` statement, without a trailing semicolon (as engines report it).
+    pub ddl: String,
+    /// Column names, used to build the `INSERT` column list. Empty for non-tables.
+    pub fields: Vec<String>,
+    /// `CREATE TRIGGER` statements belonging to the object. Empty for non-tables.
+    pub trigger_ddl: Vec<String>,
+    /// One SQL value tuple per row, e.g. `(1, 'a', NULL)`. Empty for non-tables.
+    pub rows: Vec<String>,
+}
+
+/// One category's selection in a saved backup configuration. `select_all` means "every object of
+/// this kind at backup time" (Navicat's *Run-time selected*); otherwise `selected` names the
+/// objects to include.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedBackupSelection {
+    #[serde(default)]
+    pub select_all: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected: Vec<String>,
+}
+
+impl SavedBackupSelection {
+    pub fn all() -> Self {
+        Self {
+            select_all: true,
+            selected: Vec::new(),
+        }
+    }
+
+    /// Whether `name` is included.
+    pub fn contains(&self, name: &str) -> bool {
+        self.select_all || self.selected.iter().any(|item| item == name)
+    }
+}
+
+/// A named backup configuration saved from the "New Backup" dialog so the same object selection
+/// can be reused. Filed under a connection (by profile id) and a database name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedBackup {
+    pub name: String,
+    /// The `ConnectionProfile::id` the configuration belongs to.
+    pub connection_id: String,
+    pub database: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub comment: String,
+    #[serde(default)]
+    pub tables: SavedBackupSelection,
+    #[serde(default)]
+    pub views: SavedBackupSelection,
+    #[serde(default)]
+    pub functions: SavedBackupSelection,
+    #[serde(default)]
+    pub events: SavedBackupSelection,
+}
+
+impl SavedBackup {
+    pub fn selection(&self, kind: BackupObjectKind) -> &SavedBackupSelection {
+        match kind {
+            BackupObjectKind::Table => &self.tables,
+            BackupObjectKind::View => &self.views,
+            BackupObjectKind::Function => &self.functions,
+            BackupObjectKind::Event => &self.events,
+        }
+    }
+
+    pub fn selection_mut(&mut self, kind: BackupObjectKind) -> &mut SavedBackupSelection {
+        match kind {
+            BackupObjectKind::Table => &mut self.tables,
+            BackupObjectKind::View => &mut self.views,
+            BackupObjectKind::Function => &mut self.functions,
+            BackupObjectKind::Event => &mut self.events,
+        }
+    }
+}
+
 /// The outcome of running an arbitrary SQL statement from the query editor.
 #[derive(Debug, Clone)]
 pub struct QueryResult {

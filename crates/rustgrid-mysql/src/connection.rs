@@ -1,10 +1,10 @@
 use async_trait::async_trait;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use rustgrid_core::{
-    CellValue, ColumnDef, ColumnInfo, Connection, DatabaseInfo, DriverId, Error, FilterCondition,
-    FilterConjunction, FilterNode, FilterOperator, ForeignKeyDef, IndexDef, ObjectKind,
-    PageRequest, QueryResult, Result, RowInsert, RowUpdate, TableInfo, TableOptions, TablePage,
-    TableSchema, TriggerDef,
+    BackupObjectKind, CellValue, ColumnDef, ColumnInfo, Connection, DatabaseInfo, DriverId, Error,
+    FilterCondition, FilterConjunction, FilterNode, FilterOperator, ForeignKeyDef, IndexDef,
+    ObjectDump, ObjectKind, PageRequest, QueryResult, Result, RowInsert, RowUpdate, TableInfo,
+    TableOptions, TablePage, TableSchema, TriggerDef,
 };
 use sqlx::mysql::{MySqlColumn, MySqlRow};
 use sqlx::{
@@ -52,6 +52,64 @@ impl MysqlConnection {
             .await
             .map_err(map_query_error)?;
         Ok(())
+    }
+
+    /// The `CREATE` statement an engine's `SHOW CREATE <verb>` reports, e.g. `SHOW CREATE TABLE`.
+    /// The DDL lives in the result column whose name starts with "Create" (or contains
+    /// "Statement" for `SHOW CREATE TRIGGER`).
+    async fn show_create(&self, database: &str, name: &str, verb: &str) -> Result<String> {
+        let sql = format!(
+            "SHOW CREATE {verb} {}.{}",
+            quote_identifier(database),
+            quote_identifier(name)
+        );
+        let result = self.execute_query(Some(database), &sql).await?;
+        let index = result
+            .columns
+            .iter()
+            .position(|column| {
+                let name = column.name.to_ascii_lowercase();
+                name.contains("create") || name.contains("statement")
+            })
+            .unwrap_or_else(|| usize::from(result.columns.len() > 1));
+        let row = result.rows.into_iter().next().unwrap_or_default();
+        match row.into_iter().nth(index) {
+            Some(CellValue::Text(text)) => Ok(text),
+            Some(other) => Ok(other.as_display()),
+            None => Err(Error::Query(format!(
+                "SHOW CREATE {verb} returned no result"
+            ))),
+        }
+    }
+
+    /// The metadata of a table for a backup: `CREATE TABLE`, column names and trigger DDL. Its
+    /// rows are streamed separately by `stream_table_rows`.
+    async fn table_metadata(&self, database: &str, table: &str) -> Result<ObjectDump> {
+        let ddl = self.show_create(database, table, "TABLE").await?;
+        let fields: Vec<String> = self
+            .columns(database, table)
+            .await?
+            .into_iter()
+            .map(|column| column.name)
+            .collect();
+
+        let mut trigger_ddl = Vec::new();
+        if let Ok(schema) = self.table_schema(database, table).await {
+            for trigger in &schema.triggers {
+                if let Ok(ddl) = self.show_create(database, &trigger.name, "TRIGGER").await {
+                    trigger_ddl.push(ddl);
+                }
+            }
+        }
+
+        Ok(ObjectDump {
+            name: table.to_string(),
+            kind: BackupObjectKind::Table,
+            ddl,
+            fields,
+            trigger_ddl,
+            rows: Vec::new(),
+        })
     }
 }
 
@@ -375,13 +433,37 @@ impl Connection for MysqlConnection {
         }
     }
 
-    async fn create_database(&self, name: &str) -> Result<()> {
-        let sql = format!("CREATE DATABASE {}", quote_identifier(name));
+    async fn create_database(
+        &self,
+        name: &str,
+        charset: Option<&str>,
+        collation: Option<&str>,
+    ) -> Result<()> {
+        let sql = self.create_database_sql(name, charset, collation);
         sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
             .execute(&self.pool)
             .await
             .map_err(map_query_error)?;
         Ok(())
+    }
+
+    fn create_database_sql(
+        &self,
+        name: &str,
+        charset: Option<&str>,
+        collation: Option<&str>,
+    ) -> String {
+        let mut sql = format!("CREATE DATABASE {}", quote_identifier(name));
+        if let Some(charset) = charset {
+            sql.push_str(" CHARACTER SET ");
+            sql.push_str(charset);
+        }
+        if let Some(collation) = collation {
+            sql.push_str(" COLLATE ");
+            sql.push_str(collation);
+        }
+        sql.push(';');
+        sql
     }
 
     async fn drop_database(&self, name: &str) -> Result<()> {
@@ -521,6 +603,140 @@ impl Connection for MysqlConnection {
 
     fn column_types(&self) -> Vec<&'static str> {
         MYSQL_COLUMN_TYPES.to_vec()
+    }
+
+    fn storage_engines(&self) -> Vec<&'static str> {
+        MYSQL_STORAGE_ENGINES.to_vec()
+    }
+
+    async fn list_routines(&self, database: &str) -> Result<Vec<String>> {
+        let rows = sqlx::query(
+            "SELECT routine_name FROM information_schema.routines \
+             WHERE routine_schema = ? ORDER BY routine_name",
+        )
+        .bind(database)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_query_error)?;
+
+        rows.iter()
+            .map(|row| row.try_get(0).map_err(map_query_error))
+            .collect()
+    }
+
+    async fn list_events(&self, database: &str) -> Result<Vec<String>> {
+        let rows = sqlx::query(
+            "SELECT event_name FROM information_schema.events \
+             WHERE event_schema = ? ORDER BY event_name",
+        )
+        .bind(database)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_query_error)?;
+
+        rows.iter()
+            .map(|row| row.try_get(0).map_err(map_query_error))
+            .collect()
+    }
+
+    async fn backup_object_metadata(
+        &self,
+        database: &str,
+        kind: BackupObjectKind,
+        name: &str,
+    ) -> Result<ObjectDump> {
+        let ddl = match kind {
+            BackupObjectKind::Table => return self.table_metadata(database, name).await,
+            BackupObjectKind::View => self.show_create(database, name, "VIEW").await?,
+            BackupObjectKind::Function => {
+                let routine_type: Option<String> = sqlx::query(
+                    "SELECT routine_type FROM information_schema.routines \
+                     WHERE routine_schema = ? AND routine_name = ?",
+                )
+                .bind(database)
+                .bind(name)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(map_query_error)?
+                .and_then(|row| row.try_get(0).ok());
+                let verb = if routine_type
+                    .as_deref()
+                    .is_some_and(|value| value.eq_ignore_ascii_case("PROCEDURE"))
+                {
+                    "PROCEDURE"
+                } else {
+                    "FUNCTION"
+                };
+                self.show_create(database, name, verb).await?
+            }
+            BackupObjectKind::Event => self.show_create(database, name, "EVENT").await?,
+        };
+        Ok(ObjectDump {
+            name: name.to_string(),
+            kind,
+            ddl,
+            fields: Vec::new(),
+            trigger_ddl: Vec::new(),
+            rows: Vec::new(),
+        })
+    }
+
+    async fn stream_table_rows(
+        &self,
+        database: &str,
+        table: &str,
+        on_row: &mut (dyn for<'a> FnMut(&'a str) -> Result<()> + Send),
+    ) -> Result<u64> {
+        let columns = self.columns(database, table).await?;
+        let types: Vec<String> = columns
+            .iter()
+            .map(|column| column.data_type.clone())
+            .collect();
+
+        let sql = format!(
+            "SELECT * FROM {}.{}",
+            quote_identifier(database),
+            quote_identifier(table)
+        );
+        // `fetch` yields a boxed stream, so rows are decoded and handed to `on_row` one at a
+        // time instead of materialising the whole table. `poll_fn` drives it without pulling in
+        // the whole `futures-util` surface.
+        let mut stream = sqlx::query(sqlx::AssertSqlSafe(sql)).fetch(&self.pool);
+        let mut count = 0u64;
+        while let Some(item) = std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await {
+            let row = item.map_err(map_query_error)?;
+            let mut tuple = String::from("(");
+            for index in 0..columns.len() {
+                if index > 0 {
+                    tuple.push_str(", ");
+                }
+                tuple.push_str(&render_literal(
+                    &decode_cell(&row, index),
+                    types.get(index).map(String::as_str).unwrap_or(""),
+                ));
+            }
+            tuple.push(')');
+            on_row(&tuple)?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    async fn restore_object(&self, database: &str, object: &ObjectDump) -> Result<()> {
+        // One pinned connection for the whole object: it keeps the session-scoped
+        // `SET FOREIGN_KEY_CHECKS=0` and carries every batch inside a single transaction, which
+        // is dramatically faster than one connection and one implicit commit per statement.
+        let mut connection = self.pool.acquire().await.map_err(map_query_error)?;
+        let result = restore_object_on(&mut connection, database, object).await;
+        if result.is_err() {
+            // A failed batch must not leave an open transaction on a connection that is about
+            // to go back to the pool.
+            let _ = exec_sql(&mut connection, "ROLLBACK").await;
+        }
+        // Always restore the session default: the connection returns to the pool, and a leaked
+        // `FOREIGN_KEY_CHECKS=0` would silently disable integrity checks for later work.
+        let _ = exec_sql(&mut connection, "SET FOREIGN_KEY_CHECKS=1").await;
+        result
     }
 
     async fn table_schema(&self, database: &str, table: &str) -> Result<TableSchema> {
@@ -950,6 +1166,19 @@ const MYSQL_COLUMN_TYPES: [&str; 37] = [
     "multipolygon",
 ];
 
+/// The MySQL storage engines offered by the table designer's Options tab. `InnoDB` is the default.
+const MYSQL_STORAGE_ENGINES: [&str; 9] = [
+    "InnoDB",
+    "MyISAM",
+    "MEMORY",
+    "CSV",
+    "ARCHIVE",
+    "BLACKHOLE",
+    "MRG_MYISAM",
+    "FEDERATED",
+    "PERFORMANCE_SCHEMA",
+];
+
 /// Read a nullable numeric `information_schema` column, tolerating both its signed and unsigned
 /// `BIGINT` representations.
 fn optional_u64(row: &MySqlRow, index: usize) -> Option<u64> {
@@ -1174,6 +1403,193 @@ fn quote_literal(value: &str) -> String {
 
 fn quote_identifier(identifier: &str) -> String {
     format!("`{}`", identifier.replace('`', "``"))
+}
+
+/// Rows per `INSERT` statement while restoring a table.
+const RESTORE_INSERT_BATCH_ROWS: usize = 1_000;
+
+/// Byte budget per `INSERT` statement while restoring a table, keeping a statement comfortably
+/// under the server's `max_allowed_packet`.
+const RESTORE_INSERT_BATCH_BYTES: usize = 4 * 1024 * 1024;
+
+/// Drop a trailing semicolon and surrounding whitespace from a stored statement.
+fn trim_statement(sql: &str) -> String {
+    sql.trim().trim_end_matches(';').trim_end().to_string()
+}
+
+/// Run one statement on a pinned connection.
+async fn exec_sql(connection: &mut MySqlConnection, sql: &str) -> Result<()> {
+    sqlx::raw_sql(sqlx::AssertSqlSafe(sql.to_string()))
+        .execute(&mut *connection)
+        .await
+        .map_err(map_query_error)?;
+    Ok(())
+}
+
+/// Restore one object over an already-pinned connection. Foreign key checks are disabled for the
+/// duration and the inserts run inside one transaction; the caller resets the session afterwards.
+async fn restore_object_on(
+    connection: &mut MySqlConnection,
+    database: &str,
+    object: &ObjectDump,
+) -> Result<()> {
+    let qualified = format!(
+        "{}.{}",
+        quote_identifier(database),
+        quote_identifier(&object.name)
+    );
+    let ddl = trim_statement(&object.ddl);
+
+    // Function/view/event DDL from `SHOW CREATE` is unqualified, so pin the schema context.
+    exec_sql(connection, &format!("USE {}", quote_identifier(database))).await?;
+
+    match object.kind {
+        BackupObjectKind::Table => {
+            exec_sql(connection, "SET FOREIGN_KEY_CHECKS=0").await?;
+            exec_sql(connection, &format!("DROP TABLE IF EXISTS {qualified}")).await?;
+            if !ddl.is_empty() {
+                exec_sql(connection, &ddl).await?;
+            }
+            if !object.fields.is_empty() && !object.rows.is_empty() {
+                let columns = object
+                    .fields
+                    .iter()
+                    .map(|field| quote_identifier(field))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                exec_sql(connection, "START TRANSACTION").await?;
+                let mut batch: Vec<&str> = Vec::new();
+                let mut bytes = 0usize;
+                for row in &object.rows {
+                    if !batch.is_empty()
+                        && (batch.len() >= RESTORE_INSERT_BATCH_ROWS
+                            || bytes + row.len() + 2 > RESTORE_INSERT_BATCH_BYTES)
+                    {
+                        insert_batch(connection, &qualified, &columns, &batch).await?;
+                        batch.clear();
+                        bytes = 0;
+                    }
+                    bytes += row.len() + 2;
+                    batch.push(row);
+                }
+                if !batch.is_empty() {
+                    insert_batch(connection, &qualified, &columns, &batch).await?;
+                }
+                exec_sql(connection, "COMMIT").await?;
+            }
+            for trigger in &object.trigger_ddl {
+                let trigger = trim_statement(trigger);
+                if !trigger.is_empty() {
+                    exec_sql(connection, &trigger).await?;
+                }
+            }
+        }
+        BackupObjectKind::View => {
+            exec_sql(connection, &format!("DROP VIEW IF EXISTS {qualified}")).await?;
+            if !ddl.is_empty() {
+                exec_sql(connection, &ddl).await?;
+            }
+        }
+        BackupObjectKind::Function => {
+            // The DDL says whether this is a function or a procedure, and the correct kind must
+            // be dropped; `DROP FUNCTION` on a procedure (and vice versa) errors.
+            let is_procedure = ddl.to_ascii_uppercase().contains(" PROCEDURE ");
+            let verb = if is_procedure {
+                "PROCEDURE"
+            } else {
+                "FUNCTION"
+            };
+            exec_sql(connection, &format!("DROP {verb} IF EXISTS {qualified}")).await?;
+            if !ddl.is_empty() {
+                exec_sql(connection, &ddl).await?;
+            }
+        }
+        BackupObjectKind::Event => {
+            exec_sql(connection, &format!("DROP EVENT IF EXISTS {qualified}")).await?;
+            if !ddl.is_empty() {
+                exec_sql(connection, &ddl).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Run one multi-row `INSERT` built from a batch of value tuples.
+async fn insert_batch(
+    connection: &mut MySqlConnection,
+    qualified: &str,
+    columns: &str,
+    rows: &[&str],
+) -> Result<()> {
+    let sql = format!(
+        "INSERT INTO {qualified} ({columns}) VALUES {}",
+        rows.join(", ")
+    );
+    exec_sql(connection, &sql).await
+}
+
+/// Render one decoded cell as a SQL value literal. The column type is needed only for `BIT`,
+/// whose literals are written as `b'...'`.
+fn render_literal(value: &CellValue, column_type: &str) -> String {
+    if column_type.to_ascii_lowercase().starts_with("bit") {
+        let bits = match value {
+            CellValue::Null => return "NULL".to_string(),
+            CellValue::Bool(value) => u64::from(*value),
+            CellValue::Int(value) => (*value).max(0) as u64,
+            CellValue::Uint(value) => *value,
+            CellValue::Float(value) => (*value).max(0.0) as u64,
+            CellValue::Bytes(bytes) => bytes
+                .iter()
+                .fold(0u64, |acc, byte| (acc << 8) | u64::from(*byte)),
+            CellValue::Text(text) => text.parse().unwrap_or(0),
+        };
+        return format!("b'{bits:b}'");
+    }
+
+    match value {
+        CellValue::Null => "NULL".to_string(),
+        CellValue::Bool(value) => u8::from(*value).to_string(),
+        CellValue::Int(value) => value.to_string(),
+        CellValue::Uint(value) => value.to_string(),
+        CellValue::Float(value) => {
+            if value.is_finite() {
+                value.to_string()
+            } else {
+                "NULL".to_string()
+            }
+        }
+        CellValue::Text(text) => quote_mysql_string(text),
+        CellValue::Bytes(bytes) => {
+            let mut hex = String::with_capacity(bytes.len() * 2 + 2);
+            hex.push_str("0x");
+            for byte in bytes {
+                hex.push_str(&format!("{byte:02X}"));
+            }
+            hex
+        }
+    }
+}
+
+/// Quote a string as a MySQL literal, escaping the characters MySQL treats specially inside
+/// single quotes. The result is valid both in a restore `INSERT` and in an extracted script.
+fn quote_mysql_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('\'');
+    for character in value.chars() {
+        match character {
+            '\0' => out.push_str("\\0"),
+            '\'' => out.push_str("\\'"),
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{1a}' => out.push_str("\\Z"),
+            _ => out.push(character),
+        }
+    }
+    out.push('\'');
+    out
 }
 
 /// Build the ` ORDER BY ...` fragment for a page request, or an empty string when unsorted.

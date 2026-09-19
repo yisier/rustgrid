@@ -34,6 +34,8 @@ impl AppView {
                 .child(self.render_query_object_toolbar(cx))
                 .child(self.render_saved_queries(cx))
                 .into_any_element()
+        } else if self.main_tab == MainTab::Backups {
+            self.render_backups(cx).into_any_element()
         } else if let Some(pane) = self.object_pane.clone() {
             div()
                 .flex()
@@ -48,11 +50,12 @@ impl AppView {
             div().into_any_element()
         };
 
-        let has_tabs = self.object_pane.is_some()
-            || !self.grids.is_empty()
-            || !self.designs.is_empty()
-            || !self.queries.is_empty()
-            || self.main_tab == MainTab::Queries;
+        let has_tabs = self.main_tab != MainTab::Backups
+            && (self.object_pane.is_some()
+                || !self.grids.is_empty()
+                || !self.designs.is_empty()
+                || !self.queries.is_empty()
+                || self.main_tab == MainTab::Queries);
         let mut content = div()
             .flex()
             .flex_col()
@@ -532,15 +535,20 @@ impl Render for TabBar {
                         "common.table"
                     })
                     .to_string();
+                    let name = if design.is_new && design.table.is_empty() {
+                        t!("object.new_table").to_string()
+                    } else {
+                        design.table.clone()
+                    };
                     let title = if design.dirty {
                         format!(
                             "{} @{} ({}) - {} *",
-                            design.table, design.database, design.connection_name, kind
+                            name, design.database, design.connection_name, kind
                         )
                     } else {
                         format!(
                             "{} @{} ({}) - {}",
-                            design.table, design.database, design.connection_name, kind
+                            name, design.database, design.connection_name, kind
                         )
                     };
                     (index, design.id, title, design.is_view)

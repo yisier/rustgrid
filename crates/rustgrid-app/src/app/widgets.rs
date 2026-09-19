@@ -279,23 +279,53 @@ impl AppView {
                             this.open_copy_form(index, window, cx);
                         }),
                     ))
-                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
-                    .child(self.context_item(
-                        "ctx-new-database",
-                        t!("database.new").to_string(),
-                        cx.listener(|this, _event, _window, cx| {
-                            this.context_menu = None;
-                            cx.notify();
-                        }),
-                    ))
-                    .child(self.context_item(
-                        "ctx-new-query",
-                        t!("main.new_query").to_string(),
-                        cx.listener(move |this, _event, _window, cx| {
-                            this.context_menu = None;
-                            this.open_new_query_for_connection(index, cx);
-                        }),
-                    ));
+                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)));
+
+                // Creating a database and refreshing the list both need a live connection, but stay
+                // visible (greyed out) when disconnected.
+                items =
+                    if connected {
+                        items.child(self.context_item(
+                            "ctx-new-database",
+                            t!("database.new").to_string(),
+                            cx.listener(move |this, _event, window, cx| {
+                                this.context_menu = None;
+                                this.open_new_database(index, window, cx);
+                            }),
+                        ))
+                    } else {
+                        items.child(self.context_item_disabled(
+                            "ctx-new-database",
+                            t!("database.new").to_string(),
+                        ))
+                    };
+
+                items = items.child(self.context_item(
+                    "ctx-new-query",
+                    t!("main.new_query").to_string(),
+                    cx.listener(move |this, _event, _window, cx| {
+                        this.context_menu = None;
+                        this.open_new_query_for_connection(index, cx);
+                    }),
+                ));
+
+                items = items.child(div().h(px(1.0)).my_1().bg(rgb(theme.border)));
+                items =
+                    if connected {
+                        items.child(self.context_item(
+                            "ctx-refresh",
+                            t!("connection.refresh").to_string(),
+                            cx.listener(move |this, _event, _window, cx| {
+                                this.context_menu = None;
+                                this.load_databases(index, cx);
+                            }),
+                        ))
+                    } else {
+                        items.child(self.context_item_disabled(
+                            "ctx-refresh",
+                            t!("connection.refresh").to_string(),
+                        ))
+                    };
             }
             ContextTarget::Database {
                 connection_index,
@@ -612,6 +642,26 @@ impl AppView {
                     .text_color(rgb(theme.tree_selected_text))
             })
             .on_click(on_click)
+            .child(label)
+    }
+
+    /// A context-menu row that stays visible but is greyed out and non-interactive, used for
+    /// actions that need a live connection the menu was opened on.
+    pub(super) fn context_item_disabled(
+        &self,
+        id: &'static str,
+        label: String,
+    ) -> impl IntoElement {
+        let theme = self.theme;
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .w_full()
+            .h(px(26.0))
+            .px_3()
+            .text_size(px(12.5))
+            .text_color(rgb(theme.text_muted))
             .child(label)
     }
 }

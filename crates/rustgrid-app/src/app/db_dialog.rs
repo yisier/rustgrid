@@ -37,8 +37,10 @@ impl AppView {
 
     fn db_dialog_title(&self) -> String {
         match self.db_dialog {
-            Some(DbDialog::New { .. }) => t!("database.new").to_string(),
-            Some(DbDialog::Edit { .. }) => t!("database.edit").to_string(),
+            Some(DbDialog::Edit(ref form)) if form.database_index.is_none() => {
+                t!("database.new").to_string()
+            }
+            Some(DbDialog::Edit(_)) => t!("database.edit").to_string(),
             Some(DbDialog::Delete { .. }) => t!("database.delete").to_string(),
             None => String::new(),
         }
@@ -46,7 +48,7 @@ impl AppView {
 
     fn db_dialog_footer(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let allow_ok = match self.db_dialog.as_ref() {
-            Some(DbDialog::Edit { loading, .. }) => !*loading,
+            Some(DbDialog::Edit(form)) => !form.loading,
             Some(_) => true,
             None => false,
         };
@@ -85,33 +87,24 @@ impl AppView {
         let theme = self.theme;
 
         match self.db_dialog.as_ref() {
-            Some(DbDialog::New { error, .. }) => {
-                let mut name_row = div().flex().flex_row().items_center().gap_2().child(
+            Some(DbDialog::Edit(form)) => {
+                // Creating: the name is the editable input. Editing: it is fixed and read-only.
+                let name_field: AnyElement = if form.database_index.is_none() {
+                    match self.db_name_input.as_ref() {
+                        Some(input) => div()
+                            .w(px(300.0))
+                            .h(px(24.0))
+                            .child(input.clone())
+                            .into_any_element(),
+                        None => div().into_any_element(),
+                    }
+                } else {
                     div()
-                        .w(px(150.0))
-                        .flex_none()
                         .text_size(px(12.0))
-                        .child(format!("{}:", t!("database.name"))),
-                );
-                if let Some(input) = self.db_name_input.as_ref() {
-                    name_row = name_row.child(div().w(px(300.0)).h(px(24.0)).child(input.clone()));
-                }
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .p_4()
-                    .child(name_row)
-                    .child(db_error(error, theme))
-                    .into_any_element()
-            }
-            Some(DbDialog::Edit {
-                name,
-                tab,
-                loading,
-                error,
-                ..
-            }) => {
+                        .child(form.name.clone())
+                        .into_any_element()
+                };
+
                 let tabs = div()
                     .flex()
                     .flex_row()
@@ -123,9 +116,9 @@ impl AppView {
                     .child(self.db_tab_button(DbTab::General, cx))
                     .child(self.db_tab_button(DbTab::Sql, cx));
 
-                let page: AnyElement = match tab {
+                let page: AnyElement = match form.tab {
                     DbTab::General => {
-                        let mut form = div().flex().flex_col().gap_3().p_4().flex_1().child(
+                        let mut body = div().flex().flex_col().gap_3().p_4().flex_1().child(
                             div()
                                 .flex()
                                 .flex_row()
@@ -138,31 +131,31 @@ impl AppView {
                                         .text_size(px(12.0))
                                         .child(format!("{}:", t!("database.name"))),
                                 )
-                                .child(div().text_size(px(12.0)).child(name.clone())),
+                                .child(name_field),
                         );
-                        if *loading {
-                            form = form.child(
+                        if form.loading {
+                            body = body.child(
                                 div()
                                     .text_size(px(12.0))
                                     .text_color(rgb(theme.text_muted))
                                     .child(t!("common.loading").to_string()),
                             );
                         } else {
-                            form = form.child(db_combo_row(
+                            body = body.child(db_combo_row(
                                 format!("{}:", t!("database.charset")),
                                 self.db_charset_combo.clone(),
                             ));
-                            form = form.child(db_combo_row(
+                            body = body.child(db_combo_row(
                                 format!("{}:", t!("database.collation")),
                                 self.db_collation_combo.clone(),
                             ));
                         }
-                        form = form.child(db_error(error, theme));
-                        form.into_any_element()
+                        body = body.child(db_error(&form.error, theme));
+                        body.into_any_element()
                     }
                     DbTab::Sql => {
                         let mut page = div().flex().flex_col().gap_2().p_4().flex_1();
-                        match self.db_alter_preview() {
+                        match self.db_sql_preview() {
                             None => {
                                 page = page.child(
                                     div()

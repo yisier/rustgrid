@@ -9,7 +9,7 @@ use chrono::{Datelike, NaiveDate, NaiveDateTime, Timelike};
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, DispatchPhase, Div,
     ElementInputHandler, Entity, EntityInputHandler, FocusHandle, FontWeight, HighlightStyle,
-    ImageSource, KeyBinding, KeyDownEvent, ListHorizontalSizingBehavior, MouseButton,
+    ImageSource, KeyBinding, KeyDownEvent, ListHorizontalSizingBehavior, Modifiers, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Resource, ScrollDelta,
     ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, Stateful, StyledText,
     Subscription, Svg, TextLayout, UTF16Selection, UniformListScrollHandle, WeakEntity, Window,
@@ -17,9 +17,9 @@ use gpui::{
 };
 use rustgrid_config::{AppSettings, ConfigStore, LanguageSetting, ThemeSetting};
 use rustgrid_core::{
-    CellValue, Connection, ConnectionConfig, DriverRegistry, Error, FilterCondition,
-    FilterConjunction, FilterGroup, FilterNode, FilterOperator, PageRequest, QueryResult,
-    RowInsert, RowUpdate, SavedQuery,
+    BackupObjectKind, CellValue, Connection, ConnectionConfig, DriverRegistry, Error,
+    FilterCondition, FilterConjunction, FilterGroup, FilterNode, FilterOperator, PageRequest,
+    QueryResult, RowInsert, RowUpdate, SavedBackup, SavedQuery,
 };
 
 use crate::form::{ConnectionForm, FORM_FIELDS, FormField};
@@ -121,6 +121,79 @@ struct SaveQueryDialog {
     error: Option<String>,
 }
 
+/// State of the "new table" name prompt, shown when saving a brand-new table designer.
+struct CreateTableDialog {
+    /// `TableDesignView::id` of the designer that requested the name.
+    design_id: u64,
+    name: String,
+    error: Option<String>,
+}
+
+/// Which tab of a backup dialog is showing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BackupDialogTab {
+    Objects,
+    Log,
+}
+
+/// One object row in a backup or restore dialog's object selection.
+#[derive(Clone)]
+struct BackupObjectEntry {
+    kind: BackupObjectKind,
+    name: String,
+    selected: bool,
+}
+
+/// A backup file discovered under the config dir's `backups/` tree.
+struct BackupFileInfo {
+    path: std::path::PathBuf,
+    /// The file stem, e.g. `20260919225552`.
+    name: String,
+    /// The `ConnectionProfile::id` whose folder holds the file.
+    connection_id: String,
+    /// The database folder holding the file.
+    database: String,
+    manifest: rustgrid_backup::BackupManifest,
+    size: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+/// Which entry of the backup list is selected.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BackupSelection {
+    File(usize),
+    Config(usize),
+}
+
+/// State of the "New Backup" dialog.
+struct NewBackupDialog {
+    connection_index: usize,
+    database: String,
+    tab: BackupDialogTab,
+    objects: Vec<BackupObjectEntry>,
+    /// Name the configuration is saved under by the *Save* button.
+    config_name: String,
+    /// A saved configuration to apply to the object selection once it has finished loading.
+    apply: Option<SavedBackup>,
+    loading: bool,
+    running: bool,
+    log: Vec<String>,
+    error: Option<String>,
+}
+
+/// State of the "Restore Backup" dialog.
+struct RestoreBackupDialog {
+    /// Index into `AppView::backup_files`.
+    file_index: usize,
+    connection_index: Option<usize>,
+    database: String,
+    tab: BackupDialogTab,
+    objects: Vec<BackupObjectEntry>,
+    running: bool,
+    log: Vec<String>,
+    error: Option<String>,
+}
+
 /// Which pane's row owns the in-place rename editor. The object list and the connection tree can
 /// both list the same table, so the editor is drawn in exactly one of them.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -199,8 +272,10 @@ fn make_db_name_input(
         TextInput::new(theme, "", TextInputOptions::default(), cx)
             .on_change(Rc::new(move |text, _window, cx| {
                 let _ = change.update(cx, |app, cx| {
-                    if let Some(DbDialog::New { name, .. }) = app.db_dialog.as_mut() {
-                        *name = text.to_string();
+                    if let Some(DbDialog::Edit(form)) = app.db_dialog.as_mut()
+                        && form.database_index.is_none()
+                    {
+                        form.name = text.to_string();
                     }
                     cx.notify();
                 });
@@ -214,6 +289,41 @@ fn make_db_name_input(
                     let _ = cancel.update(cx, |app, cx| {
                         app.db_dialog = None;
                         app.db_name_input = None;
+                        cx.notify();
+                    });
+                }
+            }))
+    })
+}
+
+/// Build the name field of the "new table" prompt, pre-filled with `initial`.
+fn make_create_table_input(
+    theme: Theme,
+    initial: String,
+    app: &WeakEntity<AppView>,
+    cx: &mut Context<'_, AppView>,
+) -> Entity<TextInput> {
+    let change = app.clone();
+    let submit = app.clone();
+    cx.new(move |cx| {
+        TextInput::new(theme, initial, TextInputOptions::default(), cx)
+            .on_change(Rc::new(move |text, _window, cx| {
+                let _ = change.update(cx, |app, cx| {
+                    if let Some(dialog) = app.create_table_dialog.as_mut() {
+                        dialog.name = text.to_string();
+                    }
+                    cx.notify();
+                });
+            }))
+            .on_submit(Rc::new(move |_window, cx| {
+                let _ = submit.update(cx, |app, cx| app.submit_create_table(cx));
+            }))
+            .on_cancel(Rc::new({
+                let cancel = app.clone();
+                move |_window, cx| {
+                    let _ = cancel.update(cx, |app, cx| {
+                        app.create_table_dialog = None;
+                        app.create_table_input = None;
                         cx.notify();
                     });
                 }
@@ -268,26 +378,26 @@ enum DbTab {
     Sql,
 }
 
+/// The editable fields shared by the "New Database" and "Edit Database" dialogs. `database_index`
+/// is `None` while creating (so the name field is editable) and `Some` while editing an existing
+/// database (name read-only, SQL preview shows the `ALTER`).
+struct DatabaseForm {
+    connection_index: usize,
+    database_index: Option<usize>,
+    name: String,
+    original_charset: String,
+    original_collation: String,
+    charset: String,
+    collation: String,
+    charsets: Vec<String>,
+    collations: Vec<String>,
+    tab: DbTab,
+    loading: bool,
+    error: Option<String>,
+}
+
 enum DbDialog {
-    New {
-        connection_index: usize,
-        name: String,
-        error: Option<String>,
-    },
-    Edit {
-        connection_index: usize,
-        database_index: usize,
-        name: String,
-        original_charset: String,
-        original_collation: String,
-        charset: String,
-        collation: String,
-        charsets: Vec<String>,
-        collations: Vec<String>,
-        tab: DbTab,
-        loading: bool,
-        error: Option<String>,
-    },
+    Edit(DatabaseForm),
     Delete {
         connection_index: usize,
         database_index: usize,
@@ -488,6 +598,23 @@ enum DeleteConfirm {
     },
     /// Delete a saved query from the saved-query list.
     SavedQuery { index: usize },
+    /// Delete a backup file from disk.
+    BackupFile { index: usize },
+    /// Delete a saved backup configuration.
+    BackupConfig { index: usize },
+    /// Delete the selected row(s) of a table designer's fields/indexes/foreign-keys grid.
+    DesignRows {
+        design_id: u64,
+        kind: DesignDeleteKind,
+    },
+}
+
+/// Which designer grid a [`DeleteConfirm::DesignRows`] confirmation applies to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DesignDeleteKind {
+    Fields,
+    Indexes,
+    ForeignKeys,
 }
 
 #[derive(Clone, Copy)]
@@ -503,11 +630,14 @@ enum TableOperation {
 enum DialogKind {
     ConnectionForm,
     DbDialog,
+    CreateTable,
     Password,
     SaveQuery,
     Error,
     Confirm,
     Options,
+    NewBackup,
+    RestoreBackup,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -582,9 +712,29 @@ pub struct AppView {
     /// The saved-query list sort: which column and whether it is descending. `None` keeps the
     /// stored (insertion) order.
     saved_query_sort: Option<(SavedQueryColumn, bool)>,
+    /// Saved backup configurations loaded from `backups.json`.
+    backup_configs: Vec<SavedBackup>,
+    /// Backup files found under the config dir's `backups/` tree.
+    backup_files: Vec<BackupFileInfo>,
+    /// The backup-list entry highlighted in the Backup main tab.
+    backup_selected: Option<BackupSelection>,
+    /// The open "new backup" dialog, if any.
+    new_backup_dialog: Option<NewBackupDialog>,
+    /// The open "restore backup" dialog, if any.
+    restore_dialog: Option<RestoreBackupDialog>,
+    backup_connection_combo: Option<Entity<ComboBox>>,
+    backup_database_combo: Option<Entity<ComboBox>>,
+    restore_connection_combo: Option<Entity<ComboBox>>,
+    restore_database_combo: Option<Entity<ComboBox>>,
+    /// The configuration-name field of the "new backup" dialog.
+    backup_name_input: Option<Entity<TextInput>>,
+    backup_name_focus_pending: bool,
     /// The open "save query" dialog, if any.
     save_query_dialog: Option<SaveQueryDialog>,
     query_name_input: Option<Entity<TextInput>>,
+    /// The open "new table" name prompt, if any, and its shared name input.
+    create_table_dialog: Option<CreateTableDialog>,
+    create_table_input: Option<Entity<TextInput>>,
     save_location_combo: Option<Entity<ComboBox>>,
     save_query_focus_pending: bool,
     query_focus: FocusHandle,
@@ -662,6 +812,7 @@ pub struct AppView {
     tab_revision: u64,
 }
 
+mod backup;
 mod database;
 mod db_dialog;
 mod design;
@@ -722,6 +873,7 @@ impl AppView {
         let theme_setting = settings.theme;
         let language = settings.language;
         let saved_queries = config.load_queries().unwrap_or_default();
+        let backup_configs = config.load_backups().unwrap_or_default();
         // Claim Tab inside the cell editor so it advances to the next cell rather than moving
         // window focus (which is what the `Root` context binds it to).
         cx.bind_keys([
@@ -745,8 +897,21 @@ impl AppView {
             saved_queries,
             saved_query_selected: None,
             saved_query_sort: None,
+            backup_configs,
+            backup_files: Vec::new(),
+            backup_selected: None,
+            new_backup_dialog: None,
+            restore_dialog: None,
+            backup_connection_combo: None,
+            backup_database_combo: None,
+            restore_connection_combo: None,
+            restore_database_combo: None,
+            backup_name_input: None,
+            backup_name_focus_pending: false,
             save_query_dialog: None,
             query_name_input: None,
+            create_table_dialog: None,
+            create_table_input: None,
             save_location_combo: None,
             save_query_focus_pending: false,
             query_focus: cx.focus_handle(),
@@ -1056,6 +1221,9 @@ impl AppView {
         if let Some(input) = self.query_name_input.as_ref() {
             input.update(cx, |input, cx| input.set_theme(theme, cx));
         }
+        if let Some(input) = self.backup_name_input.as_ref() {
+            input.update(cx, |input, cx| input.set_theme(theme, cx));
+        }
         for design in &self.designs {
             design.update(cx, |design, cx| design.set_theme(theme, cx));
         }
@@ -1066,6 +1234,10 @@ impl AppView {
             self.query_database_combo.as_ref(),
             self.save_location_combo.as_ref(),
             self.language_combo.as_ref(),
+            self.backup_connection_combo.as_ref(),
+            self.backup_database_combo.as_ref(),
+            self.restore_connection_combo.as_ref(),
+            self.restore_database_combo.as_ref(),
         ]
         .into_iter()
         .flatten()
@@ -1295,8 +1467,10 @@ impl Render for AppView {
         }
         self.sync_cached_children(cx);
         self.ensure_query_combos(cx);
+        self.ensure_backup_combos(cx);
         self.sync_db_combos(cx);
         self.sync_query_combos(cx);
+        self.sync_backup_combos(cx);
         self.sync_save_location_combo(cx);
         self.sync_language_combo(cx);
         let theme = self.theme;
@@ -1351,6 +1525,15 @@ impl Render for AppView {
         if self.query_focus_pending {
             window.focus(&self.query_focus, cx);
             self.query_focus_pending = false;
+        }
+
+        if self.backup_name_focus_pending {
+            self.backup_name_focus_pending = false;
+            if let Some(input) = self.backup_name_input.clone() {
+                cx.on_next_frame(window, move |_this, window, cx| {
+                    input.update(cx, |input, cx| input.focus_state(window, cx));
+                });
+            }
         }
 
         self.query_editor_focused = self.query_focus.is_focused(window);

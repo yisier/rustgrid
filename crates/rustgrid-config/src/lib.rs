@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use directories::ProjectDirs;
-use rustgrid_core::{ConnectionProfile, SavedQuery};
+use rustgrid_core::{ConnectionProfile, SavedBackup, SavedQuery};
 use serde::{Deserialize, Serialize};
 
 const CURRENT_VERSION: u32 = 1;
@@ -14,6 +14,9 @@ const SETTINGS_VERSION: u32 = 2;
 const SETTINGS_FILE: &str = "settings.json";
 const QUERIES_VERSION: u32 = 1;
 const QUERIES_FILE: &str = "queries.json";
+const BACKUPS_VERSION: u32 = 1;
+const BACKUPS_FILE: &str = "backups.json";
+const BACKUPS_DIR: &str = "backups";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -111,6 +114,22 @@ impl Default for QueriesFile {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BackupsFile {
+    version: u32,
+    #[serde(default)]
+    backups: Vec<SavedBackup>,
+}
+
+impl Default for BackupsFile {
+    fn default() -> Self {
+        Self {
+            version: BACKUPS_VERSION,
+            backups: Vec::new(),
+        }
+    }
+}
+
 impl ConfigStore {
     pub fn new() -> ConfigResult<Self> {
         let dirs = ProjectDirs::from("", "", "rustgrid").ok_or(ConfigError::NoConfigDir)?;
@@ -133,6 +152,12 @@ impl ConfigStore {
 
     pub fn queries_path(&self) -> PathBuf {
         self.root.join(QUERIES_FILE)
+    }
+
+    /// The root directory of this app's NB3 backups. Files live under
+    /// `<root>/backups/<connection_id>/<database>/<name>.nb3`.
+    pub fn backups_dir(&self) -> PathBuf {
+        self.root.join(BACKUPS_DIR)
     }
 
     pub fn load_profiles(&self) -> ConfigResult<Vec<ConnectionProfile>> {
@@ -207,6 +232,27 @@ impl ConfigStore {
         };
         let contents = serde_json::to_string_pretty(&file)?;
         fs::write(self.queries_path(), contents)?;
+        Ok(())
+    }
+
+    pub fn load_backups(&self) -> ConfigResult<Vec<SavedBackup>> {
+        let path = self.root.join(BACKUPS_FILE);
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let contents = fs::read_to_string(path)?;
+        let file: BackupsFile = serde_json::from_str(&contents)?;
+        Ok(file.backups)
+    }
+
+    pub fn save_backups(&self, backups: &[SavedBackup]) -> ConfigResult<()> {
+        fs::create_dir_all(&self.root)?;
+        let file = BackupsFile {
+            version: BACKUPS_VERSION,
+            backups: backups.to_vec(),
+        };
+        let contents = serde_json::to_string_pretty(&file)?;
+        fs::write(self.root.join(BACKUPS_FILE), contents)?;
         Ok(())
     }
 }

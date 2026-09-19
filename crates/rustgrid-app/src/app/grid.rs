@@ -141,6 +141,18 @@ impl AppView {
                 operation,
             } => self.run_table_operation(connection_index, database_index, name, operation, cx),
             DeleteConfirm::SavedQuery { index } => self.delete_saved_query(index, cx),
+            DeleteConfirm::BackupFile { index } => self.delete_backup_file(index, cx),
+            DeleteConfirm::BackupConfig { index } => self.delete_backup_config(index, cx),
+            DeleteConfirm::DesignRows { design_id, kind } => {
+                let target = self
+                    .designs
+                    .iter()
+                    .find(|design| design.read(cx).id == design_id)
+                    .cloned();
+                if let Some(design) = target {
+                    design.update(cx, |design, cx| design.delete_selected(kind, cx));
+                }
+            }
         }
         cx.notify();
     }
@@ -253,6 +265,18 @@ impl GridView {
                         grid.state.rows = Arc::new(page.rows);
                         grid.state.total_rows = page.total_rows;
                         grid.state.error = None;
+                        // An empty editable table opens with one blank insert row ready to type
+                        // into. Skipped for views, later pages and filtered views.
+                        if grid.state.editable
+                            && !grid.state.is_view
+                            && page_index == 0
+                            && grid.state.rows.is_empty()
+                            && grid.state.filters.is_empty()
+                            && grid.inserts.is_empty()
+                        {
+                            grid.inserts.push(BTreeMap::new());
+                            grid.state.selection = Some(CellSelection::new(0, 0));
+                        }
                         if reset_scroll {
                             grid.reset_scroll();
                         }

@@ -2,8 +2,8 @@ use async_trait::async_trait;
 
 use crate::error::Result;
 use crate::model::{
-    ColumnInfo, ConnectionConfig, DatabaseInfo, DriverId, PageRequest, QueryResult, RowInsert,
-    RowUpdate, TableInfo, TablePage, TableSchema,
+    BackupObjectKind, ColumnInfo, ConnectionConfig, DatabaseInfo, DriverId, ObjectDump,
+    PageRequest, QueryResult, RowInsert, RowUpdate, TableInfo, TablePage, TableSchema,
 };
 
 #[async_trait]
@@ -56,7 +56,23 @@ pub trait Connection: Send + Sync {
     /// cannot be prepared still execute.
     async fn execute_query(&self, database: Option<&str>, sql: &str) -> Result<QueryResult>;
 
-    async fn create_database(&self, name: &str) -> Result<()>;
+    /// Create a database. `charset`/`collation` are omitted when `None`, letting the engine pick
+    /// its defaults.
+    async fn create_database(
+        &self,
+        name: &str,
+        charset: Option<&str>,
+        collation: Option<&str>,
+    ) -> Result<()>;
+
+    /// The `CREATE DATABASE` statement [`Connection::create_database`] runs, for the dialog's SQL
+    /// preview. `charset`/`collation` are omitted when `None`.
+    fn create_database_sql(
+        &self,
+        name: &str,
+        charset: Option<&str>,
+        collation: Option<&str>,
+    ) -> String;
 
     async fn drop_database(&self, name: &str) -> Result<()>;
 
@@ -95,6 +111,44 @@ pub trait Connection: Send + Sync {
 
     /// The column types this engine offers in the table designer's type list, in display order.
     fn column_types(&self) -> Vec<&'static str>;
+
+    /// List the stored routines (functions and procedures) of a database, ordered by name, for
+    /// the backup object tree.
+    async fn list_routines(&self, database: &str) -> Result<Vec<String>>;
+
+    /// List the scheduled events of a database, ordered by name, for the backup object tree.
+    async fn list_events(&self, database: &str) -> Result<Vec<String>>;
+
+    /// Introspect one object for a backup: its `CREATE` statement, column names and
+    /// `CREATE TRIGGER` statements. The returned `rows` is always empty; tables stream their
+    /// rows separately through [`Connection::stream_table_rows`], and views/functions/events
+    /// have no data. Engines that do not support a kind should return an empty dump rather than
+    /// failing.
+    async fn backup_object_metadata(
+        &self,
+        database: &str,
+        kind: BackupObjectKind,
+        name: &str,
+    ) -> Result<ObjectDump>;
+
+    /// Stream a table's rows, in order, as pre-rendered SQL value tuples such as
+    /// `(1, 'a', NULL)`, calling `on_row` once per row and returning the row count.
+    ///
+    /// Implementations must not buffer the whole table: rows are handed to `on_row` as they are
+    /// decoded. An error returned by `on_row` (for example a failed backup write) aborts the
+    /// stream and is propagated to the caller.
+    async fn stream_table_rows(
+        &self,
+        database: &str,
+        table: &str,
+        on_row: &mut (dyn for<'a> FnMut(&'a str) -> Result<()> + Send),
+    ) -> Result<u64>;
+
+    /// Restore one dumped object into `database`, replacing any object with the same name.
+    async fn restore_object(&self, database: &str, object: &ObjectDump) -> Result<()>;
+
+    /// The storage engines offered in the table designer's Options tab, in display order.
+    fn storage_engines(&self) -> Vec<&'static str>;
 
     /// Introspect the full definition of an existing table (or view).
     async fn table_schema(&self, database: &str, table: &str) -> Result<TableSchema>;

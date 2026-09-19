@@ -36,7 +36,8 @@ pub(super) enum ButtonKind {
 }
 
 /// A push button, the single source of truth for button chrome. Backed by the gpui-kit
-/// (shadcn-style) button so dialog and command buttons match the rest of the UI kit.
+/// (shadcn-style) button so dialog and command buttons match the rest of the UI kit. Rendered at
+/// `Size::Small` (24px, the app's compact dialog metric) rather than the kit's 32px medium.
 pub(super) fn button(
     id: impl Into<SharedString>,
     label: String,
@@ -44,11 +45,10 @@ pub(super) fn button(
     theme: Theme,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    sized_button(id, label, kind, Size::Medium, theme, on_click)
+    sized_button(id, label, kind, Size::Small, theme, on_click)
 }
 
-/// A compact dialog button (24px, matching the toolbar items) for the app's floating popups,
-/// where the dialog-sized 32px button crowds the surface.
+/// A compact dialog button (24px, matching the toolbar items) for the app's floating popups.
 pub(super) fn popup_button(
     id: impl Into<SharedString>,
     label: String,

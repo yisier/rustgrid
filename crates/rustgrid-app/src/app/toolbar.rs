@@ -125,7 +125,10 @@ impl AppView {
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let active = self.main_tab == tab;
-        let enabled = matches!(tab, MainTab::Tables | MainTab::Views | MainTab::Queries);
+        let enabled = matches!(
+            tab,
+            MainTab::Tables | MainTab::Views | MainTab::Queries | MainTab::Backups
+        );
         self.main_button(
             SharedString::from(format!("main-tab-{}", tab as usize)),
             icon,
@@ -188,6 +191,15 @@ impl AppView {
 
     pub(super) fn select_main_tab(&mut self, tab: MainTab, cx: &mut Context<'_, Self>) {
         self.main_tab = tab;
+        if tab == MainTab::Backups {
+            self.refresh_backups(cx);
+            self.active_grid = None;
+            self.active_query = None;
+            self.active_design = None;
+            self.saved_query_selected = None;
+            cx.notify();
+            return;
+        }
         let category = match tab {
             MainTab::Tables => Category::Tables,
             MainTab::Views => Category::Views,
