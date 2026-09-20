@@ -13,6 +13,11 @@ not a later refactor.
   manifest), used by the Backup main tab.
 - `crates/rustgrid-export` — table-data export writers: `.xlsx` (rust_xlsxwriter), `.csv`, `.sql`
   and `.txt`. Engine-agnostic formatting fed by decoded `CellValue` rows.
+- `crates/rustgrid-import` — source-file readers for the Import Wizard: Excel workbooks
+  (`.xlsx`/`.xls`/`.xlsm`/`.xlsb`/`.ods`) via `calamine`, and `.csv`/`.txt` with an RFC 4180
+  parser (`encoding_rs` GB18030 fallback; TXT auto-detects its field delimiter among
+  tab/comma/semicolon/pipe), plus the source-column type inference used when the wizard creates a
+  table.
 - `crates/rustgrid-mysql` — the only compiled-in driver; implements the core traits with sqlx.
 - `crates/rustgrid-config` — versioned settings/profiles plus encrypted secret storage in the
   OS config dir (`connections.json`, `settings.json`, `secrets.json`).
@@ -21,7 +26,7 @@ not a later refactor.
   tests; the rest are `impl AppView` submodules: `tree`, `database`, `db_dialog`, `objects`,
   `sidebar`, `tabs`, `toolbar`, `query`, `query_view`, `query_editor`, `grid`, `grid_input`,
   `grid_commit`, `grid_view`, `grid_cell`, `grid_scroll`, `grid_toolbar`, `dialogs`,
-  `export`, `widgets`, `form`). New view code goes in the matching submodule, **not** `mod.rs`.
+  `export`, `import`, `widgets`, `form`). New view code goes in the matching submodule, **not** `mod.rs`.
   `ui/` is the internal design system (buttons, scrollbars, text fields, dropdowns, ...) and the
   wrapper layer over gpui-kit: put shared chrome there, never one-off `div`s in feature code. Several subtrees are child
   `Entity` views wired through `WeakEntity<AppView>` + `notify_*` invalidation: the Tables/Views
@@ -53,6 +58,11 @@ not a later refactor.
 - Stored secrets: **chacha20poly1305 0.11** + **base64 0.22** (XChaCha20-Poly1305).
 - Export: **rust_xlsxwriter 0.99** writes `.xlsx`; **rfd 0.17** (XDG-portal backend on Linux) drives
   the native folder/file dialogs. CSV/SQL/TXT need no dependencies.
+- Import: **calamine 0.36** (`dates`) reads `.xlsx`/`.xls`/`.xlsm`/`.xlsb`/`.ods`; `.csv` is
+  comma-separated and `.txt` auto-detects tab/comma/semicolon/pipe, both via a built-in RFC 4180
+  parser with `encoding_rs` 0.8 for a GB18030 fallback. The same **rfd 0.17** drives the
+  source-file dialog. Imported date/time values are normalised with **dtparse 2** (a Python
+  `dateutil` port, day-first) to MySQL's canonical form before insert.
 
 ## Commands
 
@@ -275,9 +285,25 @@ shadcn chrome described above. Implemented today:
    fields by default), and P4 options + run (include column titles, continue on error) with a
    live log/progress view. Writes go through `rustgrid-export`; the wizard streams table pages via
    `Connection::fetch_page` (ordered by the primary key when the table has one).
+9. Import wizard: **Import Wizard** (object toolbar / table context menu, when a database is
+   open) opens a separate OS window walking four pages — P1 import type (`Excel File`, `CSV File`,
+   `Text File`), P2 the merged source page (a native file dialog picks the workbook or delimited
+   file; each worksheet — or the single file-named table for CSV/TXT — becomes a row with an
+   editable destination table and a **Create Table** check box), P3 field mapping (a destination
+   dropdown per source column, auto-matched by normalised header name), and P4 run/log. A source
+   table whose name matches an existing table targets it; otherwise the name becomes the table name
+   and **Create Table** is ticked automatically (`database_table_names` + `find_existing`).
+   Field matching is case/separator-insensitive (`normalize_key`). A created table's columns and
+   types are inferred from the data by `rustgrid-import::infer_columns` (integer → `bigint`,
+   decimal → `decimal(20,6)`, dates → `date`/`datetime`, booleans → `tinyint(1)`, text → `varchar`/
+   `longtext`), and the `id` column becomes the primary key (forced `NOT NULL`). Rows are inserted
+   in `IMPORT_BATCH_ROWS` batches through `Connection::insert_rows`; unmatched source columns are
+   simply not imported. Date/time values are parsed by `dtparse` (day-first, so `26/6/2025` is
+   26 June) and rewritten to MySQL's canonical `YYYY-MM-DD[ HH:MM:SS]`, so text sources with local
+   date conventions import into `date`/`datetime` columns.
 
 Still out of scope: a second database engine, and the disabled placeholder UI (the
-`Functions`/`Users` main tabs, the `Design/New/Delete Table`, `Import` toolbar buttons, and the
+`Functions`/`Users` main tabs, the `Design/New/Delete Table` toolbar buttons, and the
 query editor's `Query Builder`/`Snippets` items are deliberate stubs — leave them disabled unless
 asked). The abstractions above are what make more engines cheap later — do not build those
 features early.
@@ -344,6 +370,12 @@ features early.
   TXT and buffers `.xlsx`. Field selection is applied by projecting each page's columns down to the
   chosen ones, so the writer's header and the row values stay aligned. A table with no primary key
   exports in the engine's natural order.
+- The import wizard is likewise a real window (`ImportWindow` observing `AppView`). It reads the
+  workbook on tokio's blocking pool through `Runtime::spawn_blocking` — `calamine` is synchronous
+  and must not run on gpui's event thread. It opens the workbook once per read (`sheet_names`, then
+  `read_sheet` per sheet), and the whole sheet (header + rows) is held in `ImportSheetFields` so a
+  freshly created table can infer its column types. Keep new source formats inside
+  `rustgrid-import`; the app only sees `SheetData`/`infer_columns`.
 - DB work is tokio-based but gpui's executor is not tokio. Inside `cx.spawn`, run sqlx
   futures through `Runtime::spawn` and `.await` the returned `JoinHandle` (see
   `app.rs`). Awaiting sqlx directly in a gpui task panics with "there is no reactor running".

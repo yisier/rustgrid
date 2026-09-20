@@ -20,9 +20,14 @@ impl AppView {
         cx: &mut Context<'_, Self>,
     ) -> Div {
         let theme = self.theme;
-        let (category, open_enabled) = {
+        let (category, open_enabled, connection_index, database_index) = {
             let pane = pane.read(cx);
-            (pane.category, pane.selected.is_some())
+            (
+                pane.category,
+                pane.selected.is_some(),
+                pane.connection_index,
+                pane.database_index,
+            )
         };
         if category == Category::Queries {
             return self.render_query_object_toolbar(cx);
@@ -30,10 +35,15 @@ impl AppView {
         let design_enabled = category == Category::Tables && open_enabled;
         let new_enabled = category == Category::Tables;
         let export_enabled = category == Category::Tables && open_enabled;
+        let import_enabled = category == Category::Tables
+            && self
+                .database_name(connection_index, database_index)
+                .is_some();
         let pane_for_open = pane.clone();
         let pane_for_design = pane.clone();
         let pane_for_new = pane.clone();
         let pane_for_export = pane.clone();
+        let pane_for_import = pane.clone();
         div()
             .flex()
             .flex_row()
@@ -121,8 +131,14 @@ impl AppView {
                         "obj-import",
                         "icons/import.svg",
                         t!("object.import_wizard").to_string(),
-                        false,
-                        |_, _, _| {},
+                        import_enabled,
+                        cx.listener(move |this, _event, _window, cx| {
+                            let (connection_index, database_index) = {
+                                let pane = pane_for_import.read(cx);
+                                (pane.connection_index, pane.database_index)
+                            };
+                            this.open_import_wizard(connection_index, database_index, cx);
+                        }),
                     ))
                     .child(toolbar_separator(theme))
                     .child(self.toolbar_item(

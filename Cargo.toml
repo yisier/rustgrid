@@ -4,6 +4,7 @@ members = [
     "crates/rustgrid-core",
     "crates/rustgrid-backup",
     "crates/rustgrid-export",
+    "crates/rustgrid-import",
     "crates/rustgrid-mysql",
     "crates/rustgrid-config",
     "crates/rustgrid-app",
@@ -21,6 +22,7 @@ authors = ["yisier"]
 rustgrid-core = { path = "crates/rustgrid-core" }
 rustgrid-backup = { path = "crates/rustgrid-backup" }
 rustgrid-export = { path = "crates/rustgrid-export" }
+rustgrid-import = { path = "crates/rustgrid-import" }
 rustgrid-mysql = { path = "crates/rustgrid-mysql" }
 rustgrid-config = { path = "crates/rustgrid-config" }
 
@@ -41,6 +43,9 @@ gpui-kit = "0.6"
 sqlparser = "0.62"
 sqlformat = "0.5"
 rust_xlsxwriter = { version = "0.99", default-features = false }
+calamine = { version = "0.36", default-features = false, features = ["dates"] }
+encoding_rs = "0.8"
+dtparse = "2"
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 chacha20poly1305 = "0.11"
 base64 = "0.22"

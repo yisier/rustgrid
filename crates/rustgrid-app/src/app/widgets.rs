@@ -462,6 +462,14 @@ impl AppView {
                                 this.open_export_wizard(ci, di, &export_name, cx);
                             }),
                         ))
+                        .child(self.context_item(
+                            "table-import",
+                            t!("object.import_wizard").to_string(),
+                            cx.listener(move |this, _event, _window, cx| {
+                                this.context_menu = None;
+                                this.open_import_wizard(ci, di, cx);
+                            }),
+                        ))
                         .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
                         .child(self.context_item(
                             "table-drop",

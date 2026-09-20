@@ -1782,6 +1782,8 @@ impl AppView {
             self.restore_dialog = None;
             self.export_window = None;
             self.export_wizard = None;
+            self.import_window = None;
+            self.import_wizard = None;
             cx.quit();
             return;
         }
@@ -1804,6 +1806,16 @@ impl AppView {
         {
             self.export_window = None;
             self.export_wizard = None;
+            cx.notify();
+            return;
+        }
+        if self
+            .import_window
+            .as_ref()
+            .is_some_and(|handle| handle.window_id() == id)
+        {
+            self.import_window = None;
+            self.import_wizard = None;
             cx.notify();
         }
     }

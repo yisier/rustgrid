@@ -1,0 +1,15 @@
+[package]
+name = "rustgrid-import"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+rustgrid-core.workspace = true
+calamine.workspace = true
+chrono.workspace = true
+encoding_rs.workspace = true
+thiserror.workspace = true

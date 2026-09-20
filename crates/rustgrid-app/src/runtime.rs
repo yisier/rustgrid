@@ -26,4 +26,14 @@ impl Runtime {
     {
         self.inner.handle().spawn(future)
     }
+
+    /// Run a blocking task (file I/O, spreadsheet parsing) on tokio's blocking pool, so it never
+    /// stalls the async workers.
+    pub fn spawn_blocking<F, R>(&self, function: F) -> tokio::task::JoinHandle<R>
+    where
+        F: FnOnce() -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        self.inner.handle().spawn_blocking(function)
+    }
 }

@@ -94,7 +94,11 @@ impl AppView {
     }
 
     /// The table-kind object names of an open database, in catalog order.
-    fn database_table_names(&self, connection_index: usize, database_index: usize) -> Vec<String> {
+    pub(super) fn database_table_names(
+        &self,
+        connection_index: usize,
+        database_index: usize,
+    ) -> Vec<String> {
         self.connections
             .get(connection_index)
             .and_then(|node| match &node.databases {
@@ -232,6 +236,14 @@ impl AppView {
                     return;
                 }
                 self.set_export_error(String::new(), cx);
+                // Re-entering the run page is a fresh run: drop the previous result so the footer
+                // offers Start again instead of a stale Close.
+                if let Some(wizard) = self.export_wizard.as_mut() {
+                    wizard.elapsed = None;
+                    wizard.rows_total = 0;
+                    wizard.rows_done = 0;
+                    wizard.log.clear();
+                }
                 self.set_export_step(ExportStep::Options, cx);
             }
             ExportStep::Options => {}
@@ -1450,19 +1462,23 @@ impl AppView {
             .export_wizard
             .as_ref()
             .is_some_and(|wizard| wizard.running);
-        let mut right = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .flex_none()
-            .child(self.export_footer_button(
+        // Once a run has finished the primary button becomes Close, so the footer is not left
+        // offering Start again on completed data.
+        let finished = !running
+            && self
+                .export_wizard
+                .as_ref()
+                .is_some_and(|wizard| wizard.elapsed.is_some());
+        let mut right = div().flex().flex_row().items_center().gap_2().flex_none();
+        if !finished {
+            right = right.child(self.export_footer_button(
                 "export-cancel",
                 t!("export.cancel").to_string(),
                 false,
                 !running,
                 cx.listener(|this, _event, window, cx| this.export_close(window, cx)),
             ));
+        }
         if step != ExportStep::Format {
             right = right.child(self.export_footer_button(
                 "export-back",
@@ -1473,13 +1489,23 @@ impl AppView {
             ));
         }
         if step == ExportStep::Options {
-            right = right.child(self.export_footer_button(
-                "export-start",
-                t!("export.start").to_string(),
-                true,
-                !running,
-                cx.listener(|this, _event, _window, cx| this.export_start(cx)),
-            ));
+            if finished {
+                right = right.child(self.export_footer_button(
+                    "export-close-done",
+                    t!("export.close").to_string(),
+                    true,
+                    true,
+                    cx.listener(|this, _event, window, cx| this.export_close(window, cx)),
+                ));
+            } else {
+                right = right.child(self.export_footer_button(
+                    "export-start",
+                    t!("export.start").to_string(),
+                    true,
+                    !running,
+                    cx.listener(|this, _event, _window, cx| this.export_start(cx)),
+                ));
+            }
         } else {
             right = right.child(self.export_footer_button(
                 "export-next",
@@ -1514,6 +1540,18 @@ impl AppView {
         } else {
             ui::button(id, label, ButtonKind::Disabled, self.theme, on_click).into_any_element()
         }
+    }
+
+    /// A footer push button shared with the Import Wizard.
+    pub(super) fn wizard_footer_button(
+        &self,
+        id: &'static str,
+        label: String,
+        primary: bool,
+        enabled: bool,
+        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> AnyElement {
+        self.export_footer_button(id, label, primary, enabled, on_click)
     }
 }
 
@@ -1550,7 +1588,7 @@ impl Render for ExportWindow {
 // ----- Free helpers ---------------------------------------------------------------------------
 
 /// The directory new exports default into: the desktop, else the home directory.
-fn default_export_dir() -> String {
+pub(super) fn default_export_dir() -> String {
     if let Some(dirs) = directories::UserDirs::new() {
         if let Some(desktop) = dirs.desktop_dir() {
             return desktop.to_string_lossy().into_owned();
@@ -1581,7 +1619,7 @@ fn make_export_dir_input(
 }
 
 /// The child window's titlebar (same chrome as the Backup window).
-fn child_window_titlebar(title: String, theme: Theme) -> impl IntoElement {
+pub(super) fn child_window_titlebar(title: String, theme: Theme) -> impl IntoElement {
     div()
         .flex()
         .flex_row()
@@ -1639,7 +1677,7 @@ fn child_window_titlebar(title: String, theme: Theme) -> impl IntoElement {
         )
 }
 
-fn export_titlebar_button(
+pub(super) fn export_titlebar_button(
     id: &'static str,
     label: &'static str,
     theme: Theme,
@@ -1659,7 +1697,7 @@ fn export_titlebar_button(
 }
 
 /// A clickable check-box row used by the options page.
-fn export_check_row(
+pub(super) fn export_check_row(
     id: impl Into<SharedString>,
     label: String,
     checked: bool,
@@ -1681,7 +1719,7 @@ fn export_check_row(
 
 /// A small bordered "..." button, used to pick one table's output file. `enabled` is false for an
 /// unticked table, which has no output path.
-fn export_small_button(
+pub(super) fn export_small_button(
     id: String,
     enabled: bool,
     theme: Theme,
@@ -1712,7 +1750,7 @@ fn export_small_button(
 }
 
 /// One `label    value` row of the options page summary block.
-fn export_summary_row(label: String, value: String, theme: Theme) -> impl IntoElement {
+pub(super) fn export_summary_row(label: String, value: String, theme: Theme) -> impl IntoElement {
     div()
         .flex()
         .flex_row()
@@ -1738,7 +1776,7 @@ fn export_summary_row(label: String, value: String, theme: Theme) -> impl IntoEl
 }
 
 /// Format an elapsed duration as `HH:MM:SS`.
-fn format_hms(elapsed: std::time::Duration) -> String {
+pub(super) fn format_hms(elapsed: std::time::Duration) -> String {
     let total = elapsed.as_secs();
     format!(
         "{:02}:{:02}:{:02}",
@@ -1749,6 +1787,6 @@ fn format_hms(elapsed: std::time::Duration) -> String {
 }
 
 /// The local wall-clock timestamp used by the export log.
-fn now_timestamp() -> String {
+pub(super) fn now_timestamp() -> String {
     chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }

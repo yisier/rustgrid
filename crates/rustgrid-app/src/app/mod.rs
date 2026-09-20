@@ -389,6 +389,176 @@ struct ExportWizard {
     error: Option<String>,
 }
 
+/// The source kinds offered by the import wizard's first page: Excel workbooks (one table per
+/// worksheet), and comma/tab delimited text (one table named after the file).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ImportFormat {
+    Excel,
+    Csv,
+    Text,
+}
+
+impl ImportFormat {
+    /// Every kind, in the order the wizard presents them.
+    const ALL: [ImportFormat; 3] = [ImportFormat::Excel, ImportFormat::Csv, ImportFormat::Text];
+
+    /// The i18n key for the kind's label.
+    fn label_key(self) -> &'static str {
+        match self {
+            ImportFormat::Excel => "import.format.xlsx",
+            ImportFormat::Csv => "import.format.csv",
+            ImportFormat::Text => "import.format.txt",
+        }
+    }
+
+    /// The reader this kind uses.
+    fn source_kind(self) -> rustgrid_import::SourceKind {
+        match self {
+            ImportFormat::Excel => rustgrid_import::SourceKind::Excel,
+            ImportFormat::Csv => rustgrid_import::SourceKind::Csv,
+            ImportFormat::Text => rustgrid_import::SourceKind::Text,
+        }
+    }
+}
+
+/// Which page of the import wizard is showing: choose a kind (P1), pick the file and its target
+/// tables (P2, Navicat's P2+P3 merged), map fields (P3), then run (P4).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ImportStep {
+    Format,
+    Source,
+    Mapping,
+    Run,
+}
+
+impl ImportStep {
+    /// The 1-based page number and the total, for the page heading.
+    fn index(self) -> (usize, usize) {
+        match self {
+            ImportStep::Format => (1, 4),
+            ImportStep::Source => (2, 4),
+            ImportStep::Mapping => (3, 4),
+            ImportStep::Run => (4, 4),
+        }
+    }
+}
+
+/// One worksheet row of the import wizard's P2 list.
+struct ImportSheetPlan {
+    /// The worksheet name.
+    name: String,
+    /// Whether this sheet is imported.
+    selected: bool,
+    /// The destination table name, editable on P2.
+    target: String,
+    /// Whether the destination table is created before inserting (auto-set when no table with the
+    /// sheet's name exists).
+    create: bool,
+    /// The editable destination-table field.
+    target_input: Option<Entity<TextInput>>,
+}
+
+/// The loaded source/destination columns and rows of one worksheet, shared by the mapping page and
+/// the run.
+struct ImportSheetFields {
+    /// The worksheet's column names, in order.
+    source: Vec<String>,
+    /// The worksheet's data rows, read once when the sheet loads.
+    rows: Vec<Vec<Option<String>>>,
+    /// Every destination column: the existing table's columns, or the source names for a table the
+    /// wizard creates.
+    target_columns: Vec<String>,
+    /// The destination column's type, parallel to `target_columns`, used to normalise date/time
+    /// values before insert.
+    target_types: Vec<String>,
+    /// The destination column each source column maps to; parallel to `source`. Empty means the
+    /// source column is not imported.
+    mapped: Vec<String>,
+    /// The destination table's primary-key columns.
+    primary_key: Vec<String>,
+    loading: bool,
+    error: Option<String>,
+}
+
+impl ImportSheetFields {
+    fn loading() -> Self {
+        Self {
+            source: Vec::new(),
+            rows: Vec::new(),
+            target_columns: Vec::new(),
+            target_types: Vec::new(),
+            mapped: Vec::new(),
+            primary_key: Vec::new(),
+            loading: true,
+            error: None,
+        }
+    }
+
+    /// The `(source column index, destination column, destination type)` triples to import.
+    fn mapping_columns(&self) -> Vec<(usize, String, String)> {
+        self.mapped
+            .iter()
+            .enumerate()
+            .filter(|(_, target)| !target.is_empty())
+            .map(|(index, target)| {
+                let data_type = self
+                    .target_columns
+                    .iter()
+                    .position(|column| column == target)
+                    .and_then(|position| self.target_types.get(position))
+                    .cloned()
+                    .unwrap_or_default();
+                (index, target.clone(), data_type)
+            })
+            .collect()
+    }
+}
+
+/// One row of the mapping page: a source column and its destination-column dropdown.
+struct ImportMappingRow {
+    source: String,
+    combo: Entity<ComboBox>,
+}
+
+/// State of the "Import Wizard" window.
+struct ImportWizard {
+    connection_index: usize,
+    database_index: usize,
+    database: String,
+    step: ImportStep,
+    format: ImportFormat,
+    /// The chosen source file, empty until picked.
+    file: String,
+    /// The source-file field on P2.
+    file_input: Option<Entity<TextInput>>,
+    /// One row per worksheet in the file.
+    sheets: Vec<ImportSheetPlan>,
+    /// The database's table names at load time, so a typed target can auto-toggle "create".
+    existing_tables: Vec<String>,
+    /// Loaded source/destination data per sheet, keyed by sheet name.
+    fields: BTreeMap<String, ImportSheetFields>,
+    /// The sheet whose mapping P3 shows, as an index into `sheets`.
+    mapping_sheet: usize,
+    /// The P3 source-sheet dropdown (drawn when more than one sheet is selected).
+    sheet_combo: Option<Entity<ComboBox>>,
+    /// The P3 destination-column dropdowns, keyed by sheet name and built for every selected sheet
+    /// up front, so switching sheets never creates entities during a combo callback.
+    mapping_rows: BTreeMap<String, Vec<ImportMappingRow>>,
+    running: bool,
+    log: Vec<String>,
+    log_scroll: ScrollHandle,
+    rows_total: usize,
+    rows_done: usize,
+    imported_tables: usize,
+    added: usize,
+    updated: usize,
+    deleted: usize,
+    errors: usize,
+    started: Option<std::time::Instant>,
+    elapsed: Option<std::time::Duration>,
+    error: Option<String>,
+}
+
 /// Which pane's row owns the in-place rename editor. The object list and the connection tree can
 /// both list the same table, so the editor is drawn in exactly one of them.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1050,6 +1220,10 @@ pub struct AppView {
     export_wizard: Option<ExportWizard>,
     /// The OS window hosting the export wizard, if open.
     export_window: Option<WindowHandle<gpui_kit::component::Root>>,
+    /// The open import wizard, if any.
+    import_wizard: Option<ImportWizard>,
+    /// The OS window hosting the import wizard, if open.
+    import_window: Option<WindowHandle<gpui_kit::component::Root>>,
     /// The main window's id, so closing it also closes the Backup/Restore window.
     main_window_id: Option<WindowId>,
     /// Keeps the window-closed listener alive, so closing the OS window clears the dialog state.
@@ -1072,6 +1246,7 @@ mod grid_input;
 mod grid_scroll;
 mod grid_toolbar;
 mod grid_view;
+mod import;
 mod info_pane;
 mod objects;
 mod options;
@@ -1287,6 +1462,8 @@ impl AppView {
             backup_window: None,
             export_wizard: None,
             export_window: None,
+            import_wizard: None,
+            import_window: None,
             main_window_id: None,
             _window_closed: window_closed,
         }
