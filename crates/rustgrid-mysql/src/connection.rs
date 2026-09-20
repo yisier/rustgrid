@@ -4,7 +4,7 @@ use rustgrid_core::{
     BackupObjectKind, CellValue, ColumnDef, ColumnInfo, Connection, DatabaseInfo, DriverId, Error,
     FilterCondition, FilterConjunction, FilterNode, FilterOperator, ForeignKeyDef, IndexDef,
     ObjectDump, ObjectKind, PageRequest, QueryResult, Result, RowInsert, RowUpdate, TableInfo,
-    TableOptions, TablePage, TableSchema, TriggerDef,
+    TableOptions, TablePage, TableSchema, TableStatus, TriggerDef,
 };
 use sqlx::mysql::{MySqlColumn, MySqlRow};
 use sqlx::{
@@ -525,6 +525,57 @@ impl Connection for MysqlConnection {
         let charset: String = row.try_get(0).map_err(map_query_error)?;
         let collation: String = row.try_get(1).map_err(map_query_error)?;
         Ok((charset, collation))
+    }
+
+    async fn server_version(&self) -> Result<String> {
+        let row = sqlx::query("SELECT VERSION()")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(map_query_error)?;
+        row.try_get(0).map_err(map_query_error)
+    }
+
+    async fn session_count(&self) -> Result<u64> {
+        self.scalar_u64(
+            "SELECT COUNT(*) FROM information_schema.PROCESSLIST".to_string(),
+            &[],
+        )
+        .await
+    }
+
+    async fn table_status(&self, database: &str, table: &str) -> Result<TableStatus> {
+        let sql = format!(
+            "SHOW TABLE STATUS FROM {} LIKE '{}'",
+            quote_identifier(database),
+            escape_string_literal(table)
+        );
+        let result = self.execute_query(Some(database), &sql).await?;
+        let Some(row) = result.rows.into_iter().next() else {
+            return Ok(TableStatus::default());
+        };
+        let value = |name: &str| -> Option<&CellValue> {
+            result
+                .columns
+                .iter()
+                .position(|column| column.name.eq_ignore_ascii_case(name))
+                .and_then(|index| row.get(index))
+        };
+        Ok(TableStatus {
+            engine: value("Engine").and_then(text_value),
+            rows: value("Rows").and_then(u64_value),
+            auto_increment: value("Auto_increment").and_then(u64_value),
+            row_format: value("Row_format").and_then(text_value),
+            created: value("Create_time").and_then(text_value),
+            updated: value("Update_time").and_then(text_value),
+            checked: value("Check_time").and_then(text_value),
+            index_length: value("Index_length").and_then(u64_value),
+            data_length: value("Data_length").and_then(u64_value),
+            max_data_length: value("Max_data_length").and_then(u64_value),
+            data_free: value("Data_free").and_then(u64_value),
+            collation: value("Collation").and_then(text_value),
+            create_options: value("Create_options").and_then(text_value),
+            comment: value("Comment").and_then(text_value),
+        })
     }
 
     async fn character_sets(&self) -> Result<Vec<String>> {
@@ -1403,6 +1454,31 @@ fn quote_literal(value: &str) -> String {
 
 fn quote_identifier(identifier: &str) -> String {
     format!("`{}`", identifier.replace('`', "``"))
+}
+
+/// Escape a string for use inside a single-quoted SQL literal (used by `SHOW ... LIKE '<name>'`,
+/// which cannot bind parameters).
+fn escape_string_literal(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('\'', "''")
+}
+
+/// The display text of a cell, or `None` for `NULL`/binary values.
+fn text_value(cell: &CellValue) -> Option<String> {
+    match cell {
+        CellValue::Null | CellValue::Bytes(_) => None,
+        other => Some(other.as_display()),
+    }
+}
+
+/// The numeric value of a cell, or `None` when it is not a number.
+fn u64_value(cell: &CellValue) -> Option<u64> {
+    match cell {
+        CellValue::Uint(value) => Some(*value),
+        CellValue::Int(value) => u64::try_from(*value).ok(),
+        CellValue::Float(value) => Some(*value as u64),
+        CellValue::Text(text) => text.trim().parse().ok(),
+        _ => None,
+    }
 }
 
 /// Rows per `INSERT` statement while restoring a table.

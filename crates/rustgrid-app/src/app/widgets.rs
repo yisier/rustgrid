@@ -516,6 +516,187 @@ impl AppView {
                         ));
                 }
             }
+            ContextTarget::BackupFile { index } => {
+                let index = *index;
+                items = items
+                    .child(self.context_item(
+                        "backup-ctx-restore",
+                        t!("backup.restore").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.open_restore_backup(index, cx);
+                        }),
+                    ))
+                    .child(self.context_item(
+                        "backup-ctx-new",
+                        t!("backup.new").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.open_new_backup(cx);
+                        }),
+                    ))
+                    .child(self.context_item(
+                        "backup-ctx-delete",
+                        t!("backup.delete").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.backup_selected = Some(BackupSelection::File(index));
+                            this.confirm_delete_backup(cx);
+                        }),
+                    ))
+                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(self.context_item(
+                        "backup-ctx-extract",
+                        t!("backup.extract_sql").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.extract_backup_sql(index, cx);
+                        }),
+                    ))
+                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(self.context_item(
+                        "backup-ctx-copy",
+                        t!("backup.copy").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.copy_backup_file(index);
+                            cx.notify();
+                        }),
+                    ))
+                    .child(self.context_item(
+                        "backup-ctx-rename",
+                        t!("backup.rename").to_string(),
+                        cx.listener(move |this, _event, window, cx| {
+                            this.context_menu = None;
+                            this.begin_rename_backup(index, window, cx);
+                        }),
+                    ))
+                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(self.context_item(
+                        "backup-ctx-reveal",
+                        t!("backup.reveal").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.reveal_backup(index);
+                            cx.notify();
+                        }),
+                    ))
+                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(self.context_item(
+                        "backup-ctx-refresh",
+                        t!("connection.refresh").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.refresh_selected_backup(cx);
+                        }),
+                    ))
+                    .child(self.context_item(
+                        "backup-ctx-info",
+                        t!("backup.object_info").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.open_backup_info(index, cx);
+                        }),
+                    ));
+            }
+            ContextTarget::BackupConfig { index } => {
+                let index = *index;
+                items = items
+                    .child(self.context_item(
+                        "backup-config-ctx-delete",
+                        t!("backup.delete").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.backup_selected = Some(BackupSelection::Config(index));
+                            this.confirm_delete_backup(cx);
+                        }),
+                    ))
+                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(self.context_item(
+                        "backup-config-ctx-refresh",
+                        t!("connection.refresh").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.refresh_selected_backup(cx);
+                        }),
+                    ))
+                    .child(self.context_item(
+                        "backup-config-ctx-info",
+                        t!("backup.object_info").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.backup_selected = Some(BackupSelection::Config(index));
+                            this.info_open = true;
+                            cx.notify();
+                        }),
+                    ));
+            }
+            ContextTarget::QueryFile { index } => {
+                let index = *index;
+                items = items
+                    .child(self.context_item(
+                        "queryfile-ctx-open",
+                        t!("query.open_query").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.open_saved_query(index, cx);
+                        }),
+                    ))
+                    .child(self.context_item(
+                        "queryfile-ctx-delete",
+                        t!("query.delete_query").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.saved_query_selected = Some(index);
+                            this.confirm_delete_saved_query(index, cx);
+                        }),
+                    ))
+                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(self.context_item(
+                        "queryfile-ctx-copy",
+                        t!("backup.copy").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.copy_query_file(index);
+                            cx.notify();
+                        }),
+                    ))
+                    .child(self.context_item(
+                        "queryfile-ctx-rename",
+                        t!("backup.rename").to_string(),
+                        cx.listener(move |this, _event, window, cx| {
+                            this.context_menu = None;
+                            this.begin_rename_query(index, window, cx);
+                        }),
+                    ))
+                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(self.context_item(
+                        "queryfile-ctx-reveal",
+                        t!("backup.reveal").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.reveal_query(index);
+                            cx.notify();
+                        }),
+                    ))
+                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(self.context_item(
+                        "queryfile-ctx-refresh",
+                        t!("connection.refresh").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.refresh_selected_query(cx);
+                        }),
+                    ))
+                    .child(self.context_item(
+                        "queryfile-ctx-info",
+                        t!("backup.object_info").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.open_query_info(index, cx);
+                        }),
+                    ));
+            }
             ContextTarget::QueryEditor => {
                 items = items
                     .child(self.context_item(

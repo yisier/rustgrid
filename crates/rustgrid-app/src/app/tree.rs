@@ -449,6 +449,19 @@ impl AppView {
         category: Category,
         cx: &mut Context<'_, Self>,
     ) {
+        self.clear_info_table();
+        if category == Category::Backups {
+            // Selecting the Backups category scopes the Backup main tab to this database. The
+            // backup files themselves live in the middle pane, not as tree leaves.
+            self.active_grid = None;
+            self.active_query = None;
+            self.active_design = None;
+            self.saved_query_selected = None;
+            self.main_tab = MainTab::Backups;
+            self.refresh_backups(cx);
+            cx.notify();
+            return;
+        }
         let mut should_load = false;
         if let Some(node) = self.connections.get_mut(connection_index)
             && let Loadable::Loaded(databases) = &mut node.databases
@@ -493,6 +506,22 @@ impl AppView {
             .and_then(|node| match &node.databases {
                 Loadable::Loaded(databases) => {
                     databases.get(database_index).map(|db| db.name.clone())
+                }
+                _ => None,
+            })
+    }
+
+    /// The index of a database by name, for resolving an info-pane table selection.
+    pub(super) fn database_index_by_name(
+        &self,
+        connection_index: usize,
+        name: &str,
+    ) -> Option<usize> {
+        self.connections
+            .get(connection_index)
+            .and_then(|node| match &node.databases {
+                Loadable::Loaded(databases) => {
+                    databases.iter().position(|database| database.name == name)
                 }
                 _ => None,
             })
@@ -562,6 +591,11 @@ impl AppView {
         let Some(connection) = self.connection_arc(connection_index) else {
             return;
         };
+
+        // The info pane follows the selected table.
+        if let Some(database_index) = self.database_index_by_name(connection_index, &database) {
+            self.set_info_table(connection_index, database_index, table.clone());
+        }
 
         if let Some(index) = self.grids.iter().position(|grid| {
             let grid = grid.read(cx);

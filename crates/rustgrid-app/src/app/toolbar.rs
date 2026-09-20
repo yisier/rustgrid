@@ -218,6 +218,9 @@ impl AppView {
         self.active_query = None;
         self.active_design = None;
         self.saved_query_selected = None;
+        if tab == MainTab::Queries {
+            self.refresh_query_files(cx);
+        }
         cx.notify();
     }
 }

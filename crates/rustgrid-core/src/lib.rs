@@ -10,6 +10,6 @@ pub use model::{
     DatabaseInfo, DriverId, FilterCondition, FilterConjunction, FilterGroup, FilterNode,
     FilterOperator, ForeignKeyDef, IndexDef, ObjectDump, ObjectKind, PageRequest, QueryResult,
     RowInsert, RowUpdate, SavedBackup, SavedBackupSelection, SavedQuery, SortColumn, TableInfo,
-    TableOptions, TablePage, TableSchema, TriggerDef,
+    TableOptions, TablePage, TableSchema, TableStatus, TriggerDef,
 };
 pub use registry::{DriverRegistry, DriverSource};

@@ -512,6 +512,27 @@ pub struct TableSchema {
     pub options: TableOptions,
 }
 
+/// A `SHOW TABLE STATUS`-style summary of one table, shown by the object-info pane. Every field
+/// is optional because engines and even table types (views, partitioned tables) report different
+/// subsets.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TableStatus {
+    pub engine: Option<String>,
+    pub rows: Option<u64>,
+    pub auto_increment: Option<u64>,
+    pub row_format: Option<String>,
+    pub created: Option<String>,
+    pub updated: Option<String>,
+    pub checked: Option<String>,
+    pub index_length: Option<u64>,
+    pub data_length: Option<u64>,
+    pub max_data_length: Option<u64>,
+    pub data_free: Option<u64>,
+    pub collation: Option<String>,
+    pub create_options: Option<String>,
+    pub comment: Option<String>,
+}
+
 /// The kind of database object a backup can contain. Mirrors Navicat's object-selection
 /// categories (tables, views, functions, events). Stored procedures are grouped with
 /// functions, exactly as Navicat's backup profile does.

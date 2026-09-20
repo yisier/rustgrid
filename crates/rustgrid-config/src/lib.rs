@@ -14,6 +14,7 @@ const SETTINGS_VERSION: u32 = 2;
 const SETTINGS_FILE: &str = "settings.json";
 const QUERIES_VERSION: u32 = 1;
 const QUERIES_FILE: &str = "queries.json";
+const QUERIES_DIR: &str = "queries";
 const BACKUPS_VERSION: u32 = 1;
 const BACKUPS_FILE: &str = "backups.json";
 const BACKUPS_DIR: &str = "backups";
@@ -154,6 +155,57 @@ impl ConfigStore {
         self.root.join(QUERIES_FILE)
     }
 
+    /// The root directory of saved queries. Each query is a `.sql` file under
+    /// `<root>/queries/<connection_id>/<database>/<name>.sql`, mirroring the backups tree.
+    pub fn queries_dir(&self) -> PathBuf {
+        self.root.join(QUERIES_DIR)
+    }
+
+    /// The file a saved query is written to.
+    pub fn query_file_path(&self, connection_id: &str, database: &str, name: &str) -> PathBuf {
+        self.queries_dir()
+            .join(sanitize_component(connection_id))
+            .join(sanitize_component(database))
+            .join(format!("{}.sql", sanitize_component(name)))
+    }
+
+    /// Write (or overwrite) one saved query's `.sql` file.
+    pub fn save_query_file(&self, query: &SavedQuery) -> ConfigResult<PathBuf> {
+        let path = self.query_file_path(&query.connection_id, &query.database, &query.name);
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        fs::write(&path, &query.sql)?;
+        Ok(path)
+    }
+
+    /// Remove one saved query's `.sql` file.
+    pub fn delete_query_file(&self, query: &SavedQuery) -> ConfigResult<()> {
+        let path = self.query_file_path(&query.connection_id, &query.database, &query.name);
+        if path.exists() {
+            fs::remove_file(path)?;
+        }
+        Ok(())
+    }
+
+    /// Move a set of legacy `queries.json` entries into the per-file tree (once). The old file is
+    /// renamed to `queries.json.bak` so the migration does not run again.
+    pub fn migrate_legacy_queries(&self) -> ConfigResult<()> {
+        let path = self.queries_path();
+        if !path.exists() {
+            return Ok(());
+        }
+        if let Ok(contents) = fs::read_to_string(&path)
+            && let Ok(file) = serde_json::from_str::<QueriesFile>(&contents)
+        {
+            for query in &file.queries {
+                let _ = self.save_query_file(query);
+            }
+        }
+        let _ = fs::rename(&path, self.root.join(format!("{QUERIES_FILE}.bak")));
+        Ok(())
+    }
+
     /// The root directory of this app's NB3 backups. Files live under
     /// `<root>/backups/<connection_id>/<database>/<name>.nb3`.
     pub fn backups_dir(&self) -> PathBuf {
@@ -255,6 +307,17 @@ impl ConfigStore {
         fs::write(self.root.join(BACKUPS_FILE), contents)?;
         Ok(())
     }
+}
+
+/// Make a filesystem-safe path component from a connection id or database name.
+fn sanitize_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| match character {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            _ => character,
+        })
+        .collect()
 }
 
 fn migrate(mut file: ProfilesFile) -> ProfilesFile {

@@ -12,14 +12,15 @@ use gpui::{
     ImageSource, KeyBinding, KeyDownEvent, ListHorizontalSizingBehavior, Modifiers, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Resource, ScrollDelta,
     ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, Stateful, StyledText,
-    Subscription, Svg, TextLayout, UTF16Selection, UniformListScrollHandle, WeakEntity, Window,
-    WindowControlArea, canvas, deferred, div, img, prelude::*, px, rgb, svg, uniform_list,
+    Subscription, Svg, TextLayout, TitlebarOptions, UTF16Selection, UniformListScrollHandle,
+    WeakEntity, Window, WindowBounds, WindowControlArea, WindowHandle, WindowId, WindowOptions,
+    canvas, deferred, div, img, prelude::*, px, rgb, size, svg, uniform_list,
 };
 use rustgrid_config::{AppSettings, ConfigStore, LanguageSetting, ThemeSetting};
 use rustgrid_core::{
     BackupObjectKind, CellValue, Connection, ConnectionConfig, DriverRegistry, Error,
     FilterCondition, FilterConjunction, FilterGroup, FilterNode, FilterOperator, PageRequest,
-    QueryResult, RowInsert, RowUpdate, SavedBackup, SavedQuery,
+    QueryResult, RowInsert, RowUpdate, SavedBackup, SavedQuery, TableStatus,
 };
 
 use crate::form::{ConnectionForm, FORM_FIELDS, FormField};
@@ -45,8 +46,22 @@ use ui::{
 // the same keys in a deeper context (the editing cell) takes precedence and moves the editor.
 gpui::actions!(grid, [NextCell, PrevCell]);
 
+// Backup-list actions. `Root` binds `ctrl-c` to a copy action in the `"Root"` context, which
+// would swallow the keystroke before `on_key_down`; binding our own actions in a deeper context
+// (the backup list) takes precedence, like the grid's Tab binding above.
+gpui::actions!(backup, [CopyBackupFile, PasteBackupFile, RenameBackupFile]);
+
+// Saved-query file-list actions, mirroring the backup list's F2 / Ctrl+C / Ctrl+V handling.
+gpui::actions!(queryfile, [CopyQueryFile, PasteQueryFile, RenameQueryFile]);
+
 /// Key context applied to the cell that owns the in-place editor.
 const GRID_CELL_CONTEXT: &str = "GridCell";
+
+/// Key context applied to the backup list, so F2 / Ctrl+C / Ctrl+V reach it.
+const BACKUP_LIST_CONTEXT: &str = "BackupList";
+
+/// Key context applied to the saved-query file list.
+const QUERY_LIST_CONTEXT: &str = "QueryList";
 
 /// The six text inputs of the connection form, created when the form opens. Order follows
 /// [`FORM_FIELDS`] so `FormField as usize` indexes the array.
@@ -165,6 +180,58 @@ enum BackupSelection {
     Config(usize),
 }
 
+/// An in-app copy of a backup file, so Ctrl+C / Ctrl+V works like copying a file in Explorer.
+/// Only the source path is held (the bytes are read on paste), keeping memory bounded.
+#[derive(Clone)]
+struct BackupClipboard {
+    /// The file stem (without the extension) at copy time.
+    name: String,
+    /// The copied file's path.
+    path: std::path::PathBuf,
+}
+
+/// A saved-query `.sql` file discovered under the config dir's `queries/` tree.
+struct QueryFileInfo {
+    path: std::path::PathBuf,
+    /// The file stem, e.g. `清理库存`.
+    name: String,
+    /// The connection folder holding the file.
+    connection_id: String,
+    /// The database folder holding the file.
+    database: String,
+    size: u64,
+    created: Option<std::time::SystemTime>,
+    modified: Option<std::time::SystemTime>,
+}
+
+/// An in-app copy of a query file, so Ctrl+C / Ctrl+V works like copying a file in Explorer.
+#[derive(Clone)]
+struct QueryClipboard {
+    /// The file stem (without the extension) at copy time.
+    name: String,
+    /// The copied file's path.
+    path: std::path::PathBuf,
+}
+
+/// The in-place "rename query" editor, drawn in the row it started from.
+struct QueryRenameEdit {
+    /// Index into `AppView::query_files`.
+    index: usize,
+    old_name: String,
+    new_name: String,
+    input: Entity<TextInput>,
+}
+
+/// The in-place "rename backup" editor, drawn in the row it started from. `new_name` mirrors the
+/// input's text so `submit_backup_rename` never reads the entity back during its change callback.
+struct BackupRenameEdit {
+    /// Index into `AppView::backup_files`.
+    index: usize,
+    old_name: String,
+    new_name: String,
+    input: Entity<TextInput>,
+}
+
 /// State of the "New Backup" dialog.
 struct NewBackupDialog {
     connection_index: usize,
@@ -178,6 +245,18 @@ struct NewBackupDialog {
     loading: bool,
     running: bool,
     log: Vec<String>,
+    /// Keeps the info log scrolled to the newest line while the operation runs.
+    log_scroll: ScrollHandle,
+    /// Progress counters for the run's summary.
+    total: usize,
+    success: usize,
+    failed: usize,
+    /// Records: the planned total (0 when unknown, e.g. a backup) and processed so far.
+    rows_total: usize,
+    rows_done: usize,
+    /// When the run started, and its final elapsed time.
+    started: Option<std::time::Instant>,
+    elapsed: Option<std::time::Duration>,
     error: Option<String>,
 }
 
@@ -191,6 +270,18 @@ struct RestoreBackupDialog {
     objects: Vec<BackupObjectEntry>,
     running: bool,
     log: Vec<String>,
+    /// Keeps the info log scrolled to the newest line while the operation runs.
+    log_scroll: ScrollHandle,
+    /// Progress counters for the run's summary.
+    total: usize,
+    success: usize,
+    failed: usize,
+    /// Records: the planned total (sum of the manifest's row counts) and processed so far.
+    rows_total: usize,
+    rows_done: usize,
+    /// When the run started, and its final elapsed time.
+    started: Option<std::time::Instant>,
+    elapsed: Option<std::time::Duration>,
     error: Option<String>,
 }
 
@@ -351,6 +442,18 @@ enum ContextTarget {
         is_view: bool,
         /// Which pane the row was right-clicked in, so Rename edits the name in place there.
         pane: RowPane,
+    },
+    /// A backup file in the Backup main tab's list.
+    BackupFile {
+        index: usize,
+    },
+    /// A saved backup profile in the Backup main tab's list.
+    BackupConfig {
+        index: usize,
+    },
+    /// A saved-query `.sql` file in the Queries main tab's list.
+    QueryFile {
+        index: usize,
     },
     QueryEditor,
 }
@@ -626,6 +729,9 @@ enum TableOperation {
 
 /// Which app dialog `Root` is currently hosting. AppView state stays the source of truth; this
 /// only tracks the last kind handed to `window.open_dialog` so the transition fires once.
+///
+/// The Backup and Restore windows are deliberately **not** here: they are drawn as non-modal
+/// floating panels by `AppView` so the rest of the app stays usable while they are open.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DialogKind {
     ConnectionForm,
@@ -636,8 +742,6 @@ enum DialogKind {
     Error,
     Confirm,
     Options,
-    NewBackup,
-    RestoreBackup,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -648,14 +752,6 @@ enum MainTab {
     Users,
     Queries,
     Backups,
-}
-
-/// A sortable column of the saved-query list under the Queries main tab.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SavedQueryColumn {
-    Name,
-    Connection,
-    Database,
 }
 
 const MAIN_TABS: [(MainTab, &str, &str); 6] = [
@@ -671,10 +767,15 @@ const PANEL_WIDTH: f32 = 620.0;
 const FIELD_LABEL_WIDTH: f32 = 96.0;
 const OBJECT_ROW_HEIGHT: f32 = 20.0;
 const OBJECT_BOTTOM_MARGIN: f32 = 20.0;
-/// Fixed column widths of the saved-query list (query name / connection / database).
-const SAVED_QUERY_NAME_WIDTH: f32 = 200.0;
-const SAVED_QUERY_CONNECTION_WIDTH: f32 = 160.0;
-const SAVED_QUERY_DATABASE_WIDTH: f32 = 160.0;
+/// Default and clamp widths of the drag-resizable side panes.
+pub(super) const SIDEBAR_DEFAULT_WIDTH: f32 = 260.0;
+pub(super) const SIDEBAR_MIN_WIDTH: f32 = 150.0;
+pub(super) const SIDEBAR_MAX_WIDTH: f32 = 560.0;
+pub(super) const INFO_DEFAULT_WIDTH: f32 = 300.0;
+pub(super) const INFO_MIN_WIDTH: f32 = 220.0;
+pub(super) const INFO_MAX_WIDTH: f32 = 640.0;
+/// Width of a pane's drag-to-resize divider.
+pub(super) const PANE_DIVIDER_WIDTH: f32 = 5.0;
 const GRID_ROW_HEIGHT: f32 = 24.0;
 const GRID_COLUMN_WIDTH: f32 = 120.0;
 /// Fixed column widths of a filter condition row. The filter builder's group boundary row reuses
@@ -705,13 +806,18 @@ pub struct AppView {
     next_design_id: u64,
     active_query: Option<usize>,
     next_query_id: u64,
-    /// Saved, named queries loaded from `queries.json`.
-    saved_queries: Vec<SavedQuery>,
-    /// The saved query highlighted in the Queries list, indexed into `saved_queries`.
+    /// Saved queries, as individual `.sql` files under the config dir's `queries/` tree.
+    query_files: Vec<QueryFileInfo>,
+    /// The saved query highlighted in the Queries list, indexed into `query_files`.
     saved_query_selected: Option<usize>,
-    /// The saved-query list sort: which column and whether it is descending. `None` keeps the
-    /// stored (insertion) order.
-    saved_query_sort: Option<(SavedQueryColumn, bool)>,
+    /// The in-app copied query file, for Ctrl+C / Ctrl+V.
+    query_clipboard: Option<QueryClipboard>,
+    /// The in-place rename editor for a query file, if any.
+    query_rename: Option<QueryRenameEdit>,
+    query_rename_blur: Option<Subscription>,
+    query_rename_focus_pending: bool,
+    /// Focus target for the query file list, so F2 / Ctrl+C / Ctrl+V reach it.
+    query_list_focus: FocusHandle,
     /// Saved backup configurations loaded from `backups.json`.
     backup_configs: Vec<SavedBackup>,
     /// Backup files found under the config dir's `backups/` tree.
@@ -722,13 +828,17 @@ pub struct AppView {
     new_backup_dialog: Option<NewBackupDialog>,
     /// The open "restore backup" dialog, if any.
     restore_dialog: Option<RestoreBackupDialog>,
-    backup_connection_combo: Option<Entity<ComboBox>>,
-    backup_database_combo: Option<Entity<ComboBox>>,
-    restore_connection_combo: Option<Entity<ComboBox>>,
-    restore_database_combo: Option<Entity<ComboBox>>,
     /// The configuration-name field of the "new backup" dialog.
     backup_name_input: Option<Entity<TextInput>>,
     backup_name_focus_pending: bool,
+    /// The in-app copied backup file, for Ctrl+C / Ctrl+V.
+    backup_clipboard: Option<BackupClipboard>,
+    /// The in-place rename editor for a backup file, if any.
+    backup_rename: Option<BackupRenameEdit>,
+    backup_rename_blur: Option<Subscription>,
+    backup_rename_focus_pending: bool,
+    /// Focus target for the backup list, so F2 / Ctrl+C / Ctrl+V reach it.
+    backup_focus: FocusHandle,
     /// The open "save query" dialog, if any.
     save_query_dialog: Option<SaveQueryDialog>,
     query_name_input: Option<Entity<TextInput>>,
@@ -810,6 +920,32 @@ pub struct AppView {
     /// otherwise freezes them until they are explicitly notified).
     tree_revision: u64,
     tab_revision: u64,
+    /// The connection-tree host, which owns its own (drag-resizable) width so resizing only
+    /// re-renders it, not the whole app.
+    sidebar_host: Entity<SidebarHost>,
+    /// The right-hand object-info pane, which likewise owns its width and its resize divider.
+    info_pane: Entity<InfoPane>,
+    /// Whether the connection-tree sidebar is shown (bottom-right toggle).
+    sidebar_open: bool,
+    /// Whether the right-hand object-info pane is shown (bottom-right toggle).
+    info_open: bool,
+    /// The selection the info pane is currently loaded for, so async loads fire once per change.
+    info_loaded_for: Option<String>,
+    /// The connected server's `(version, sessions)` for the connection info pane.
+    info_server: Loadable<(String, u64)>,
+    /// The selected database's `(charset, collation)` for the database info pane.
+    info_database: Loadable<(String, String)>,
+    /// The selected table `(connection, database, name)` driving the table info pane, set by the
+    /// connection tree and the object list.
+    info_table_selected: Option<(usize, usize, String)>,
+    /// The selected table's status for the table info pane.
+    info_table_status: Loadable<TableStatus>,
+    /// The OS window hosting the Backup/Restore UI, if open.
+    backup_window: Option<WindowHandle<gpui_kit::component::Root>>,
+    /// The main window's id, so closing it also closes the Backup/Restore window.
+    main_window_id: Option<WindowId>,
+    /// Keeps the window-closed listener alive, so closing the OS window clears the dialog state.
+    _window_closed: Subscription,
 }
 
 mod backup;
@@ -827,6 +963,7 @@ mod grid_input;
 mod grid_scroll;
 mod grid_toolbar;
 mod grid_view;
+mod info_pane;
 mod objects;
 mod options;
 mod query;
@@ -841,6 +978,8 @@ mod ui;
 mod widgets;
 
 pub use shell::AppShell;
+
+use info_pane::{InfoPane, SidebarHost};
 
 impl AppView {
     pub fn new(
@@ -872,15 +1011,38 @@ impl AppView {
         let settings = config.load_settings().unwrap_or_default();
         let theme_setting = settings.theme;
         let language = settings.language;
-        let saved_queries = config.load_queries().unwrap_or_default();
+        let _ = config.migrate_legacy_queries();
+        let query_files = query::scan_query_files(&config);
         let backup_configs = config.load_backups().unwrap_or_default();
         // Claim Tab inside the cell editor so it advances to the next cell rather than moving
         // window focus (which is what the `Root` context binds it to).
         cx.bind_keys([
             KeyBinding::new("tab", NextCell, Some(GRID_CELL_CONTEXT)),
             KeyBinding::new("shift-tab", PrevCell, Some(GRID_CELL_CONTEXT)),
+            KeyBinding::new("f2", RenameBackupFile, Some(BACKUP_LIST_CONTEXT)),
+            KeyBinding::new("ctrl-c", CopyBackupFile, Some(BACKUP_LIST_CONTEXT)),
+            KeyBinding::new("cmd-c", CopyBackupFile, Some(BACKUP_LIST_CONTEXT)),
+            KeyBinding::new("ctrl-v", PasteBackupFile, Some(BACKUP_LIST_CONTEXT)),
+            KeyBinding::new("cmd-v", PasteBackupFile, Some(BACKUP_LIST_CONTEXT)),
+            KeyBinding::new("f2", RenameQueryFile, Some(QUERY_LIST_CONTEXT)),
+            KeyBinding::new("ctrl-c", CopyQueryFile, Some(QUERY_LIST_CONTEXT)),
+            KeyBinding::new("cmd-c", CopyQueryFile, Some(QUERY_LIST_CONTEXT)),
+            KeyBinding::new("ctrl-v", PasteQueryFile, Some(QUERY_LIST_CONTEXT)),
+            KeyBinding::new("cmd-v", PasteQueryFile, Some(QUERY_LIST_CONTEXT)),
         ]);
         let app = cx.weak_entity();
+        let app_entity = cx.entity();
+        let tree_pane = cx.new(|cx| TreePane::new(app.clone(), cx));
+        let sidebar_host = cx.new(|cx| SidebarHost::new(app.clone(), &app_entity, cx));
+        let info_pane = cx.new(|cx| InfoPane::new(app.clone(), &app_entity, &tree_pane, cx));
+        let window_closed = cx.on_window_closed({
+            let weak = app.clone();
+            move |cx, id| {
+                if let Some(app) = weak.upgrade() {
+                    app.update(cx, |app, cx| app.on_window_closed(id, cx));
+                }
+            }
+        });
 
         Self {
             registry,
@@ -894,20 +1056,25 @@ impl AppView {
             next_design_id: 0,
             active_query: None,
             next_query_id: 0,
-            saved_queries,
+            query_files,
             saved_query_selected: None,
-            saved_query_sort: None,
+            query_clipboard: None,
+            query_rename: None,
+            query_rename_blur: None,
+            query_rename_focus_pending: false,
+            query_list_focus: cx.focus_handle(),
             backup_configs,
             backup_files: Vec::new(),
             backup_selected: None,
             new_backup_dialog: None,
             restore_dialog: None,
-            backup_connection_combo: None,
-            backup_database_combo: None,
-            restore_connection_combo: None,
-            restore_database_combo: None,
             backup_name_input: None,
             backup_name_focus_pending: false,
+            backup_clipboard: None,
+            backup_rename: None,
+            backup_rename_blur: None,
+            backup_rename_focus_pending: false,
+            backup_focus: cx.focus_handle(),
             save_query_dialog: None,
             query_name_input: None,
             create_table_dialog: None,
@@ -939,7 +1106,7 @@ impl AppView {
             menu_popup_anchor: Rc::new(RefCell::new(Point::default())),
             object_pane: None,
             tab_bar: cx.new(|_| TabBar::new(app.clone())),
-            tree_pane: cx.new(|cx| TreePane::new(app.clone(), cx)),
+            tree_pane,
             main_tab: MainTab::Tables,
             db_dialog: None,
             db_charset_combo: None,
@@ -999,6 +1166,18 @@ impl AppView {
             language_combo: None,
             tree_revision: 0,
             tab_revision: 0,
+            sidebar_host,
+            info_pane,
+            sidebar_open: true,
+            info_open: false,
+            info_loaded_for: None,
+            info_server: Loadable::Idle,
+            info_database: Loadable::Idle,
+            info_table_selected: None,
+            info_table_status: Loadable::Idle,
+            backup_window: None,
+            main_window_id: None,
+            _window_closed: window_closed,
         }
     }
 
@@ -1224,6 +1403,14 @@ impl AppView {
         if let Some(input) = self.backup_name_input.as_ref() {
             input.update(cx, |input, cx| input.set_theme(theme, cx));
         }
+        if let Some(edit) = self.backup_rename.as_ref() {
+            edit.input
+                .update(cx, |input, cx| input.set_theme(theme, cx));
+        }
+        if let Some(edit) = self.query_rename.as_ref() {
+            edit.input
+                .update(cx, |input, cx| input.set_theme(theme, cx));
+        }
         for design in &self.designs {
             design.update(cx, |design, cx| design.set_theme(theme, cx));
         }
@@ -1234,16 +1421,134 @@ impl AppView {
             self.query_database_combo.as_ref(),
             self.save_location_combo.as_ref(),
             self.language_combo.as_ref(),
-            self.backup_connection_combo.as_ref(),
-            self.backup_database_combo.as_ref(),
-            self.restore_connection_combo.as_ref(),
-            self.restore_database_combo.as_ref(),
         ]
         .into_iter()
         .flatten()
         {
             combo.update(cx, |combo, cx| combo.set_theme(theme, cx));
         }
+    }
+
+    // ----- Bottom status bar --------------------------------------------------------------------
+
+    /// A small toggle in the status bar's bottom-right corner, mirroring Navicat's pane controls:
+    /// a filled "panel" icon whose column is on the left (navigation pane) or right (info pane),
+    /// so the two buttons are mirror images.
+    fn pane_toggle(
+        &self,
+        open: bool,
+        icon: &'static str,
+        id: &'static str,
+        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> impl IntoElement {
+        let theme = self.theme;
+        let color = if open {
+            theme.icon_connection
+        } else {
+            theme.text_muted
+        };
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(20.0))
+            .h(px(18.0))
+            .flex_none()
+            .rounded(px(2.0))
+            .cursor_pointer()
+            .text_color(rgb(color))
+            .when(open, move |style| style.bg(rgb(theme.tree_selected_bg)))
+            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            .on_click(on_click)
+            .child(
+                svg()
+                    .path(icon)
+                    .w(px(16.0))
+                    .h(px(16.0))
+                    .flex_none()
+                    .text_color(rgb(color)),
+            )
+    }
+
+    /// The window's fixed bottom status bar: driver count on the left, the active view's status in
+    /// the middle, and the side-pane toggles in the bottom-right corner.
+    fn render_status_bar(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let center: AnyElement = if self.main_tab == MainTab::Backups {
+            let count = self.visible_backup_files(cx).len() + self.visible_backup_configs(cx).len();
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .px_2()
+                .text_size(px(12.0))
+                .text_color(rgb(theme.text))
+                .child(format!("{count} {}", t!("common.backup")))
+                .into_any_element()
+        } else if self.active_grid.is_none()
+            && self.active_query.is_none()
+            && self.active_design.is_none()
+            && let Some(pane) = self.object_pane.clone()
+        {
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .child(self.render_object_status(&pane, cx))
+                .into_any_element()
+        } else {
+            div().flex_1().min_w(px(0.0)).into_any_element()
+        };
+
+        let bar = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .h(px(24.0))
+            .flex_none()
+            .px_2()
+            .bg(rgb(theme.toolbar_bg))
+            .border_t_1()
+            .border_color(rgb(theme.border))
+            .text_size(px(12.0))
+            .child(
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(rgb(theme.text_muted))
+                    .child(format!(
+                        "{}: {}",
+                        t!("sidebar.drivers"),
+                        self.registry.len()
+                    )),
+            )
+            .child(center)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .flex_none()
+                    .child(self.pane_toggle(
+                        self.sidebar_open,
+                        "icons/panel-left.svg",
+                        "pane-toggle-sidebar",
+                        cx.listener(|this, _event, _window, cx| {
+                            this.sidebar_open = !this.sidebar_open;
+                            cx.notify();
+                        }),
+                    ))
+                    .child(self.pane_toggle(
+                        self.info_open,
+                        "icons/panel-right.svg",
+                        "pane-toggle-info",
+                        cx.listener(|this, _event, _window, cx| {
+                            this.info_open = !this.info_open;
+                            cx.notify();
+                        }),
+                    )),
+            );
+        bar.into_any_element()
     }
 }
 
@@ -1467,12 +1772,15 @@ impl Render for AppView {
         }
         self.sync_cached_children(cx);
         self.ensure_query_combos(cx);
-        self.ensure_backup_combos(cx);
         self.sync_db_combos(cx);
         self.sync_query_combos(cx);
-        self.sync_backup_combos(cx);
         self.sync_save_location_combo(cx);
         self.sync_language_combo(cx);
+        self.sync_info(cx);
+        // Remember the main window so closing it can take the Backup/Restore window with it.
+        if self.main_window_id.is_none() {
+            self.main_window_id = Some(window.window_handle().window_id());
+        }
         let theme = self.theme;
 
         // gpui does not re-run `render` when the window is resized, so the object list would
@@ -1536,6 +1844,22 @@ impl Render for AppView {
             }
         }
 
+        if self.backup_rename_focus_pending {
+            if let Some(edit) = self.backup_rename.as_ref() {
+                let handle = edit.input.read(cx).focus_handle();
+                window.focus(&handle, cx);
+            }
+            self.backup_rename_focus_pending = false;
+        }
+
+        if self.query_rename_focus_pending {
+            if let Some(edit) = self.query_rename.as_ref() {
+                let handle = edit.input.read(cx).focus_handle();
+                window.focus(&handle, cx);
+            }
+            self.query_rename_focus_pending = false;
+        }
+
         self.query_editor_focused = self.query_focus.is_focused(window);
 
         if self.query_editor_focused && !self.caret_blink_running {
@@ -1563,14 +1887,14 @@ impl Render for AppView {
             .detach();
         }
 
-        let body = div()
-            .flex()
-            .flex_row()
-            .flex_1()
-            .w_full()
-            .overflow_hidden()
-            .child(self.render_sidebar())
-            .child(self.render_content(window, cx));
+        let mut body = div().flex().flex_row().flex_1().w_full().overflow_hidden();
+        if self.sidebar_open {
+            body = body.child(self.sidebar_host.clone());
+        }
+        body = body.child(self.render_content(window, cx));
+        if self.info_open {
+            body = body.child(self.info_pane.clone());
+        }
 
         let mut root = div()
             .relative()
@@ -1580,10 +1904,29 @@ impl Render for AppView {
             .bg(rgb(theme.window_bg))
             .text_color(rgb(theme.text))
             .text_size(px(12.5))
+            // A side-pane divider sits on its pane's edge, so the pointer leaves the pane while
+            // dragging. These root-level handlers keep the drag alive anywhere in the window and
+            // update only the pane entities, so the whole app does not re-render per mouse move.
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                let host = this.sidebar_host.clone();
+                host.update(cx, |host, cx| host.drag_move(event, cx));
+                let pane = this.info_pane.clone();
+                pane.update(cx, |pane, cx| pane.drag_move(event, cx));
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                    let host = this.sidebar_host.clone();
+                    host.update(cx, |host, cx| host.end_drag(cx));
+                    let pane = this.info_pane.clone();
+                    pane.update(cx, |pane, cx| pane.end_drag(cx));
+                }),
+            )
             .child(render_titlebar(theme))
             .child(self.render_menu_bar(cx))
             .child(self.render_main_toolbar(cx))
-            .child(body);
+            .child(body)
+            .child(self.render_status_bar(cx));
 
         if self.tools_menu_open {
             root = root.child(self.render_tools_menu(cx));

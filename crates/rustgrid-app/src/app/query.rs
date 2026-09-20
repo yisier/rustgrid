@@ -1,3 +1,4 @@
+use super::backup::reveal_in_file_manager;
 use super::*;
 
 impl AppView {
@@ -1052,24 +1053,24 @@ impl AppView {
             return;
         };
 
-        match self.saved_queries.iter().position(|saved| {
-            saved.name == name && saved.connection_id == connection_id && saved.database == database
-        }) {
-            Some(position) => {
-                self.saved_queries[position].sql = sql;
-                self.saved_query_selected = Some(position);
+        let query = SavedQuery {
+            name: name.clone(),
+            sql,
+            connection_id,
+            database: database.clone(),
+        };
+        let saved_path = match self.config.save_query_file(&query) {
+            Ok(path) => path,
+            Err(error) => {
+                self.save_query_error(error.to_string(), cx);
+                return;
             }
-            None => {
-                self.saved_queries.push(SavedQuery {
-                    name: name.clone(),
-                    sql,
-                    connection_id,
-                    database: database.clone(),
-                });
-                self.saved_query_selected = Some(self.saved_queries.len() - 1);
-            }
-        }
-        let _ = self.config.save_queries(&self.saved_queries);
+        };
+        self.refresh_query_files(cx);
+        self.saved_query_selected = self
+            .query_files
+            .iter()
+            .position(|file| file.path == saved_path);
 
         if let Some(tab) = self.queries.get_mut(tab_index) {
             tab.name = Some(name);
@@ -1103,77 +1104,123 @@ impl AppView {
 
     /// The display name of the connection a saved query belongs to (falls back to the stored id
     /// when the connection no longer exists).
-    pub(super) fn saved_query_connection_name(&self, saved: &SavedQuery) -> String {
+    pub(super) fn query_connection_name(&self, connection_id: &str) -> String {
         self.connections
             .iter()
-            .find(|node| node.profile.id == saved.connection_id)
+            .find(|node| node.profile.id == connection_id)
             .map(|node| node.profile.name.clone())
-            .unwrap_or_else(|| saved.connection_id.clone())
+            .unwrap_or_else(|| connection_id.to_string())
     }
 
-    /// The query-list scope taken from the connection tree's selection:
-    /// - `Some((connection_id, Some(database)))` when a database is selected,
-    /// - `Some((connection_id, None))` when only a connection is selected (all of its databases),
-    /// - `None` when the selection is neither (categories/tables), which shows every saved query.
-    pub(super) fn saved_query_filter(&self, cx: &App) -> Option<(String, Option<String>)> {
-        let selected = self.tree_pane.read(cx).selected.clone()?;
-        if let Some(rest) = selected.strip_prefix("conn-") {
-            let index: usize = rest.parse().ok()?;
-            let connection_id = self.connections.get(index)?.profile.id.clone();
-            return Some((connection_id, None));
-        }
-        if let Some(rest) = selected.strip_prefix("db-") {
-            let mut parts = rest.splitn(2, '-');
-            let connection_index: usize = parts.next()?.parse().ok()?;
-            let database_index: usize = parts.next()?.parse().ok()?;
-            let connection_id = self.connections.get(connection_index)?.profile.id.clone();
-            let database = self.database_name(connection_index, database_index);
-            return Some((connection_id, database));
-        }
-        None
-    }
-
-    /// Toggle the saved-query list sort on a column: first click ascending, a second click on the
-    /// same column flips the direction.
-    pub(super) fn toggle_saved_query_sort(
-        &mut self,
-        column: SavedQueryColumn,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.saved_query_sort = match self.saved_query_sort {
-            Some((current, descending)) if current == column => Some((column, !descending)),
-            _ => Some((column, false)),
-        };
+    /// Rescan the query directory tree for `.sql` files.
+    pub(super) fn refresh_query_files(&mut self, cx: &mut Context<'_, Self>) {
+        self.query_files = scan_query_files(&self.config);
+        self.clamp_query_selection();
         cx.notify();
     }
 
-    /// Open a saved query in a new editor tab (or activate the tab that already shows it).
+    fn clamp_query_selection(&mut self) {
+        if let Some(index) = self.saved_query_selected
+            && index >= self.query_files.len()
+        {
+            self.saved_query_selected = None;
+        }
+    }
+
+    /// The database the Queries tab is scoped to, taken from the connection tree's selection.
+    /// Like backups, queries only resolve when the connection is open and the database is opened.
+    pub(super) fn query_scope(&self, cx: &App) -> Option<(String, String)> {
+        let selected = self.tree_pane.read(cx).selected.clone()?;
+        let (connection_index, database_index): (usize, usize) =
+            if let Some(rest) = selected.strip_prefix("db-") {
+                let mut parts = rest.splitn(2, '-');
+                Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+            } else if let Some(rest) = selected.strip_prefix("cat-") {
+                let mut parts = rest.splitn(3, '-');
+                let pair = (parts.next()?.parse().ok()?, parts.next()?.parse().ok()?);
+                // Only the Queries category scopes the Queries tab.
+                (parts.next()? == "q").then_some(pair)
+            } else {
+                None
+            }?;
+        let node = self.connections.get(connection_index)?;
+        if !matches!(node.status, ConnectionStatus::Connected(_)) {
+            return None;
+        }
+        let Loadable::Loaded(databases) = &node.databases else {
+            return None;
+        };
+        let database = databases.get(database_index)?;
+        if !database.opened {
+            return None;
+        }
+        Some((node.profile.id.clone(), database.name.clone()))
+    }
+
+    /// Indices into `query_files` that belong to the current scope, in list order.
+    pub(super) fn visible_query_files(&self, cx: &App) -> Vec<usize> {
+        let Some((connection_id, database)) = self.query_scope(cx) else {
+            return Vec::new();
+        };
+        self.query_files
+            .iter()
+            .enumerate()
+            .filter(|(_, file)| file.connection_id == connection_id && file.database == database)
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// Whether the highlighted query file is inside the current scope (so Delete is enabled).
+    pub(super) fn query_selected_in_scope(&self, cx: &App) -> bool {
+        let Some(file) = self
+            .saved_query_selected
+            .and_then(|index| self.query_files.get(index))
+        else {
+            return false;
+        };
+        match self.query_scope(cx) {
+            Some((connection_id, database)) => {
+                file.connection_id == connection_id && file.database == database
+            }
+            None => false,
+        }
+    }
+
+    /// Open a saved query file in a new editor tab (or activate the tab that already shows it).
     pub(super) fn open_saved_query(&mut self, index: usize, cx: &mut Context<'_, Self>) {
-        let Some(saved) = self.saved_queries.get(index).cloned() else {
+        let Some(file) = self.query_files.get(index) else {
+            return;
+        };
+        let connection_id = file.connection_id.clone();
+        let database = file.database.clone();
+        let name = file.name.clone();
+        let Ok(sql) = std::fs::read_to_string(&file.path) else {
+            self.error_dialog = Some(t!("query.read_failed", name = name).to_string());
+            cx.notify();
             return;
         };
         let connection_index = self
             .connections
             .iter()
-            .position(|node| node.profile.id == saved.connection_id);
-        let database = (!saved.database.is_empty()).then(|| saved.database.clone());
+            .position(|node| node.profile.id == connection_id);
+        let database_option = (!database.is_empty()).then_some(database);
 
         let existing = self.queries.iter().position(|tab| {
-            tab.name.as_deref() == Some(saved.name.as_str())
+            tab.name.as_deref() == Some(name.as_str())
                 && tab.connection_index == connection_index
-                && tab.database.as_deref() == database.as_deref()
+                && tab.database.as_deref() == database_option.as_deref()
         });
         if let Some(existing) = existing {
             self.activate_query(existing, cx);
             return;
         }
 
-        self.open_query_with(connection_index, database, cx);
+        self.open_query_with(connection_index, database_option, cx);
         if let Some(active) = self.active_query
             && let Some(tab) = self.queries.get_mut(active)
         {
-            tab.sql = saved.sql;
-            tab.name = Some(saved.name);
+            tab.sql = sql;
+            tab.name = Some(name);
             tab.caret = tab.sql.len();
             tab.anchor = tab.caret;
         }
@@ -1190,9 +1237,9 @@ impl AppView {
         cx.notify();
     }
 
-    /// Ask for confirmation before deleting a saved query.
+    /// Ask for confirmation before deleting a query file.
     pub(super) fn confirm_delete_saved_query(&mut self, index: usize, cx: &mut Context<'_, Self>) {
-        if index >= self.saved_queries.len() {
+        if index >= self.query_files.len() {
             return;
         }
         self.delete_confirm = Some(DeleteConfirm::SavedQuery { index });
@@ -1200,13 +1247,202 @@ impl AppView {
     }
 
     pub(super) fn delete_saved_query(&mut self, index: usize, cx: &mut Context<'_, Self>) {
-        if index >= self.saved_queries.len() {
+        let Some(file) = self.query_files.get(index) else {
+            return;
+        };
+        let query = SavedQuery {
+            name: file.name.clone(),
+            sql: String::new(),
+            connection_id: file.connection_id.clone(),
+            database: file.database.clone(),
+        };
+        if let Err(error) = self.config.delete_query_file(&query) {
+            self.error_dialog = Some(error.to_string());
+        }
+        self.saved_query_selected = None;
+        self.refresh_query_files(cx);
+    }
+
+    /// Copy a query file into the app's query clipboard, so Ctrl+V can drop it into any database.
+    pub(super) fn copy_query_file(&mut self, index: usize) {
+        let Some(file) = self.query_files.get(index) else {
+            return;
+        };
+        self.query_clipboard = Some(QueryClipboard {
+            name: file.name.clone(),
+            path: file.path.clone(),
+        });
+    }
+
+    /// Paste the copied query file into the current scope's database folder.
+    pub(super) fn paste_query_file(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(clipboard) = self.query_clipboard.clone() else {
+            return;
+        };
+        let Some((connection_id, database)) = self.query_scope(cx) else {
+            return;
+        };
+        let suffix = t!("backup.copy_suffix").to_string();
+        let mut name = clipboard.name.clone();
+        let mut dest = self
+            .config
+            .query_file_path(&connection_id, &database, &name);
+        if dest.exists() {
+            let copy = format!("{name} - {suffix}");
+            name = copy.clone();
+            dest = self
+                .config
+                .query_file_path(&connection_id, &database, &name);
+            let mut number = 2u64;
+            while dest.exists() {
+                name = format!("{copy} ({number})");
+                dest = self
+                    .config
+                    .query_file_path(&connection_id, &database, &name);
+                number += 1;
+            }
+        }
+        match std::fs::copy(&clipboard.path, &dest) {
+            Ok(_) => {
+                self.refresh_query_files(cx);
+                self.saved_query_selected =
+                    self.query_files.iter().position(|file| file.path == dest);
+            }
+            Err(error) => self.error_dialog = Some(error.to_string()),
+        }
+        cx.notify();
+    }
+
+    /// Start the in-place "rename query" editor on the selected file's row.
+    pub(super) fn begin_rename_query(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.query_rename.is_some() {
             return;
         }
-        self.saved_queries.remove(index);
-        let _ = self.config.save_queries(&self.saved_queries);
-        self.saved_query_selected = None;
+        let Some(file) = self.query_files.get(index) else {
+            return;
+        };
+        let old_name = file.name.clone();
+        self.saved_query_selected = Some(index);
+        let theme = self.theme;
+        let weak = cx.weak_entity();
+        let change = weak.clone();
+        let submit = weak.clone();
+        let cancel = weak.clone();
+        let initial = old_name.clone();
+        let input = cx.new(move |cx| {
+            TextInput::new(
+                theme,
+                initial,
+                TextInputOptions {
+                    bare: true,
+                    text_size: Some(12.0),
+                    ..Default::default()
+                },
+                cx,
+            )
+            .on_change(Rc::new(move |text, _window, cx| {
+                let _ = change.update(cx, |app, cx| {
+                    if let Some(edit) = app.query_rename.as_mut() {
+                        edit.new_name = text.to_string();
+                    }
+                    cx.notify();
+                });
+            }))
+            .on_submit(Rc::new(move |window, cx| {
+                let _ = submit.update(cx, |app, cx| {
+                    let focus = app.query_list_focus.clone();
+                    app.submit_query_rename(cx);
+                    window.focus(&focus, cx);
+                });
+            }))
+            .on_cancel(Rc::new(move |window, cx| {
+                let _ = cancel.update(cx, |app, cx| {
+                    let focus = app.query_list_focus.clone();
+                    app.query_rename = None;
+                    app.query_rename_blur = None;
+                    window.focus(&focus, cx);
+                    cx.notify();
+                });
+            }))
+        });
+        let focus = input.read(cx).focus_handle();
+        self.query_rename = Some(QueryRenameEdit {
+            index,
+            old_name: old_name.clone(),
+            new_name: old_name,
+            input,
+        });
+        self.query_rename_blur = Some(cx.on_blur(&focus, window, |app, _window, cx| {
+            if app.query_rename.is_some() {
+                app.submit_query_rename(cx);
+            }
+        }));
+        self.query_rename_focus_pending = true;
+        window.focus(&focus, cx);
         cx.notify();
+    }
+
+    /// Commit the in-place rename; a taken name is rejected with an error dialog.
+    pub(super) fn submit_query_rename(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(edit) = self.query_rename.take() else {
+            return;
+        };
+        self.query_rename_blur = None;
+        let new_name = edit.new_name.trim().to_string();
+        if new_name.is_empty() || new_name == edit.old_name {
+            cx.notify();
+            return;
+        }
+        let Some(file) = self.query_files.get(edit.index) else {
+            cx.notify();
+            return;
+        };
+        let old_path = file.path.clone();
+        let connection_id = file.connection_id.clone();
+        let database = file.database.clone();
+        let new_path = self
+            .config
+            .query_file_path(&connection_id, &database, &new_name);
+        if new_path.exists() {
+            self.error_dialog = Some(t!("query.rename_exists", name = new_name).to_string());
+            cx.notify();
+            return;
+        }
+        match std::fs::rename(&old_path, &new_path) {
+            Ok(()) => {
+                self.refresh_query_files(cx);
+                self.saved_query_selected = self
+                    .query_files
+                    .iter()
+                    .position(|file| file.path == new_path);
+            }
+            Err(error) => self.error_dialog = Some(error.to_string()),
+        }
+        cx.notify();
+    }
+
+    /// Reveal a query file in the OS file manager.
+    pub(super) fn reveal_query(&mut self, index: usize) {
+        if let Some(file) = self.query_files.get(index) {
+            reveal_in_file_manager(&file.path);
+        }
+    }
+
+    /// Open the object-info pane for a query file.
+    pub(super) fn open_query_info(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        self.saved_query_selected = Some(index);
+        self.info_open = true;
+        cx.notify();
+    }
+
+    /// Refresh the query file list from disk (also called from the row context menu).
+    pub(super) fn refresh_selected_query(&mut self, cx: &mut Context<'_, Self>) {
+        self.refresh_query_files(cx);
     }
 }
 
@@ -1222,21 +1458,59 @@ fn decode_save_location(value: &str) -> Option<(usize, String)> {
     Some((connection.parse().ok()?, database.to_string()))
 }
 
-/// Whether a saved query passes the current tree scope (`None` = show everything).
-impl AppView {
-    pub(super) fn saved_query_matches(
-        &self,
-        saved: &SavedQuery,
-        filter: &Option<(String, Option<String>)>,
-    ) -> bool {
-        match filter {
-            None => true,
-            Some((connection_id, None)) => &saved.connection_id == connection_id,
-            Some((connection_id, Some(database))) => {
-                &saved.connection_id == connection_id && &saved.database == database
+/// Scan the config dir's `queries/` tree for `.sql` files, sorted by name.
+pub(super) fn scan_query_files(config: &ConfigStore) -> Vec<QueryFileInfo> {
+    let root = config.queries_dir();
+    let mut files = Vec::new();
+    if let Ok(connections) = std::fs::read_dir(&root) {
+        for connection in connections.flatten() {
+            if !connection
+                .file_type()
+                .map(|kind| kind.is_dir())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let connection_id = connection.file_name().to_string_lossy().into_owned();
+            let Ok(databases) = std::fs::read_dir(connection.path()) else {
+                continue;
+            };
+            for database in databases.flatten() {
+                if !database
+                    .file_type()
+                    .map(|kind| kind.is_dir())
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                let database_name = database.file_name().to_string_lossy().into_owned();
+                let Ok(entries) = std::fs::read_dir(database.path()) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|ext| ext.to_str()) != Some("sql") {
+                        continue;
+                    }
+                    let metadata = entry.metadata().ok();
+                    files.push(QueryFileInfo {
+                        name: path
+                            .file_stem()
+                            .map(|stem| stem.to_string_lossy().into_owned())
+                            .unwrap_or_default(),
+                        connection_id: connection_id.clone(),
+                        database: database_name.clone(),
+                        size: metadata.as_ref().map(|meta| meta.len()).unwrap_or(0),
+                        created: metadata.as_ref().and_then(|meta| meta.created().ok()),
+                        modified: metadata.and_then(|meta| meta.modified().ok()),
+                        path,
+                    });
+                }
             }
         }
     }
+    files.sort_by_key(|file| file.name.to_lowercase());
+    files
 }
 
 #[cfg(test)]

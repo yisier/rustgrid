@@ -38,10 +38,6 @@ impl AppView {
             Some(DialogKind::Confirm)
         } else if self.options_open {
             Some(DialogKind::Options)
-        } else if self.new_backup_dialog.is_some() {
-            Some(DialogKind::NewBackup)
-        } else if self.restore_dialog.is_some() {
-            Some(DialogKind::RestoreBackup)
         } else {
             None
         };
@@ -63,8 +59,6 @@ impl AppView {
             Some(DialogKind::Error) => self.open_error_dialog(window, cx),
             Some(DialogKind::Confirm) => self.open_confirm_dialog(window, cx),
             Some(DialogKind::Options) => self.open_options_dialog(window, cx),
-            Some(DialogKind::NewBackup) => self.open_new_backup_dialog(window, cx),
-            Some(DialogKind::RestoreBackup) => self.open_restore_backup_dialog(window, cx),
             None => {}
         }
     }
@@ -899,9 +893,9 @@ impl AppView {
             }
             Some(DeleteConfirm::SavedQuery { index }) => {
                 let name = self
-                    .saved_queries
+                    .query_files
                     .get(*index)
-                    .map(|saved| saved.name.clone())
+                    .map(|file| file.name.clone())
                     .unwrap_or_default();
                 (
                     t!("query.delete_title").to_string(),

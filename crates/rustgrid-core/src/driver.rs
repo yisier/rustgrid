@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use crate::error::Result;
 use crate::model::{
     BackupObjectKind, ColumnInfo, ConnectionConfig, DatabaseInfo, DriverId, ObjectDump,
-    PageRequest, QueryResult, RowInsert, RowUpdate, TableInfo, TablePage, TableSchema,
+    PageRequest, QueryResult, RowInsert, RowUpdate, TableInfo, TablePage, TableSchema, TableStatus,
 };
 
 #[async_trait]
@@ -90,6 +90,17 @@ pub trait Connection: Send + Sync {
     async fn rename_table(&self, database: &str, table: &str, new_name: &str) -> Result<()>;
 
     async fn database_defaults(&self, name: &str) -> Result<(String, String)>;
+
+    /// The server's version string (e.g. `8.0.31`), for the connection info pane.
+    async fn server_version(&self) -> Result<String>;
+
+    /// The number of client sessions currently connected to the server, for the connection info
+    /// pane. Engines without a session table may return `0`.
+    async fn session_count(&self) -> Result<u64>;
+
+    /// A `SHOW TABLE STATUS`-style summary of one table, for the table info pane. Engines without
+    /// an equivalent should return [`TableStatus::default`].
+    async fn table_status(&self, database: &str, table: &str) -> Result<TableStatus>;
 
     async fn character_sets(&self) -> Result<Vec<String>>;
 

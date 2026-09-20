@@ -44,7 +44,6 @@ impl AppView {
                 .overflow_hidden()
                 .child(self.render_object_toolbar(&pane, cx))
                 .child(pane.clone())
-                .child(self.render_object_status(&pane, cx))
                 .into_any_element()
         } else {
             div().into_any_element()

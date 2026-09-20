@@ -55,6 +55,9 @@ impl AssetSource for Assets {
             "icons/row_marker.svg" => Some(include_bytes!("../assets/icons/row_marker.svg")),
             "icons/save.svg" => Some(include_bytes!("../assets/icons/save.svg")),
             "icons/format_sql.svg" => Some(include_bytes!("../assets/icons/format_sql.svg")),
+            "icons/explain.svg" => Some(include_bytes!("../assets/icons/explain.svg")),
+            "icons/panel-left.svg" => Some(include_bytes!("../assets/icons/panel-left.svg")),
+            "icons/panel-right.svg" => Some(include_bytes!("../assets/icons/panel-right.svg")),
             "icons/run.svg" => Some(include_bytes!("../assets/icons/run.svg")),
             _ => None,
         };

@@ -137,11 +137,7 @@ impl AppView {
     /// The object toolbar shown for the `Queries` category, including when no database is open.
     pub(super) fn render_query_object_toolbar(&self, cx: &mut Context<'_, Self>) -> Div {
         let theme = self.theme;
-        let filter = self.saved_query_filter(cx);
-        let delete_enabled = self
-            .saved_query_selected
-            .and_then(|index| self.saved_queries.get(index))
-            .is_some_and(|saved| self.saved_query_matches(saved, &filter));
+        let delete_enabled = self.query_selected_in_scope(cx);
         div()
             .flex()
             .flex_row()
@@ -197,8 +193,8 @@ impl AppView {
         cx.notify();
     }
 
-    /// The bottom status strip of the object list: item count on the left, connection and
-    /// database on the right (Navicat layout).
+    /// The content of the object status shown in the window's bottom status bar: item count on the
+    /// left, connection and database on the right (Navicat layout).
     pub(super) fn render_object_status(
         &self,
         pane: &Entity<ObjectPane>,
@@ -224,12 +220,8 @@ impl AppView {
             .flex_row()
             .items_center()
             .justify_between()
-            .h(px(24.0))
-            .flex_none()
+            .w_full()
             .px_2()
-            .bg(rgb(theme.toolbar_bg))
-            .border_t_1()
-            .border_color(rgb(theme.border))
             .text_size(px(12.0))
             .child(div().text_color(rgb(theme.text)).child(format!(
                 "{} {}",
@@ -632,7 +624,14 @@ impl ObjectPane {
     }
 
     fn select_object(&mut self, name: String, cx: &mut Context<'_, Self>) {
-        self.selected = Some(name);
+        self.selected = Some(name.clone());
+        let connection_index = self.connection_index;
+        let database_index = self.database_index;
+        if let Some(app) = self.app.upgrade() {
+            app.update(cx, |app, _| {
+                app.set_info_table(connection_index, database_index, name);
+            });
+        }
         self.notify_app(cx);
         cx.notify();
     }

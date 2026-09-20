@@ -1,48 +1,5 @@
 use super::*;
 
-impl AppView {
-    pub(super) fn render_sidebar(&self) -> impl IntoElement {
-        let theme = self.theme;
-
-        div()
-            .flex()
-            .flex_col()
-            .w(px(260.0))
-            .h_full()
-            .flex_none()
-            .bg(rgb(theme.sidebar_bg))
-            .border_r_1()
-            .border_color(rgb(theme.border))
-            .child(self.tree_pane.clone().cached(cached_style(|d| {
-                d.flex().flex_col().flex_1().min_h(px(0.0)).w_full()
-            })))
-            .child(self.render_sidebar_footer())
-    }
-
-    pub(super) fn render_sidebar_footer(&self) -> impl IntoElement {
-        let theme = self.theme;
-
-        div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .px_2()
-            .py_1()
-            .border_t_1()
-            .border_color(rgb(theme.border))
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(theme.text_muted))
-                    .child(format!(
-                        "{}: {}",
-                        t!("sidebar.drivers"),
-                        self.registry.len()
-                    )),
-            )
-    }
-}
-
 /// The connection status shown by a tree row, reduced to what rendering needs.
 enum TreeStatus {
     Connected,
@@ -249,6 +206,12 @@ impl TreePane {
                 this.selected_table = None;
                 window.focus(&this.focus, cx);
                 this.selected = Some(format!("conn-{index}"));
+                if let Some(app) = this.app.upgrade() {
+                    app.update(cx, |app, cx| {
+                        app.clear_info_table();
+                        cx.notify();
+                    });
+                }
                 let double_click =
                     matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2);
                 if double_click {
@@ -362,6 +325,12 @@ impl TreePane {
                 this.selected_table = None;
                 window.focus(&this.focus, cx);
                 this.selected = Some(format!("db-{connection_index}-{database_index}"));
+                if let Some(app) = this.app.upgrade() {
+                    app.update(cx, |app, cx| {
+                        app.clear_info_table();
+                        cx.notify();
+                    });
+                }
                 let double_click =
                     matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2);
                 if double_click {
