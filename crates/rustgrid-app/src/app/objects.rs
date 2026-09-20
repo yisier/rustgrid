@@ -29,9 +29,11 @@ impl AppView {
         }
         let design_enabled = category == Category::Tables && open_enabled;
         let new_enabled = category == Category::Tables;
+        let export_enabled = category == Category::Tables && open_enabled;
         let pane_for_open = pane.clone();
         let pane_for_design = pane.clone();
         let pane_for_new = pane.clone();
+        let pane_for_export = pane.clone();
         div()
             .flex()
             .flex_row()
@@ -127,8 +129,18 @@ impl AppView {
                         "obj-export",
                         "icons/export.svg",
                         t!("object.export_wizard").to_string(),
-                        false,
-                        |_, _, _| {},
+                        export_enabled,
+                        cx.listener(move |this, _event, _window, cx| {
+                            let Some((connection_index, database_index, name, is_view)) =
+                                object_selection(&pane_for_export, cx)
+                            else {
+                                return;
+                            };
+                            if is_view {
+                                return;
+                            }
+                            this.open_export_wizard(connection_index, database_index, &name, cx);
+                        }),
                     )),
             )
             .child(self.render_object_search(cx))

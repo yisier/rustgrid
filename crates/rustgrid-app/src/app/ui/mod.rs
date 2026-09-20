@@ -315,6 +315,42 @@ pub(super) fn checkbox_box(checked: bool, theme: Theme) -> impl IntoElement {
         .child(if checked { "✓" } else { "" }.to_string())
 }
 
+/// A stateless shadcn radio dot, sized to match [`checkbox_box`]. Like the check box it is drawn
+/// rather than using the kit's stateful control, so it can sit inside a row that owns the click.
+pub(super) fn radio_box(selected: bool, theme: Theme) -> impl IntoElement {
+    let foreground = if theme.is_dark() {
+        theme.window_bg
+    } else {
+        0xffffff
+    };
+    div()
+        .w(px(14.0))
+        .h(px(14.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .border_1()
+        .border_color(rgb(if selected {
+            theme.primary
+        } else {
+            theme.border
+        }))
+        .bg(rgb(if selected {
+            theme.primary
+        } else {
+            theme.input_bg
+        }))
+        .child(
+            div()
+                .w(px(6.0))
+                .h(px(6.0))
+                .rounded_full()
+                .when(selected, move |style| style.bg(rgb(foreground))),
+        )
+}
+
 /// The shared chrome for an app-drawn floating surface (popup menus, dropdown lists, pickers):
 /// absolutely positioned with the dialog face, a border and the soft shadow.
 ///

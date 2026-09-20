@@ -9,6 +9,10 @@ not a later refactor.
 - `crates/rustgrid-core` — engine-agnostic domain: `Driver`/`Connection` traits, models
   (`CellValue`, `ConnectionProfile`, `TablePage`, ...), `Error`, `DriverRegistry`.
   **No sqlx / GPUI / OS dependencies here.**
+- `crates/rustgrid-backup` — RustGrid's own `.rgbak` backup container (zstd chunks + JSON
+  manifest), used by the Backup main tab.
+- `crates/rustgrid-export` — table-data export writers: `.xlsx` (rust_xlsxwriter), `.csv`, `.sql`
+  and `.txt`. Engine-agnostic formatting fed by decoded `CellValue` rows.
 - `crates/rustgrid-mysql` — the only compiled-in driver; implements the core traits with sqlx.
 - `crates/rustgrid-config` — versioned settings/profiles plus encrypted secret storage in the
   OS config dir (`connections.json`, `settings.json`, `secrets.json`).
@@ -17,7 +21,7 @@ not a later refactor.
   tests; the rest are `impl AppView` submodules: `tree`, `database`, `db_dialog`, `objects`,
   `sidebar`, `tabs`, `toolbar`, `query`, `query_view`, `query_editor`, `grid`, `grid_input`,
   `grid_commit`, `grid_view`, `grid_cell`, `grid_scroll`, `grid_toolbar`, `dialogs`,
-  `widgets`, `form`). New view code goes in the matching submodule, **not** `mod.rs`.
+  `export`, `widgets`, `form`). New view code goes in the matching submodule, **not** `mod.rs`.
   `ui/` is the internal design system (buttons, scrollbars, text fields, dropdowns, ...) and the
   wrapper layer over gpui-kit: put shared chrome there, never one-off `div`s in feature code. Several subtrees are child
   `Entity` views wired through `WeakEntity<AppView>` + `notify_*` invalidation: the Tables/Views
@@ -47,6 +51,8 @@ not a later refactor.
   `runtime-tokio`, `mysql`, `tls-rustls-ring`, `chrono`.
 - i18n: **rust-i18n 4**. Config dir: **directories 6**.
 - Stored secrets: **chacha20poly1305 0.11** + **base64 0.22** (XChaCha20-Poly1305).
+- Export: **rust_xlsxwriter 0.99** writes `.xlsx`; **rfd 0.17** (XDG-portal backend on Linux) drives
+  the native folder/file dialogs. CSV/SQL/TXT need no dependencies.
 
 ## Commands
 
@@ -262,12 +268,19 @@ shadcn chrome described above. Implemented today:
    selection shows every saved query. Rows open with a double-click and are deleted through the
    shared confirm dialog. They persist in the config dir's `queries.json` (`SavedQuery`, keyed by
    connection profile id + database name).
+8. Table export wizard: with a table selected, **Export Wizard** (object toolbar / table context
+   menu) opens a separate OS window walking four pages — P1 format (`.xlsx`/`.csv`/`.sql`/`.txt`),
+   P2 tables + output paths (native folder/file dialogs via `rfd`, defaulting to the desktop),
+   P3 exported columns per selected table (source-table dropdown when several are chosen, all
+   fields by default), and P4 options + run (include column titles, continue on error) with a
+   live log/progress view. Writes go through `rustgrid-export`; the wizard streams table pages via
+   `Connection::fetch_page` (ordered by the primary key when the table has one).
 
 Still out of scope: a second database engine, and the disabled placeholder UI (the
-`Functions`/`Users`/`Backups` main tabs, the `Design/New/Delete Table`, `Import/Export` toolbar
-buttons, and the query editor's `Query Builder`/`Snippets` items are deliberate stubs —
-leave them disabled unless asked). The abstractions above are what make more engines cheap later —
-do not build those features early.
+`Functions`/`Users` main tabs, the `Design/New/Delete Table`, `Import` toolbar buttons, and the
+query editor's `Query Builder`/`Snippets` items are deliberate stubs — leave them disabled unless
+asked). The abstractions above are what make more engines cheap later — do not build those
+features early.
 
 ## Gotchas
 
@@ -321,6 +334,16 @@ do not build those features early.
   Paging is client-side (`page_size = rows.len()`), and `load_page` re-runs the stored SQL via
   `reload_query_grid`. Editing is enabled only when `sqlparser` infers a single-table `FROM`
   (`sql::infer_single_table`).
+- The export wizard is a separate OS window (like Backup), not a `Root` dialog, because the
+  `rfd` folder/file pickers must not run on gpui's event thread: the **synchronous** `rfd` API
+  shows a nested Windows message loop inside event handling and crashes the app. The pickers use
+  `rfd::AsyncFileDialog` awaited from a gpui task, which runs the dialog on rfd's own thread.
+  The wizard reads table rows through
+  `Connection::fetch_page` in `EXPORT_PAGE_SIZE` pages (ordered by the primary key when there is
+  one, for stable offsets) and feeds them to `rustgrid_export::TableWriter`, which streams CSV/SQL/
+  TXT and buffers `.xlsx`. Field selection is applied by projecting each page's columns down to the
+  chosen ones, so the writer's header and the row values stay aligned. A table with no primary key
+  exports in the engine's natural order.
 - DB work is tokio-based but gpui's executor is not tokio. Inside `cx.spawn`, run sqlx
   futures through `Runtime::spawn` and `.await` the returned `JoinHandle` (see
   `app.rs`). Awaiting sqlx directly in a gpui task panics with "there is no reactor running".

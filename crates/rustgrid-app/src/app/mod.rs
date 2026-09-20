@@ -22,6 +22,7 @@ use rustgrid_core::{
     FilterCondition, FilterConjunction, FilterGroup, FilterNode, FilterOperator, PageRequest,
     QueryResult, RowInsert, RowUpdate, SavedBackup, SavedQuery, TableStatus,
 };
+use rustgrid_export::ExportFormat;
 
 use crate::form::{ConnectionForm, FORM_FIELDS, FormField};
 use crate::runtime::Runtime;
@@ -280,6 +281,109 @@ struct RestoreBackupDialog {
     rows_total: usize,
     rows_done: usize,
     /// When the run started, and its final elapsed time.
+    started: Option<std::time::Instant>,
+    elapsed: Option<std::time::Duration>,
+    error: Option<String>,
+}
+
+/// Which page of the export wizard (P1..P4) is showing. P4 merges Navicat's options page with the
+/// run/log page, so the wizard is four steps.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExportStep {
+    Format,
+    Tables,
+    Fields,
+    Options,
+}
+
+impl ExportStep {
+    /// The 1-based page number and the total, for the page heading.
+    fn index(self) -> (usize, usize) {
+        match self {
+            ExportStep::Format => (1, 4),
+            ExportStep::Tables => (2, 4),
+            ExportStep::Fields => (3, 4),
+            ExportStep::Options => (4, 4),
+        }
+    }
+}
+
+/// One table row of the export wizard's P2 list.
+struct ExportTablePlan {
+    name: String,
+    selected: bool,
+    /// The full output path for this table.
+    path: String,
+}
+
+/// The P3 field selection of one table.
+struct ExportFields {
+    /// Every column of the table, in catalog order.
+    columns: Vec<String>,
+    /// Whether each column is exported; parallel to `columns`.
+    selected: Vec<bool>,
+    /// The table's primary-key columns, used to order the export's paged reads.
+    primary_key: Vec<String>,
+    loading: bool,
+    error: Option<String>,
+}
+
+impl ExportFields {
+    /// A freshly loaded table: every column selected.
+    fn all(columns: Vec<rustgrid_core::ColumnInfo>) -> Self {
+        let primary_key = columns
+            .iter()
+            .filter(|column| column.primary_key)
+            .map(|column| column.name.clone())
+            .collect();
+        Self {
+            selected: vec![true; columns.len()],
+            columns: columns.into_iter().map(|column| column.name).collect(),
+            primary_key,
+            loading: false,
+            error: None,
+        }
+    }
+
+    /// The exported column names, in catalog order.
+    fn selected_columns(&self) -> Vec<String> {
+        self.columns
+            .iter()
+            .zip(&self.selected)
+            .filter(|(_, selected)| **selected)
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    fn all_selected(&self) -> bool {
+        !self.selected.is_empty() && self.selected.iter().all(|value| *value)
+    }
+}
+
+/// State of the "Export Wizard" window.
+struct ExportWizard {
+    connection_index: usize,
+    database: String,
+    step: ExportStep,
+    format: ExportFormat,
+    /// The directory new output paths default into; editable on P2.
+    output_dir: String,
+    tables: Vec<ExportTablePlan>,
+    /// P3's available fields per selected table, keyed by table name.
+    fields: BTreeMap<String, ExportFields>,
+    /// The table whose fields P3 shows, as an index into `tables`.
+    field_table: usize,
+    /// The P3 source-table dropdown (drawn only when more than one table is selected).
+    field_combo: Option<Entity<ComboBox>>,
+    /// The P2 output-directory field.
+    dir_input: Option<Entity<TextInput>>,
+    include_header: bool,
+    continue_on_error: bool,
+    running: bool,
+    log: Vec<String>,
+    log_scroll: ScrollHandle,
+    rows_total: usize,
+    rows_done: usize,
     started: Option<std::time::Instant>,
     elapsed: Option<std::time::Duration>,
     error: Option<String>,
@@ -942,6 +1046,10 @@ pub struct AppView {
     info_table_status: Loadable<TableStatus>,
     /// The OS window hosting the Backup/Restore UI, if open.
     backup_window: Option<WindowHandle<gpui_kit::component::Root>>,
+    /// The open export wizard, if any.
+    export_wizard: Option<ExportWizard>,
+    /// The OS window hosting the export wizard, if open.
+    export_window: Option<WindowHandle<gpui_kit::component::Root>>,
     /// The main window's id, so closing it also closes the Backup/Restore window.
     main_window_id: Option<WindowId>,
     /// Keeps the window-closed listener alive, so closing the OS window clears the dialog state.
@@ -954,6 +1062,7 @@ mod db_dialog;
 mod design;
 mod design_view;
 mod dialogs;
+mod export;
 mod form;
 mod grid;
 mod grid_cell;
@@ -1176,6 +1285,8 @@ impl AppView {
             info_table_selected: None,
             info_table_status: Loadable::Idle,
             backup_window: None,
+            export_wizard: None,
+            export_window: None,
             main_window_id: None,
             _window_closed: window_closed,
         }
@@ -1402,6 +1513,20 @@ impl AppView {
         }
         if let Some(input) = self.backup_name_input.as_ref() {
             input.update(cx, |input, cx| input.set_theme(theme, cx));
+        }
+        if let Some(input) = self
+            .export_wizard
+            .as_ref()
+            .and_then(|wizard| wizard.dir_input.as_ref())
+        {
+            input.update(cx, |input, cx| input.set_theme(theme, cx));
+        }
+        if let Some(combo) = self
+            .export_wizard
+            .as_ref()
+            .and_then(|wizard| wizard.field_combo.as_ref())
+        {
+            combo.update(cx, |combo, cx| combo.set_theme(theme, cx));
         }
         if let Some(edit) = self.backup_rename.as_ref() {
             edit.input

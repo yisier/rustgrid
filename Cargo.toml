@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/rustgrid-core",
     "crates/rustgrid-backup",
+    "crates/rustgrid-export",
     "crates/rustgrid-mysql",
     "crates/rustgrid-config",
     "crates/rustgrid-app",
@@ -19,6 +20,7 @@ authors = ["yisier"]
 [workspace.dependencies]
 rustgrid-core = { path = "crates/rustgrid-core" }
 rustgrid-backup = { path = "crates/rustgrid-backup" }
+rustgrid-export = { path = "crates/rustgrid-export" }
 rustgrid-mysql = { path = "crates/rustgrid-mysql" }
 rustgrid-config = { path = "crates/rustgrid-config" }
 
@@ -38,6 +40,8 @@ gpui = { package = "gpui-pre", version = "0.3" }
 gpui-kit = "0.6"
 sqlparser = "0.62"
 sqlformat = "0.5"
+rust_xlsxwriter = { version = "0.99", default-features = false }
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 chacha20poly1305 = "0.11"
 base64 = "0.22"
 sha1 = "0.10"

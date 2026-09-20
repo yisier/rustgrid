@@ -423,6 +423,7 @@ impl AppView {
                 let empty_name = name.clone();
                 let truncate_name = name.clone();
                 let rename_name = name.clone();
+                let export_name = name.clone();
 
                 items = items
                     .child(self.context_item(
@@ -452,6 +453,15 @@ impl AppView {
                 // table-only operations are offered here.
                 if !is_view {
                     items = items
+                        .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                        .child(self.context_item(
+                            "table-export",
+                            t!("object.export_wizard").to_string(),
+                            cx.listener(move |this, _event, _window, cx| {
+                                this.context_menu = None;
+                                this.open_export_wizard(ci, di, &export_name, cx);
+                            }),
+                        ))
                         .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
                         .child(self.context_item(
                             "table-drop",

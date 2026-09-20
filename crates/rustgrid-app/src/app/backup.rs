@@ -1780,6 +1780,8 @@ impl AppView {
             self.new_backup_dialog = None;
             self.backup_name_input = None;
             self.restore_dialog = None;
+            self.export_window = None;
+            self.export_wizard = None;
             cx.quit();
             return;
         }
@@ -1792,6 +1794,16 @@ impl AppView {
             self.new_backup_dialog = None;
             self.backup_name_input = None;
             self.restore_dialog = None;
+            cx.notify();
+            return;
+        }
+        if self
+            .export_window
+            .as_ref()
+            .is_some_and(|handle| handle.window_id() == id)
+        {
+            self.export_window = None;
+            self.export_wizard = None;
             cx.notify();
         }
     }
