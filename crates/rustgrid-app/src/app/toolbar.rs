@@ -127,7 +127,7 @@ impl AppView {
         let active = self.main_tab == tab;
         let enabled = matches!(
             tab,
-            MainTab::Tables | MainTab::Views | MainTab::Queries | MainTab::Backups
+            MainTab::Tables | MainTab::Views | MainTab::Users | MainTab::Queries | MainTab::Backups
         );
         self.main_button(
             SharedString::from(format!("main-tab-{}", tab as usize)),
@@ -191,6 +191,19 @@ impl AppView {
 
     pub(super) fn select_main_tab(&mut self, tab: MainTab, cx: &mut Context<'_, Self>) {
         self.main_tab = tab;
+        if tab == MainTab::Users {
+            self.refresh_users(cx);
+            self.privilege_manager = None;
+            self.active_grid = None;
+            self.active_query = None;
+            self.active_design = None;
+            self.active_user_editor = None;
+            self.saved_query_selected = None;
+            // Navicat shows the account details pane by default on the Users tab.
+            self.info_open = true;
+            cx.notify();
+            return;
+        }
         if tab == MainTab::Backups {
             self.refresh_backups(cx);
             self.active_grid = None;

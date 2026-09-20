@@ -17,6 +17,7 @@ enum InfoTarget {
     Query(usize),
     BackupFile(usize),
     BackupConfig(usize),
+    User(usize, usize),
     None,
 }
 
@@ -32,6 +33,7 @@ impl InfoTarget {
             InfoTarget::Query(index) => format!("query:{index}"),
             InfoTarget::BackupFile(index) => format!("bfile:{index}"),
             InfoTarget::BackupConfig(index) => format!("bconfig:{index}"),
+            InfoTarget::User(connection, index) => format!("user:{connection}:{index}"),
             InfoTarget::None => "none".to_string(),
         }
     }
@@ -250,6 +252,15 @@ impl AppView {
             return InfoTarget::Query(index);
         }
 
+        // The Users tab describes the selected account.
+        if self.main_tab == MainTab::Users
+            && self.privilege_manager.is_none()
+            && let (Some(connection), Some(index)) = (self.users_connection, self.selected_user)
+            && matches!(&self.users, Loadable::Loaded(users) if index < users.len())
+        {
+            return InfoTarget::User(connection, index);
+        }
+
         // The table selection (set by the object list or the connection tree) describes a table
         // while the Tables/Views tabs are showing.
         if matches!(self.main_tab, MainTab::Tables | MainTab::Views)
@@ -318,6 +329,7 @@ impl AppView {
         self.info_server = Loadable::Idle;
         self.info_database = Loadable::Idle;
         self.info_table_status = Loadable::Idle;
+        self.info_user = Loadable::Idle;
 
         match target {
             InfoTarget::Connection(connection_index) => {
@@ -395,6 +407,35 @@ impl AppView {
                 })
                 .detach();
             }
+            InfoTarget::User(connection_index, index) => {
+                let Some(connection) = self.connection_arc(connection_index) else {
+                    self.info_user = Loadable::Failed(t!("info.not_connected").to_string());
+                    return;
+                };
+                let account = match &self.users {
+                    Loadable::Loaded(users) => users.get(index).cloned(),
+                    _ => None,
+                };
+                let Some(account) = account else {
+                    return;
+                };
+                let runtime = self.runtime.clone();
+                cx.spawn(async move |this, cx| {
+                    let result = runtime
+                        .spawn(async move {
+                            connection.user_details(&account.user, &account.host).await
+                        })
+                        .await;
+                    let _ = this.update(cx, |app, cx| {
+                        app.info_user = match result {
+                            Ok(inner) => loadable(inner),
+                            Err(error) => Loadable::Failed(error.to_string()),
+                        };
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
             _ => {}
         }
     }
@@ -418,7 +459,64 @@ impl AppView {
             InfoTarget::Table(connection, database, name) => {
                 self.table_info(connection, database, &name, theme)
             }
+            InfoTarget::User(_, index) => self.user_info(index, theme),
         }
+    }
+
+    /// The details pane of the Users main tab: the selected account's attributes, plus whether it
+    /// holds the server-wide `SUPER` privilege (loaded with the rest of its details).
+    fn user_info(&self, index: usize, theme: Theme) -> AnyElement {
+        let account = match &self.users {
+            Loadable::Loaded(users) => users.get(index),
+            _ => None,
+        };
+        let Some(account) = account else {
+            return div().into_any_element();
+        };
+        let superuser = match &self.info_user {
+            Loadable::Loaded(details) => {
+                Some(details.server_privileges.contains(&Privilege::Super))
+            }
+            _ => None,
+        };
+        let yes_no = |value: bool| t!(if value { "common.yes" } else { "common.no" }).to_string();
+        let fields = vec![
+            (
+                t!("user.field.ssl_type").to_string(),
+                if account.ssl_type.is_empty() {
+                    "--".to_string()
+                } else {
+                    account.ssl_type.clone()
+                },
+            ),
+            (
+                t!("user.field.max_questions").to_string(),
+                account.max_questions.to_string(),
+            ),
+            (
+                t!("user.field.max_updates").to_string(),
+                account.max_updates.to_string(),
+            ),
+            (
+                t!("user.field.max_connections").to_string(),
+                account.max_connections.to_string(),
+            ),
+            (
+                t!("user.field.max_user_connections").to_string(),
+                account.max_user_connections.to_string(),
+            ),
+            (
+                t!("user.field.superuser").to_string(),
+                superuser.map(yes_no).unwrap_or_else(|| "--".to_string()),
+            ),
+        ];
+        info_panel(
+            "icons/user.svg",
+            theme.icon_users,
+            &account.label(),
+            &t!("common.user"),
+            &fields,
+        )
     }
 
     fn connection_info(&self, index: usize, theme: Theme) -> AnyElement {

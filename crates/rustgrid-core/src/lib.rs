@@ -2,6 +2,7 @@ pub mod driver;
 pub mod error;
 pub mod model;
 pub mod registry;
+pub mod user;
 
 pub use driver::{Connection, Driver};
 pub use error::{Error, Result};
@@ -13,3 +14,6 @@ pub use model::{
     TableOptions, TablePage, TableSchema, TableStatus, TriggerDef,
 };
 pub use registry::{DriverRegistry, DriverSource};
+pub use user::{
+    ObjectGrant, ObjectPrivilegeRow, Privilege, RoleMembership, UserAccount, UserDetails, UserEdit,
+};

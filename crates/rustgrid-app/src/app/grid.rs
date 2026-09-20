@@ -153,6 +153,12 @@ impl AppView {
                     design.update(cx, |design, cx| design.delete_selected(kind, cx));
                 }
             }
+            DeleteConfirm::User {
+                connection_index,
+                user,
+                host,
+                ..
+            } => self.delete_user(connection_index, user, host, cx),
         }
         cx.notify();
     }

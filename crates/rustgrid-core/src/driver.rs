@@ -1,10 +1,11 @@
 use async_trait::async_trait;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::model::{
     BackupObjectKind, ColumnInfo, ConnectionConfig, DatabaseInfo, DriverId, ObjectDump,
     PageRequest, QueryResult, RowInsert, RowUpdate, TableInfo, TablePage, TableSchema, TableStatus,
 };
+use crate::user::{ObjectPrivilegeRow, UserAccount, UserDetails, UserEdit};
 
 #[async_trait]
 pub trait Driver: Send + Sync {
@@ -192,4 +193,93 @@ pub trait Connection: Send + Sync {
     }
 
     async fn close(&self) -> Result<()>;
+
+    // ----- Account (user/role) management --------------------------------------------------------
+    //
+    // Engine-agnostic account administration used by the Users main tab and the user editor.
+    // Drivers without an equivalent capability keep the defaults, which report the feature as
+    // unsupported rather than silently succeeding.
+
+    /// List every account (user and role) on the server, for the Users tab.
+    async fn list_users(&self) -> Result<Vec<UserAccount>> {
+        Err(Error::Query(
+            "user management is not supported by this driver".to_string(),
+        ))
+    }
+
+    /// Load one account's editable state: its attributes, granted server privileges, role edges
+    /// and object-level grants.
+    async fn user_details(&self, _user: &str, _host: &str) -> Result<UserDetails> {
+        Err(Error::Query(
+            "user management is not supported by this driver".to_string(),
+        ))
+    }
+
+    /// The SQL script [`Connection::save_user`] runs, for the editor's SQL preview.
+    fn user_edit_sql(&self, _edit: &UserEdit) -> String {
+        String::new()
+    }
+
+    /// Create or alter an account, and replace its server privileges, role memberships and
+    /// object grants with the edit's.
+    async fn save_user(&self, _edit: &UserEdit) -> Result<()> {
+        Err(Error::Query(
+            "user management is not supported by this driver".to_string(),
+        ))
+    }
+
+    /// Drop an account.
+    async fn drop_user(&self, _user: &str, _host: &str) -> Result<()> {
+        Err(Error::Query(
+            "user management is not supported by this driver".to_string(),
+        ))
+    }
+
+    /// The authentication plugins offered by the account editor's Plugin dropdown.
+    fn authentication_plugins(&self) -> Vec<&'static str> {
+        Vec::new()
+    }
+
+    /// The SSL types offered by the account editor's SSL type dropdown.
+    fn ssl_types(&self) -> Vec<&'static str> {
+        Vec::new()
+    }
+
+    /// Every account's privileges on one object (`database` plus an optional table/routine name,
+    /// empty for a database-wide grant), for the privilege manager's matrix.
+    async fn object_privilege_matrix(
+        &self,
+        _database: &str,
+        _name: &str,
+    ) -> Result<Vec<ObjectPrivilegeRow>> {
+        Err(Error::Query(
+            "privilege management is not supported by this driver".to_string(),
+        ))
+    }
+
+    /// Replace the object-level privileges of the listed accounts on one object. Only that
+    /// object's privileges are touched; every other grant is left alone. An account absent from
+    /// `rows` keeps its current grants.
+    async fn set_object_privileges(
+        &self,
+        _database: &str,
+        _name: &str,
+        _rows: &[ObjectPrivilegeRow],
+    ) -> Result<()> {
+        Err(Error::Query(
+            "privilege management is not supported by this driver".to_string(),
+        ))
+    }
+
+    /// The SQL script that [`Connection::set_object_privileges`] would run for one object, given
+    /// its previously loaded rows and the edited ones. Used by the privilege manager's preview.
+    fn object_privileges_sql(
+        &self,
+        _database: &str,
+        _name: &str,
+        _original: &[ObjectPrivilegeRow],
+        _rows: &[ObjectPrivilegeRow],
+    ) -> String {
+        String::new()
+    }
 }

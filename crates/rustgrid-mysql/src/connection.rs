@@ -3,8 +3,9 @@ use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use rustgrid_core::{
     BackupObjectKind, CellValue, ColumnDef, ColumnInfo, Connection, DatabaseInfo, DriverId, Error,
     FilterCondition, FilterConjunction, FilterNode, FilterOperator, ForeignKeyDef, IndexDef,
-    ObjectDump, ObjectKind, PageRequest, QueryResult, Result, RowInsert, RowUpdate, TableInfo,
-    TableOptions, TablePage, TableSchema, TableStatus, TriggerDef,
+    ObjectDump, ObjectKind, ObjectPrivilegeRow, PageRequest, QueryResult, Result, RowInsert,
+    RowUpdate, TableInfo, TableOptions, TablePage, TableSchema, TableStatus, TriggerDef,
+    UserAccount, UserDetails, UserEdit,
 };
 use sqlx::mysql::{MySqlColumn, MySqlRow};
 use sqlx::{
@@ -13,7 +14,7 @@ use sqlx::{
 };
 
 pub struct MysqlConnection {
-    pool: MySqlPool,
+    pub(crate) pool: MySqlPool,
 }
 
 impl MysqlConnection {
@@ -1026,6 +1027,61 @@ impl Connection for MysqlConnection {
         self.pool.close().await;
         Ok(())
     }
+
+    async fn list_users(&self) -> Result<Vec<UserAccount>> {
+        crate::user::list_users(&self.pool).await
+    }
+
+    async fn user_details(&self, user: &str, host: &str) -> Result<UserDetails> {
+        crate::user::user_details(&self.pool, user, host).await
+    }
+
+    fn user_edit_sql(&self, edit: &UserEdit) -> String {
+        crate::user::edit_sql(edit)
+    }
+
+    async fn save_user(&self, edit: &UserEdit) -> Result<()> {
+        crate::user::save_user(&self.pool, edit).await
+    }
+
+    async fn drop_user(&self, user: &str, host: &str) -> Result<()> {
+        crate::user::drop_user(&self.pool, user, host).await
+    }
+
+    fn authentication_plugins(&self) -> Vec<&'static str> {
+        crate::user::authentication_plugins()
+    }
+
+    fn ssl_types(&self) -> Vec<&'static str> {
+        crate::user::ssl_types()
+    }
+
+    async fn object_privilege_matrix(
+        &self,
+        database: &str,
+        name: &str,
+    ) -> Result<Vec<ObjectPrivilegeRow>> {
+        crate::user::object_privilege_matrix(&self.pool, database, name).await
+    }
+
+    async fn set_object_privileges(
+        &self,
+        database: &str,
+        name: &str,
+        rows: &[ObjectPrivilegeRow],
+    ) -> Result<()> {
+        crate::user::set_object_privileges(&self.pool, database, name, rows).await
+    }
+
+    fn object_privileges_sql(
+        &self,
+        database: &str,
+        name: &str,
+        original: &[ObjectPrivilegeRow],
+        rows: &[ObjectPrivilegeRow],
+    ) -> String {
+        crate::user::object_privileges_sql(database, name, original, rows)
+    }
 }
 
 /// Build the DDL that turns `original` into `modified`; exposed free so it can be unit tested
@@ -1834,7 +1890,7 @@ fn condition_piece(condition: &FilterCondition, binds: &mut Vec<String>) -> Opti
 }
 
 /// Map a sqlx error to a Navicat-style message: `<code> - <message>` for MySQL server errors.
-fn map_query_error(error: sqlx::Error) -> Error {
+pub(crate) fn map_query_error(error: sqlx::Error) -> Error {
     if let sqlx::Error::Database(database_error) = &error
         && let Some(mysql_error) =
             database_error.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()

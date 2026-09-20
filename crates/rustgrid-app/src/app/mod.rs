@@ -14,13 +14,14 @@ use gpui::{
     ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, Stateful, StyledText,
     Subscription, Svg, TextLayout, TitlebarOptions, UTF16Selection, UniformListScrollHandle,
     WeakEntity, Window, WindowBounds, WindowControlArea, WindowHandle, WindowId, WindowOptions,
-    canvas, deferred, div, img, prelude::*, px, rgb, size, svg, uniform_list,
+    canvas, deferred, div, img, prelude::*, px, rgb, rgba, size, svg, uniform_list,
 };
 use rustgrid_config::{AppSettings, ConfigStore, LanguageSetting, ThemeSetting};
 use rustgrid_core::{
     BackupObjectKind, CellValue, Connection, ConnectionConfig, DriverRegistry, Error,
-    FilterCondition, FilterConjunction, FilterGroup, FilterNode, FilterOperator, PageRequest,
-    QueryResult, RowInsert, RowUpdate, SavedBackup, SavedQuery, TableStatus,
+    FilterCondition, FilterConjunction, FilterGroup, FilterNode, FilterOperator, ObjectGrant,
+    ObjectPrivilegeRow, PageRequest, Privilege, QueryResult, RowInsert, RowUpdate, SavedBackup,
+    SavedQuery, TableStatus, UserAccount, UserDetails, UserEdit,
 };
 use rustgrid_export::ExportFormat;
 
@@ -742,6 +743,7 @@ enum TabTarget {
     Grid(usize),
     Query(usize),
     Design(usize),
+    User(usize),
 }
 
 struct TabMenu {
@@ -984,6 +986,13 @@ enum DeleteConfirm {
         design_id: u64,
         kind: DesignDeleteKind,
     },
+    /// Drop a server account from the Users tab.
+    User {
+        connection_index: usize,
+        user: String,
+        host: String,
+        label: String,
+    },
 }
 
 /// Which designer grid a [`DeleteConfirm::DesignRows`] confirmation applies to.
@@ -1214,6 +1223,25 @@ pub struct AppView {
     info_table_selected: Option<(usize, usize, String)>,
     /// The selected table's status for the table info pane.
     info_table_status: Loadable<TableStatus>,
+    /// The Users main tab's loaded accounts for `users_connection`.
+    users: Loadable<Vec<UserAccount>>,
+    /// The connection whose users the Users tab shows.
+    users_connection: Option<usize>,
+    /// The Users-list search text.
+    user_search: String,
+    user_search_input: Entity<TextInput>,
+    /// The account highlighted in the Users list, as an index into `users`.
+    selected_user: Option<usize>,
+    /// Keeps the Users list's scroll position across re-renders.
+    users_scroll: ScrollHandle,
+    /// The selected account's details, for the info pane.
+    info_user: Loadable<UserDetails>,
+    /// Open user-editor tabs (the 用户 designer), one entity each.
+    user_editors: Vec<Entity<user_editor::UserEditor>>,
+    active_user_editor: Option<usize>,
+    next_user_id: u64,
+    /// The open privilege manager, shown in place of the Users list while it is up.
+    privilege_manager: Option<Entity<privilege_manager::PrivilegeManager>>,
     /// The OS window hosting the Backup/Restore UI, if open.
     backup_window: Option<WindowHandle<gpui_kit::component::Root>>,
     /// The open export wizard, if any.
@@ -1250,6 +1278,7 @@ mod import;
 mod info_pane;
 mod objects;
 mod options;
+mod privilege_manager;
 mod query;
 mod query_editor;
 mod query_view;
@@ -1259,6 +1288,8 @@ mod tabs;
 mod toolbar;
 mod tree;
 mod ui;
+mod user;
+mod user_editor;
 mod widgets;
 
 pub use shell::AppShell;
@@ -1459,6 +1490,38 @@ impl AppView {
             info_database: Loadable::Idle,
             info_table_selected: None,
             info_table_status: Loadable::Idle,
+            users: Loadable::Idle,
+            users_connection: None,
+            user_search: String::new(),
+            user_search_input: {
+                let weak = app.clone();
+                cx.new(move |cx| {
+                    TextInput::new(
+                        Theme::dark(),
+                        "",
+                        TextInputOptions {
+                            placeholder: t!("user.search").to_string().into(),
+                            icon: Some("icons/search.svg"),
+                            clearable: true,
+                            ..Default::default()
+                        },
+                        cx,
+                    )
+                    .on_change(Rc::new(move |text, _window, cx| {
+                        let _ = weak.update(cx, |app, cx| {
+                            app.user_search = text.to_string();
+                            cx.notify();
+                        });
+                    }))
+                })
+            },
+            selected_user: None,
+            users_scroll: ScrollHandle::new(),
+            info_user: Loadable::Idle,
+            user_editors: Vec::new(),
+            active_user_editor: None,
+            next_user_id: 0,
+            privilege_manager: None,
             backup_window: None,
             export_wizard: None,
             export_window: None,
@@ -1645,6 +1708,13 @@ impl AppView {
             query.id.hash(&mut hasher);
             query.name.hash(&mut hasher);
         }
+        self.active_user_editor.hash(&mut hasher);
+        self.user_editors.len().hash(&mut hasher);
+        for editor in &self.user_editors {
+            let editor = editor.read(cx);
+            editor.id.hash(&mut hasher);
+            editor.dirty.hash(&mut hasher);
+        }
         hasher.finish()
     }
 
@@ -1672,6 +1742,8 @@ impl AppView {
             }
         }
         self.object_search_input
+            .update(cx, |input, cx| input.set_theme(theme, cx));
+        self.user_search_input
             .update(cx, |input, cx| input.set_theme(theme, cx));
         if let Some(input) = self.db_name_input.as_ref() {
             input.update(cx, |input, cx| input.set_theme(theme, cx));
@@ -1715,6 +1787,12 @@ impl AppView {
         }
         for design in &self.designs {
             design.update(cx, |design, cx| design.set_theme(theme, cx));
+        }
+        for editor in &self.user_editors {
+            editor.update(cx, |editor, cx| editor.set_theme(theme, cx));
+        }
+        if let Some(manager) = self.privilege_manager.as_ref() {
+            manager.update(cx, |manager, cx| manager.set_theme(theme, cx));
         }
         for combo in [
             self.db_charset_combo.as_ref(),
@@ -1786,6 +1864,12 @@ impl AppView {
                 .text_size(px(12.0))
                 .text_color(rgb(theme.text))
                 .child(format!("{count} {}", t!("common.backup")))
+                .into_any_element()
+        } else if self.main_tab == MainTab::Users && self.privilege_manager.is_none() {
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .child(self.render_users_status())
                 .into_any_element()
         } else if self.active_grid.is_none()
             && self.active_query.is_none()
@@ -2079,6 +2163,7 @@ impl Render for AppView {
         self.sync_save_location_combo(cx);
         self.sync_language_combo(cx);
         self.sync_info(cx);
+        self.sync_users(cx);
         // Remember the main window so closing it can take the Backup/Restore window with it.
         if self.main_window_id.is_none() {
             self.main_window_id = Some(window.window_handle().window_id());
