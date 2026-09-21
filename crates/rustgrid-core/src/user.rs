@@ -316,3 +316,17 @@ pub struct UserEdit {
     /// (the 成员 tab, meaningful when the account is a role).
     pub members: Vec<(String, String, bool)>,
 }
+
+/// The kinds of change one account save makes. The editor groups the generated statements by this
+/// so its confirmation dialog can annotate each group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserEditSection {
+    /// Identity and attributes: rename, authentication, password, resource limits, lock/expiry.
+    Account,
+    /// Global (`*.*`) privileges.
+    ServerPrivileges,
+    /// Database/table/routine grants.
+    ObjectGrants,
+    /// Role memberships.
+    Roles,
+}

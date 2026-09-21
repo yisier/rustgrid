@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use rustgrid_core::{
     ObjectGrant, ObjectPrivilegeRow, Privilege, Result, RoleMembership, UserAccount, UserDetails,
-    UserEdit,
+    UserEdit, UserEditSection,
 };
 use sqlx::mysql::MySqlRow;
 use sqlx::{AssertSqlSafe, MySqlPool, Row};
@@ -237,34 +237,62 @@ async fn fetch_role_edges(
 
 // ----- Writing -------------------------------------------------------------------------------
 
-/// The ordered statements that turn the loaded state into the edit's state.
-fn edit_statements(edit: &UserEdit) -> Vec<String> {
+/// The ordered statements that turn the loaded state into the edit's state, grouped by what they
+/// change so the editor's confirmation dialog can annotate each group.
+pub(crate) fn edit_groups(edit: &UserEdit) -> Vec<(UserEditSection, Vec<String>)> {
     let account = &edit.account;
     let target = quote_account(&account.user, &account.host);
     let is_new = edit.original.is_none();
-    let mut statements = Vec::new();
+    let mut groups = Vec::new();
 
+    let mut account_statements = Vec::new();
     // A renamed account keeps its grants and role edges, so rename first and address every
     // following statement at the new identity.
     if let Some(original) = &edit.original {
         let old_user = &original.account.user;
         let old_host = &original.account.host;
         if old_user != &account.user || old_host != &account.host {
-            statements.push(format!(
+            account_statements.push(format!(
                 "RENAME USER {} TO {target}",
                 quote_account(old_user, old_host)
             ));
         }
     }
+    account_statements.extend(account_statements_inner(edit, &target, is_new));
+    if !account_statements.is_empty() {
+        groups.push((UserEditSection::Account, account_statements));
+    }
 
-    statements.extend(account_statements(edit, &target, is_new));
-    statements.extend(server_privilege_statements(edit, &target));
-    statements.extend(object_grant_statements(edit, &target));
-    statements.extend(role_statements(edit, &target));
+    let server = server_privilege_statements(edit, &target);
+    if !server.is_empty() {
+        groups.push((UserEditSection::ServerPrivileges, server));
+    }
+    let objects = object_grant_statements(edit, &target);
+    if !objects.is_empty() {
+        groups.push((UserEditSection::ObjectGrants, objects));
+    }
+    let roles = role_statements(edit, &target);
+    if !roles.is_empty() {
+        groups.push((UserEditSection::Roles, roles));
+    }
+    groups
+}
+
+/// The ordered statements that turn the loaded state into the edit's state.
+fn edit_statements(edit: &UserEdit) -> Vec<String> {
+    let mut statements: Vec<String> = edit_groups(edit)
+        .into_iter()
+        .flat_map(|(_, statements)| statements)
+        .collect();
+    // Account-management statements are applied immediately, but the editor's preview shows (and
+    // the save runs) an explicit refresh so the grant tables are reloaded deterministically.
+    if !statements.is_empty() {
+        statements.push("FLUSH PRIVILEGES".to_string());
+    }
     statements
 }
 
-fn account_statements(edit: &UserEdit, target: &str, is_new: bool) -> Vec<String> {
+fn account_statements_inner(edit: &UserEdit, target: &str, is_new: bool) -> Vec<String> {
     let account = &edit.account;
     let mut clauses: Vec<String> = Vec::new();
 
@@ -1027,6 +1055,53 @@ mod tests {
                 .iter()
                 .any(|s| s == "REVOKE GRANT OPTION ON `test`.`t` FROM 'test'@'%'"),
             "{joined}"
+        );
+    }
+
+    #[test]
+    fn edit_groups_group_the_change_and_append_a_refresh() {
+        let original = UserDetails {
+            account: UserAccount {
+                user: "test".to_string(),
+                host: "%".to_string(),
+                ..Default::default()
+            },
+            server_privileges: [Privilege::Select].into_iter().collect(),
+            ..Default::default()
+        };
+        let edit = UserEdit {
+            original: Some(original),
+            account: UserAccount {
+                user: "test".to_string(),
+                host: "%".to_string(),
+                plugin: "mysql_native_password".to_string(),
+                ..Default::default()
+            },
+            password: None,
+            server_privileges: [Privilege::Insert].into_iter().collect(),
+            grants: Vec::new(),
+            roles: Vec::new(),
+            members: Vec::new(),
+        };
+
+        let groups = edit_groups(&edit);
+        assert!(
+            groups
+                .iter()
+                .any(|(section, _)| *section == UserEditSection::Account),
+            "{groups:?}"
+        );
+        assert!(
+            groups
+                .iter()
+                .any(|(section, _)| *section == UserEditSection::ServerPrivileges),
+            "{groups:?}"
+        );
+
+        let statements = edit_statements(&edit);
+        assert_eq!(
+            statements.last().map(String::as_str),
+            Some("FLUSH PRIVILEGES")
         );
     }
 }

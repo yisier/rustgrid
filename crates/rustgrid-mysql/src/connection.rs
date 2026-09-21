@@ -1040,6 +1040,13 @@ impl Connection for MysqlConnection {
         crate::user::edit_sql(edit)
     }
 
+    fn user_edit_groups(
+        &self,
+        edit: &UserEdit,
+    ) -> Vec<(rustgrid_core::UserEditSection, Vec<String>)> {
+        crate::user::edit_groups(edit)
+    }
+
     async fn save_user(&self, edit: &UserEdit) -> Result<()> {
         crate::user::save_user(&self.pool, edit).await
     }

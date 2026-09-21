@@ -14,14 +14,14 @@ use gpui::{
     ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, Stateful, StyledText,
     Subscription, Svg, TextLayout, TitlebarOptions, UTF16Selection, UniformListScrollHandle,
     WeakEntity, Window, WindowBounds, WindowControlArea, WindowHandle, WindowId, WindowOptions,
-    canvas, deferred, div, img, prelude::*, px, rgb, size, svg, uniform_list,
+    canvas, deferred, div, img, prelude::*, px, rgb, rgba, size, svg, uniform_list,
 };
 use rustgrid_config::{AppSettings, ConfigStore, LanguageSetting, ThemeSetting};
 use rustgrid_core::{
     BackupObjectKind, CellValue, Connection, ConnectionConfig, DriverRegistry, Error,
     FilterCondition, FilterConjunction, FilterGroup, FilterNode, FilterOperator, ObjectGrant,
     ObjectPrivilegeRow, PageRequest, Privilege, QueryResult, RowInsert, RowUpdate, SavedBackup,
-    SavedQuery, TableStatus, UserAccount, UserDetails, UserEdit,
+    SavedQuery, TableStatus, UserAccount, UserDetails, UserEdit, UserEditSection,
 };
 use rustgrid_export::ExportFormat;
 

@@ -5,7 +5,7 @@ use crate::model::{
     BackupObjectKind, ColumnInfo, ConnectionConfig, DatabaseInfo, DriverId, ObjectDump,
     PageRequest, QueryResult, RowInsert, RowUpdate, TableInfo, TablePage, TableSchema, TableStatus,
 };
-use crate::user::{ObjectPrivilegeRow, UserAccount, UserDetails, UserEdit};
+use crate::user::{ObjectPrivilegeRow, UserAccount, UserDetails, UserEdit, UserEditSection};
 
 #[async_trait]
 pub trait Driver: Send + Sync {
@@ -218,6 +218,12 @@ pub trait Connection: Send + Sync {
     /// The SQL script [`Connection::save_user`] runs, for the editor's SQL preview.
     fn user_edit_sql(&self, _edit: &UserEdit) -> String {
         String::new()
+    }
+
+    /// The statements [`Connection::save_user`] runs, grouped by what they change, so the editor's
+    /// confirmation dialog can annotate each group. Empty when the driver has no user management.
+    fn user_edit_groups(&self, _edit: &UserEdit) -> Vec<(UserEditSection, Vec<String>)> {
+        Vec::new()
     }
 
     /// Create or alter an account, and replace its server privileges, role memberships and

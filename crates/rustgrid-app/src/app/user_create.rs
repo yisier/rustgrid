@@ -279,6 +279,65 @@ fn db_privilege_groups() -> [(&'static str, Vec<Privilege>); 3] {
     ]
 }
 
+/// The global (`*.*`) privileges grouped for the 服务器权限 section. Covers all of
+/// [`Privilege::ALL`], so the templates and the grid always agree.
+fn server_privilege_groups() -> [(&'static str, Vec<Privilege>); 6] {
+    [
+        (
+            "user.create.priv_group.dml",
+            vec![
+                Privilege::Select,
+                Privilege::Insert,
+                Privilege::Update,
+                Privilege::Delete,
+            ],
+        ),
+        (
+            "user.create.priv_group.ddl",
+            vec![
+                Privilege::Create,
+                Privilege::Alter,
+                Privilege::Drop,
+                Privilege::Index,
+                Privilege::CreateView,
+                Privilege::CreateTemporaryTables,
+                Privilege::CreateRoutine,
+                Privilege::AlterRoutine,
+                Privilege::References,
+                Privilege::Trigger,
+            ],
+        ),
+        (
+            "user.create.server_group.exec",
+            vec![
+                Privilege::Execute,
+                Privilege::ShowView,
+                Privilege::ShowDatabases,
+                Privilege::LockTables,
+            ],
+        ),
+        (
+            "user.create.server_group.admin",
+            vec![
+                Privilege::Process,
+                Privilege::Reload,
+                Privilege::Shutdown,
+                Privilege::Super,
+                Privilege::File,
+                Privilege::GrantOption,
+            ],
+        ),
+        (
+            "user.create.server_group.replication",
+            vec![Privilege::ReplicationClient, Privilege::ReplicationSlave],
+        ),
+        (
+            "user.create.server_group.account",
+            vec![Privilege::CreateUser, Privilege::Event],
+        ),
+    ]
+}
+
 /// One database row of the 权限 section: whether it is granted, its scope, and its privileges.
 pub(super) struct DbGrant {
     pub(super) name: String,
@@ -344,6 +403,11 @@ pub(super) struct UserCreateDialog {
     pub(super) saving: bool,
     /// Set briefly after a successful save so the footer can confirm it.
     pub(super) saved: bool,
+    /// Whether the password fields are active while editing (the 修改登录密码 checkbox). Always
+    /// true for a new account.
+    pub(super) change_password: bool,
+    /// Whether the 确认并执行 dialog is open.
+    pub(super) confirm_open: bool,
 }
 
 impl UserCreateDialog {
@@ -396,6 +460,8 @@ impl UserCreateDialog {
             error: None,
             saving: false,
             saved: false,
+            change_password: !editing,
+            confirm_open: false,
         }
     }
 
@@ -1216,6 +1282,35 @@ impl AppView {
         cx.notify();
     }
 
+    /// Toggle the 修改登录密码 checkbox; clearing it also drops any typed password.
+    pub(super) fn toggle_create_change_password(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(dialog) = self.create_user_dialog.as_mut() {
+            dialog.change_password = !dialog.change_password;
+            if !dialog.change_password {
+                dialog.editor.password.clear();
+                dialog.editor.guard_password.clear();
+            }
+        }
+        if let Some(input) = self.create_user_password.clone() {
+            input.update(cx, |input, cx| input.set_text(String::new(), cx));
+        }
+        if let Some(input) = self.create_user_confirm.clone() {
+            input.update(cx, |input, cx| input.set_text(String::new(), cx));
+        }
+        cx.notify();
+    }
+
+    /// Set the host from one of the 主机地址 quick chips.
+    pub(super) fn set_create_host(&mut self, host: String, cx: &mut Context<'_, Self>) {
+        if let Some(dialog) = self.create_user_dialog.as_mut() {
+            dialog.editor.account.host = host.clone();
+        }
+        if let Some(input) = self.create_user_host.clone() {
+            input.update(cx, |input, cx| input.set_text(host, cx));
+        }
+        cx.notify();
+    }
+
     /// Toggle one server privilege.
     pub(super) fn toggle_create_server_privilege(
         &mut self,
@@ -1605,10 +1700,10 @@ impl AppView {
                 },
                 ..dialog.editor.account.clone()
             },
-            password: if dialog.editor.password.is_empty() {
-                None
-            } else {
+            password: if dialog.change_password && !dialog.editor.password.is_empty() {
                 Some(dialog.editor.password.clone())
+            } else {
+                None
             },
             server_privileges: dialog.editor.server_privileges.clone(),
             grants: dialog.object_grants(),
@@ -1635,6 +1730,14 @@ impl AppView {
         }
     }
 
+    /// Copy the SQL 预览 script to the clipboard.
+    pub(super) fn copy_create_user_sql(&mut self, cx: &mut Context<'_, Self>) {
+        let sql = self.create_user_sql();
+        if !sql.trim().is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(sql));
+        }
+    }
+
     /// Validate and save the account, then reload it in place.
     pub(super) fn submit_create_user(&mut self, cx: &mut Context<'_, Self>) {
         let Some(dialog) = self.create_user_dialog.as_ref() else {
@@ -1651,12 +1754,44 @@ impl AppView {
             cx.notify();
             return;
         }
+        if dialog.is_edit() && dialog.change_password && dialog.editor.password.is_empty() {
+            let message = t!("user.create.password_required").to_string();
+            if let Some(dialog) = self.create_user_dialog.as_mut() {
+                dialog.error = Some(message);
+            }
+            cx.notify();
+            return;
+        }
         if dialog.editor.password != dialog.editor.guard_password {
             let message = t!("user.password_mismatch").to_string();
             if let Some(dialog) = self.create_user_dialog.as_mut() {
                 dialog.error = Some(message);
             }
             cx.notify();
+            return;
+        }
+        if let Some(dialog) = self.create_user_dialog.as_mut() {
+            dialog.confirm_open = true;
+            dialog.error = None;
+        }
+        cx.notify();
+    }
+
+    /// Close the 确认并执行 dialog without saving.
+    pub(super) fn close_create_confirm(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(dialog) = self.create_user_dialog.as_mut() {
+            dialog.confirm_open = false;
+        }
+        cx.notify();
+    }
+
+    /// Run the save the 确认并执行 dialog previewed. Split from [`Self::submit_create_user`] so the
+    /// user always sees the change diff before anything is executed.
+    pub(super) fn execute_create_user(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(dialog) = self.create_user_dialog.as_ref() else {
+            return;
+        };
+        if dialog.saving {
             return;
         }
         let Some(edit) = self.create_user_edit() else {
@@ -1666,6 +1801,7 @@ impl AppView {
         if let Some(dialog) = self.create_user_dialog.as_mut() {
             dialog.saving = true;
             dialog.saved = false;
+            dialog.confirm_open = false;
             dialog.error = None;
         }
         let Some(connection) = self.connection_arc(connection_index) else {
@@ -1738,6 +1874,64 @@ impl AppView {
         .detach();
         cx.notify();
     }
+
+    /// The annotated SQL the 确认并执行 dialog shows: each group of statements is preceded by a
+    /// localized comment, like Navicat's change diff.
+    pub(super) fn create_user_preview(&self) -> String {
+        let Some(dialog) = self.create_user_dialog.as_ref() else {
+            return String::new();
+        };
+        let Some(connection) = self.connection_arc(dialog.connection_index) else {
+            return String::new();
+        };
+        let Some(edit) = self.create_user_edit() else {
+            return String::new();
+        };
+        let subject = match dialog.original_account() {
+            Some((user, host)) => format!("{user}@{host}"),
+            None => format!(
+                "{}@{}",
+                dialog.editor.account.user, dialog.editor.account.host
+            ),
+        };
+        let mut out = String::new();
+        out.push_str(&format!(
+            "-- {}\n",
+            t!("user.create.preview_header", account = subject)
+        ));
+        if dialog.is_edit() {
+            let note = if dialog.change_password && !dialog.editor.password.is_empty() {
+                t!("user.create.preview_password_changed")
+            } else {
+                t!("user.create.preview_password_kept")
+            };
+            out.push_str(&format!("-- {note}\n"));
+        }
+        let groups = connection.user_edit_groups(&edit);
+        if groups.is_empty() {
+            out.push_str(&format!("-- {}\n", t!("design.no_changes")));
+            return out;
+        }
+        for (index, (section, statements)) in groups.into_iter().enumerate() {
+            out.push('\n');
+            out.push_str(&format!(
+                "-- {} {}: {}\n",
+                t!("user.create.preview_change"),
+                index + 1,
+                t!(user_edit_section_key(section))
+            ));
+            for statement in statements {
+                out.push_str(&statement);
+                out.push_str(";\n");
+            }
+        }
+        // `edit_statements` refreshes the grant tables once after a non-empty script; mirror it so
+        // the preview matches exactly what Save runs.
+        out.push('\n');
+        out.push_str(&format!("-- {}\n", t!("user.create.preview_refresh")));
+        out.push_str("FLUSH PRIVILEGES;\n");
+        out
+    }
 }
 
 // ----- Window field entities -----------------------------------------------------------------
@@ -1745,6 +1939,16 @@ impl AppView {
 /// Parse a resource-limit field; an empty or invalid value means "no limit" (0).
 fn parse_limit(text: &str) -> u64 {
     text.trim().parse::<u64>().unwrap_or(0)
+}
+
+/// The i18n key naming one group of the account-change diff.
+fn user_edit_section_key(section: UserEditSection) -> &'static str {
+    match section {
+        UserEditSection::Account => "user.create.preview.account",
+        UserEditSection::ServerPrivileges => "user.tab.server_privileges",
+        UserEditSection::ObjectGrants => "user.tab.privileges",
+        UserEditSection::Roles => "user.tab.roles",
+    }
 }
 
 /// Build one identity/limit field of the window. Edits write straight into the window state so the
@@ -1843,7 +2047,7 @@ impl AppView {
             None => t!("user.create.title").to_string(),
         };
 
-        let root = div()
+        let mut root = div()
             .relative()
             .flex()
             .flex_col()
@@ -1883,7 +2087,122 @@ impl AppView {
                     .child(self.create_user_footer(cx)),
             );
 
+        if dialog.confirm_open {
+            root = root.child(self.render_create_confirm(cx));
+        }
         root.into_any_element()
+    }
+
+    /// The 确认并执行 dialog: the annotated change diff plus 关闭 / 确认并执行.
+    fn render_create_confirm(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let preview = self.create_user_preview();
+
+        let mut code = div()
+            .id("user-create-confirm-sql")
+            .flex()
+            .flex_col()
+            .max_h(px(360.0))
+            .overflow_y_scroll()
+            .rounded(px(6.0))
+            .bg(rgb(0x0d1117))
+            .p_3();
+        for line in preview.lines() {
+            let comment = line.trim_start().starts_with("--");
+            code = code.child(
+                div()
+                    .font_family("Consolas")
+                    .text_size(px(12.0))
+                    .line_height(px(18.0))
+                    .text_color(rgb(if comment { 0x8b949e } else { 0xc9d1d9 }))
+                    .child(line.to_string()),
+            );
+        }
+
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .w_full()
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(t!("user.create.confirm_title").to_string()),
+            )
+            .child(
+                div()
+                    .id("user-create-confirm-copy")
+                    .cursor_pointer()
+                    .text_size(px(11.0))
+                    .text_color(rgb(theme.primary))
+                    .hover(move |style| style.text_color(rgb(theme.text)))
+                    .on_click(
+                        cx.listener(|this, _event, _window, cx| this.copy_create_user_sql(cx)),
+                    )
+                    .child(t!("user.create.copy_sql").to_string()),
+            );
+
+        let panel = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_4()
+            .w(px(720.0))
+            .max_h(px(560.0))
+            .bg(rgb(theme.dialog_bg))
+            .border_1()
+            .border_color(rgb(theme.border))
+            .rounded(px(8.0))
+            .shadow(ui::dialog_shadow())
+            .child(header)
+            .child(code)
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(t!("user.create.confirm_hint").to_string()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_end()
+                    .gap_2()
+                    .w_full()
+                    .child(self.dialog_button(
+                        "user-create-confirm-close",
+                        t!("user.create.confirm_close").to_string(),
+                        false,
+                        cx.listener(|this, _event, _window, cx| this.close_create_confirm(cx)),
+                    ))
+                    .child(self.dialog_button(
+                        "user-create-confirm-execute",
+                        t!("user.create.confirm_execute").to_string(),
+                        true,
+                        cx.listener(|this, _event, _window, cx| this.execute_create_user(cx)),
+                    )),
+            )
+            .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
+                cx.stop_propagation();
+            });
+
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .occlude()
+            .bg(rgba(0x00000040))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _event, _window, cx| this.close_create_confirm(cx)),
+            )
+            .child(panel)
+            .into_any_element()
     }
 
     /// The left section navigation.
@@ -1951,7 +2270,7 @@ impl AppView {
             UserSection::ServerPrivileges => self.render_create_server_privileges(cx),
             UserSection::ObjectPrivileges => self.render_create_grants(cx),
             UserSection::Roles => self.render_create_roles(cx),
-            UserSection::Sql => self.render_create_sql(),
+            UserSection::Sql => self.render_create_sql(cx),
         }
     }
 
@@ -1974,27 +2293,83 @@ impl AppView {
                 t!("user.field.host").to_string(),
                 sized_text(self.create_user_host.as_ref(), theme),
                 theme,
-            ))
-            .child(create_row(
-                t!("user.field.plugin").to_string(),
-                sized_combo(self.create_user_plugin_combo.as_ref(), theme),
-                theme,
-            ))
-            .child(create_row(
-                t!("user.field.password").to_string(),
-                sized_text(self.create_user_password.as_ref(), theme),
-                theme,
-            ))
-            .child(create_row(
-                t!("user.field.confirm_password").to_string(),
-                sized_text(self.create_user_confirm.as_ref(), theme),
+            ));
+
+        // 主机地址 quick chips, like the prototype's `% (任意网络)` / `localhost` shortcuts.
+        let mut host_choices = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .child(div().w(px(CREATE_LABEL_WIDTH)).flex_none());
+        for (label_key, value) in [
+            ("user.create.host_any", "%"),
+            ("user.create.host_local", "localhost"),
+            ("user.create.host_lan", "192.168.1.%"),
+        ] {
+            let host = value.to_string();
+            host_choices = host_choices.child(
+                div()
+                    .id(SharedString::from(format!("user-create-host-{value}")))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .h(px(20.0))
+                    .px_2()
+                    .rounded(px(4.0))
+                    .text_size(px(11.0))
+                    .bg(rgb(theme.button_bg))
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .text_color(rgb(theme.text_muted))
+                    .cursor_pointer()
+                    .hover(move |style| style.text_color(rgb(theme.text)))
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.set_create_host(host.clone(), cx)
+                    }))
+                    .child(t!(label_key).to_string()),
+            );
+        }
+        identity = identity.child(host_choices).child(create_row(
+            t!("user.field.plugin").to_string(),
+            sized_combo(self.create_user_plugin_combo.as_ref(), theme),
+            theme,
+        ));
+
+        if dialog.is_edit() {
+            identity = identity.child(create_row(
+                String::new(),
+                check_row(
+                    "user-create-change-password",
+                    t!("user.create.change_password").to_string(),
+                    dialog.change_password,
+                    theme,
+                    cx.listener(|this, _event, _window, cx| this.toggle_create_change_password(cx)),
+                )
+                .into_any_element(),
                 theme,
             ));
-        if dialog.is_edit() {
-            let hint = if account.password_set {
-                t!("user.create.password_set_hint")
+        }
+        if !dialog.is_edit() || dialog.change_password {
+            identity = identity
+                .child(create_row(
+                    t!("user.field.password").to_string(),
+                    sized_text(self.create_user_password.as_ref(), theme),
+                    theme,
+                ))
+                .child(create_row(
+                    t!("user.field.confirm_password").to_string(),
+                    sized_text(self.create_user_confirm.as_ref(), theme),
+                    theme,
+                ));
+            let hint: String = if dialog.is_edit() {
+                if account.password_set {
+                    t!("user.create.password_set_hint").to_string()
+                } else {
+                    t!("user.create.password_unset_hint").to_string()
+                }
             } else {
-                t!("user.create.password_unset_hint")
+                t!("user.create.password_hint").to_string()
             };
             identity = identity.child(
                 div()
@@ -2007,15 +2382,32 @@ impl AppView {
                         div()
                             .text_size(px(11.0))
                             .text_color(rgb(theme.text_muted))
-                            .child(hint.to_string()),
+                            .child(hint),
                     ),
             );
         }
 
         let mut status = div().flex().flex_col().gap_2().w_full();
+        // 锁定该账号 sits beside the expiry dropdown, like the prototype.
         status = status.child(create_row(
             t!("user.field.password_expiry").to_string(),
-            sized_combo(self.create_user_expiry_combo.as_ref(), theme),
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_4()
+                .child(sized_combo(self.create_user_expiry_combo.as_ref(), theme))
+                .child(
+                    check_row(
+                        "user-create-locked",
+                        t!("user.field.locked_account").to_string(),
+                        account.account_locked,
+                        theme,
+                        cx.listener(|this, _event, _window, cx| this.toggle_create_locked(cx)),
+                    )
+                    .into_any_element(),
+                )
+                .into_any_element(),
             theme,
         ));
         if dialog.expiry == CreateExpiry::Interval {
@@ -2025,18 +2417,6 @@ impl AppView {
                 theme,
             ));
         }
-        status = status.child(create_row(
-            String::new(),
-            check_row(
-                "user-create-locked",
-                t!("user.field.locked_account").to_string(),
-                account.account_locked,
-                theme,
-                cx.listener(|this, _event, _window, cx| this.toggle_create_locked(cx)),
-            )
-            .into_any_element(),
-            theme,
-        ));
 
         let mut limits = div().flex().flex_col().gap_2().w_full();
         for (label_key, input) in [
@@ -2134,31 +2514,49 @@ impl AppView {
             );
         }
 
-        let mut grid = div().flex().flex_row().flex_wrap().w_full();
-        for (index, privilege) in Privilege::ALL.into_iter().enumerate() {
-            let checked = dialog.editor.server_privileges.contains(&privilege);
-            grid = grid.child(
+        // Grouped like the prototype, so the global set reads as categories instead of one long grid.
+        let mut groups = div().flex().flex_col().gap_3().w_full();
+        for (group_key, privileges) in server_privilege_groups() {
+            let mut grid = div().flex().flex_row().flex_wrap().w_full();
+            for (position, privilege) in privileges.into_iter().enumerate() {
+                let checked = dialog.editor.server_privileges.contains(&privilege);
+                grid = grid.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "user-create-server-priv-{group_key}-{position}"
+                        )))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .w(px(210.0))
+                        .h(px(CREATE_ROW_HEIGHT))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                            this.toggle_create_server_privilege(privilege, cx)
+                        }))
+                        .child(checkbox_box(checked, theme))
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(rgb(theme.text))
+                                .child(t!(privilege.label_key()).to_string()),
+                        ),
+                );
+            }
+            groups = groups.child(
                 div()
-                    .id(SharedString::from(format!(
-                        "user-create-server-priv-{index}"
-                    )))
                     .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .w(px(210.0))
-                    .h(px(CREATE_ROW_HEIGHT))
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.toggle_create_server_privilege(privilege, cx)
-                    }))
-                    .child(checkbox_box(checked, theme))
+                    .flex_col()
+                    .gap_1()
+                    .w_full()
                     .child(
                         div()
-                            .text_size(px(12.0))
-                            .text_color(rgb(theme.text))
-                            .child(t!(privilege.label_key()).to_string()),
-                    ),
+                            .text_size(px(11.0))
+                            .text_color(rgb(theme.text_muted))
+                            .child(t!(group_key).to_string()),
+                    )
+                    .child(grid),
             );
         }
 
@@ -2176,8 +2574,12 @@ impl AppView {
             ))
             .child(section(
                 t!("user.tab.server_privileges").to_string(),
-                Some(t!("user.create.server_privileges_hint", count = checked_count).to_string()),
-                grid.into_any_element(),
+                Some(format!(
+                    "{} · {}",
+                    t!("user.create.server_privileges_hint", count = checked_count),
+                    t!("user.create.server_danger")
+                )),
+                groups.into_any_element(),
                 theme,
             ))
             .into_any_element()
@@ -2891,7 +3293,7 @@ impl AppView {
     }
 
     /// SQL 预览: the script Save would run.
-    fn render_create_sql(&self) -> AnyElement {
+    fn render_create_sql(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
         let sql = self.create_user_sql();
         let text = if sql.trim().is_empty() {
@@ -2912,9 +3314,33 @@ impl AppView {
             .w_full()
             .child(
                 div()
-                    .text_size(px(11.0))
-                    .text_color(rgb(theme.text_muted))
-                    .child(t!("user.create.preview_sql").to_string()),
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .w_full()
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(theme.text_muted))
+                            .child(t!("user.create.preview_sql").to_string()),
+                    )
+                    .child(
+                        div()
+                            .id("user-create-sql-copy")
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .cursor_pointer()
+                            .text_size(px(11.0))
+                            .text_color(rgb(theme.primary))
+                            .hover(move |style| style.text_color(rgb(theme.text)))
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.copy_create_user_sql(cx)
+                            }))
+                            .child(t!("user.create.copy_sql").to_string()),
+                    ),
             )
             .child(
                 div()
@@ -2987,7 +3413,14 @@ impl AppView {
                     }
                 }),
             ));
-        // The footer's left cell reports state: the failure reason, or a brief 已保存 confirmation.
+        // The footer's left cell reports state: the failure reason, a brief 已保存 confirmation, or
+        // a summary of what the account will hold (the prototype's "就绪 · 已配置 …").
+        let granted = dialog.db_grants.iter().filter(|row| row.enabled).count();
+        let role_count = dialog
+            .context
+            .as_ref()
+            .map(|context| context.roles.len() + context.members.len())
+            .unwrap_or(0);
         let status: AnyElement = if let Some(error) = dialog.error.as_ref() {
             div()
                 .text_color(rgb(theme.danger))
@@ -2997,6 +3430,18 @@ impl AppView {
             div()
                 .text_color(rgb(theme.primary))
                 .child(t!("user.create.saved").to_string())
+                .into_any_element()
+        } else if granted > 0 || role_count > 0 {
+            div()
+                .text_color(rgb(theme.text_muted))
+                .child(
+                    t!(
+                        "user.create.summary",
+                        databases = granted,
+                        roles = role_count
+                    )
+                    .to_string(),
+                )
                 .into_any_element()
         } else {
             div().into_any_element()
@@ -3042,6 +3487,18 @@ mod tests {
             ServerTemplate::Admin.privileges().len(),
             Privilege::ALL.len()
         );
+    }
+
+    #[test]
+    fn server_groups_cover_every_privilege_exactly_once() {
+        let mut grouped: Vec<Privilege> = server_privilege_groups()
+            .into_iter()
+            .flat_map(|(_, privileges)| privileges)
+            .collect();
+        grouped.sort();
+        let mut all = Privilege::ALL.to_vec();
+        all.sort();
+        assert_eq!(grouped, all);
     }
 
     #[test]

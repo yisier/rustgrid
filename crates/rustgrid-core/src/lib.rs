@@ -16,4 +16,5 @@ pub use model::{
 pub use registry::{DriverRegistry, DriverSource};
 pub use user::{
     ObjectGrant, ObjectPrivilegeRow, Privilege, RoleMembership, UserAccount, UserDetails, UserEdit,
+    UserEditSection,
 };
