@@ -146,6 +146,9 @@ impl AppView {
                 move |window, cx| {
                     #[cfg(target_os = "windows")]
                     crate::win_resize::install(window);
+                    // `open_window` does not raise what it opens, so the wizard can otherwise
+                    // appear behind the main window.
+                    window.activate_window();
                     let view = cx.new(|cx| ExportWindow::new(view_weak.clone(), &app_entity, cx));
                     cx.new(|cx| gpui_kit::component::Root::new(view, window, cx))
                 },

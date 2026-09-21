@@ -301,12 +301,20 @@ shadcn chrome described above. Implemented today:
    simply not imported. Date/time values are parsed by `dtparse` (day-first, so `26/6/2025` is
    26 June) and rewritten to MySQL's canonical `YYYY-MM-DD[ HH:MM:SS]`, so text sources with local
    date conventions import into `date`/`datetime` columns.
+10. User management: the `Users` main tab lists the server's accounts (toolbar: 编辑 / 新建 /
+   删除 / 权限管理器, plus a search field). **New User** and **Edit User** are the *same* separate
+    OS window (`user_create.rs`, `UserCreateWindow` observing `AppView`), with two views over one
+    shared `UserEditorState`: 快速视图 is Navicat's guided form (普通用户/管理用户 presets +
+    per-database privilege matrix) and 完整视图 is the full account designer (attributes, server
+    privileges, individual object grants, roles). Switching views is lossless and Save is one
+    path, so the two flows cannot drift apart. Saving a new account switches the window to 完整视图
+    in place instead of closing and reopening a tab. Passwords are prompted on connect, never
+    stored in a profile.
 
-Still out of scope: a second database engine, and the disabled placeholder UI (the
-`Functions`/`Users` main tabs, the `Design/New/Delete Table` toolbar buttons, and the
-query editor's `Query Builder`/`Snippets` items are deliberate stubs — leave them disabled unless
-asked). The abstractions above are what make more engines cheap later — do not build those
-features early.
+Still out of scope: a second database engine, and the disabled placeholder UI (the `Functions`
+main tab, the `Design/New/Delete Table` toolbar buttons, and the query editor's
+`Query Builder`/`Snippets` items are deliberate stubs — leave them disabled unless asked). The
+abstractions above are what make more engines cheap later — do not build those features early.
 
 ## Gotchas
 

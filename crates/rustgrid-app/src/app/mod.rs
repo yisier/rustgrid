@@ -743,7 +743,6 @@ enum TabTarget {
     Grid(usize),
     Query(usize),
     Design(usize),
-    User(usize),
 }
 
 struct TabMenu {
@@ -1236,10 +1235,25 @@ pub struct AppView {
     users_scroll: ScrollHandle,
     /// The selected account's details, for the info pane.
     info_user: Loadable<UserDetails>,
-    /// Open user-editor tabs (the 用户 designer), one entity each.
-    user_editors: Vec<Entity<user_editor::UserEditor>>,
-    active_user_editor: Option<usize>,
-    next_user_id: u64,
+    /// The open account window, if any: the create/edit flow launched from the Users toolbar.
+    create_user_dialog: Option<user_create::UserCreateDialog>,
+    /// The dialog's identity fields.
+    create_user_user: Option<Entity<TextInput>>,
+    create_user_host: Option<Entity<TextInput>>,
+    create_user_password: Option<Entity<TextInput>>,
+    create_user_confirm: Option<Entity<TextInput>>,
+    /// The dialog's plugin and password-expiry dropdowns.
+    create_user_plugin_combo: Option<Entity<ComboBox>>,
+    create_user_expiry_combo: Option<Entity<ComboBox>>,
+    /// The dialog's password-expiry interval (days) field, shown for the INTERVAL policy.
+    create_user_expiry_days: Option<Entity<TextInput>>,
+    /// The dialog's 搜索数据库 and 搜索表 filters.
+    create_user_db_search: Option<Entity<TextInput>>,
+    create_user_table_search: Option<Entity<TextInput>>,
+    /// The dialog's privilege-level dropdown, while it is open.
+    create_user_level_menu: Option<user_create::CreateLevelMenu>,
+    /// The OS window hosting the "New User" dialog, if open.
+    create_user_window: Option<WindowHandle<gpui_kit::component::Root>>,
     /// The open privilege manager, shown in place of the Users list while it is up.
     privilege_manager: Option<Entity<privilege_manager::PrivilegeManager>>,
     /// The OS window hosting the Backup/Restore UI, if open.
@@ -1289,7 +1303,7 @@ mod toolbar;
 mod tree;
 mod ui;
 mod user;
-mod user_editor;
+mod user_create;
 mod widgets;
 
 pub use shell::AppShell;
@@ -1518,9 +1532,18 @@ impl AppView {
             selected_user: None,
             users_scroll: ScrollHandle::new(),
             info_user: Loadable::Idle,
-            user_editors: Vec::new(),
-            active_user_editor: None,
-            next_user_id: 0,
+            create_user_dialog: None,
+            create_user_user: None,
+            create_user_host: None,
+            create_user_password: None,
+            create_user_confirm: None,
+            create_user_plugin_combo: None,
+            create_user_expiry_combo: None,
+            create_user_expiry_days: None,
+            create_user_db_search: None,
+            create_user_table_search: None,
+            create_user_level_menu: None,
+            create_user_window: None,
             privilege_manager: None,
             backup_window: None,
             export_wizard: None,
@@ -1708,13 +1731,6 @@ impl AppView {
             query.id.hash(&mut hasher);
             query.name.hash(&mut hasher);
         }
-        self.active_user_editor.hash(&mut hasher);
-        self.user_editors.len().hash(&mut hasher);
-        for editor in &self.user_editors {
-            let editor = editor.read(cx);
-            editor.id.hash(&mut hasher);
-            editor.dirty.hash(&mut hasher);
-        }
         hasher.finish()
     }
 
@@ -1787,9 +1803,6 @@ impl AppView {
         }
         for design in &self.designs {
             design.update(cx, |design, cx| design.set_theme(theme, cx));
-        }
-        for editor in &self.user_editors {
-            editor.update(cx, |editor, cx| editor.set_theme(theme, cx));
         }
         if let Some(manager) = self.privilege_manager.as_ref() {
             manager.update(cx, |manager, cx| manager.set_theme(theme, cx));

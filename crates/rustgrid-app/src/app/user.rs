@@ -145,7 +145,7 @@ impl AppView {
                         "icons/add_field.svg",
                         t!("user.new").to_string(),
                         has_connection,
-                        cx.listener(|this, _event, _window, cx| this.open_new_user(cx)),
+                        cx.listener(|this, _event, _window, cx| this.open_create_user(cx)),
                     ))
                     .child(toolbar_separator(theme))
                     .child(self.toolbar_item(
@@ -261,28 +261,9 @@ impl AppView {
         cx.notify();
     }
 
-    /// Open a blank account in a new user editor.
-    pub(super) fn open_new_user(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(connection_index) = self.users_connection_index(cx) else {
-            return;
-        };
-        let Some(connection) = self.connection_arc(connection_index) else {
-            return;
-        };
-        let connection_name = self
-            .connections
-            .get(connection_index)
-            .map(|node| node.profile.name.clone())
-            .unwrap_or_default();
-        self.push_user_editor(connection, connection_name, None, cx);
-    }
-
-    /// Open the selected account in a new user editor.
+    /// Open the selected account in the account window.
     pub(super) fn open_selected_user(&mut self, cx: &mut Context<'_, Self>) {
         let Some(index) = self.selected_user else {
-            return;
-        };
-        let Some(connection_index) = self.users_connection else {
             return;
         };
         let account = match &self.users {
@@ -292,116 +273,7 @@ impl AppView {
         let Some(account) = account else {
             return;
         };
-        let Some(connection) = self.connection_arc(connection_index) else {
-            return;
-        };
-        let connection_name = self
-            .connections
-            .get(connection_index)
-            .map(|node| node.profile.name.clone())
-            .unwrap_or_default();
-        self.push_user_editor(
-            connection,
-            connection_name,
-            Some((account.user, account.host)),
-            cx,
-        );
-    }
-
-    /// Create a user-editor tab and make it the active content. An account already open in an
-    /// editor is re-activated instead of opened twice.
-    fn push_user_editor(
-        &mut self,
-        connection: Arc<dyn Connection>,
-        connection_name: String,
-        account: Option<(String, String)>,
-        cx: &mut Context<'_, Self>,
-    ) {
-        if let Some((user, host)) = account.as_ref()
-            && let Some(position) = self.user_editors.iter().position(|editor| {
-                let editor = editor.read(cx);
-                Arc::ptr_eq(&editor.connection, &connection)
-                    && editor
-                        .original_user()
-                        .is_some_and(|(open_user, open_host)| {
-                            open_user == *user && open_host == *host
-                        })
-            })
-        {
-            self.activate_user_editor(Some(position), cx);
-            return;
-        }
-
-        let id = self.next_user_id;
-        self.next_user_id += 1;
-        let theme = self.theme;
-        let app = cx.weak_entity();
-        let runtime = self.runtime.clone();
-        let editor = cx.new(|cx| {
-            user_editor::UserEditor::new(
-                id,
-                connection,
-                connection_name,
-                account,
-                app,
-                runtime,
-                theme,
-                cx,
-            )
-        });
-        editor.update(cx, |editor, cx| editor.load(cx));
-        self.user_editors.push(editor);
-        self.active_user_editor = Some(self.user_editors.len() - 1);
-        self.active_grid = None;
-        self.active_query = None;
-        self.active_design = None;
-        self.main_tab = MainTab::Users;
-        self.privilege_manager = None;
-        cx.notify();
-    }
-
-    pub(super) fn activate_user_editor(
-        &mut self,
-        index: Option<usize>,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.active_user_editor = index;
-        self.active_grid = None;
-        self.active_query = None;
-        self.active_design = None;
-        cx.notify();
-    }
-
-    pub(super) fn close_user_editor(&mut self, index: usize, cx: &mut Context<'_, Self>) {
-        if index >= self.user_editors.len() {
-            return;
-        }
-        self.user_editors.remove(index);
-        self.active_user_editor = match self.active_user_editor {
-            Some(active) if active == index => None,
-            Some(active) if active > index => Some(active - 1),
-            other => other,
-        };
-        cx.notify();
-    }
-
-    /// Close every user editor bound to a connection that is going away.
-    pub(super) fn close_connection_user_editors(
-        &mut self,
-        connection: &Arc<dyn Connection>,
-        cx: &App,
-    ) {
-        let active_id = self
-            .active_user_editor
-            .and_then(|index| self.user_editors.get(index))
-            .map(|editor| editor.read(cx).id);
-        self.user_editors
-            .retain(|editor| !Arc::ptr_eq(&editor.read(cx).connection, connection));
-        self.active_user_editor = active_id.and_then(|id| {
-            self.user_editors
-                .iter()
-                .position(|editor| editor.read(cx).id == id)
-        });
+        self.open_edit_user((account.user, account.host), cx);
     }
 
     /// Ask for confirmation before dropping the account at `index`.
@@ -484,7 +356,6 @@ impl AppView {
         });
         manager.update(cx, |manager, cx| manager.load(cx));
         self.privilege_manager = Some(manager);
-        self.active_user_editor = None;
         self.active_grid = None;
         self.active_query = None;
         self.active_design = None;

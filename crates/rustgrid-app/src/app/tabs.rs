@@ -17,16 +17,6 @@ impl AppView {
                     d.flex().flex_col().flex_1().min_w(px(0.0)).min_h(px(0.0))
                 }))
                 .into_any_element()
-        } else if let Some(editor) = self
-            .active_user_editor
-            .and_then(|index| self.user_editors.get(index))
-        {
-            editor
-                .clone()
-                .cached(cached_style(|d| {
-                    d.flex().flex_col().flex_1().min_w(px(0.0)).min_h(px(0.0))
-                }))
-                .into_any_element()
         } else if let Some(query) = self.active_query.and_then(|index| self.queries.get(index)) {
             self.render_query_view(query, window, cx).into_any_element()
         } else if let Some(grid) = self.active_grid.and_then(|index| self.grids.get(index)) {
@@ -73,7 +63,6 @@ impl AppView {
             && (self.object_pane.is_some()
                 || !self.grids.is_empty()
                 || !self.designs.is_empty()
-                || !self.user_editors.is_empty()
                 || !self.queries.is_empty()
                 || self.main_tab == MainTab::Queries
                 || self.main_tab == MainTab::Users);
@@ -507,116 +496,11 @@ impl TabBar {
                     .child("✕"),
             )
     }
-
-    #[allow(clippy::too_many_arguments)]
-    fn user_tab(
-        &self,
-        theme: Theme,
-        index: usize,
-        id: u64,
-        title: String,
-        active: bool,
-        cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
-        let tab_id = SharedString::from(format!("user-tab-{id}"));
-        let close_id = SharedString::from(format!("user-tab-close-{id}"));
-        let activate = self.app.clone();
-        let close = self.app.clone();
-        let menu = self.app.clone();
-        let middle = self.app.clone();
-
-        div()
-            .id(tab_id)
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_1()
-            .h_full()
-            .px_2()
-            .flex_none()
-            .cursor_pointer()
-            .text_size(px(12.0))
-            .when(active, |style| {
-                style
-                    .bg(rgb(theme.editor_bg))
-                    .border_t_1()
-                    .border_l_1()
-                    .border_r_1()
-                    .border_color(rgb(theme.border))
-            })
-            .when(!active, |style| {
-                style
-                    .bg(rgb(theme.button_bg))
-                    .border_1()
-                    .border_color(rgb(theme.border))
-            })
-            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-            .on_click(cx.listener(move |_this, _event, _window, cx| {
-                let _ = activate.update(cx, |app, cx| {
-                    if index < app.user_editors.len() {
-                        app.activate_user_editor(Some(index), cx);
-                    }
-                });
-            }))
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |_this, event: &MouseDownEvent, _window, cx| {
-                    let _ = menu.update(cx, |app, cx| {
-                        app.context_menu = None;
-                        app.tab_menu = Some(TabMenu {
-                            target: TabTarget::User(index),
-                            position: event.position,
-                        });
-                        cx.notify();
-                    });
-                }),
-            )
-            .on_mouse_down(
-                MouseButton::Middle,
-                cx.listener(move |_this, _event, _window, cx| {
-                    let _ = middle.update(cx, |app, cx| app.close_user_editor(index, cx));
-                }),
-            )
-            .child(tree_icon("icons/user.svg", theme.icon_users))
-            .child(
-                div()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .max_w(px(180.0))
-                    .child(title),
-            )
-            .child(
-                div()
-                    .id(close_id)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .w(px(16.0))
-                    .h(px(16.0))
-                    .cursor_pointer()
-                    .hover(move |style| style.bg(rgb(theme.button_hover_bg)))
-                    .on_click(cx.listener(move |_this, _event, _window, cx| {
-                        cx.stop_propagation();
-                        let _ = close.update(cx, |app, cx| app.close_user_editor(index, cx));
-                    }))
-                    .child("✕"),
-            )
-    }
 }
 
 impl Render for TabBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let (
-            theme,
-            active_grid,
-            active_query,
-            active_design,
-            active_user_editor,
-            grid_tabs,
-            query_tabs,
-            design_tabs,
-            user_tabs,
-        ) = {
+        let (theme, active_grid, active_query, active_design, grid_tabs, query_tabs, design_tabs) = {
             let Some(app) = self.app.upgrade() else {
                 return div().into_any_element();
             };
@@ -680,32 +564,14 @@ impl Render for TabBar {
                     (index, design.id, title, design.is_view)
                 })
                 .collect();
-            let user_tabs: Vec<(usize, u64, String)> = app
-                .user_editors
-                .iter()
-                .enumerate()
-                .map(|(index, entity)| {
-                    let editor = entity.read(cx);
-                    let name = editor.title();
-                    let kind = t!("common.user").to_string();
-                    let title = if editor.dirty {
-                        format!("* {name} ({}) - {kind}", editor.connection_name)
-                    } else {
-                        format!("{name} ({}) - {kind}", editor.connection_name)
-                    };
-                    (index, editor.id, title)
-                })
-                .collect();
             (
                 app.theme,
                 app.active_grid,
                 app.active_query,
                 app.active_design,
-                app.active_user_editor,
                 grid_tabs,
                 query_tabs,
                 design_tabs,
-                user_tabs,
             )
         };
 
@@ -754,16 +620,6 @@ impl Render for TabBar {
                 cx,
             ));
         }
-        for (index, id, title) in user_tabs {
-            strip = strip.child(self.user_tab(
-                theme,
-                index,
-                id,
-                title,
-                active_user_editor == Some(index),
-                cx,
-            ));
-        }
 
         // The object tab is pinned; the arrows only appear (and wrap the scrollable tab strip)
         // when the open tabs no longer fit.
@@ -778,10 +634,7 @@ impl Render for TabBar {
             .bg(rgb(theme.toolbar_bg))
             .child(self.object_tab(
                 theme,
-                active_grid.is_none()
-                    && active_query.is_none()
-                    && active_design.is_none()
-                    && active_user_editor.is_none(),
+                active_grid.is_none() && active_query.is_none() && active_design.is_none(),
                 cx,
             ));
         if needs_scroll {

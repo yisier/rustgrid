@@ -277,7 +277,6 @@ impl AppView {
         if let Some(connection) = connection {
             self.close_connection_grids(&connection, cx);
             self.close_connection_designs(&connection, cx);
-            self.close_connection_user_editors(&connection, cx);
             let runtime = self.runtime.clone();
             cx.spawn(async move |_this, _cx| {
                 let _ = runtime.spawn(async move { connection.close().await }).await;

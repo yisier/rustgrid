@@ -1751,6 +1751,9 @@ impl AppView {
                 move |window, cx| {
                     #[cfg(target_os = "windows")]
                     crate::win_resize::install(window);
+                    // `open_window` does not raise what it opens, so the window can otherwise
+                    // appear behind the main one.
+                    window.activate_window();
                     let view = cx.new(|cx| BackupWindow::new(view_weak.clone(), &app_entity, cx));
                     cx.new(|cx| gpui_kit::component::Root::new(view, window, cx))
                 },
@@ -1784,6 +1787,8 @@ impl AppView {
             self.export_wizard = None;
             self.import_window = None;
             self.import_wizard = None;
+            self.create_user_window = None;
+            self.create_user_dialog = None;
             cx.quit();
             return;
         }
@@ -1817,6 +1822,16 @@ impl AppView {
             self.import_window = None;
             self.import_wizard = None;
             cx.notify();
+            return;
+        }
+        if self
+            .create_user_window
+            .as_ref()
+            .is_some_and(|handle| handle.window_id() == id)
+        {
+            // The user closed the account window from the OS chrome: drop its state too, so the
+            // toolbar buttons are not left permanently short-circuited by a stale window handle.
+            self.cancel_create_user(cx);
         }
     }
 

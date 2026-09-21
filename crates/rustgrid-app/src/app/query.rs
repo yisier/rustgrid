@@ -155,7 +155,6 @@ impl AppView {
             TabTarget::Grid(index) => self.close_grid(index, cx),
             TabTarget::Query(index) => self.close_query(index, cx),
             TabTarget::Design(index) => self.close_design(index, cx),
-            TabTarget::User(index) => self.close_user_editor(index, cx),
         }
     }
 
@@ -231,33 +230,6 @@ impl AppView {
                     self.activate_design(Some(position), cx);
                 }
             }
-            TabTarget::User(keep) => {
-                let keep_id = self.user_editors.get(keep).map(|editor| editor.read(cx).id);
-                while !self.queries.is_empty() {
-                    self.close_query(self.queries.len() - 1, cx);
-                }
-                while !self.grids.is_empty() {
-                    self.close_grid(self.grids.len() - 1, cx);
-                }
-                while !self.designs.is_empty() {
-                    self.close_design(self.designs.len() - 1, cx);
-                }
-                let mut index = self.user_editors.len();
-                while index > 0 {
-                    index -= 1;
-                    if Some(self.user_editors[index].read(cx).id) != keep_id {
-                        self.close_user_editor(index, cx);
-                    }
-                }
-                if let Some(id) = keep_id
-                    && let Some(position) = self
-                        .user_editors
-                        .iter()
-                        .position(|editor| editor.read(cx).id == id)
-                {
-                    self.activate_user_editor(Some(position), cx);
-                }
-            }
         }
     }
 
@@ -271,9 +243,6 @@ impl AppView {
         }
         while !self.designs.is_empty() {
             self.close_design(self.designs.len() - 1, cx);
-        }
-        while !self.user_editors.is_empty() {
-            self.close_user_editor(self.user_editors.len() - 1, cx);
         }
     }
 
