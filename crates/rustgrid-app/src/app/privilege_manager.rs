@@ -1,7 +1,9 @@
-//! The privilege manager: pick a database or table on the left and edit every account's
-//! privileges on it as a check-box matrix.
+//! The privilege manager: pick a database or table on the left and edit the privileges of the
+//! accounts that hold grants on it as a check-box matrix. Matching Navicat, the matrix lists only
+//! accounts with an existing grant on the selected object; 添加权限 adds another account and
+//! 删除权限 removes the selected ones (revoking them on Save).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 
@@ -32,7 +34,6 @@ impl PmTab {
 const PM_ROW_HEIGHT: f32 = 22.0;
 
 pub(super) struct PrivilegeManager {
-    app: WeakEntity<AppView>,
     runtime: Arc<Runtime>,
     pub(super) theme: Theme,
     connection: Arc<dyn Connection>,
@@ -43,10 +44,18 @@ pub(super) struct PrivilegeManager {
     expanded: Option<String>,
     /// The selected object: `(database, name)`; the name is empty for a database-wide grant.
     selected: Option<(String, String)>,
-    /// Every account with its pending privileges on `selected`.
+    /// Accounts holding a grant on `selected`, with their pending privileges.
     rows: Vec<ObjectPrivilegeRow>,
     /// The rows as loaded, for the SQL preview diff.
     original: Vec<ObjectPrivilegeRow>,
+    /// Every account on the server, for the 添加权限 picker.
+    accounts: Vec<UserAccount>,
+    /// The matrix rows selected for 删除权限.
+    selected_rows: BTreeSet<usize>,
+    /// Whether the 添加权限 account picker is open.
+    add_open: bool,
+    /// Keeps the picker's scroll position.
+    add_scroll: ScrollHandle,
     tab: PmTab,
     loading: bool,
     saving: bool,
@@ -59,14 +68,12 @@ impl PrivilegeManager {
     pub(super) fn new(
         connection: Arc<dyn Connection>,
         connection_name: String,
-        app: WeakEntity<AppView>,
         runtime: Arc<Runtime>,
         theme: Theme,
         cx: &mut Context<'_, Self>,
     ) -> Self {
         let _ = cx;
         Self {
-            app,
             runtime,
             theme,
             connection,
@@ -77,6 +84,10 @@ impl PrivilegeManager {
             selected: None,
             rows: Vec::new(),
             original: Vec::new(),
+            accounts: Vec::new(),
+            selected_rows: BTreeSet::new(),
+            add_open: false,
+            add_scroll: ScrollHandle::new(),
             tab: PmTab::General,
             loading: false,
             saving: false,
@@ -86,22 +97,32 @@ impl PrivilegeManager {
         }
     }
 
-    /// Load the database list for the tree.
+    /// Load the database list for the tree and the account list for the 添加权限 picker.
     pub(super) fn load(&mut self, cx: &mut Context<'_, Self>) {
         let connection = self.connection.clone();
         let runtime = self.runtime.clone();
         self.loading = true;
         cx.spawn(async move |this, cx| {
             let result = runtime
-                .spawn(async move { connection.list_databases().await })
+                .spawn(async move {
+                    let databases = connection.list_databases().await;
+                    let accounts = connection.list_users().await;
+                    (databases, accounts)
+                })
                 .await;
             let _ = this.update(cx, |manager, cx| {
                 manager.loading = false;
                 match result {
-                    Ok(Ok(databases)) => {
-                        manager.databases = databases.into_iter().map(|db| db.name).collect();
+                    Ok((databases, accounts)) => {
+                        match databases {
+                            Ok(databases) => {
+                                manager.databases =
+                                    databases.into_iter().map(|db| db.name).collect();
+                            }
+                            Err(error) => manager.error = Some(error.to_string()),
+                        }
+                        manager.accounts = accounts.unwrap_or_default();
                     }
-                    Ok(Err(error)) => manager.error = Some(error.to_string()),
                     Err(error) => manager.error = Some(error.to_string()),
                 }
                 cx.notify();
@@ -161,27 +182,28 @@ impl PrivilegeManager {
         cx.notify();
     }
 
-    /// Select an object and load every account's privileges on it.
+    /// Select an object and load the accounts that hold a grant on it. Matching Navicat, accounts
+    /// without an explicit grant are not listed; use 添加权限 to add one.
     fn select_node(&mut self, node: (String, String), cx: &mut Context<'_, Self>) {
         self.selected = Some(node.clone());
         self.rows.clear();
         self.original.clear();
+        self.selected_rows.clear();
+        self.add_open = false;
         self.dirty = false;
         self.loading = true;
         let connection = self.connection.clone();
         let runtime = self.runtime.clone();
         cx.spawn(async move |this, cx| {
             let (database, name) = node;
-            let joined = {
+            let result = {
                 let connection = connection.clone();
                 let database = database.clone();
                 let name = name.clone();
                 runtime
-                    .spawn(async move {
-                        let matrix = connection.object_privilege_matrix(&database, &name).await;
-                        let accounts = connection.list_users().await;
-                        (matrix, accounts)
-                    })
+                    .spawn(
+                        async move { connection.object_privilege_matrix(&database, &name).await },
+                    )
                     .await
             };
             let _ = this.update(cx, |manager, cx| {
@@ -189,43 +211,14 @@ impl PrivilegeManager {
                 if manager.selected.as_ref() != Some(&(database.clone(), name.clone())) {
                     return;
                 }
-                let (matrix, accounts) = match joined {
-                    Ok(pair) => pair,
-                    Err(error) => {
-                        manager.error = Some(error.to_string());
-                        return;
+                match result {
+                    Ok(Ok(matrix)) => {
+                        manager.original = matrix.clone();
+                        manager.rows = matrix;
                     }
-                };
-                let matrix = match matrix {
-                    Ok(matrix) => matrix,
-                    Err(error) => {
-                        manager.error = Some(error.to_string());
-                        Vec::new()
-                    }
-                };
-                let accounts = accounts.unwrap_or_default();
-                let mut rows: Vec<ObjectPrivilegeRow> = accounts
-                    .into_iter()
-                    .map(|account| ObjectPrivilegeRow::new(account.user, account.host))
-                    .collect();
-                for row in &mut rows {
-                    if let Some(found) = matrix
-                        .iter()
-                        .find(|item| item.user == row.user && item.host == row.host)
-                    {
-                        row.privileges = found.privileges.clone();
-                    }
+                    Ok(Err(error)) => manager.error = Some(error.to_string()),
+                    Err(error) => manager.error = Some(error.to_string()),
                 }
-                for item in &matrix {
-                    if !rows
-                        .iter()
-                        .any(|row| row.user == item.user && row.host == item.host)
-                    {
-                        rows.push(item.clone());
-                    }
-                }
-                manager.original = rows.clone();
-                manager.rows = rows;
                 cx.notify();
             });
         })
@@ -241,6 +234,73 @@ impl PrivilegeManager {
             self.dirty = true;
             cx.notify();
         }
+    }
+
+    /// Select/deselect a matrix row for 删除权限.
+    fn toggle_row(&mut self, row: usize, cx: &mut Context<'_, Self>) {
+        if row >= self.rows.len() {
+            return;
+        }
+        if !self.selected_rows.remove(&row) {
+            self.selected_rows.insert(row);
+        }
+        cx.notify();
+    }
+
+    /// Drop the selected accounts from the matrix; Save then revokes their grants.
+    fn remove_selected(&mut self, cx: &mut Context<'_, Self>) {
+        if self.selected_rows.is_empty() {
+            return;
+        }
+        for index in std::mem::take(&mut self.selected_rows).into_iter().rev() {
+            if index < self.rows.len() {
+                self.rows.remove(index);
+            }
+        }
+        self.dirty = true;
+        cx.notify();
+    }
+
+    /// The accounts that do not yet have a row in the matrix, for the 添加权限 picker.
+    fn addable_accounts(&self) -> Vec<UserAccount> {
+        self.accounts
+            .iter()
+            .filter(|account| {
+                !self
+                    .rows
+                    .iter()
+                    .any(|row| row.user == account.user && row.host == account.host)
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn toggle_add(&mut self, cx: &mut Context<'_, Self>) {
+        self.add_open = !self.add_open;
+        cx.notify();
+    }
+
+    fn close_add(&mut self, cx: &mut Context<'_, Self>) {
+        if self.add_open {
+            self.add_open = false;
+            cx.notify();
+        }
+    }
+
+    /// Add one account to the matrix with no privileges yet; ticking its boxes then Save grants them.
+    fn add_account(&mut self, user: String, host: String, cx: &mut Context<'_, Self>) {
+        self.add_open = false;
+        if !self
+            .rows
+            .iter()
+            .any(|row| row.user == user && row.host == host)
+        {
+            self.rows.push(ObjectPrivilegeRow::new(user, host));
+            self.selected_rows.clear();
+            self.selected_rows.insert(self.rows.len() - 1);
+            self.dirty = true;
+        }
+        cx.notify();
     }
 
     fn preview_sql(&self) -> String {
@@ -286,74 +346,35 @@ impl PrivilegeManager {
         .detach();
         cx.notify();
     }
-
-    fn close(&self, cx: &mut Context<'_, Self>) {
-        if let Some(app) = self.app.upgrade() {
-            app.update(cx, |app, cx| {
-                app.privilege_manager = None;
-                cx.notify();
-            });
-        }
-    }
 }
 
 impl Render for PrivilegeManager {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
-        div()
+        let mut root = div()
+            .relative()
             .flex()
             .flex_col()
             .size_full()
             .bg(rgb(theme.editor_bg))
-            .child(self.render_header(cx))
             .child(self.render_toolbar(cx))
             .child(self.render_subtabs(cx))
-            .child(self.render_body(cx))
+            .child(self.render_body(cx));
+        if self.add_open {
+            // A full-pane backdrop closes the picker on any outside click; it also intercepts the
+            // 添加权限 button itself, so a second click there closes rather than reopening.
+            root = root
+                .child(div().absolute().inset_0().occlude().on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _event, _window, cx| this.close_add(cx)),
+                ))
+                .child(self.render_add_menu(cx));
+        }
+        root
     }
 }
 
 impl PrivilegeManager {
-    fn render_header(&self, cx: &mut Context<'_, Self>) -> Div {
-        let theme = self.theme;
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .h(px(30.0))
-            .px_3()
-            .flex_none()
-            .bg(rgb(theme.toolbar_bg))
-            .border_b_1()
-            .border_color(rgb(theme.border))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .child(tree_icon("icons/gear.svg", theme.icon_users))
-                    .child(div().text_color(rgb(theme.text)).child(format!(
-                        "{} - {}",
-                        self.connection_name,
-                        t!("user.privilege.manager")
-                    ))),
-            )
-            .child(
-                div()
-                    .id("pm-close")
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .w(px(20.0))
-                    .h(px(20.0))
-                    .cursor_pointer()
-                    .hover(move |style| style.bg(rgb(theme.button_hover_bg)))
-                    .on_click(cx.listener(|this, _event, _window, cx| this.close(cx)))
-                    .child("✕"),
-            )
-    }
-
     fn render_toolbar(&self, cx: &mut Context<'_, Self>) -> Div {
         let theme = self.theme;
         div()
@@ -375,6 +396,71 @@ impl PrivilegeManager {
                 theme,
                 cx.listener(|this, _event, _window, cx| this.save(cx)),
             ))
+            .child(toolbar_separator(theme))
+            .child(ui::toolbar_item(
+                "pm-add",
+                "icons/add_field.svg",
+                t!("user.privilege.add").to_string(),
+                self.selected.is_some(),
+                theme,
+                cx.listener(|this, _event, _window, cx| this.toggle_add(cx)),
+            ))
+            .child(ui::toolbar_item(
+                "pm-remove",
+                "icons/delete_field.svg",
+                t!("user.privilege.remove").to_string(),
+                !self.selected_rows.is_empty(),
+                theme,
+                cx.listener(|this, _event, _window, cx| this.remove_selected(cx)),
+            ))
+    }
+
+    /// The 添加权限 account picker: the server's accounts not already in the matrix.
+    fn render_add_menu(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let theme = self.theme;
+        let addable = self.addable_accounts();
+        let mut list = ui::popup_panel(theme)
+            .id("pm-add-menu")
+            .left(px(8.0))
+            .top(px(58.0))
+            .w(px(260.0))
+            .max_h(px(260.0))
+            .overflow_y_scroll()
+            .track_scroll(&self.add_scroll)
+            .p_1();
+        if addable.is_empty() {
+            list = list.child(tree_message(
+                t!("user.privilege.all_granted").to_string(),
+                4.0,
+                theme.text_muted,
+            ));
+            return list;
+        }
+        for (index, account) in addable.into_iter().enumerate() {
+            let user = account.user.clone();
+            let host = account.host.clone();
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("pm-add-{index}")))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .h(px(PM_ROW_HEIGHT))
+                    .px_2()
+                    .flex_none()
+                    .rounded(px(2.0))
+                    .text_size(px(12.0))
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.add_account(user.clone(), host.clone(), cx)
+                    }))
+                    .child(tree_icon("icons/user.svg", theme.icon_users))
+                    .child(account.label()),
+            );
+        }
+        list
     }
 
     fn render_subtabs(&self, cx: &mut Context<'_, Self>) -> Div {
@@ -610,7 +696,15 @@ impl PrivilegeManager {
 
         let rows = self.rows.clone();
         let mut body = div().flex().flex_col();
+        if rows.is_empty() {
+            body = body.child(tree_message(
+                t!("user.privilege.empty").to_string(),
+                8.0,
+                theme.text_muted,
+            ));
+        }
         for (row, entry) in rows.iter().enumerate() {
+            let selected = self.selected_rows.contains(&row);
             let mut line = div()
                 .id(SharedString::from(format!("pm-row-{row}")))
                 .flex()
@@ -618,13 +712,22 @@ impl PrivilegeManager {
                 .items_center()
                 .h(px(PM_ROW_HEIGHT))
                 .when(row % 2 == 1, move |style| style.bg(rgb(theme.row_alt_bg)))
+                .when(selected, move |style| style.bg(rgb(theme.tree_selected_bg)))
                 .child(
                     div()
+                        .id(SharedString::from(format!("pm-row-name-{row}")))
                         .w(px(name_width))
                         .flex_none()
                         .px_2()
                         .overflow_hidden()
                         .whitespace_nowrap()
+                        .cursor_pointer()
+                        .when(selected, move |style| {
+                            style.text_color(rgb(theme.tree_selected_text))
+                        })
+                        .on_click(
+                            cx.listener(move |this, _event, _window, cx| this.toggle_row(row, cx)),
+                        )
                         .child(entry.label()),
                 );
             for privilege in Privilege::OBJECT {

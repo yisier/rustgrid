@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 const CURRENT_VERSION: u32 = 1;
 const PROFILES_FILE: &str = "connections.json";
-const SETTINGS_VERSION: u32 = 2;
+const SETTINGS_VERSION: u32 = 3;
 const SETTINGS_FILE: &str = "settings.json";
 const QUERIES_VERSION: u32 = 1;
 const QUERIES_FILE: &str = "queries.json";
@@ -91,12 +91,17 @@ struct SettingsFile {
     theme: ThemeSetting,
     #[serde(default)]
     language: LanguageSetting,
+    /// Whether the right-hand object-info pane is shown. Remembered across launches; it is
+    /// `false` until the user chooses to reveal it.
+    #[serde(default)]
+    show_info_pane: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AppSettings {
     pub theme: ThemeSetting,
     pub language: LanguageSetting,
+    pub show_info_pane: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -251,6 +256,7 @@ impl ConfigStore {
         Ok(AppSettings {
             theme: file.theme,
             language: file.language,
+            show_info_pane: file.show_info_pane,
         })
     }
 
@@ -260,6 +266,7 @@ impl ConfigStore {
             version: SETTINGS_VERSION,
             theme: settings.theme,
             language: settings.language,
+            show_info_pane: settings.show_info_pane,
         };
         let contents = serde_json::to_string_pretty(&file)?;
         fs::write(self.settings_path(), contents)?;

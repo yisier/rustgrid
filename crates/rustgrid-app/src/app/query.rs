@@ -80,6 +80,7 @@ impl AppView {
         self.active_query = Some(self.queries.len() - 1);
         self.active_grid = None;
         self.active_design = None;
+        self.privilege_manager_active = false;
         self.query_completion = None;
         self.clear_object_search(cx);
         self.query_focus_pending = true;
@@ -90,6 +91,7 @@ impl AppView {
     pub(super) fn activate_query(&mut self, index: usize, cx: &mut Context<'_, Self>) {
         self.active_query = Some(index);
         self.active_design = None;
+        self.privilege_manager_active = false;
         self.active_grid = self
             .queries
             .get(index)
@@ -1436,7 +1438,7 @@ impl AppView {
     /// Open the object-info pane for a query file.
     pub(super) fn open_query_info(&mut self, index: usize, cx: &mut Context<'_, Self>) {
         self.saved_query_selected = Some(index);
-        self.info_open = true;
+        self.set_info_open(true, cx);
         cx.notify();
     }
 

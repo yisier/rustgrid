@@ -303,13 +303,17 @@ shadcn chrome described above. Implemented today:
    date conventions import into `date`/`datetime` columns.
 10. User management: the `Users` main tab lists the server's accounts (toolbar: 编辑 / 新建 /
    删除 / 权限管理器, plus a search field). **New User** and **Edit User** are the *same* separate
-    OS window (`user_create.rs`, `UserCreateWindow` observing `AppView`), with two views over one
-    shared `UserEditorState`: 快速视图 is Navicat's guided form (普通用户/管理用户 presets +
-    per-database privilege matrix) and 完整视图 is the full account designer (attributes, server
-    privileges, individual object grants, roles). Switching views is lossless and Save is one
-    path, so the two flows cannot drift apart. Saving a new account switches the window to 完整视图
-    in place instead of closing and reopening a tab. Passwords are prompted on connect, never
-    stored in a profile.
+    OS window (`user_create.rs`, `UserCreateWindow` observing `AppView`), and the *same* window
+    creates or edits the account. There is no 快速视图/完整视图 split: a left navigation
+    (`UserSection`) shows five sections over one shared `UserEditorState` — 常规 (identity,
+    authentication, account lock, password expiry and the online resource limits), 服务器权限
+    (the global `*.*` grid with one-click 快捷模板), 权限 (a database list beside the selected
+    database's detail: 全部表/指定具体表 scope, quick presets and grouped fine-grained privileges),
+    角色 (the 成员属于 / 成员 lists, whose 集 column grants
+    `WITH ADMIN OPTION`, granting the role first if needed) and SQL 预览 (the script Save would
+    run). Save is one path for both flows; changing the username/host emits `RENAME USER` before
+    the rest of the script so the account keeps its grants and role edges, and a successful save
+    reloads the account in place. Passwords are prompted on connect, never stored in a profile.
 
 Still out of scope: a second database engine, and the disabled placeholder UI (the `Functions`
 main tab, the `Design/New/Delete Table` toolbar buttons, and the query editor's

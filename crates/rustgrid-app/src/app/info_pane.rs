@@ -254,7 +254,7 @@ impl AppView {
 
         // The Users tab describes the selected account.
         if self.main_tab == MainTab::Users
-            && self.privilege_manager.is_none()
+            && !self.privilege_manager_active
             && let (Some(connection), Some(index)) = (self.users_connection, self.selected_user)
             && matches!(&self.users, Loadable::Loaded(users) if index < users.len())
         {

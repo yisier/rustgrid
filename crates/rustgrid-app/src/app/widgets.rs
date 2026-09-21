@@ -644,8 +644,7 @@ impl AppView {
                         cx.listener(move |this, _event, _window, cx| {
                             this.context_menu = None;
                             this.backup_selected = Some(BackupSelection::Config(index));
-                            this.info_open = true;
-                            cx.notify();
+                            this.set_info_open(true, cx);
                         }),
                     ));
             }

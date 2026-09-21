@@ -61,6 +61,7 @@ pub(crate) struct TextInputOptions {
 /// A queued mutation that must run on the next render, where a `Window` is available.
 enum Pending {
     SetText(String, bool),
+    SetPlaceholder(SharedString),
 }
 
 pub(crate) struct TextInput {
@@ -131,6 +132,17 @@ impl TextInput {
     /// Replaces the field's text. Applied on the next render, where a `Window` is available.
     pub(crate) fn set_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
         self.pending.push(Pending::SetText(text.into(), true));
+        cx.notify();
+    }
+
+    /// Replaces the field's placeholder. Applied on the next render, where a `Window` is available.
+    pub(crate) fn set_placeholder(
+        &mut self,
+        placeholder: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending
+            .push(Pending::SetPlaceholder(placeholder.into()));
         cx.notify();
     }
 
@@ -257,6 +269,11 @@ impl TextInput {
                     }
                     state.update(cx, |state, cx| {
                         state.set_value(text.clone(), window, cx);
+                    });
+                }
+                Pending::SetPlaceholder(placeholder) => {
+                    state.update(cx, |state, cx| {
+                        state.set_placeholder(placeholder.clone(), window, cx);
                     });
                 }
             }

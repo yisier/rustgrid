@@ -342,13 +342,11 @@ impl AppView {
             .map(|node| node.profile.name.clone())
             .unwrap_or_default();
         let theme = self.theme;
-        let app = cx.weak_entity();
         let runtime = self.runtime.clone();
         let manager = cx.new(|cx| {
             privilege_manager::PrivilegeManager::new(
                 connection,
                 connection_name,
-                app,
                 runtime,
                 theme,
                 cx,
@@ -356,10 +354,31 @@ impl AppView {
         });
         manager.update(cx, |manager, cx| manager.load(cx));
         self.privilege_manager = Some(manager);
+        self.privilege_manager_active = true;
         self.active_grid = None;
         self.active_query = None;
         self.active_design = None;
         self.selected_user = None;
+        cx.notify();
+    }
+
+    /// Make the privilege manager's tab the active one, without reloading it.
+    pub(super) fn activate_privilege_manager(&mut self, cx: &mut Context<'_, Self>) {
+        if self.privilege_manager.is_none() {
+            return;
+        }
+        self.privilege_manager_active = true;
+        self.active_grid = None;
+        self.active_query = None;
+        self.active_design = None;
+        self.query_completion = None;
+        cx.notify();
+    }
+
+    /// Close the privilege manager's tab and drop its state.
+    pub(super) fn close_privilege_manager(&mut self, cx: &mut Context<'_, Self>) {
+        self.privilege_manager = None;
+        self.privilege_manager_active = false;
         cx.notify();
     }
 

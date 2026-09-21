@@ -14,7 +14,7 @@ use gpui::{
     ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, Stateful, StyledText,
     Subscription, Svg, TextLayout, TitlebarOptions, UTF16Selection, UniformListScrollHandle,
     WeakEntity, Window, WindowBounds, WindowControlArea, WindowHandle, WindowId, WindowOptions,
-    canvas, deferred, div, img, prelude::*, px, rgb, rgba, size, svg, uniform_list,
+    canvas, deferred, div, img, prelude::*, px, rgb, size, svg, uniform_list,
 };
 use rustgrid_config::{AppSettings, ConfigStore, LanguageSetting, ThemeSetting};
 use rustgrid_core::{
@@ -1247,15 +1247,20 @@ pub struct AppView {
     create_user_expiry_combo: Option<Entity<ComboBox>>,
     /// The dialog's password-expiry interval (days) field, shown for the INTERVAL policy.
     create_user_expiry_days: Option<Entity<TextInput>>,
-    /// The dialog's 搜索数据库 and 搜索表 filters.
-    create_user_db_search: Option<Entity<TextInput>>,
-    create_user_table_search: Option<Entity<TextInput>>,
-    /// The dialog's privilege-level dropdown, while it is open.
-    create_user_level_menu: Option<user_create::CreateLevelMenu>,
+    /// The dialog's resource-limit fields.
+    create_user_max_questions: Option<Entity<TextInput>>,
+    create_user_max_updates: Option<Entity<TextInput>>,
+    create_user_max_connections: Option<Entity<TextInput>>,
+    create_user_max_user_connections: Option<Entity<TextInput>>,
+    /// The 权限 database filter.
+    create_user_database_search: Option<Entity<TextInput>>,
     /// The OS window hosting the "New User" dialog, if open.
     create_user_window: Option<WindowHandle<gpui_kit::component::Root>>,
-    /// The open privilege manager, shown in place of the Users list while it is up.
+    /// The open privilege manager. It owns its own tab in the main tab strip (at the same level
+    /// as the 对象 tab), so it stays open while the user switches back to the Users list.
     privilege_manager: Option<Entity<privilege_manager::PrivilegeManager>>,
+    /// Whether the privilege manager's tab is the active one (as opposed to the object/Users tab).
+    privilege_manager_active: bool,
     /// The OS window hosting the Backup/Restore UI, if open.
     backup_window: Option<WindowHandle<gpui_kit::component::Root>>,
     /// The open export wizard, if any.
@@ -1498,7 +1503,9 @@ impl AppView {
             sidebar_host,
             info_pane,
             sidebar_open: true,
-            info_open: false,
+            // The info pane stays hidden until the user reveals it; the choice is remembered in
+            // settings, so it is restored here instead of being forced open on the Users tab.
+            info_open: settings.show_info_pane,
             info_loaded_for: None,
             info_server: Loadable::Idle,
             info_database: Loadable::Idle,
@@ -1540,11 +1547,14 @@ impl AppView {
             create_user_plugin_combo: None,
             create_user_expiry_combo: None,
             create_user_expiry_days: None,
-            create_user_db_search: None,
-            create_user_table_search: None,
-            create_user_level_menu: None,
+            create_user_max_questions: None,
+            create_user_max_updates: None,
+            create_user_max_connections: None,
+            create_user_max_user_connections: None,
+            create_user_database_search: None,
             create_user_window: None,
             privilege_manager: None,
+            privilege_manager_active: false,
             backup_window: None,
             export_wizard: None,
             export_window: None,
@@ -1563,6 +1573,7 @@ impl AppView {
         let _ = self.config.save_settings(&AppSettings {
             theme: setting,
             language: self.language,
+            show_info_pane: self.info_open,
         });
         self.notify_object_pane(cx);
         cx.notify();
@@ -1577,8 +1588,25 @@ impl AppView {
         let _ = self.config.save_settings(&AppSettings {
             theme: self.theme_setting,
             language,
+            show_info_pane: self.info_open,
         });
         self.notify_object_pane(cx);
+        cx.notify();
+    }
+
+    /// Show or hide the right-hand object-info pane and remember the choice, so the next launch
+    /// restores it. This is the only way the pane is revealed from the chrome; it is never shown
+    /// automatically.
+    pub(super) fn set_info_open(&mut self, open: bool, cx: &mut Context<'_, Self>) {
+        if self.info_open == open {
+            return;
+        }
+        self.info_open = open;
+        let _ = self.config.save_settings(&AppSettings {
+            theme: self.theme_setting,
+            language: self.language,
+            show_info_pane: open,
+        });
         cx.notify();
     }
 
@@ -1731,6 +1759,11 @@ impl AppView {
             query.id.hash(&mut hasher);
             query.name.hash(&mut hasher);
         }
+        self.privilege_manager_active.hash(&mut hasher);
+        if let Some(manager) = &self.privilege_manager {
+            let manager = manager.read(cx);
+            manager.connection_name.hash(&mut hasher);
+        }
         hasher.finish()
     }
 
@@ -1878,7 +1911,7 @@ impl AppView {
                 .text_color(rgb(theme.text))
                 .child(format!("{count} {}", t!("common.backup")))
                 .into_any_element()
-        } else if self.main_tab == MainTab::Users && self.privilege_manager.is_none() {
+        } else if self.main_tab == MainTab::Users && !self.privilege_manager_active {
             div()
                 .flex_1()
                 .min_w(px(0.0))
@@ -1942,8 +1975,7 @@ impl AppView {
                         "icons/panel-right.svg",
                         "pane-toggle-info",
                         cx.listener(|this, _event, _window, cx| {
-                            this.info_open = !this.info_open;
-                            cx.notify();
+                            this.set_info_open(!this.info_open, cx);
                         }),
                     )),
             );

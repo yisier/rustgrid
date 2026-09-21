@@ -1,47 +1,34 @@
-//! The "New User" window (Navicat's 新建用户): the guided create flow opened by the Users
-//! toolbar's New button.
+//! The user-account window (Navicat's 新建用户 / 编辑用户): one unified editor for creating and
+//! editing a MySQL account.
 //!
-//! The layout follows Navicat's: the two account presets (普通用户 / 管理用户), the identity
-//! fields (username, host, plugin, password, confirm, password-expiry policy), and a
-//! per-database privilege section. The privilege section is master-detail — the database list on
-//! the left selects the database being configured, the card above it picks that database's
-//! privilege level and table scope, and a table picker appears beside the list for 指定表.
+//! There is no separate "quick" and "full" view any more. A single window shows a left navigation
+//! with five sections — 常规 (identity, authentication, attributes, resource limits), 服务器权限
+//! (global `*.*` privileges), 权限 (database/table grants), 角色 (role memberships) and SQL 预览 —
+//! and the same surface creates a new account or edits an existing one. A rename (changing the
+//! username/host) is applied with `RENAME USER` on save.
 //!
 //! Like the Export/Import wizards and the Backup window, this is a **separate OS window**, not a
 //! `Root` modal: `AppView` owns the state ([`UserCreateDialog`]) and this module renders it, so
-//! `AppView::sync_dialog` is not involved. Saving hands the resulting [`UserEdit`] to
-//! `Connection::save_user` and then opens the account in the full user editor for further tuning.
+//! `AppView::sync_dialog` is not involved.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 
-/// Height of one row in the identity form and the database/table lists.
+/// Height of one row in the identity form and the grant/role lists.
 const CREATE_ROW_HEIGHT: f32 = 26.0;
-/// Left inset of the identity form, so its labels line up under the preset card's text.
-const CREATE_FORM_INDENT: f32 = 40.0;
-/// Width of the identity form's label column; every label ends at the same x, which is what makes
-/// the control column left-aligned.
-const CREATE_LABEL_WIDTH: f32 = 160.0;
+/// Width of the identity form's label column; every label ends at the same x.
+const CREATE_LABEL_WIDTH: f32 = 150.0;
 /// Gap between a label and its control.
 const CREATE_LABEL_GAP: f32 = 16.0;
 /// Width of the identity form's control column.
 const CREATE_FIELD_WIDTH: f32 = 300.0;
-/// Fixed width of the privilege-level dropdown.
-const CREATE_LEVEL_WIDTH: f32 = 116.0;
-/// Fixed width of the database list while the table picker is shown beside it.
-const CREATE_DB_LIST_WIDTH: f32 = 236.0;
-/// Height of the database / table list panes.
-const CREATE_LIST_HEIGHT: f32 = 220.0;
-
-/// The window's account preset, drawn as the two cards at the top.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum CreateKind {
-    /// A regular account: only the databases and privileges picked below.
-    Regular,
-    /// An instance-level administrator: server privileges plus the standard admin object grants.
-    Admin,
-}
+/// Width of the narrower resource-limit fields.
+const CREATE_LIMIT_WIDTH: f32 = 120.0;
+/// Width of the left section navigation.
+const CREATE_NAV_WIDTH: f32 = 150.0;
+/// Width of the SQL preview's monospace box.
+const CREATE_PREVIEW_HEIGHT: f32 = 260.0;
 
 /// The 密码过期策略 choice, mapped to [`UserAccount::password_lifetime`].
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -73,140 +60,290 @@ fn expiry_value(expiry: CreateExpiry) -> &'static str {
     }
 }
 
-/// One database row of the window's privilege matrix.
-pub(super) struct CreateDatabaseRow {
-    pub(super) name: String,
-    /// Whether the database is granted to the account.
-    pub(super) selected: bool,
-    /// The privilege level applied to the database (or to its picked tables).
-    pub(super) level: CreateLevel,
-    /// Whether the grant covers the picked tables (指定表) rather than the whole database (全部表).
-    pub(super) specific: bool,
-    /// The tables picked for the 指定表 scope.
-    pub(super) tables: Vec<String>,
-}
-
-/// The canned privilege set applied to one database by the window's level dropdown. The window is
-/// a quick-start tool: the user editor's 权限 tab is where individual privileges are ticked.
+/// A one-click preset for the 服务器权限 section. Picking one replaces the ticked set, which can
+/// then be adjusted by hand.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum CreateLevel {
-    /// Read-only access (SELECT, SHOW VIEW).
+pub(super) enum ServerTemplate {
+    None,
     ReadOnly,
-    /// Read/write access.
     ReadWrite,
-    /// Read/write plus the data-definition privileges (CREATE/ALTER/DROP/INDEX/CREATE VIEW).
     Developer,
-    /// Every object-level privilege, including GRANT OPTION.
-    All,
+    Admin,
 }
 
-impl CreateLevel {
-    pub(super) const ALL: [CreateLevel; 4] = [
-        CreateLevel::ReadOnly,
-        CreateLevel::ReadWrite,
-        CreateLevel::Developer,
-        CreateLevel::All,
+impl ServerTemplate {
+    const ALL: [ServerTemplate; 5] = [
+        ServerTemplate::None,
+        ServerTemplate::ReadOnly,
+        ServerTemplate::ReadWrite,
+        ServerTemplate::Developer,
+        ServerTemplate::Admin,
     ];
 
-    pub(super) fn label_key(self) -> &'static str {
+    fn label_key(self) -> &'static str {
         match self {
-            CreateLevel::ReadOnly => "user.create.level.read_only",
-            CreateLevel::ReadWrite => "user.create.level.read_write",
-            CreateLevel::Developer => "user.create.level.developer",
-            CreateLevel::All => "user.create.level.all",
+            ServerTemplate::None => "user.create.template.none",
+            ServerTemplate::ReadOnly => "user.create.template.read_only",
+            ServerTemplate::ReadWrite => "user.create.template.read_write",
+            ServerTemplate::Developer => "user.create.template.developer",
+            ServerTemplate::Admin => "user.create.template.admin",
         }
     }
 
-    /// The privileges this level grants.
+    /// The global privileges this template grants.
     pub(super) fn privileges(self) -> BTreeSet<Privilege> {
         let mut set = BTreeSet::new();
         match self {
-            CreateLevel::ReadOnly => {
-                set.insert(Privilege::Select);
-                set.insert(Privilege::ShowView);
+            ServerTemplate::None => {}
+            ServerTemplate::ReadOnly => {
+                set.extend([Privilege::Select, Privilege::ShowView]);
             }
-            CreateLevel::ReadWrite => {
+            ServerTemplate::ReadWrite => {
                 set.extend([
                     Privilege::Select,
                     Privilege::Insert,
                     Privilege::Update,
                     Privilege::Delete,
+                    Privilege::ShowView,
+                    Privilege::Execute,
                 ]);
-                set.insert(Privilege::ShowView);
             }
-            CreateLevel::Developer => {
+            ServerTemplate::Developer => {
                 set.extend([
                     Privilege::Select,
                     Privilege::Insert,
                     Privilege::Update,
                     Privilege::Delete,
+                    Privilege::ShowView,
+                    Privilege::Execute,
                     Privilege::Create,
                     Privilege::Alter,
                     Privilege::Drop,
                     Privilege::Index,
                     Privilege::CreateView,
-                    Privilege::ShowView,
+                    Privilege::CreateRoutine,
+                    Privilege::AlterRoutine,
+                    Privilege::References,
+                    Privilege::Trigger,
+                    Privilege::Event,
+                    Privilege::CreateTemporaryTables,
+                    Privilege::LockTables,
                 ]);
             }
-            // `Privilege::OBJECT` already includes GRANT OPTION.
-            CreateLevel::All => set.extend(Privilege::OBJECT),
+            ServerTemplate::Admin => set.extend(Privilege::ALL),
         }
         set
     }
 }
 
-/// Which view of the account the window shows.
-///
-/// The two are the *same* account described two ways: 快速视图 is Navicat's guided form (presets
-/// plus the per-database privilege matrix) and 完整视图 is the full account designer (attributes,
-/// roles and the individual privilege matrix). Both edit [`UserCreateDialog::editor`], so
-/// switching views never loses or re-reads anything, and Save is one path for both.
+/// The window's left-navigation sections.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum CreateView {
-    /// The guided form, with the account presets.
-    Quick,
-    /// The full account designer.
+pub(super) enum UserSection {
+    General,
+    ServerPrivileges,
+    ObjectPrivileges,
+    Roles,
+    Sql,
+}
+
+impl UserSection {
+    const ALL: [UserSection; 5] = [
+        UserSection::General,
+        UserSection::ServerPrivileges,
+        UserSection::ObjectPrivileges,
+        UserSection::Roles,
+        UserSection::Sql,
+    ];
+
+    fn label_key(self) -> &'static str {
+        match self {
+            UserSection::General => "user.tab.general",
+            UserSection::ServerPrivileges => "user.tab.server_privileges",
+            UserSection::ObjectPrivileges => "user.tab.privileges",
+            UserSection::Roles => "user.tab.roles",
+            UserSection::Sql => "user.tab.sql",
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            UserSection::General => "icons/user.svg",
+            UserSection::ServerPrivileges => "icons/gear.svg",
+            UserSection::ObjectPrivileges => "icons/database.svg",
+            UserSection::Roles => "icons/user.svg",
+            UserSection::Sql => "icons/queries.svg",
+        }
+    }
+
+    fn id(self) -> &'static str {
+        match self {
+            UserSection::General => "user-create-nav-general",
+            UserSection::ServerPrivileges => "user-create-nav-server",
+            UserSection::ObjectPrivileges => "user-create-nav-object",
+            UserSection::Roles => "user-create-nav-roles",
+            UserSection::Sql => "user-create-nav-sql",
+        }
+    }
+}
+
+/// Whether a database's grant covers the whole database or only picked tables.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum GrantScope {
+    AllTables,
+    SpecificTables,
+}
+
+/// A one-click database-level privilege preset, matching the reference layout's 快捷权限预设.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum DbTemplate {
+    None,
+    ReadOnly,
+    ReadWrite,
     Full,
 }
 
-/// State of the "New User" window.
+impl DbTemplate {
+    const ALL: [DbTemplate; 4] = [
+        DbTemplate::None,
+        DbTemplate::ReadOnly,
+        DbTemplate::ReadWrite,
+        DbTemplate::Full,
+    ];
+
+    fn label_key(self) -> &'static str {
+        match self {
+            DbTemplate::None => "user.create.db_template.none",
+            DbTemplate::ReadOnly => "user.create.db_template.read_only",
+            DbTemplate::ReadWrite => "user.create.db_template.read_write",
+            DbTemplate::Full => "user.create.db_template.full",
+        }
+    }
+
+    pub(super) fn privileges(self) -> BTreeSet<Privilege> {
+        let mut set = BTreeSet::new();
+        match self {
+            DbTemplate::None => {}
+            DbTemplate::ReadOnly => {
+                set.insert(Privilege::Select);
+            }
+            DbTemplate::ReadWrite => {
+                set.extend([
+                    Privilege::Select,
+                    Privilege::Insert,
+                    Privilege::Update,
+                    Privilege::Delete,
+                ]);
+            }
+            DbTemplate::Full => set.extend(Privilege::OBJECT),
+        }
+        set
+    }
+}
+
+/// The grouped object privileges the 权限 detail pane shows as check boxes.
+fn db_privilege_groups() -> [(&'static str, Vec<Privilege>); 3] {
+    [
+        (
+            "user.create.priv_group.dml",
+            vec![
+                Privilege::Select,
+                Privilege::Insert,
+                Privilege::Update,
+                Privilege::Delete,
+            ],
+        ),
+        (
+            "user.create.priv_group.ddl",
+            vec![
+                Privilege::Create,
+                Privilege::Alter,
+                Privilege::Drop,
+                Privilege::Index,
+                Privilege::CreateView,
+                Privilege::CreateTemporaryTables,
+            ],
+        ),
+        (
+            "user.create.priv_group.routines",
+            vec![
+                Privilege::Execute,
+                Privilege::AlterRoutine,
+                Privilege::CreateRoutine,
+                Privilege::Trigger,
+                Privilege::References,
+                Privilege::LockTables,
+                Privilege::ShowView,
+                Privilege::GrantOption,
+            ],
+        ),
+    ]
+}
+
+/// One database row of the 权限 section: whether it is granted, its scope, and its privileges.
+pub(super) struct DbGrant {
+    pub(super) name: String,
+    pub(super) enabled: bool,
+    pub(super) scope: GrantScope,
+    pub(super) tables: Vec<String>,
+    pub(super) privileges: BTreeSet<Privilege>,
+}
+
+impl DbGrant {
+    /// The badge shown in the database list: the preset name (with its privilege count) or 未授权,
+    /// plus whether the database is granted (for its colour).
+    fn summary(&self) -> (String, bool) {
+        if !self.enabled || self.privileges.is_empty() {
+            return (t!("user.create.unauthorized").to_string(), false);
+        }
+        let count = self.privileges.len();
+        let name = if self.privileges == DbTemplate::ReadOnly.privileges() {
+            t!("user.create.db_template.read_only").to_string()
+        } else if self.privileges == DbTemplate::ReadWrite.privileges() {
+            t!("user.create.db_template.read_write").to_string()
+        } else if self.privileges == DbTemplate::Full.privileges() {
+            t!("user.create.db_template.full").to_string()
+        } else {
+            t!("user.create.custom").to_string()
+        };
+        (format!("{name} ({count})"), true)
+    }
+}
+
+/// State of the user-account window.
 pub(super) struct UserCreateDialog {
-    /// The connection the account is created on.
+    /// The connection the account lives on.
     pub(super) connection_index: usize,
-    pub(super) connection_name: String,
-    /// Which view is showing.
-    pub(super) view: CreateView,
-    /// The account being described. Shared by both views and owned here, so the window is the
-    /// single source of truth for the account (the full view is rendered from it directly).
+    /// The active navigation section.
+    pub(super) section: UserSection,
+    /// The account being described. Owned here so create and edit share one source of truth.
     pub(super) editor: UserEditorState,
-    pub(super) kind: CreateKind,
     pub(super) expiry: CreateExpiry,
     pub(super) expiry_days: u32,
-    /// The databases of the connection; picked up when the window opens.
-    pub(super) databases: Vec<CreateDatabaseRow>,
-    /// Every database's tables, loaded lazily per database for the 指定表 picker.
-    pub(super) tables: BTreeMap<String, Vec<String>>,
-    pub(super) loading_databases: bool,
-    /// The databases whose tables are currently being fetched.
-    pub(super) loading_tables: BTreeSet<String>,
-    /// The database currently being configured in the detail card (index into `databases`).
+    /// The server's databases, in server order.
+    pub(super) databases: Vec<String>,
+    /// One row per database, driving the 权限 section's list/detail.
+    pub(super) db_grants: Vec<DbGrant>,
+    /// The database shown in the 权限 detail pane (index into `db_grants`).
     pub(super) active_database: Option<usize>,
-    /// The 搜索数据库 filter text.
+    /// The 权限 database filter text.
     pub(super) database_search: String,
-    /// The 搜索表 filter text of the table picker.
-    pub(super) table_search: String,
-    /// Whether the 指定表 table picker is expanded beside the database list.
-    pub(super) tables_open: bool,
-    /// The 预览 SQL pane at the bottom of the window.
-    pub(super) preview_open: bool,
-    pub(super) preview_scroll: ScrollHandle,
-    /// The account's role/member edges, loaded when the full view is first opened.
+    pub(super) db_scroll: ScrollHandle,
+    pub(super) table_scroll: ScrollHandle,
+    /// Lazily-loaded tables per database (the 指定具体表 picker).
+    pub(super) tables: BTreeMap<String, Vec<String>>,
+    pub(super) loading_tables: BTreeSet<String>,
+    /// The account's role/member edges, loaded with the account.
     pub(super) context: Option<UserAccountContext>,
-    /// The membership candidate list (deferred, like its combo box).
-    pub(super) account_menu: Option<AccountMenu>,
+    /// Every account on the server, for the role membership lists.
+    pub(super) accounts: Vec<(String, String)>,
+    pub(super) sql_scroll: ScrollHandle,
+    /// Whether the account's details are still loading (Save is disabled until they are).
+    pub(super) loading: bool,
     /// The window's inline validation error.
     pub(super) error: Option<String>,
     pub(super) saving: bool,
+    /// Set briefly after a successful save so the footer can confirm it.
+    pub(super) saved: bool,
 }
 
 impl UserCreateDialog {
@@ -214,7 +351,6 @@ impl UserCreateDialog {
     /// host))` when editing an existing account, `None` when creating one.
     pub(super) fn new(
         connection_index: usize,
-        connection_name: String,
         plugin: String,
         account: Option<(String, String)>,
     ) -> Self {
@@ -226,37 +362,40 @@ impl UserCreateDialog {
             .as_ref()
             .map(|(_, host)| host.clone())
             .unwrap_or_else(|| "%".to_string());
+        let editing = account.is_some();
         let mut editor = UserEditorState::new(plugin.clone());
         editor.account.user = user;
         editor.account.host = host;
-        let context = account.map(|(user, host)| UserAccountContext {
-            user,
-            host,
+        // The identity is known up front, so the title and 新建/编辑 state are correct before the
+        // account's details finish loading.
+        editor.original_account = account.clone();
+        let context = Some(UserAccountContext {
+            user: editor.account.user.clone(),
+            host: editor.account.host.clone(),
             roles: BTreeMap::new(),
             members: BTreeMap::new(),
         });
         Self {
             connection_index,
-            connection_name,
-            view: CreateView::Quick,
+            section: UserSection::General,
             editor,
-            kind: CreateKind::Regular,
             expiry: CreateExpiry::Default,
             expiry_days: 30,
             databases: Vec::new(),
-            tables: BTreeMap::new(),
-            loading_databases: true,
-            loading_tables: BTreeSet::new(),
+            db_grants: Vec::new(),
             active_database: None,
             database_search: String::new(),
-            table_search: String::new(),
-            tables_open: false,
-            preview_open: false,
-            preview_scroll: ScrollHandle::new(),
+            db_scroll: ScrollHandle::new(),
+            table_scroll: ScrollHandle::new(),
+            tables: BTreeMap::new(),
+            loading_tables: BTreeSet::new(),
             context,
-            account_menu: None,
+            accounts: Vec::new(),
+            sql_scroll: ScrollHandle::new(),
+            loading: editing,
             error: None,
             saving: false,
+            saved: false,
         }
     }
 
@@ -270,32 +409,101 @@ impl UserCreateDialog {
         self.editor.original_account.is_some()
     }
 
-    /// Whether the guided (quick) view is showing.
-    pub(super) fn is_quick(&self) -> bool {
-        self.view == CreateView::Quick
+    /// The user/host pairs the role lists pick from.
+    pub(super) fn membership_candidates(&self) -> &[(String, String)] {
+        &self.accounts
     }
 
-    /// The user/host pairs a membership tab can pick from.
-    pub(super) fn membership_candidates(&self) -> Vec<(String, String)> {
-        self.account_menu
-            .as_ref()
-            .map(|menu| menu.accounts.clone())
-            .unwrap_or_default()
+    /// Rebuild the 权限 rows from the server database list and the account's loaded grants. Called
+    /// once the databases and (for an edit) the details are both in.
+    fn rebuild_db_grants(&mut self) {
+        let grants = &self.editor.grants;
+        // The server's database list plus any database that only appears in the account's grants,
+        // so a granted database the listing omits is never silently dropped (and revoked) on save.
+        let mut names: Vec<String> = self.databases.clone();
+        for grant in grants {
+            if !names.iter().any(|name| name == &grant.database) {
+                names.push(grant.database.clone());
+            }
+        }
+        let mut rows: Vec<DbGrant> = Vec::with_capacity(names.len());
+        for database in &names {
+            let db_grants: Vec<&ObjectGrant> = grants
+                .iter()
+                .filter(|grant| &grant.database == database)
+                .collect();
+            if let Some(whole) = db_grants.iter().find(|grant| grant.name.is_empty()) {
+                rows.push(DbGrant {
+                    name: database.clone(),
+                    enabled: true,
+                    scope: GrantScope::AllTables,
+                    tables: Vec::new(),
+                    privileges: whole.privileges.clone(),
+                });
+                continue;
+            }
+            let table_grants: Vec<&ObjectGrant> = db_grants
+                .iter()
+                .copied()
+                .filter(|grant| !grant.name.is_empty())
+                .collect();
+            if table_grants.is_empty() {
+                rows.push(DbGrant {
+                    name: database.clone(),
+                    enabled: false,
+                    scope: GrantScope::AllTables,
+                    tables: Vec::new(),
+                    privileges: BTreeSet::new(),
+                });
+            } else {
+                rows.push(DbGrant {
+                    name: database.clone(),
+                    enabled: true,
+                    scope: GrantScope::SpecificTables,
+                    tables: table_grants
+                        .iter()
+                        .map(|grant| grant.name.clone())
+                        .collect(),
+                    privileges: table_grants
+                        .iter()
+                        .flat_map(|grant| grant.privileges.iter().copied())
+                        .collect(),
+                });
+            }
+        }
+        self.db_grants = rows;
+        self.active_database = (!self.db_grants.is_empty()).then_some(0);
     }
 
-    /// The number of databases granted, for the quick view's "已选 N 个数据库" badge.
-    pub(super) fn selected_database_count(&self) -> usize {
-        self.databases.iter().filter(|row| row.selected).count()
-    }
-
-    /// The row currently being configured in the detail card.
-    fn active_row(&self) -> Option<&CreateDatabaseRow> {
-        self.active_database
-            .and_then(|index| self.databases.get(index))
+    /// Project the 权限 rows into the object grants `UserEdit` carries. A 指定具体表 scope with no
+    /// tables picked falls back to a whole-database grant so Save is never a silent no-op.
+    fn object_grants(&self) -> Vec<ObjectGrant> {
+        let mut grants = Vec::new();
+        for row in &self.db_grants {
+            if !row.enabled {
+                continue;
+            }
+            if row.scope == GrantScope::SpecificTables && !row.tables.is_empty() {
+                for table in &row.tables {
+                    grants.push(ObjectGrant {
+                        database: row.name.clone(),
+                        name: table.clone(),
+                        privileges: row.privileges.clone(),
+                    });
+                }
+            } else {
+                grants.push(ObjectGrant {
+                    database: row.name.clone(),
+                    name: String::new(),
+                    privileges: row.privileges.clone(),
+                });
+            }
+        }
+        grants
     }
 }
 
-/// Which identity field a change came from, used by the window's text inputs.
+/// Which identity/limit field a change came from, used by the window's text inputs.
 #[derive(Clone, Copy)]
 pub(super) enum CreateField {
     User,
@@ -303,8 +511,11 @@ pub(super) enum CreateField {
     Password,
     Confirm,
     ExpiryDays,
+    MaxQuestions,
+    MaxUpdates,
+    MaxConnections,
+    MaxUserConnections,
     DatabaseSearch,
-    TableSearch,
 }
 
 /// Which dropdown a change came from.
@@ -314,10 +525,8 @@ enum CreateCombo {
     Expiry,
 }
 
-/// The account-level state both views edit: the attributes, the server privileges and the
-/// individual object grants. The quick view projects a privilege matrix onto [`Self::grants`];
-/// the full view edits the 权限 tab directly. Owning it once is what lets the two views be the
-/// same account rather than two copies.
+/// The account-level state the window edits: the attributes, the server privileges, the individual
+/// object grants and the role edges.
 pub(super) struct UserEditorState {
     /// The account as loaded, or `None` while creating a new one.
     pub(super) original: Option<UserDetails>,
@@ -356,7 +565,7 @@ impl UserEditorState {
     }
 }
 
-/// The role/member edges of the account being edited, loaded with the full view.
+/// The role/member edges of the account being edited.
 pub(super) struct UserAccountContext {
     pub(super) user: String,
     pub(super) host: String,
@@ -366,60 +575,9 @@ pub(super) struct UserAccountContext {
     pub(super) members: BTreeMap<(String, String), bool>,
 }
 
-/// The membership candidate list, held until the full view's 成员属于 / 成员 tabs exist to render
-/// it (the gpui-kit combo state needs a `Window`).
-pub(super) struct AccountMenu {
-    pub(super) accounts: Vec<(String, String)>,
-}
-
-// ----- Grant building ------------------------------------------------------------------------
-
-/// The object grants the window currently describes.
-///
-/// 管理用户 is instance-level: the server privileges are what matter, so the standard admin package
-/// is granted on every database. 普通用户 grants only the checked databases — a whole-database
-/// grant, or one grant per picked table for the 指定表 scope (falling back to the whole database
-/// when nothing is picked, so Save is never a silent no-op).
-fn create_object_grants(dialog: &UserCreateDialog) -> Vec<ObjectGrant> {
-    if dialog.kind == CreateKind::Admin {
-        return dialog
-            .databases
-            .iter()
-            .map(|row| ObjectGrant {
-                database: row.name.clone(),
-                name: String::new(),
-                privileges: CreateLevel::All.privileges(),
-            })
-            .collect();
-    }
-    let mut grants: Vec<ObjectGrant> = Vec::new();
-    for row in &dialog.databases {
-        if !row.selected {
-            continue;
-        }
-        let privileges = row.level.privileges();
-        if row.specific && !row.tables.is_empty() {
-            for table in &row.tables {
-                grants.push(ObjectGrant {
-                    database: row.name.clone(),
-                    name: table.clone(),
-                    privileges: privileges.clone(),
-                });
-            }
-        } else {
-            grants.push(ObjectGrant {
-                database: row.name.clone(),
-                name: String::new(),
-                privileges,
-            });
-        }
-    }
-    grants
-}
-
 // ----- Layout helpers ------------------------------------------------------------------------
 
-/// A titled section of the full view: a heading (with an optional hint) above its content.
+/// A titled block: a small heading above its content.
 fn section(title: String, hint: Option<String>, content: AnyElement, theme: Theme) -> Div {
     let mut head = div()
         .flex()
@@ -452,9 +610,6 @@ fn section(title: String, hint: Option<String>, content: AnyElement, theme: Them
 }
 
 /// One labeled identity-form row: a fixed-width label then its control.
-///
-/// The label cell is `CREATE_LABEL_WIDTH` wide for **every** row, so all six controls start at the
-/// same x and the column is left-aligned — a per-label width would stagger them.
 fn create_row(label: String, control: AnyElement, theme: Theme) -> Div {
     div()
         .flex()
@@ -473,17 +628,17 @@ fn create_row(label: String, control: AnyElement, theme: Theme) -> Div {
         .child(control)
 }
 
-/// A `CREATE_FIELD_WIDTH` text field (or its empty placeholder while the entity is missing).
-fn sized_text(input: Option<&Entity<TextInput>>, theme: Theme) -> AnyElement {
+/// A text field of the given width (or its empty placeholder while the entity is missing).
+fn sized_text_w(input: Option<&Entity<TextInput>>, theme: Theme, width: f32) -> AnyElement {
     match input {
         Some(input) => div()
-            .w(px(CREATE_FIELD_WIDTH))
+            .w(px(width))
             .h(px(24.0))
             .flex_none()
             .child(input.clone())
             .into_any_element(),
         None => div()
-            .w(px(CREATE_FIELD_WIDTH))
+            .w(px(width))
             .h(px(24.0))
             .flex_none()
             .border_1()
@@ -491,6 +646,11 @@ fn sized_text(input: Option<&Entity<TextInput>>, theme: Theme) -> AnyElement {
             .bg(rgb(theme.input_bg))
             .into_any_element(),
     }
+}
+
+/// A `CREATE_FIELD_WIDTH` text field.
+fn sized_text(input: Option<&Entity<TextInput>>, theme: Theme) -> AnyElement {
+    sized_text_w(input, theme, CREATE_FIELD_WIDTH)
 }
 
 /// A `CREATE_FIELD_WIDTH` combo box (or its empty placeholder while the entity is missing).
@@ -513,10 +673,36 @@ fn sized_combo(combo: Option<&Entity<ComboBox>>, theme: Theme) -> AnyElement {
     }
 }
 
+/// A clickable checkbox row: a box then its label.
+fn check_row(
+    id: &'static str,
+    label: String,
+    checked: bool,
+    theme: Theme,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .h(px(CREATE_ROW_HEIGHT))
+        .cursor_pointer()
+        .on_click(on_click)
+        .child(checkbox_box(checked, theme))
+        .child(
+            div()
+                .text_size(px(12.0))
+                .text_color(rgb(theme.text))
+                .child(label),
+        )
+}
+
 // ----- Window --------------------------------------------------------------------------------
 
-/// The root view of the "New User" OS window. It re-renders whenever `AppView` changes, so the
-/// preset cards, the privilege matrix and the SQL preview stay live while the user edits them.
+/// The root view of the user-account OS window. It re-renders whenever `AppView` changes, so the
+/// sections and the SQL preview stay live while the user edits them.
 pub(super) struct UserCreateWindow {
     app: WeakEntity<AppView>,
     _subscription: Subscription,
@@ -548,12 +734,12 @@ impl Render for UserCreateWindow {
 // ----- Actions -------------------------------------------------------------------------------
 
 impl AppView {
-    /// Open the "New User" window for the connection the Users tab is scoped to.
+    /// Open the account window for a new account on the connection the Users tab is scoped to.
     pub(super) fn open_create_user(&mut self, cx: &mut Context<'_, Self>) {
         self.open_user_window(None, cx);
     }
 
-    /// Open an existing account in the same window, starting in the full view.
+    /// Open an existing account in the window.
     pub(super) fn open_edit_user(&mut self, account: (String, String), cx: &mut Context<'_, Self>) {
         self.open_user_window(Some(account), cx);
     }
@@ -563,8 +749,6 @@ impl AppView {
     /// window state and the field entities.
     fn open_user_window(&mut self, account: Option<(String, String)>, cx: &mut Context<'_, Self>) {
         if self.create_user_dialog.is_some() {
-            // Already open: raise it rather than ignoring the click, so the window is never left
-            // hidden behind the main one with no way to get back to it.
             self.focus_create_user_window(cx);
             return;
         }
@@ -578,11 +762,6 @@ impl AppView {
             cx.notify();
             return;
         };
-        let connection_name = self
-            .connections
-            .get(connection_index)
-            .map(|node| node.profile.name.clone())
-            .unwrap_or_default();
         let plugins = connection.authentication_plugins();
         let plugin = plugins
             .first()
@@ -641,17 +820,42 @@ impl AppView {
             &weak,
             cx,
         ));
-        self.create_user_db_search = Some(make_create_search_input(
+        self.create_user_max_questions = Some(make_create_field_input(
             theme,
-            t!("user.create.search_database").to_string(),
-            CreateField::DatabaseSearch,
+            "0".to_string(),
+            false,
+            CreateField::MaxQuestions,
             &weak,
             cx,
         ));
-        self.create_user_table_search = Some(make_create_search_input(
+        self.create_user_max_updates = Some(make_create_field_input(
             theme,
-            t!("user.create.search_table").to_string(),
-            CreateField::TableSearch,
+            "0".to_string(),
+            false,
+            CreateField::MaxUpdates,
+            &weak,
+            cx,
+        ));
+        self.create_user_max_connections = Some(make_create_field_input(
+            theme,
+            "0".to_string(),
+            false,
+            CreateField::MaxConnections,
+            &weak,
+            cx,
+        ));
+        self.create_user_max_user_connections = Some(make_create_field_input(
+            theme,
+            "0".to_string(),
+            false,
+            CreateField::MaxUserConnections,
+            &weak,
+            cx,
+        ));
+        self.create_user_database_search = Some(make_create_search_input(
+            theme,
+            t!("user.create.search_database").to_string(),
+            CreateField::DatabaseSearch,
             &weak,
             cx,
         ));
@@ -681,54 +885,48 @@ impl AppView {
             cx,
         ));
 
-        let mut dialog =
-            UserCreateDialog::new(connection_index, connection_name, plugin, account.clone());
-        if editing {
-            dialog.view = CreateView::Full;
-        }
+        let dialog = UserCreateDialog::new(connection_index, plugin, account);
         self.create_user_dialog = Some(dialog);
-        self.create_user_level_menu = None;
         if editing {
             self.load_edit_account(cx);
         } else {
-            self.load_create_databases(cx);
+            self.load_create_reference_data(cx);
         }
         self.open_create_user_window(cx);
         cx.notify();
     }
 
-    /// Load the account being edited into the window, and the databases its privilege matrix
-    /// shows.
+    /// Load the account being edited, plus the databases and accounts its sections show.
     fn load_edit_account(&mut self, cx: &mut Context<'_, Self>) {
         let Some(dialog) = self.create_user_dialog.as_ref() else {
             return;
         };
         let Some((user, host)) = dialog.original_account().cloned() else {
-            self.load_create_databases(cx);
+            self.load_create_reference_data(cx);
             return;
         };
         let Some(connection) = self.connection_arc(dialog.connection_index) else {
             return;
         };
         let runtime = self.runtime.clone();
-        let query_user = user.clone();
-        let query_host = host.clone();
         cx.spawn(async move |this, cx| {
             let joined = {
                 let connection = connection.clone();
                 runtime
                     .spawn(async move {
-                        let details = connection.user_details(&query_user, &query_host).await;
+                        let details = connection.user_details(&user, &host).await;
                         let accounts = connection.list_users().await;
-                        (details, accounts)
+                        let databases = connection.list_databases().await;
+                        (details, accounts, databases)
                     })
                     .await
             };
-            let (details, accounts) = match joined {
-                Ok(pair) => pair,
+            let (details, accounts, databases) = match joined {
+                Ok(joined) => joined,
                 Err(error) => {
                     let _ = this.update(cx, |app, cx| {
                         if let Some(dialog) = app.create_user_dialog.as_mut() {
+                            dialog.loading = false;
                             dialog.error = Some(error.to_string());
                         }
                         cx.notify();
@@ -740,203 +938,81 @@ impl AppView {
                 let Some(dialog) = app.create_user_dialog.as_mut() else {
                     return;
                 };
+                dialog.loading = false;
                 match details {
                     Ok(details) => dialog.editor.apply_details(details),
                     Err(error) => dialog.error = Some(error.to_string()),
                 }
                 if let Ok(accounts) = accounts {
-                    dialog.account_menu = Some(AccountMenu {
-                        accounts: accounts
-                            .into_iter()
-                            .map(|account| (account.user, account.host))
-                            .collect(),
-                    });
+                    dialog.accounts = accounts
+                        .into_iter()
+                        .map(|account| (account.user, account.host))
+                        .collect();
                 }
+                match databases {
+                    Ok(databases) => {
+                        dialog.databases = databases.into_iter().map(|db| db.name).collect();
+                    }
+                    Err(error) => dialog.error = Some(error.to_string()),
+                }
+                dialog.rebuild_db_grants();
                 app.sync_create_editor_fields(cx);
                 cx.notify();
             });
         })
         .detach();
-        self.load_create_databases(cx);
     }
 
-    /// Open the OS window hosting the "New User" dialog (mirrors the Export/Import windows).
-    fn open_create_user_window(&mut self, cx: &mut Context<'_, Self>) {
-        if self.create_user_window.is_some() {
-            return;
-        }
-        let weak = cx.weak_entity();
-        let app_entity = cx.entity();
-        let title = t!("user.create.title").to_string();
-        cx.defer(move |cx: &mut App| {
-            let Some(app) = weak.upgrade() else {
-                return;
-            };
-            let bounds = Bounds::centered(None, size(px(820.0), px(720.0)), cx);
-            let view_weak = weak.clone();
-            let opened = cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some(title.clone().into()),
-                        appears_transparent: true,
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                move |window, cx| {
-                    #[cfg(target_os = "windows")]
-                    crate::win_resize::install(window);
-                    // `open_window` does not raise what it opens, so without this the window can
-                    // appear behind the main one and look like the toolbar button did nothing.
-                    window.activate_window();
-                    let view =
-                        cx.new(|cx| UserCreateWindow::new(view_weak.clone(), &app_entity, cx));
-                    cx.new(|cx| gpui_kit::component::Root::new(view, window, cx))
-                },
-            );
-            match opened {
-                Ok(handle) => app.update(cx, |app, cx| {
-                    app.create_user_window = Some(handle);
-                    cx.notify();
-                }),
-                Err(error) => app.update(cx, |app, cx| {
-                    app.error_dialog = Some(error.to_string());
-                    cx.notify();
-                }),
-            }
-        });
-    }
-
-    /// Raise the already-open account window.
-    fn focus_create_user_window(&mut self, cx: &mut Context<'_, Self>) {
-        if let Some(handle) = self.create_user_window {
-            let _ = handle.update(cx, |_, window, _| {
-                window.activate_window();
-                window.refresh();
-            });
-        }
-    }
-
-    /// Close the window and drop the entities it created. Called from the footer, where the
-    /// window is at hand.
-    pub(super) fn create_user_close(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        self.cancel_create_user(cx);
-        window.remove_window();
-    }
-
-    /// Close the window and drop the entities it created.
-    pub(super) fn cancel_create_user(&mut self, cx: &mut Context<'_, Self>) {
-        self.create_user_dialog = None;
-        self.create_user_user = None;
-        self.create_user_host = None;
-        self.create_user_password = None;
-        self.create_user_confirm = None;
-        self.create_user_plugin_combo = None;
-        self.create_user_expiry_combo = None;
-        self.create_user_expiry_days = None;
-        self.create_user_db_search = None;
-        self.create_user_table_search = None;
-        self.create_user_level_menu = None;
-        self.create_user_window = None;
-        cx.notify();
-    }
-
-    /// Pick the account preset.
-    pub(super) fn set_create_user_kind(&mut self, kind: CreateKind, cx: &mut Context<'_, Self>) {
-        if let Some(dialog) = self.create_user_dialog.as_mut() {
-            dialog.kind = kind;
-            dialog.error = None;
-        }
-        self.create_user_level_menu = None;
-        cx.notify();
-    }
-
-    /// Write one of the window's text fields.
-    pub(super) fn set_create_field(
-        &mut self,
-        field: CreateField,
-        text: &str,
-        cx: &mut Context<'_, Self>,
-    ) {
-        if let Some(dialog) = self.create_user_dialog.as_mut() {
-            match field {
-                CreateField::User => dialog.editor.account.user = text.to_string(),
-                CreateField::Host => dialog.editor.account.host = text.to_string(),
-                CreateField::Password => dialog.editor.password = text.to_string(),
-                CreateField::Confirm => dialog.editor.guard_password = text.to_string(),
-                CreateField::ExpiryDays => {
-                    if let Ok(days) = text.trim().parse::<u32>() {
-                        dialog.expiry_days = days;
-                    }
-                }
-                CreateField::DatabaseSearch => dialog.database_search = text.to_string(),
-                CreateField::TableSearch => dialog.table_search = text.to_string(),
-            }
-        }
-        cx.notify();
-    }
-
-    /// Apply a plugin / password-expiry dropdown pick.
-    fn create_combo_selected(
-        &mut self,
-        field: CreateCombo,
-        value: &str,
-        cx: &mut Context<'_, Self>,
-    ) {
-        if let Some(dialog) = self.create_user_dialog.as_mut() {
-            match field {
-                CreateCombo::Plugin => dialog.editor.account.plugin = value.to_string(),
-                CreateCombo::Expiry => dialog.expiry = CreateExpiry::from_value(value),
-            }
-        }
-        cx.notify();
-    }
-
-    /// Load the connection's databases into the window's privilege matrix.
-    pub(super) fn load_create_databases(&mut self, cx: &mut Context<'_, Self>) {
+    /// Load the databases (for the grant picker) and accounts (for the role lists).
+    pub(super) fn load_create_reference_data(&mut self, cx: &mut Context<'_, Self>) {
         let Some(dialog) = self.create_user_dialog.as_ref() else {
             return;
         };
         let Some(connection) = self.connection_arc(dialog.connection_index) else {
             if let Some(dialog) = self.create_user_dialog.as_mut() {
-                dialog.loading_databases = false;
+                dialog.loading = false;
                 dialog.error = Some(t!("info.not_connected").to_string());
             }
             cx.notify();
             return;
         };
-        if let Some(dialog) = self.create_user_dialog.as_mut() {
-            dialog.loading_databases = true;
-            dialog.error = None;
-        }
         let runtime = self.runtime.clone();
         cx.spawn(async move |this, cx| {
-            let result = runtime
-                .spawn(async move { connection.list_databases().await })
-                .await;
+            let joined = {
+                let connection = connection.clone();
+                runtime
+                    .spawn(async move {
+                        let databases = connection.list_databases().await;
+                        let accounts = connection.list_users().await;
+                        (databases, accounts)
+                    })
+                    .await
+            };
             let _ = this.update(cx, |app, cx| {
                 let Some(dialog) = app.create_user_dialog.as_mut() else {
                     return;
                 };
-                dialog.loading_databases = false;
-                match result {
-                    Ok(Ok(databases)) => {
-                        dialog.databases = databases
-                            .into_iter()
-                            .map(|database| CreateDatabaseRow {
-                                name: database.name,
-                                selected: false,
-                                level: CreateLevel::ReadOnly,
-                                specific: false,
-                                tables: Vec::new(),
-                            })
-                            .collect();
-                        dialog.active_database = (!dialog.databases.is_empty()).then_some(0);
+                match joined {
+                    Ok((databases, accounts)) => {
+                        match databases {
+                            Ok(databases) => {
+                                dialog.databases =
+                                    databases.into_iter().map(|db| db.name).collect();
+                            }
+                            Err(error) => dialog.error = Some(error.to_string()),
+                        }
+                        if let Ok(accounts) = accounts
+                            && dialog.accounts.is_empty()
+                        {
+                            dialog.accounts = accounts
+                                .into_iter()
+                                .map(|account| (account.user, account.host))
+                                .collect();
+                        }
                     }
-                    Ok(Err(error)) => dialog.error = Some(error.to_string()),
                     Err(error) => dialog.error = Some(error.to_string()),
                 }
+                dialog.rebuild_db_grants();
                 cx.notify();
             });
         })
@@ -944,7 +1020,7 @@ impl AppView {
         cx.notify();
     }
 
-    /// Load one database's tables for the 指定表 picker the first time it is needed.
+    /// Load one database's tables for the 添加权限 picker's second level.
     pub(super) fn load_create_tables(&mut self, database: String, cx: &mut Context<'_, Self>) {
         let Some(dialog) = self.create_user_dialog.as_ref() else {
             return;
@@ -986,85 +1062,314 @@ impl AppView {
         cx.notify();
     }
 
-    /// Toggle the check box of one database row.
-    pub(super) fn toggle_create_database(&mut self, index: usize, cx: &mut Context<'_, Self>) {
-        if let Some(dialog) = self.create_user_dialog.as_mut()
-            && let Some(row) = dialog.databases.get_mut(index)
+    /// Open the OS window hosting the account dialog (mirrors the Export/Import windows).
+    fn open_create_user_window(&mut self, cx: &mut Context<'_, Self>) {
+        if self.create_user_window.is_some() {
+            return;
+        }
+        let weak = cx.weak_entity();
+        let app_entity = cx.entity();
+        let title = match self
+            .create_user_dialog
+            .as_ref()
+            .and_then(|dialog| dialog.original_account())
         {
-            row.selected = !row.selected;
+            Some((user, host)) => format!("{user}@{host} - {}", t!("user.create.edit_title")),
+            None => t!("user.create.title").to_string(),
+        };
+        cx.defer(move |cx: &mut App| {
+            let Some(app) = weak.upgrade() else {
+                return;
+            };
+            let bounds = Bounds::centered(None, size(px(900.0), px(720.0)), cx);
+            let view_weak = weak.clone();
+            let opened = cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some(title.clone().into()),
+                        appears_transparent: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                move |window, cx| {
+                    #[cfg(target_os = "windows")]
+                    crate::win_resize::install(window);
+                    window.activate_window();
+                    let view =
+                        cx.new(|cx| UserCreateWindow::new(view_weak.clone(), &app_entity, cx));
+                    cx.new(|cx| gpui_kit::component::Root::new(view, window, cx))
+                },
+            );
+            match opened {
+                Ok(handle) => app.update(cx, |app, cx| {
+                    app.create_user_window = Some(handle);
+                    cx.notify();
+                }),
+                Err(error) => app.update(cx, |app, cx| {
+                    app.error_dialog = Some(error.to_string());
+                    cx.notify();
+                }),
+            }
+        });
+    }
+
+    /// Raise the already-open account window.
+    fn focus_create_user_window(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(handle) = self.create_user_window {
+            let _ = handle.update(cx, |_, window, _| {
+                window.activate_window();
+                window.refresh();
+            });
+        }
+    }
+
+    /// Close the window and drop its entities.
+    pub(super) fn create_user_close(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.cancel_create_user(cx);
+        window.remove_window();
+    }
+
+    /// Close the window and drop its entities.
+    pub(super) fn cancel_create_user(&mut self, cx: &mut Context<'_, Self>) {
+        self.create_user_dialog = None;
+        self.create_user_user = None;
+        self.create_user_host = None;
+        self.create_user_password = None;
+        self.create_user_confirm = None;
+        self.create_user_plugin_combo = None;
+        self.create_user_expiry_combo = None;
+        self.create_user_expiry_days = None;
+        self.create_user_max_questions = None;
+        self.create_user_max_updates = None;
+        self.create_user_max_connections = None;
+        self.create_user_max_user_connections = None;
+        self.create_user_database_search = None;
+        self.create_user_window = None;
+        cx.notify();
+    }
+
+    /// Switch the window's active navigation section.
+    pub(super) fn set_create_section(&mut self, section: UserSection, cx: &mut Context<'_, Self>) {
+        if let Some(dialog) = self.create_user_dialog.as_mut() {
+            dialog.section = section;
         }
         cx.notify();
     }
 
-    /// Make one database the one shown in the detail card (the master-detail selection).
-    pub(super) fn activate_create_database(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+    /// Write one of the window's text fields.
+    pub(super) fn set_create_field(
+        &mut self,
+        field: CreateField,
+        text: &str,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(dialog) = self.create_user_dialog.as_mut() {
+            match field {
+                CreateField::User => dialog.editor.account.user = text.to_string(),
+                CreateField::Host => dialog.editor.account.host = text.to_string(),
+                CreateField::Password => dialog.editor.password = text.to_string(),
+                CreateField::Confirm => dialog.editor.guard_password = text.to_string(),
+                CreateField::ExpiryDays => {
+                    if let Ok(days) = text.trim().parse::<u32>() {
+                        dialog.expiry_days = days;
+                    }
+                }
+                CreateField::MaxQuestions => {
+                    dialog.editor.account.max_questions = parse_limit(text)
+                }
+                CreateField::MaxUpdates => dialog.editor.account.max_updates = parse_limit(text),
+                CreateField::MaxConnections => {
+                    dialog.editor.account.max_connections = parse_limit(text)
+                }
+                CreateField::MaxUserConnections => {
+                    dialog.editor.account.max_user_connections = parse_limit(text)
+                }
+                CreateField::DatabaseSearch => dialog.database_search = text.to_string(),
+            }
+        }
+        cx.notify();
+    }
+
+    /// Apply a plugin / password-expiry dropdown pick.
+    fn create_combo_selected(
+        &mut self,
+        field: CreateCombo,
+        value: &str,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(dialog) = self.create_user_dialog.as_mut() {
+            match field {
+                CreateCombo::Plugin => dialog.editor.account.plugin = value.to_string(),
+                CreateCombo::Expiry => dialog.expiry = CreateExpiry::from_value(value),
+            }
+        }
+        cx.notify();
+    }
+
+    /// Toggle the account-locked flag.
+    pub(super) fn toggle_create_locked(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(dialog) = self.create_user_dialog.as_mut() {
+            dialog.editor.account.account_locked = !dialog.editor.account.account_locked;
+        }
+        cx.notify();
+    }
+
+    /// Toggle one server privilege.
+    pub(super) fn toggle_create_server_privilege(
+        &mut self,
+        privilege: Privilege,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(dialog) = self.create_user_dialog.as_mut()
+            && !dialog.editor.server_privileges.remove(&privilege)
         {
+            dialog.editor.server_privileges.insert(privilege);
+        }
+        cx.notify();
+    }
+
+    /// Replace the server privileges with a template's set.
+    pub(super) fn apply_create_server_template(
+        &mut self,
+        template: ServerTemplate,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(dialog) = self.create_user_dialog.as_mut() {
+            dialog.editor.server_privileges = template.privileges();
+        }
+        cx.notify();
+    }
+
+    /// Select the database shown in the 权限 detail pane, loading its tables for 指定具体表.
+    pub(super) fn activate_create_database(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        let load = {
             let Some(dialog) = self.create_user_dialog.as_mut() else {
                 return;
             };
-            if index >= dialog.databases.len() {
+            if index >= dialog.db_grants.len() {
                 return;
             }
             dialog.active_database = Some(index);
-            dialog.table_search.clear();
-            dialog.tables_open = dialog.databases[index].specific;
-        }
-        self.create_user_level_menu = None;
-        if let Some(input) = self.create_user_table_search.clone() {
-            input.update(cx, |input, cx| input.set_text(String::new(), cx));
-        }
-        let database = self.create_user_database_needing_tables();
-        if let Some(database) = database {
+            let row = &dialog.db_grants[index];
+            (row.scope == GrantScope::SpecificTables).then(|| row.name.clone())
+        };
+        if let Some(database) = load {
             self.load_create_tables(database, cx);
         } else {
             cx.notify();
         }
     }
 
-    /// The active database's name if its 指定表 scope needs its tables loaded.
-    fn create_user_database_needing_tables(&self) -> Option<String> {
-        let dialog = self.create_user_dialog.as_ref()?;
-        let row = dialog.active_row()?;
-        (row.specific).then(|| row.name.clone())
+    /// Grant or revoke one database.
+    pub(super) fn toggle_create_database(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        if let Some(dialog) = self.create_user_dialog.as_mut()
+            && let Some(row) = dialog.db_grants.get_mut(index)
+        {
+            row.enabled = !row.enabled;
+        }
+        cx.notify();
     }
 
-    /// Set the active database's table scope (全部表 / 指定表).
-    pub(super) fn set_create_scope(&mut self, specific: bool, cx: &mut Context<'_, Self>) {
-        let database = {
+    /// Clear every database's grant.
+    pub(super) fn clear_create_databases(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(dialog) = self.create_user_dialog.as_mut() {
+            for row in &mut dialog.db_grants {
+                row.enabled = false;
+                row.scope = GrantScope::AllTables;
+                row.tables.clear();
+                row.privileges.clear();
+            }
+        }
+        cx.notify();
+    }
+
+    /// Set the active database's table scope (全部表 / 指定具体表).
+    pub(super) fn set_create_grant_scope(&mut self, scope: GrantScope, cx: &mut Context<'_, Self>) {
+        let load = {
             let Some(dialog) = self.create_user_dialog.as_mut() else {
                 return;
             };
             let Some(index) = dialog.active_database else {
                 return;
             };
-            let Some(row) = dialog.databases.get_mut(index) else {
+            let Some(row) = dialog.db_grants.get_mut(index) else {
                 return;
             };
-            row.specific = specific;
-            dialog.tables_open = specific;
-            specific.then(|| row.name.clone())
+            row.scope = scope;
+            if scope == GrantScope::SpecificTables {
+                row.enabled = true;
+                Some(row.name.clone())
+            } else {
+                row.tables.clear();
+                None
+            }
         };
-        self.create_user_level_menu = None;
-        if let Some(database) = database {
+        if let Some(database) = load {
             self.load_create_tables(database, cx);
         } else {
             cx.notify();
         }
     }
 
-    /// Expand or collapse the 指定表 table picker.
-    pub(super) fn toggle_create_tables_open(&mut self, cx: &mut Context<'_, Self>) {
-        if let Some(dialog) = self.create_user_dialog.as_mut() {
-            dialog.tables_open = !dialog.tables_open;
+    /// Apply a quick preset to the active database.
+    pub(super) fn apply_create_database_template(
+        &mut self,
+        template: DbTemplate,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(dialog) = self.create_user_dialog.as_mut()
+            && let Some(index) = dialog.active_database
+            && let Some(row) = dialog.db_grants.get_mut(index)
+        {
+            row.privileges = template.privileges();
+            row.enabled = !row.privileges.is_empty();
         }
         cx.notify();
     }
 
-    /// Toggle one table in the active database's 指定表 list.
+    /// Toggle one privilege on the active database.
+    pub(super) fn toggle_create_database_privilege(
+        &mut self,
+        privilege: Privilege,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(dialog) = self.create_user_dialog.as_mut()
+            && let Some(index) = dialog.active_database
+            && let Some(row) = dialog.db_grants.get_mut(index)
+        {
+            if !row.privileges.remove(&privilege) {
+                row.privileges.insert(privilege);
+            }
+            row.enabled = true;
+        }
+        cx.notify();
+    }
+
+    /// Select every object privilege on the active database, or clear them if all are already set.
+    pub(super) fn toggle_create_database_privileges_all(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(dialog) = self.create_user_dialog.as_mut()
+            && let Some(index) = dialog.active_database
+            && let Some(row) = dialog.db_grants.get_mut(index)
+        {
+            let all: BTreeSet<Privilege> = Privilege::OBJECT.into_iter().collect();
+            if row.privileges == all {
+                row.privileges.clear();
+                row.enabled = false;
+            } else {
+                row.privileges = all;
+                row.enabled = true;
+            }
+        }
+        cx.notify();
+    }
+
+    /// Toggle one table in the active database's 指定具体表 list.
     pub(super) fn toggle_create_table(&mut self, name: String, cx: &mut Context<'_, Self>) {
         if let Some(dialog) = self.create_user_dialog.as_mut()
             && let Some(index) = dialog.active_database
-            && let Some(row) = dialog.databases.get_mut(index)
+            && let Some(row) = dialog.db_grants.get_mut(index)
         {
             if let Some(position) = row.tables.iter().position(|table| *table == name) {
                 row.tables.remove(position);
@@ -1075,7 +1380,7 @@ impl AppView {
         cx.notify();
     }
 
-    /// Select or clear every table of the active database.
+    /// Select or clear every table of the active database's 指定具体表 list.
     pub(super) fn set_create_tables_all(&mut self, all: bool, cx: &mut Context<'_, Self>) {
         let Some(dialog) = self.create_user_dialog.as_mut() else {
             return;
@@ -1083,56 +1388,74 @@ impl AppView {
         let Some(index) = dialog.active_database else {
             return;
         };
-        let Some(row) = dialog.databases.get(index) else {
+        let Some(database) = dialog.db_grants.get(index).map(|row| row.name.clone()) else {
             return;
         };
-        let database = row.name.clone();
         let tables = dialog.tables.get(&database).cloned().unwrap_or_default();
-        if let Some(row) = dialog.databases.get_mut(index) {
+        if let Some(row) = dialog.db_grants.get_mut(index) {
             row.tables = if all { tables } else { Vec::new() };
         }
         cx.notify();
     }
 
-    /// Pick a privilege level for the active database, closing the inline menu.
-    pub(super) fn choose_create_level(&mut self, level: CreateLevel, cx: &mut Context<'_, Self>) {
-        if let Some(dialog) = self.create_user_dialog.as_mut()
-            && let Some(index) = dialog.active_database
-            && let Some(row) = dialog.databases.get_mut(index)
-        {
-            row.level = level;
-            row.selected = true;
-        }
-        self.create_user_level_menu = None;
-        cx.notify();
-    }
-
-    /// Show/hide the active database's inline privilege-level list.
-    pub(super) fn toggle_create_level_menu(&mut self, index: usize, cx: &mut Context<'_, Self>) {
-        let open = self.create_user_level_menu.as_ref().map(|menu| menu.index) == Some(index);
-        self.create_user_level_menu = if open {
-            None
-        } else {
-            Some(CreateLevelMenu { index })
+    /// Toggle one role/member edge. Turning a grant off also drops its admin option.
+    pub(super) fn toggle_create_membership(
+        &mut self,
+        member_of: bool,
+        key: (String, String),
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(dialog) = self.create_user_dialog.as_mut() else {
+            return;
         };
-        cx.notify();
-    }
-
-    /// Show/hide the window's SQL preview pane.
-    pub(super) fn toggle_create_preview(&mut self, cx: &mut Context<'_, Self>) {
-        if let Some(dialog) = self.create_user_dialog.as_mut() {
-            dialog.preview_open = !dialog.preview_open;
+        let Some(context) = dialog.context.as_mut() else {
+            return;
+        };
+        let edges = if member_of {
+            &mut context.roles
+        } else {
+            &mut context.members
+        };
+        if edges.remove(&key).is_none() {
+            edges.insert(key, false);
         }
         cx.notify();
     }
 
-    /// Push the loaded account into the window's managed text fields, combos and the quick view.
-    /// Called after loading or reloading the account.
+    /// Toggle the admin option of one role/member edge, granting it first if needed.
+    pub(super) fn toggle_create_role_admin(
+        &mut self,
+        member_of: bool,
+        key: (String, String),
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(dialog) = self.create_user_dialog.as_mut() else {
+            return;
+        };
+        let Some(context) = dialog.context.as_mut() else {
+            return;
+        };
+        let edges = if member_of {
+            &mut context.roles
+        } else {
+            &mut context.members
+        };
+        match edges.get_mut(&key) {
+            Some(admin) => *admin = !*admin,
+            None => {
+                edges.insert(key, true);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Push the loaded account into the window's managed text fields and combos.
     pub(super) fn sync_create_editor_fields(&mut self, cx: &mut Context<'_, Self>) {
         let Some(dialog) = self.create_user_dialog.as_ref() else {
             return;
         };
         let account = dialog.editor.account.clone();
+        let editing = dialog.is_edit();
         let password_cleared = dialog.editor.password.is_empty();
         let expiry = match account.password_lifetime {
             None => CreateExpiry::Default,
@@ -1157,8 +1480,39 @@ impl AppView {
                 input.update(cx, |input, cx| input.set_text(String::new(), cx));
             }
         }
+        // Like Navicat: an existing password shows as a masked hint (never the plaintext, which the
+        // server does not store) so the field does not look empty.
+        let password_hint = if editing && account.password_set {
+            SharedString::from("••••••••••")
+        } else {
+            SharedString::default()
+        };
+        for input in [
+            self.create_user_password.clone(),
+            self.create_user_confirm.clone(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            input.update(cx, |input, cx| {
+                input.set_placeholder(password_hint.clone(), cx)
+            });
+        }
         if let Some(input) = self.create_user_expiry_days.clone() {
             input.update(cx, |input, cx| input.set_text(expiry_days.to_string(), cx));
+        }
+        for (input, value) in [
+            (&self.create_user_max_questions, account.max_questions),
+            (&self.create_user_max_updates, account.max_updates),
+            (&self.create_user_max_connections, account.max_connections),
+            (
+                &self.create_user_max_user_connections,
+                account.max_user_connections,
+            ),
+        ] {
+            if let Some(input) = input.clone() {
+                input.update(cx, |input, cx| input.set_text(value.to_string(), cx));
+            }
         }
         if let Some(combo) = self.create_user_plugin_combo.clone() {
             combo.update(cx, |combo, cx| {
@@ -1182,10 +1536,20 @@ impl AppView {
         let Some(dialog) = self.create_user_dialog.as_ref() else {
             return;
         };
+        let connection_index = dialog.connection_index;
         let Some((user, host)) = dialog.original_account().cloned() else {
+            if let Some(dialog) = self.create_user_dialog.as_mut() {
+                dialog.loading = false;
+            }
+            cx.notify();
             return;
         };
-        let Some(connection) = self.connection_arc(dialog.connection_index) else {
+        let Some(connection) = self.connection_arc(connection_index) else {
+            if let Some(dialog) = self.create_user_dialog.as_mut() {
+                dialog.loading = false;
+                dialog.error = Some(t!("info.not_connected").to_string());
+            }
+            cx.notify();
             return;
         };
         let runtime = self.runtime.clone();
@@ -1197,6 +1561,7 @@ impl AppView {
                 let Some(dialog) = app.create_user_dialog.as_mut() else {
                     return;
                 };
+                dialog.loading = false;
                 match result {
                     Ok(Ok(details)) => {
                         dialog.editor.apply_details(details);
@@ -1212,147 +1577,9 @@ impl AppView {
         cx.notify();
     }
 
-    /// Switch the window between the guided (quick) and full views.
-    pub(super) fn set_create_view(&mut self, view: CreateView, cx: &mut Context<'_, Self>) {
-        let load_membership = {
-            let Some(dialog) = self.create_user_dialog.as_mut() else {
-                return;
-            };
-            dialog.view = view;
-            view == CreateView::Full && dialog.account_menu.is_none()
-        };
-        self.create_user_level_menu = None;
-        if load_membership {
-            self.load_create_accounts(cx);
-        } else {
-            cx.notify();
-        }
-    }
-
-    /// Load the server's account list for the full view's 成员属于 / 成员 tabs.
-    fn load_create_accounts(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(dialog) = self.create_user_dialog.as_ref() else {
-            return;
-        };
-        let Some(connection) = self.connection_arc(dialog.connection_index) else {
-            return;
-        };
-        let runtime = self.runtime.clone();
-        cx.spawn(async move |this, cx| {
-            let result = runtime
-                .spawn(async move { connection.list_users().await })
-                .await;
-            let _ = this.update(cx, |app, cx| {
-                let Some(dialog) = app.create_user_dialog.as_mut() else {
-                    return;
-                };
-                match result {
-                    Ok(Ok(accounts)) => {
-                        dialog.account_menu = Some(AccountMenu {
-                            accounts: accounts
-                                .into_iter()
-                                .map(|account| (account.user, account.host))
-                                .collect(),
-                        });
-                    }
-                    Ok(Err(error)) => dialog.error = Some(error.to_string()),
-                    Err(error) => dialog.error = Some(error.to_string()),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    /// Toggle one object privilege on the selected grant row.
-    pub(super) fn toggle_create_grant_privilege(
-        &mut self,
-        row: usize,
-        privilege: Privilege,
-        cx: &mut Context<'_, Self>,
-    ) {
-        if let Some(dialog) = self.create_user_dialog.as_mut()
-            && let Some(grant) = dialog.editor.grants.get_mut(row)
-            && !grant.privileges.remove(&privilege)
-        {
-            grant.privileges.insert(privilege);
-        }
-        cx.notify();
-    }
-
-    /// Toggle one server privilege in the full view's 服务器权限 tab.
-    pub(super) fn toggle_create_server_privilege(
-        &mut self,
-        privilege: Privilege,
-        cx: &mut Context<'_, Self>,
-    ) {
-        if let Some(dialog) = self.create_user_dialog.as_mut()
-            && !dialog.editor.server_privileges.remove(&privilege)
-        {
-            dialog.editor.server_privileges.insert(privilege);
-        }
-        cx.notify();
-    }
-
-    /// Toggle one role/member edge in the full view's membership tabs.
-    pub(super) fn toggle_create_membership(
-        &mut self,
-        member_of: bool,
-        key: (String, String),
-        cx: &mut Context<'_, Self>,
-    ) {
-        let Some(dialog) = self.create_user_dialog.as_mut() else {
-            return;
-        };
-        let Some(context) = dialog.context.as_mut() else {
-            return;
-        };
-        let edges = if member_of {
-            &mut context.roles
-        } else {
-            &mut context.members
-        };
-        if edges.remove(&key).is_none() {
-            edges.insert(key, false);
-        }
-        cx.notify();
-    }
-
-    /// Toggle the admin option of one role edge.
-    pub(super) fn toggle_create_role_admin(
-        &mut self,
-        key: (String, String),
-        cx: &mut Context<'_, Self>,
-    ) {
-        if let Some(dialog) = self.create_user_dialog.as_mut()
-            && let Some(context) = dialog.context.as_mut()
-            && let Some(admin) = context.roles.get_mut(&key)
-        {
-            *admin = !*admin;
-        }
-        cx.notify();
-    }
-
     /// The edit the window currently describes. `None` while the window is closed.
-    ///
-    /// The account identity and the individual privilege surface come from the shared
-    /// [`UserEditorState`], so both views build exactly one edit.
     pub(super) fn create_user_edit(&self) -> Option<UserEdit> {
         let dialog = self.create_user_dialog.as_ref()?;
-        let is_admin = dialog.kind == CreateKind::Admin && dialog.is_quick();
-        let server_privileges = if is_admin {
-            Privilege::ALL.into_iter().collect()
-        } else {
-            dialog.editor.server_privileges.clone()
-        };
-        let grants = if dialog.is_quick() {
-            // The guided view describes privileges with its matrix; the full view edits the
-            // individual grants directly.
-            create_object_grants(dialog)
-        } else {
-            dialog.editor.grants.clone()
-        };
         let (roles, members) = match dialog.context.as_ref() {
             Some(context) => (
                 context
@@ -1383,14 +1610,14 @@ impl AppView {
             } else {
                 Some(dialog.editor.password.clone())
             },
-            server_privileges,
-            grants,
+            server_privileges: dialog.editor.server_privileges.clone(),
+            grants: dialog.object_grants(),
             roles,
             members,
         })
     }
 
-    /// The SQL the window would run, for the preview pane.
+    /// The SQL the window would run, for the SQL 预览 section.
     pub(super) fn create_user_sql(&self) -> String {
         let Some(connection_index) = self
             .create_user_dialog
@@ -1408,13 +1635,12 @@ impl AppView {
         }
     }
 
-    /// Validate and save the account. Creating an account switches the window to the full view
-    /// (no need to close and reopen); saving an existing one just reloads it in place.
+    /// Validate and save the account, then reload it in place.
     pub(super) fn submit_create_user(&mut self, cx: &mut Context<'_, Self>) {
         let Some(dialog) = self.create_user_dialog.as_ref() else {
             return;
         };
-        if dialog.saving {
+        if dialog.saving || dialog.loading {
             return;
         }
         if dialog.editor.account.user.trim().is_empty() {
@@ -1437,10 +1663,9 @@ impl AppView {
             return;
         };
         let connection_index = dialog.connection_index;
-        let connection_name = dialog.connection_name.clone();
-        let was_new = edit.original.is_none();
         if let Some(dialog) = self.create_user_dialog.as_mut() {
             dialog.saving = true;
+            dialog.saved = false;
             dialog.error = None;
         }
         let Some(connection) = self.connection_arc(connection_index) else {
@@ -1459,6 +1684,7 @@ impl AppView {
             let _ = this.update(cx, |app, cx| {
                 let succeeded = matches!(result, Ok(Ok(())));
                 match result {
+                    Ok(Ok(())) => {}
                     Ok(Err(error)) => {
                         if let Some(dialog) = app.create_user_dialog.as_mut() {
                             dialog.saving = false;
@@ -1471,7 +1697,6 @@ impl AppView {
                             dialog.error = Some(error.to_string());
                         }
                     }
-                    Ok(Ok(())) => {}
                 }
                 if succeeded {
                     app.refresh_users(cx);
@@ -1480,26 +1705,32 @@ impl AppView {
                             return;
                         };
                         dialog.saving = false;
+                        dialog.loading = true;
+                        dialog.saved = true;
                         dialog.editor.password.clear();
                         dialog.editor.guard_password.clear();
-                        // Adopt the saved identity so a re-save targets it, and so the window is
-                        // now editing this account rather than creating one.
-                        dialog.editor.original_account = Some((
-                            dialog.editor.account.user.clone(),
-                            dialog.editor.account.host.clone(),
-                        ));
-                        if was_new {
-                            dialog.view = CreateView::Full;
+                        // Adopt the saved identity so a re-save targets it (and a rename sticks).
+                        let new_user = dialog.editor.account.user.clone();
+                        let new_host = dialog.editor.account.host.clone();
+                        dialog.editor.original_account = Some((new_user.clone(), new_host.clone()));
+                        if let Some(context) = dialog.context.as_mut() {
+                            context.user = new_user;
+                            context.host = new_host;
                         }
                     }
-                    if was_new {
-                        // A newly created account now exists; load it so later edits diff
-                        // against it.
-                        app.load_edit_account(cx);
-                    } else {
-                        app.reload_create_account(cx);
-                    }
-                    let _ = connection_name;
+                    app.reload_create_account(cx);
+                    // Confirm the save in the footer, then fade it after a moment.
+                    let executor = cx.background_executor().clone();
+                    cx.spawn(async move |this, cx| {
+                        executor.timer(std::time::Duration::from_millis(2500)).await;
+                        let _ = this.update(cx, |app, cx| {
+                            if let Some(dialog) = app.create_user_dialog.as_mut() {
+                                dialog.saved = false;
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .detach();
                 }
                 cx.notify();
             });
@@ -1511,8 +1742,13 @@ impl AppView {
 
 // ----- Window field entities -----------------------------------------------------------------
 
-/// Build one identity field of the window. Edits write straight into the window state so the SQL
-/// preview and the save path always see the latest text.
+/// Parse a resource-limit field; an empty or invalid value means "no limit" (0).
+fn parse_limit(text: &str) -> u64 {
+    text.trim().parse::<u64>().unwrap_or(0)
+}
+
+/// Build one identity/limit field of the window. Edits write straight into the window state so the
+/// SQL preview and the save path always see the latest text.
 fn make_create_field_input(
     theme: Theme,
     value: String,
@@ -1596,33 +1832,45 @@ fn make_create_combo(
 // ----- Rendering -----------------------------------------------------------------------------
 
 impl AppView {
-    /// The window's contents: the child titlebar, the view switcher, the body and the footer.
+    /// The window's contents: the child titlebar, the section navigation + content, and the footer.
     pub(super) fn create_user_window_contents(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
-        let title = match self
-            .create_user_dialog
-            .as_ref()
-            .and_then(|dialog| dialog.original_account())
-        {
-            Some((user, _host)) => user.clone(),
+        let Some(dialog) = self.create_user_dialog.as_ref() else {
+            return div().into_any_element();
+        };
+        let title = match dialog.original_account() {
+            Some((user, host)) => format!("{user}@{host} - {}", t!("user.create.edit_title")),
             None => t!("user.create.title").to_string(),
         };
-        div()
+
+        let root = div()
+            .relative()
             .flex()
             .flex_col()
             .size_full()
             .bg(rgb(theme.dialog_face))
             .text_color(rgb(theme.text))
             .child(export::child_window_titlebar(title, theme))
-            .child(self.render_create_view_tabs(cx))
             .child(
                 div()
                     .flex()
-                    .flex_col()
+                    .flex_row()
                     .flex_1()
                     .min_h(px(0.0))
                     .w_full()
-                    .child(self.create_user_body(cx)),
+                    .child(self.render_create_nav(cx))
+                    .child(
+                        div()
+                            .id("user-create-content")
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .h_full()
+                            .overflow_y_scroll()
+                            .p_4()
+                            .child(self.create_user_body(cx)),
+                    ),
             )
             .child(
                 div()
@@ -1633,556 +1881,90 @@ impl AppView {
                     .border_t_1()
                     .border_color(rgb(theme.border))
                     .child(self.create_user_footer(cx)),
-            )
-            .into_any_element()
-    }
-
-    /// The 快速视图 / 完整视图 switcher. Both views edit the same account, so switching is lossless.
-    fn render_create_view_tabs(&self, cx: &mut Context<'_, Self>) -> AnyElement {
-        let theme = self.theme;
-        let Some(dialog) = self.create_user_dialog.as_ref() else {
-            return div().into_any_element();
-        };
-        let mut bar = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .w_full()
-            .px_4()
-            .py_2()
-            .flex_none()
-            .bg(rgb(theme.dialog_face))
-            .border_b_1()
-            .border_color(rgb(theme.border));
-        for (view, label_key) in [
-            (CreateView::Quick, "user.create.view.quick"),
-            (CreateView::Full, "user.create.view.full"),
-        ] {
-            let active = dialog.view == view;
-            bar =
-                bar.child(
-                    div()
-                        .id(match view {
-                            CreateView::Quick => "user-create-view-quick",
-                            CreateView::Full => "user-create-view-full",
-                        })
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .h(px(24.0))
-                        .px_3()
-                        .rounded(px(4.0))
-                        .text_size(px(12.0))
-                        .cursor_pointer()
-                        .when(active, move |style| {
-                            style
-                                .bg(rgb(theme.primary))
-                                .text_color(rgb(if theme.is_dark() {
-                                    theme.window_bg
-                                } else {
-                                    0xffffff
-                                }))
-                        })
-                        .when(!active, move |style| {
-                            style
-                                .bg(rgb(theme.button_bg))
-                                .border_1()
-                                .border_color(rgb(theme.border))
-                                .text_color(rgb(theme.text_muted))
-                                .hover(move |style| style.text_color(rgb(theme.text)))
-                        })
-                        .on_click(cx.listener(move |this, _event, _window, cx| {
-                            this.set_create_view(view, cx)
-                        }))
-                        .child(t!(label_key).to_string()),
-                );
-        }
-        bar.into_any_element()
-    }
-
-    /// The body of the current view.
-    fn create_user_body(&self, cx: &mut Context<'_, Self>) -> AnyElement {
-        let Some(dialog) = self.create_user_dialog.as_ref() else {
-            return div().into_any_element();
-        };
-        if dialog.is_quick() {
-            self.create_user_quick_body(cx)
-        } else {
-            self.create_user_full_body(cx)
-        }
-    }
-
-    /// The guided body: the presets, the identity fields, the privilege section and the optional
-    /// SQL preview.
-    fn create_user_quick_body(&self, cx: &mut Context<'_, Self>) -> AnyElement {
-        let theme = self.theme;
-        let Some(dialog) = self.create_user_dialog.as_ref() else {
-            return div().into_any_element();
-        };
-        let is_admin = dialog.kind == CreateKind::Admin;
-
-        let mut body = div()
-            .id("user-create-body")
-            .flex()
-            .flex_col()
-            .gap_4()
-            .w_full()
-            .flex_1()
-            .min_h(px(0.0))
-            .overflow_y_scroll()
-            .p_4()
-            .child(self.render_create_presets(cx))
-            .child(self.render_create_identity());
-
-        if is_admin {
-            // 管理用户 is instance-level: the matrix is replaced by the preset's warning.
-            body = body.child(self.render_create_admin_warning());
-        } else {
-            body = body.child(self.render_create_databases(cx));
-        }
-
-        if let Some(error) = dialog.error.as_ref() {
-            body = body.child(
-                div()
-                    .text_size(px(12.0))
-                    .text_color(rgb(theme.danger))
-                    .child(error.clone()),
             );
-        }
 
-        if dialog.preview_open {
-            body = body.child(self.render_create_preview());
-        }
-
-        body.into_any_element()
+        root.into_any_element()
     }
 
-    /// The full body: the identity attributes, the server privileges, the individual privilege
-    /// matrix and the membership tabs — the same surface the old user-editor tab showed, now
-    /// rendering the shared [`UserEditorState`].
-    fn create_user_full_body(&self, cx: &mut Context<'_, Self>) -> AnyElement {
-        let Some(dialog) = self.create_user_dialog.as_ref() else {
-            return div().into_any_element();
-        };
-        let _ = dialog;
-
-        div()
-            .id("user-create-full-body")
-            .flex()
-            .flex_col()
-            .gap_4()
-            .w_full()
-            .flex_1()
-            .min_h(px(0.0))
-            .overflow_y_scroll()
-            .p_4()
-            .child(self.render_create_identity())
-            .child(self.render_create_server_privileges(cx))
-            .child(self.render_create_grants(cx))
-            .child(self.render_create_memberships(cx))
-            .into_any_element()
-    }
-
-    /// The 服务器权限 section of the full view.
-    fn render_create_server_privileges(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+    /// The left section navigation.
+    fn render_create_nav(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
         let Some(dialog) = self.create_user_dialog.as_ref() else {
             return div().into_any_element();
         };
-        let checked_count = dialog.editor.server_privileges.len();
-        let mut grid = div().flex().flex_row().flex_wrap().w_full();
-        for (index, privilege) in Privilege::ALL.into_iter().enumerate() {
-            let checked = dialog.editor.server_privileges.contains(&privilege);
-            grid = grid.child(
+        let mut nav = div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .w(px(CREATE_NAV_WIDTH))
+            .h_full()
+            .py_2()
+            .bg(rgb(theme.sidebar_bg))
+            .border_r_1()
+            .border_color(rgb(theme.border));
+        for section in UserSection::ALL {
+            let active = dialog.section == section;
+            let icon_color = if active {
+                theme.tree_selected_text
+            } else {
+                theme.text_muted
+            };
+            nav = nav.child(
                 div()
-                    .id(SharedString::from(format!(
-                        "user-create-server-priv-{index}"
-                    )))
+                    .id(section.id())
                     .flex()
                     .flex_row()
                     .items_center()
                     .gap_2()
-                    .w(px(200.0))
-                    .h(px(CREATE_ROW_HEIGHT))
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.toggle_create_server_privilege(privilege, cx)
+                    .h(px(30.0))
+                    .px_3()
+                    .flex_none()
+                    .text_size(px(12.0))
+                    .text_color(rgb(if active {
+                        theme.tree_selected_text
+                    } else {
+                        theme.text
                     }))
-                    .child(checkbox_box(checked, theme))
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(rgb(theme.text))
-                            .child(t!(privilege.label_key()).to_string()),
-                    ),
-            );
-        }
-        section(
-            t!("user.tab.server_privileges").to_string(),
-            Some(t!("user.create.server_privileges_hint", count = checked_count).to_string()),
-            grid.into_any_element(),
-            theme,
-        )
-        .into_any_element()
-    }
-
-    /// The 权限 section of the full view: the object grants with their privilege check boxes.
-    fn render_create_grants(&self, cx: &mut Context<'_, Self>) -> AnyElement {
-        let theme = self.theme;
-        let Some(dialog) = self.create_user_dialog.as_ref() else {
-            return div().into_any_element();
-        };
-        let grants = dialog.editor.grants.clone();
-        let database_width = 140.0;
-        let name_width = 150.0;
-        let priv_width = 62.0;
-
-        let mut header = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .h(px(24.0))
-            .flex_none()
-            .bg(rgb(theme.header_bg))
-            .border_b_1()
-            .border_color(rgb(theme.border))
-            .text_size(px(11.0))
-            .child(
-                div()
-                    .w(px(database_width))
-                    .flex_none()
-                    .px_2()
-                    .child(t!("user.privilege.database").to_string()),
-            )
-            .child(
-                div()
-                    .w(px(name_width))
-                    .flex_none()
-                    .px_2()
-                    .child(t!("user.privilege.object").to_string()),
-            );
-        for privilege in Privilege::OBJECT {
-            header = header.child(
-                div()
-                    .w(px(priv_width))
-                    .flex_none()
-                    .px_1()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .child(t!(privilege.label_key()).to_string()),
-            );
-        }
-
-        let mut rows = div().flex().flex_col();
-        if grants.is_empty() {
-            rows = rows.child(tree_message(
-                t!("user.privilege.empty").to_string(),
-                8.0,
-                theme.text_muted,
-            ));
-        }
-        for (row, grant) in grants.iter().enumerate() {
-            let mut line = div()
-                .id(SharedString::from(format!("user-create-grant-{row}")))
-                .flex()
-                .flex_row()
-                .items_center()
-                .h(px(CREATE_ROW_HEIGHT))
-                .when(row % 2 == 1, move |style| style.bg(rgb(theme.row_alt_bg)))
-                .child(
-                    div()
-                        .w(px(database_width))
-                        .flex_none()
-                        .px_2()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_size(px(12.0))
-                        .child(grant.database.clone()),
-                )
-                .child(
-                    div()
-                        .w(px(name_width))
-                        .flex_none()
-                        .px_2()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_size(px(12.0))
-                        .child(if grant.name.is_empty() {
-                            t!("user.privilege.all_database").to_string()
-                        } else {
-                            grant.name.clone()
-                        }),
-                );
-            for privilege in Privilege::OBJECT {
-                let checked = grant.privileges.contains(&privilege);
-                line = line.child(
-                    div()
-                        .id(SharedString::from(format!(
-                            "user-create-grant-{row}-{}",
-                            privilege.sql_name()
-                        )))
-                        .w(px(priv_width))
-                        .flex_none()
-                        .flex()
-                        .justify_center()
-                        .cursor_pointer()
-                        .on_click(cx.listener(move |this, _event, _window, cx| {
-                            cx.stop_propagation();
-                            this.toggle_create_grant_privilege(row, privilege, cx);
-                        }))
-                        .child(checkbox_box(checked, theme)),
-                );
-            }
-            rows = rows.child(line);
-        }
-
-        let content_width =
-            database_width + name_width + priv_width * Privilege::OBJECT.len() as f32;
-        let table = div()
-            .id("user-create-grants-scroll")
-            .flex()
-            .flex_col()
-            .w_full()
-            .border_1()
-            .border_color(rgb(theme.border))
-            .bg(rgb(theme.input_bg))
-            .overflow_hidden()
-            .overflow_x_scroll()
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .w(px(content_width))
-                    .child(header)
-                    .child(rows),
-            );
-
-        section(
-            t!("user.tab.privileges").to_string(),
-            Some(t!("user.create.grants_hint").to_string()),
-            table.into_any_element(),
-            theme,
-        )
-        .into_any_element()
-    }
-
-    /// The 成员属于 / 成员 section of the full view.
-    fn render_create_memberships(&self, cx: &mut Context<'_, Self>) -> AnyElement {
-        let theme = self.theme;
-        let Some(dialog) = self.create_user_dialog.as_ref() else {
-            return div().into_any_element();
-        };
-        let Some(context) = dialog.context.as_ref() else {
-            return div().into_any_element();
-        };
-        let candidates = dialog.membership_candidates();
-        if candidates.is_empty() {
-            return div().into_any_element();
-        }
-        let current = context.user.clone();
-        let current_host = context.host.clone();
-
-        let header = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .h(px(24.0))
-            .px_2()
-            .flex_none()
-            .bg(rgb(theme.header_bg))
-            .border_b_1()
-            .border_color(rgb(theme.border))
-            .text_size(px(11.0))
-            .child(div().flex_1().child(t!("user.member.username").to_string()))
-            .child(
-                div()
-                    .w(px(70.0))
-                    .child(t!("user.member.granted").to_string()),
-            )
-            .child(div().w(px(70.0)).child(t!("user.member.admin").to_string()));
-
-        let mut rows = div().flex().flex_col();
-        for (index, (user, host)) in candidates.iter().enumerate() {
-            // A role cannot be granted to itself.
-            if *user == current && *host == current_host {
-                continue;
-            }
-            let key = (user.clone(), host.clone());
-            let member = context.roles.contains_key(&key);
-            let admin = context.roles.get(&key).copied().unwrap_or(false);
-            let label = format!("{user}@{host}");
-            let click_key = key.clone();
-            let admin_key = key.clone();
-            rows = rows.child(
-                div()
-                    .id(SharedString::from(format!("user-create-member-{index}")))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .h(px(CREATE_ROW_HEIGHT))
-                    .px_2()
-                    .when(index % 2 == 1, move |style| style.bg(rgb(theme.row_alt_bg)))
-                    .child(
-                        div()
-                            .id(SharedString::from(format!(
-                                "user-create-member-name-{index}"
-                            )))
-                            .flex_1()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_2()
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |this, _event, _window, cx| {
-                                this.toggle_create_membership(true, click_key.clone(), cx)
-                            }))
-                            .child(tree_icon("icons/user.svg", theme.icon_users))
-                            .child(div().text_size(px(12.0)).child(label)),
-                    )
-                    .child(
-                        div()
-                            .id(SharedString::from(format!(
-                                "user-create-member-granted-{index}"
-                            )))
-                            .w(px(70.0))
-                            .flex()
-                            .justify_center()
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |this, _event, _window, cx| {
-                                this.toggle_create_membership(true, key.clone(), cx)
-                            }))
-                            .child(checkbox_box(member, theme)),
-                    )
-                    .child(
-                        div()
-                            .id(SharedString::from(format!(
-                                "user-create-member-admin-{index}"
-                            )))
-                            .w(px(70.0))
-                            .flex()
-                            .justify_center()
-                            .when(member, |cell| {
-                                cell.cursor_pointer().on_click(cx.listener(
-                                    move |this, _event, _window, cx| {
-                                        this.toggle_create_role_admin(admin_key.clone(), cx)
-                                    },
-                                ))
-                            })
-                            .child(checkbox_box(admin, theme)),
-                    ),
-            );
-        }
-
-        section(
-            t!("user.tab.member_of").to_string(),
-            None,
-            div()
-                .flex()
-                .flex_col()
-                .w_full()
-                .border_1()
-                .border_color(rgb(theme.border))
-                .bg(rgb(theme.input_bg))
-                .overflow_hidden()
-                .child(header)
-                .child(
-                    div()
-                        .id("user-create-member-scroll")
-                        .flex()
-                        .flex_col()
-                        .h(px(150.0))
-                        .overflow_y_scroll()
-                        .child(rows),
-                )
-                .into_any_element(),
-            theme,
-        )
-        .into_any_element()
-    }
-
-    /// The two preset cards at the top of the window.
-    fn render_create_presets(&self, cx: &mut Context<'_, Self>) -> AnyElement {
-        let theme = self.theme;
-        let Some(dialog) = self.create_user_dialog.as_ref() else {
-            return div().into_any_element();
-        };
-        let mut row = div().flex().flex_row().gap_3().w_full();
-        for (kind, title_key, description_key) in [
-            (
-                CreateKind::Regular,
-                "user.create.kind.regular",
-                "user.create.kind.regular_desc",
-            ),
-            (
-                CreateKind::Admin,
-                "user.create.kind.admin",
-                "user.create.kind.admin_desc",
-            ),
-        ] {
-            let selected = dialog.kind == kind;
-            row = row.child(
-                div()
-                    .id(match kind {
-                        CreateKind::Admin => "user-create-kind-admin",
-                        CreateKind::Regular => "user-create-kind-regular",
-                    })
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .p_3()
-                    .rounded(px(6.0))
-                    .border_1()
-                    .cursor_pointer()
-                    .when(selected, move |style| {
+                    .when(active, move |style| style.bg(rgb(theme.tree_selected_bg)))
+                    .when(!active, move |style| {
                         style
-                            .border_color(rgb(theme.primary))
-                            .bg(rgb(theme.tree_hover_bg))
-                    })
-                    .when(!selected, move |style| {
-                        style
-                            .border_color(rgb(theme.border))
-                            .bg(rgb(theme.input_bg))
-                            .hover(move |style| {
-                                style.border_color(rgb(theme.button_default_border))
-                            })
+                            .cursor_pointer()
+                            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
                     })
                     .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.set_create_user_kind(kind, cx)
+                        this.set_create_section(section, cx)
                     }))
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .text_color(rgb(theme.text))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(t!(title_key).to_string()),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.5))
-                            .text_color(rgb(theme.text_muted))
-                            .child(t!(description_key).to_string()),
-                    ),
+                    .child(tree_icon(section.icon(), icon_color))
+                    .child(t!(section.label_key()).to_string()),
             );
         }
-        row.into_any_element()
+        nav.into_any_element()
     }
 
-    /// The identity fields: username, host, plugin, password, confirm and the expiry policy.
-    fn render_create_identity(&self) -> AnyElement {
+    /// The body of the active section.
+    fn create_user_body(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let Some(dialog) = self.create_user_dialog.as_ref() else {
+            return div().into_any_element();
+        };
+        match dialog.section {
+            UserSection::General => self.render_create_general(cx),
+            UserSection::ServerPrivileges => self.render_create_server_privileges(cx),
+            UserSection::ObjectPrivileges => self.render_create_grants(cx),
+            UserSection::Roles => self.render_create_roles(cx),
+            UserSection::Sql => self.render_create_sql(),
+        }
+    }
+
+    /// 常规: identity, authentication, attributes and resource limits.
+    fn render_create_general(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
         let Some(dialog) = self.create_user_dialog.as_ref() else {
             return div().into_any_element();
         };
-        let mut column = div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .w_full()
-            .pl(px(CREATE_FORM_INDENT))
+        let account = &dialog.editor.account;
+
+        let mut identity = div().flex().flex_col().gap_2().w_full();
+        identity = identity
             .child(create_row(
                 t!("user.field.username").to_string(),
                 sized_text(self.create_user_user.as_ref(), theme),
@@ -2207,156 +1989,287 @@ impl AppView {
                 t!("user.field.confirm_password").to_string(),
                 sized_text(self.create_user_confirm.as_ref(), theme),
                 theme,
-            ))
-            .child(create_row(
-                t!("user.field.password_expiry").to_string(),
-                sized_combo(self.create_user_expiry_combo.as_ref(), theme),
-                theme,
             ));
+        if dialog.is_edit() {
+            let hint = if account.password_set {
+                t!("user.create.password_set_hint")
+            } else {
+                t!("user.create.password_unset_hint")
+            };
+            identity = identity.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(CREATE_LABEL_GAP))
+                    .child(div().w(px(CREATE_LABEL_WIDTH)).flex_none())
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(theme.text_muted))
+                            .child(hint.to_string()),
+                    ),
+            );
+        }
+
+        let mut status = div().flex().flex_col().gap_2().w_full();
+        status = status.child(create_row(
+            t!("user.field.password_expiry").to_string(),
+            sized_combo(self.create_user_expiry_combo.as_ref(), theme),
+            theme,
+        ));
         if dialog.expiry == CreateExpiry::Interval {
-            column = column.child(create_row(
+            status = status.child(create_row(
                 String::new(),
                 sized_text(self.create_user_expiry_days.as_ref(), theme),
                 theme,
             ));
         }
-        column.into_any_element()
-    }
-
-    /// The regular preset's privilege section: the header, the database filter and the matrix.
-    fn render_create_databases(&self, cx: &mut Context<'_, Self>) -> AnyElement {
-        let theme = self.theme;
-        let Some(dialog) = self.create_user_dialog.as_ref() else {
-            return div().into_any_element();
-        };
-        let selected = dialog.selected_database_count();
-
-        let header = div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .w_full()
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_size(px(12.5))
-                            .text_color(rgb(theme.text))
-                            .child(t!("user.create.databases").to_string()),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .px_2()
-                            .py_0p5()
-                            .rounded(px(999.0))
-                            .bg(rgb(theme.header_bg))
-                            .text_size(px(11.0))
-                            .text_color(rgb(theme.text_muted))
-                            .child(
-                                t!("user.create.selected_databases", count = selected).to_string(),
-                            ),
-                    ),
+        status = status.child(create_row(
+            String::new(),
+            check_row(
+                "user-create-locked",
+                t!("user.field.locked_account").to_string(),
+                account.account_locked,
+                theme,
+                cx.listener(|this, _event, _window, cx| this.toggle_create_locked(cx)),
             )
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(rgb(theme.text_muted))
-                    .child(t!("user.create.databases_hint").to_string()),
-            );
+            .into_any_element(),
+            theme,
+        ));
 
-        let search = div().w_full().h(px(26.0)).flex_none().child(
-            match self.create_user_db_search.clone() {
-                Some(input) => input.into_any_element(),
-                None => div().into_any_element(),
-            },
-        );
+        let mut limits = div().flex().flex_col().gap_2().w_full();
+        for (label_key, input) in [
+            ("user.field.max_questions", &self.create_user_max_questions),
+            ("user.field.max_updates", &self.create_user_max_updates),
+            (
+                "user.field.max_connections",
+                &self.create_user_max_connections,
+            ),
+            (
+                "user.field.max_user_connections",
+                &self.create_user_max_user_connections,
+            ),
+        ] {
+            limits = limits.child(create_row(
+                t!(label_key).to_string(),
+                sized_text_w(input.as_ref(), theme, CREATE_LIMIT_WIDTH),
+                theme,
+            ));
+        }
 
         div()
+            .id("user-create-general")
             .flex()
             .flex_col()
-            .gap_2()
+            .gap_5()
             .w_full()
-            .child(header)
-            .child(search)
-            .child(self.render_create_matrix(cx))
+            .child(section(
+                t!("user.create.login").to_string(),
+                None,
+                identity.into_any_element(),
+                theme,
+            ))
+            .child(section(
+                t!("user.create.status").to_string(),
+                None,
+                status.into_any_element(),
+                theme,
+            ))
+            .child(section(
+                t!("user.create.limits").to_string(),
+                Some(t!("user.create.limits_hint").to_string()),
+                limits.into_any_element(),
+                theme,
+            ))
             .into_any_element()
     }
 
-    /// The bordered master-detail matrix: the active database's card, its scope row and the lists.
-    fn render_create_matrix(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+    /// 服务器权限: the global privilege grid with one-click templates.
+    fn render_create_server_privileges(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
         let Some(dialog) = self.create_user_dialog.as_ref() else {
             return div().into_any_element();
         };
-        let mut matrix = div()
+        let checked_count = dialog.editor.server_privileges.len();
+
+        let mut templates = div().flex().flex_row().items_center().gap_2().w_full();
+        for template in ServerTemplate::ALL {
+            let active = dialog.editor.server_privileges == template.privileges();
+            templates = templates.child(
+                div()
+                    .id(SharedString::from(format!(
+                        "user-create-template-{}",
+                        template.label_key()
+                    )))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .h(px(24.0))
+                    .px_3()
+                    .rounded(px(4.0))
+                    .text_size(px(12.0))
+                    .cursor_pointer()
+                    .when(active, move |style| {
+                        style
+                            .bg(rgb(theme.primary))
+                            .text_color(rgb(if theme.is_dark() {
+                                theme.window_bg
+                            } else {
+                                0xffffff
+                            }))
+                    })
+                    .when(!active, move |style| {
+                        style
+                            .bg(rgb(theme.button_bg))
+                            .border_1()
+                            .border_color(rgb(theme.border))
+                            .text_color(rgb(theme.text_muted))
+                            .hover(move |style| style.text_color(rgb(theme.text)))
+                    })
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.apply_create_server_template(template, cx)
+                    }))
+                    .child(t!(template.label_key()).to_string()),
+            );
+        }
+
+        let mut grid = div().flex().flex_row().flex_wrap().w_full();
+        for (index, privilege) in Privilege::ALL.into_iter().enumerate() {
+            let checked = dialog.editor.server_privileges.contains(&privilege);
+            grid = grid.child(
+                div()
+                    .id(SharedString::from(format!(
+                        "user-create-server-priv-{index}"
+                    )))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .w(px(210.0))
+                    .h(px(CREATE_ROW_HEIGHT))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.toggle_create_server_privilege(privilege, cx)
+                    }))
+                    .child(checkbox_box(checked, theme))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(theme.text))
+                            .child(t!(privilege.label_key()).to_string()),
+                    ),
+            );
+        }
+
+        div()
+            .id("user-create-server")
             .flex()
             .flex_col()
+            .gap_4()
             .w_full()
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(rgb(theme.border))
-            .bg(rgb(theme.input_bg))
-            .overflow_hidden();
+            .child(section(
+                t!("user.create.template").to_string(),
+                None,
+                templates.into_any_element(),
+                theme,
+            ))
+            .child(section(
+                t!("user.tab.server_privileges").to_string(),
+                Some(t!("user.create.server_privileges_hint", count = checked_count).to_string()),
+                grid.into_any_element(),
+                theme,
+            ))
+            .into_any_element()
+    }
 
-        if dialog.loading_databases {
-            return matrix
-                .child(tree_message(
-                    t!("common.loading").to_string(),
-                    12.0,
-                    theme.text_muted,
-                ))
-                .into_any_element();
-        }
-        if dialog.databases.is_empty() {
-            return matrix
-                .child(tree_message(
-                    t!("common.empty").to_string(),
-                    12.0,
-                    theme.text_muted,
-                ))
-                .into_any_element();
-        }
-        let Some(index) = dialog.active_database else {
-            return matrix
-                .child(tree_message(
-                    t!("common.empty").to_string(),
-                    12.0,
-                    theme.text_muted,
-                ))
-                .into_any_element();
+    /// 权限: a database list on the left and the selected database's privilege detail on the right.
+    fn render_create_grants(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let Some(dialog) = self.create_user_dialog.as_ref() else {
+            return div().into_any_element();
         };
-        let Some(row) = dialog.databases.get(index) else {
-            return matrix.into_any_element();
-        };
-        let level_open = self.create_user_level_menu.as_ref().map(|menu| menu.index) == Some(index);
-        let specific = row.specific;
+        let search = dialog.database_search.to_lowercase();
+        let visible: Vec<usize> = dialog
+            .db_grants
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| search.is_empty() || row.name.to_lowercase().contains(&search))
+            .map(|(index, _)| index)
+            .collect();
 
-        // The active database's card.
-        matrix = matrix.child(
-            div()
+        div()
+            .id("user-create-grants")
+            .flex()
+            .flex_row()
+            .gap_4()
+            .w_full()
+            .flex_1()
+            .min_h(px(0.0))
+            .child(self.render_create_database_list(&visible, cx))
+            .child(self.render_create_database_detail(cx))
+            .into_any_element()
+    }
+
+    /// The 权限 section's left list: the filter, the count / clear-all row, then every database.
+    fn render_create_database_list(
+        &self,
+        visible: &[usize],
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let theme = self.theme;
+        let Some(dialog) = self.create_user_dialog.as_ref() else {
+            return div().into_any_element();
+        };
+        let search = self
+            .create_user_database_search
+            .clone()
+            .map(|input| div().w_full().h(px(24.0)).child(input).into_any_element())
+            .unwrap_or_else(|| div().into_any_element());
+
+        let mut list = div()
+            .id("user-create-db-list")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .overflow_y_scroll()
+            .track_scroll(&dialog.db_scroll);
+        for &index in visible {
+            let Some(row) = dialog.db_grants.get(index) else {
+                continue;
+            };
+            let active = dialog.active_database == Some(index);
+            let enabled = row.enabled;
+            let name = row.name.clone();
+            let (badge, authorized) = row.summary();
+            let mut entry = div()
+                .id(SharedString::from(format!("user-create-db-{index}")))
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap_2()
-                .h(px(38.0))
-                .px_3()
+                .h(px(34.0))
+                .px_2()
+                .flex_none()
+                .rounded(px(4.0))
+                .cursor_pointer()
+                .when(active, move |style| style.bg(rgb(theme.tree_selected_bg)))
+                .when(!active, move |style| {
+                    style.hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                })
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    this.activate_create_database(index, cx)
+                }))
                 .child(
                     div()
-                        .id("user-create-active-check")
+                        .id(SharedString::from(format!("user-create-db-check-{index}")))
                         .flex()
-                        .flex_row()
                         .items_center()
-                        .cursor_pointer()
                         .on_click(cx.listener(move |this, _event, _window, cx| {
-                            this.toggle_create_database(index, cx)
+                            cx.stop_propagation();
+                            this.toggle_create_database(index, cx);
                         }))
-                        .child(checkbox_box(row.selected, theme)),
+                        .child(checkbox_box(enabled, theme)),
                 )
                 .child(
                     div()
@@ -2364,510 +2277,621 @@ impl AppView {
                         .min_w(px(0.0))
                         .overflow_hidden()
                         .whitespace_nowrap()
-                        .text_size(px(12.5))
-                        .text_color(rgb(theme.text))
-                        .child(row.name.clone()),
-                )
-                .child(self.render_create_level_button(index, level_open, cx)),
-        );
-
-        if level_open {
-            matrix = matrix.child(self.render_create_level_options(index, cx));
-        }
-
-        // The 表范围 row: 全部表 / 指定表 plus the picked-tables chip.
-        matrix = matrix.child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .h(px(34.0))
-                .px_3()
-                .border_t_1()
-                .border_color(rgb(theme.grid_line))
-                .child(
+                        .text_size(px(12.0))
+                        .text_color(rgb(if active {
+                            theme.tree_selected_text
+                        } else {
+                            theme.text
+                        }))
+                        .child(name),
+                );
+            if authorized {
+                entry = entry.child(
                     div()
-                        .text_size(px(11.5))
+                        .flex_none()
+                        .px_2()
+                        .py_0p5()
+                        .rounded(px(9.0))
+                        .text_size(px(10.5))
+                        .bg(rgb(theme.tree_hover_bg))
+                        .text_color(rgb(theme.primary))
+                        .child(badge),
+                );
+            } else {
+                entry = entry.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(10.5))
                         .text_color(rgb(theme.text_muted))
-                        .child(t!("user.create.scope").to_string()),
-                )
-                .child(self.create_scope_chip(
-                    "user-create-scope-all",
-                    t!("user.create.scope.all").to_string(),
-                    !specific,
-                    false,
-                    cx,
-                ))
-                .child(self.create_scope_chip(
-                    "user-create-scope-specific",
-                    t!("user.create.scope.specific").to_string(),
-                    specific,
-                    true,
-                    cx,
-                ))
-                .when(specific, |bar| {
-                    bar.child(self.render_create_tables_chip(index, dialog.tables_open, cx))
-                })
-                .when(!specific, |bar| bar.child(div().flex_1())),
-        );
-
-        // The database list and (for 指定表) the table picker.
-        let show_tables = specific && dialog.tables_open;
-        let mut split = div()
-            .flex()
-            .flex_row()
-            .h(px(CREATE_LIST_HEIGHT))
-            .w_full()
-            .border_t_1()
-            .border_color(rgb(theme.grid_line));
-        split = split.child(self.render_create_database_list(!show_tables, cx));
-        if show_tables {
-            split = split
-                .child(div().w(px(1.0)).flex_none().h_full().bg(rgb(theme.border)))
-                .child(self.render_create_table_panel(cx));
+                        .child(badge),
+                );
+            }
+            list = list.child(entry);
         }
 
-        matrix.child(split).into_any_element()
+        let header = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .w_full()
+            .pb_2()
+            .child(search)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .w_full()
+                    .text_size(px(11.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(
+                        t!("user.create.database_count", count = dialog.db_grants.len())
+                            .to_string(),
+                    )
+                    .child(
+                        div()
+                            .id("user-create-db-clear")
+                            .cursor_pointer()
+                            .text_color(rgb(theme.primary))
+                            .hover(move |style| style.text_color(rgb(theme.text)))
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.clear_create_databases(cx)
+                            }))
+                            .child(t!("user.create.clear_all").to_string()),
+                    ),
+            );
+
+        div()
+            .flex()
+            .flex_col()
+            .w(px(270.0))
+            .flex_none()
+            .h_full()
+            .min_h(px(0.0))
+            .pr_3()
+            .border_r_1()
+            .border_color(rgb(theme.border))
+            .child(header)
+            .child(list)
+            .into_any_element()
     }
 
-    /// The active database's privilege-level dropdown button.
-    fn render_create_level_button(
+    /// The 权限 section's right detail pane for the active database.
+    fn render_create_database_detail(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let Some(dialog) = self.create_user_dialog.as_ref() else {
+            return div().into_any_element();
+        };
+        let Some(index) = dialog.active_database else {
+            return tree_message(
+                t!("user.create.select_database").to_string(),
+                8.0,
+                theme.text_muted,
+            )
+            .into_any_element();
+        };
+        let Some(row) = dialog.db_grants.get(index) else {
+            return div().into_any_element();
+        };
+        let name = row.name.clone();
+        let enabled = row.enabled;
+        let scope = row.scope;
+        let tables = row.tables.clone();
+        let privileges = row.privileges.clone();
+
+        // The scope selector (全部表 / 指定具体表).
+        let mut scopes = div().flex().flex_row().items_center().gap_1().flex_none();
+        for (option, label_key, active) in [
+            (
+                GrantScope::AllTables,
+                "user.create.scope.all",
+                scope == GrantScope::AllTables,
+            ),
+            (
+                GrantScope::SpecificTables,
+                "user.create.scope.specific",
+                scope == GrantScope::SpecificTables,
+            ),
+        ] {
+            scopes = scopes.child(
+                div()
+                    .id(SharedString::from(format!("user-create-scope-{label_key}")))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .h(px(24.0))
+                    .px_3()
+                    .rounded(px(4.0))
+                    .text_size(px(12.0))
+                    .cursor_pointer()
+                    .when(active, move |style| {
+                        style
+                            .bg(rgb(theme.primary))
+                            .text_color(rgb(if theme.is_dark() {
+                                theme.window_bg
+                            } else {
+                                0xffffff
+                            }))
+                    })
+                    .when(!active, move |style| {
+                        style
+                            .bg(rgb(theme.button_bg))
+                            .border_1()
+                            .border_color(rgb(theme.border))
+                            .text_color(rgb(theme.text_muted))
+                    })
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.set_create_grant_scope(option, cx)
+                    }))
+                    .child(t!(label_key).to_string()),
+            );
+        }
+
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .w_full()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .min_w(px(0.0))
+                    .child(tree_icon("icons/database.svg", theme.icon_database_active))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_size(px(13.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(theme.text_muted))
+                                    .child(t!("user.create.database_level").to_string()),
+                            ),
+                    ),
+            )
+            .child(scopes);
+        let target = div()
+            .text_size(px(11.0))
+            .text_color(rgb(theme.text_muted))
+            .child(format!("{} {}.*", t!("user.create.grant_applies_to"), name));
+
+        // The quick presets.
+        let mut presets = div().flex().flex_row().items_center().gap_2().w_full();
+        for template in DbTemplate::ALL {
+            let active = if template == DbTemplate::None {
+                !enabled
+            } else {
+                enabled && privileges == template.privileges()
+            };
+            presets = presets.child(
+                div()
+                    .id(SharedString::from(format!(
+                        "user-create-db-template-{}",
+                        template.label_key()
+                    )))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .h(px(28.0))
+                    .px_3()
+                    .rounded(px(4.0))
+                    .text_size(px(12.0))
+                    .cursor_pointer()
+                    .when(active, move |style| {
+                        style
+                            .bg(rgb(theme.primary))
+                            .text_color(rgb(if theme.is_dark() {
+                                theme.window_bg
+                            } else {
+                                0xffffff
+                            }))
+                    })
+                    .when(!active, move |style| {
+                        style
+                            .bg(rgb(theme.button_bg))
+                            .border_1()
+                            .border_color(rgb(theme.border))
+                            .text_color(rgb(theme.text_muted))
+                    })
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.apply_create_database_template(template, cx)
+                    }))
+                    .child(t!(template.label_key()).to_string()),
+            );
+        }
+
+        // The grouped fine-grained privileges.
+        let mut groups = div().flex().flex_col().gap_3().w_full();
+        for (group_key, group_privileges) in db_privilege_groups() {
+            let mut grid = div().flex().flex_row().flex_wrap().w_full();
+            for (position, privilege) in group_privileges.into_iter().enumerate() {
+                let checked = privileges.contains(&privilege);
+                grid = grid.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "user-create-db-priv-{group_key}-{position}"
+                        )))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .w(px(210.0))
+                        .h(px(CREATE_ROW_HEIGHT))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                            this.toggle_create_database_privilege(privilege, cx)
+                        }))
+                        .child(checkbox_box(checked, theme))
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(rgb(theme.text))
+                                .child(t!(privilege.label_key()).to_string()),
+                        ),
+                );
+            }
+            groups = groups.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .w_full()
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(theme.text_muted))
+                            .child(t!(group_key).to_string()),
+                    )
+                    .child(grid),
+            );
+        }
+        let fine_grained = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .w_full()
+            .child(
+                div().flex().flex_row().justify_end().w_full().child(
+                    div()
+                        .id("user-create-db-priv-toggle-all")
+                        .cursor_pointer()
+                        .text_size(px(11.0))
+                        .text_color(rgb(theme.primary))
+                        .hover(move |style| style.text_color(rgb(theme.text)))
+                        .on_click(cx.listener(|this, _event, _window, cx| {
+                            this.toggle_create_database_privileges_all(cx)
+                        }))
+                        .child(t!("user.create.toggle_all").to_string()),
+                ),
+            )
+            .child(groups);
+
+        let mut column = div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .flex_1()
+            .min_w(px(0.0))
+            .child(header)
+            .child(target)
+            .child(section(
+                t!("user.create.db_template").to_string(),
+                Some(t!("user.create.db_template_hint").to_string()),
+                presets.into_any_element(),
+                theme,
+            ));
+        if scope == GrantScope::SpecificTables {
+            column = column.child(section(
+                t!("user.create.specific_tables").to_string(),
+                Some(t!("user.create.tables_selected", count = tables.len()).to_string()),
+                self.render_create_table_picker(&name, &tables, cx),
+                theme,
+            ));
+        }
+        column = column
+            .child(section(
+                t!("user.create.fine_grained").to_string(),
+                None,
+                fine_grained.into_any_element(),
+                theme,
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .w_full()
+                    .text_size(px(11.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(t!("user.create.batch_hint").to_string())
+                    .child(
+                        t!("user.create.selected_privileges", count = privileges.len()).to_string(),
+                    ),
+            );
+        column.into_any_element()
+    }
+
+    /// The 指定具体表 picker of the active database.
+    fn render_create_table_picker(
         &self,
-        index: usize,
-        open: bool,
+        database: &str,
+        selected: &[String],
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let theme = self.theme;
         let Some(dialog) = self.create_user_dialog.as_ref() else {
             return div().into_any_element();
         };
-        let level = dialog
-            .databases
-            .get(index)
-            .map(|row| row.level)
-            .unwrap_or(CreateLevel::ReadOnly);
-        div()
-            .id("user-create-level")
-            .w(px(CREATE_LEVEL_WIDTH))
-            .flex_none()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_1()
-            .h(px(24.0))
-            .px_2()
-            .rounded(px(4.0))
-            .border_1()
-            .border_color(rgb(if open {
-                theme.button_default_border
-            } else {
-                theme.border
-            }))
-            .bg(rgb(theme.dialog_bg))
-            .cursor_pointer()
-            .on_click(cx.listener(move |this, _event, _window, cx| {
-                this.toggle_create_level_menu(index, cx)
-            }))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_size(px(11.5))
-                    .text_color(rgb(theme.text))
-                    .child(t!(level.label_key()).to_string()),
-            )
-            .child(tree_icon("icons/chevron-down.svg", theme.text_muted))
-            .into_any_element()
-    }
-
-    /// The active database's inline privilege-level list.
-    fn render_create_level_options(&self, index: usize, cx: &mut Context<'_, Self>) -> AnyElement {
-        let theme = self.theme;
-        let current = self
-            .create_user_dialog
-            .as_ref()
-            .and_then(|dialog| dialog.databases.get(index))
-            .map(|row| row.level);
-        let mut options = div()
+        let loading = dialog.loading_tables.contains(database);
+        let tables = dialog.tables.get(database).cloned().unwrap_or_default();
+        let mut list = div()
+            .id("user-create-table-list")
             .flex()
             .flex_col()
-            .border_t_1()
-            .border_color(rgb(theme.grid_line));
-        for (option_index, option) in CreateLevel::ALL.into_iter().enumerate() {
-            let active = current == Some(option);
-            options = options.child(
-                div()
-                    .id(SharedString::from(format!(
-                        "user-create-level-{index}-{option_index}"
-                    )))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .h(px(24.0))
-                    .pl(px(40.0))
-                    .pr_3()
-                    .cursor_pointer()
-                    .when(active, move |style| style.bg(rgb(theme.tree_selected_bg)))
-                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.choose_create_level(option, cx)
-                    }))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .text_size(px(12.0))
-                            .text_color(rgb(theme.text))
-                            .child(t!(option.label_key()).to_string()),
-                    )
-                    .child(if active {
-                        tree_icon("icons/check.svg", theme.primary).into_any_element()
-                    } else {
-                        // Keep the row height stable when unselected.
-                        div().w(px(14.0)).h(px(14.0)).flex_none().into_any_element()
-                    }),
-            );
-        }
-        options.into_any_element()
-    }
-
-    /// One 表范围 chip: `全部表` or `指定表`.
-    fn create_scope_chip(
-        &self,
-        id: &'static str,
-        label: String,
-        active: bool,
-        specific: bool,
-        cx: &mut Context<'_, Self>,
-    ) -> Stateful<Div> {
-        let theme = self.theme;
-        div()
-            .id(id)
-            .flex_none()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_center()
-            .h(px(22.0))
-            .px_3()
-            .rounded(px(4.0))
-            .text_size(px(11.5))
-            .cursor_pointer()
-            .when(active, move |style| {
-                style
-                    .border_1()
-                    .border_color(rgb(theme.button_default_border))
-                    .bg(rgb(theme.button_bg))
-                    .text_color(rgb(theme.text))
-            })
-            .when(!active, move |style| {
-                style
-                    .text_color(rgb(theme.text_muted))
-                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-            })
-            .on_click(
-                cx.listener(move |this, _event, _window, cx| this.set_create_scope(specific, cx)),
-            )
-            .child(label)
-    }
-
-    /// The 已选 N 张表 chip, which expands/collapses the table picker.
-    fn render_create_tables_chip(
-        &self,
-        index: usize,
-        open: bool,
-        cx: &mut Context<'_, Self>,
-    ) -> AnyElement {
-        let theme = self.theme;
-        let count = self
-            .create_user_dialog
-            .as_ref()
-            .and_then(|dialog| dialog.databases.get(index))
-            .map(|row| row.tables.len())
-            .unwrap_or(0);
-        div()
-            .id("user-create-tables-chip")
-            .flex_none()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_1()
-            .h(px(22.0))
-            .px_2()
-            .rounded(px(4.0))
+            .max_h(px(160.0))
+            .overflow_y_scroll()
+            .track_scroll(&dialog.table_scroll)
             .border_1()
             .border_color(rgb(theme.border))
-            .bg(rgb(theme.button_bg))
-            .cursor_pointer()
-            .on_click(cx.listener(|this, _event, _window, cx| this.toggle_create_tables_open(cx)))
-            .child(tree_icon("icons/tables.svg", theme.icon_tables))
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(rgb(theme.text))
-                    .child(t!("user.create.tables_selected", count = count).to_string()),
-            )
-            .child(tree_icon(
-                if open {
-                    "icons/chevron-down.svg"
-                } else {
-                    "icons/chevron-right.svg"
-                },
-                theme.text_muted,
-            ))
-            .into_any_element()
-    }
-
-    /// The database list; `full` makes it span the matrix when the table picker is collapsed.
-    fn render_create_database_list(&self, full: bool, cx: &mut Context<'_, Self>) -> Stateful<Div> {
-        let theme = self.theme;
-        let Some(dialog) = self.create_user_dialog.as_ref() else {
-            return div().id("user-create-db-scroll");
-        };
-        let needle = dialog.database_search.trim().to_ascii_lowercase();
-        let active = dialog.active_database;
-        let mut rows = div().flex().flex_col();
-        let mut matched = false;
-        for (index, row) in dialog.databases.iter().enumerate() {
-            if !needle.is_empty() && !row.name.to_ascii_lowercase().contains(&needle) {
-                continue;
-            }
-            matched = true;
-            let selected = row.selected;
-            let is_active = active == Some(index);
-            rows = rows.child(
-                div()
-                    .id(SharedString::from(format!("user-create-db-{index}")))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .h(px(CREATE_ROW_HEIGHT))
-                    .px_3()
-                    .when(is_active, move |style| {
-                        style.bg(rgb(theme.tree_selected_bg))
-                    })
-                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("user-create-db-check-{index}")))
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |this, _event, _window, cx| {
-                                this.toggle_create_database(index, cx)
-                            }))
-                            .child(checkbox_box(selected, theme)),
-                    )
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("user-create-db-name-{index}")))
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_2()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |this, _event, _window, cx| {
-                                this.activate_create_database(index, cx)
-                            }))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(0.0))
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_size(px(12.0))
-                                    .child(row.name.clone()),
-                            ),
-                    ),
-            );
-        }
-        if !matched {
-            rows = rows.child(tree_message(
-                t!("common.empty").to_string(),
-                12.0,
-                theme.text_muted,
-            ));
-        }
-        div()
-            .id("user-create-db-scroll")
-            .flex()
-            .flex_col()
-            .h_full()
-            .when(full, |list| list.w_full())
-            .when(!full, |list| list.w(px(CREATE_DB_LIST_WIDTH)).flex_none())
-            .overflow_y_scroll()
-            .child(rows)
-    }
-
-    /// The 指定表 table picker beside the database list.
-    fn render_create_table_panel(&self, cx: &mut Context<'_, Self>) -> Div {
-        let theme = self.theme;
-        let Some(dialog) = self.create_user_dialog.as_ref() else {
-            return div();
-        };
-        let Some(index) = dialog.active_database else {
-            return div();
-        };
-        let Some(row) = dialog.databases.get(index) else {
-            return div();
-        };
-        let database = row.name.clone();
-        let selected_tables = row.tables.clone();
-        let available = dialog.tables.get(&database).cloned().unwrap_or_default();
-        let loading = dialog.loading_tables.contains(&database);
-        let needle = dialog.table_search.trim().to_ascii_lowercase();
-        let visible: Vec<String> = available
-            .iter()
-            .filter(|table| needle.is_empty() || table.to_ascii_lowercase().contains(&needle))
-            .cloned()
-            .collect();
-        let all_selected = !available.is_empty()
-            && available
-                .iter()
-                .all(|table| selected_tables.contains(table));
-
-        let header = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .h(px(36.0))
-            .px_2()
-            .border_b_1()
-            .border_color(rgb(theme.grid_line))
-            .child(div().flex_1().min_w(px(0.0)).h(px(22.0)).child(
-                match self.create_user_table_search.clone() {
-                    Some(input) => input.into_any_element(),
-                    None => div().into_any_element(),
-                },
-            ))
-            .child(
-                div()
-                    .id("user-create-tables-all")
-                    .flex_none()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_1()
-                    .h(px(22.0))
-                    .px_2()
-                    .rounded(px(4.0))
-                    .cursor_pointer()
-                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.set_create_tables_all(!all_selected, cx)
-                    }))
-                    .child(checkbox_box(all_selected, theme))
-                    .child(
-                        div()
-                            .text_size(px(11.5))
-                            .text_color(rgb(theme.text))
-                            .child(t!("user.create.select_all").to_string()),
-                    ),
-            );
-
-        let mut rows = div().flex().flex_col();
+            .bg(rgb(theme.input_bg));
         if loading {
-            rows = rows.child(tree_message(
+            list = list.child(tree_message(
                 t!("common.loading").to_string(),
                 8.0,
                 theme.text_muted,
             ));
-        } else if visible.is_empty() {
-            rows = rows.child(tree_message(
-                t!("common.empty").to_string(),
-                8.0,
-                theme.text_muted,
-            ));
         }
-        for (row_index, table) in visible.iter().enumerate() {
-            let checked = selected_tables.contains(table);
+        for (index, table) in tables.iter().enumerate() {
+            let checked = selected.iter().any(|picked| picked == table);
             let name = table.clone();
-            rows = rows.child(
+            list = list.child(
                 div()
-                    .id(SharedString::from(format!("user-create-table-{row_index}")))
+                    .id(SharedString::from(format!("user-create-table-{index}")))
                     .flex()
                     .flex_row()
                     .items_center()
                     .gap_2()
                     .h(px(CREATE_ROW_HEIGHT))
                     .px_2()
+                    .flex_none()
                     .cursor_pointer()
-                    .when(row_index % 2 == 1, move |style| {
-                        style.bg(rgb(theme.row_alt_bg))
-                    })
                     .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
                     .on_click(cx.listener(move |this, _event, _window, cx| {
                         this.toggle_create_table(name.clone(), cx)
                     }))
                     .child(checkbox_box(checked, theme))
+                    .child(div().text_size(px(12.0)).child(table.clone())),
+            );
+        }
+        let actions =
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .id("user-create-table-all")
+                        .cursor_pointer()
+                        .text_size(px(11.0))
+                        .text_color(rgb(theme.primary))
+                        .hover(move |style| style.text_color(rgb(theme.text)))
+                        .on_click(cx.listener(|this, _event, _window, cx| {
+                            this.set_create_tables_all(true, cx)
+                        }))
+                        .child(t!("user.create.select_all").to_string()),
+                )
+                .child(
+                    div()
+                        .id("user-create-table-none")
+                        .cursor_pointer()
+                        .text_size(px(11.0))
+                        .text_color(rgb(theme.primary))
+                        .hover(move |style| style.text_color(rgb(theme.text)))
+                        .on_click(cx.listener(|this, _event, _window, cx| {
+                            this.set_create_tables_all(false, cx)
+                        }))
+                        .child(t!("user.create.clear_all").to_string()),
+                );
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .w_full()
+            .child(list)
+            .child(actions)
+            .into_any_element()
+    }
+
+    /// 角色: the roles this account belongs to, and the members of this account.
+    fn render_create_roles(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let Some(dialog) = self.create_user_dialog.as_ref() else {
+            return div().into_any_element();
+        };
+        let candidates = dialog.membership_candidates();
+
+        let mut column = div().flex().flex_col().gap_5().w_full();
+        column = column.child(self.render_create_role_list(true, candidates, cx));
+        column = column.child(self.render_create_role_list(false, candidates, cx));
+        column.into_any_element()
+    }
+
+    /// One role/member table of the 角色 section.
+    fn render_create_role_list(
+        &self,
+        member_of: bool,
+        candidates: &[(String, String)],
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let theme = self.theme;
+        let Some(dialog) = self.create_user_dialog.as_ref() else {
+            return div().into_any_element();
+        };
+        let Some(context) = dialog.context.as_ref() else {
+            return div().into_any_element();
+        };
+        let current = context.user.clone();
+        let current_host = context.host.clone();
+        let edges = if member_of {
+            &context.roles
+        } else {
+            &context.members
+        };
+
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .h(px(24.0))
+            .px_2()
+            .flex_none()
+            .bg(rgb(theme.header_bg))
+            .border_b_1()
+            .border_color(rgb(theme.border))
+            .text_size(px(11.0))
+            .child(div().flex_1().child(t!("user.member.username").to_string()))
+            .child(
+                div()
+                    .w(px(70.0))
+                    .child(t!("user.member.granted").to_string()),
+            )
+            .child(div().w(px(70.0)).child(t!("user.member.admin").to_string()));
+
+        let mut rows = div().flex().flex_col();
+        let mut shown = 0usize;
+        for (user, host) in candidates {
+            // A role cannot be granted to itself.
+            if member_of && *user == current && *host == current_host {
+                continue;
+            }
+            let key = (user.clone(), host.clone());
+            let member = edges.contains_key(&key);
+            let admin = edges.get(&key).copied().unwrap_or(false);
+            let label = format!("{user}@{host}");
+            let grant_key = key.clone();
+            let admin_key = key.clone();
+            let row = shown;
+            shown += 1;
+            rows = rows.child(
+                div()
+                    .id(SharedString::from(format!(
+                        "user-create-role-{}-{row}",
+                        if member_of { "of" } else { "member" }
+                    )))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .h(px(CREATE_ROW_HEIGHT))
+                    .px_2()
+                    .when(row % 2 == 1, move |style| style.bg(rgb(theme.row_alt_bg)))
                     .child(
                         div()
+                            .id(SharedString::from(format!(
+                                "user-create-role-name-{}-{row}",
+                                if member_of { "of" } else { "member" }
+                            )))
                             .flex_1()
-                            .min_w(px(0.0))
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_size(px(12.0))
-                            .child(table.clone()),
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.toggle_create_membership(member_of, grant_key.clone(), cx)
+                            }))
+                            .child(tree_icon("icons/user.svg", theme.icon_users))
+                            .child(div().text_size(px(12.0)).child(label)),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "user-create-role-granted-{}-{row}",
+                                if member_of { "of" } else { "member" }
+                            )))
+                            .w(px(70.0))
+                            .flex()
+                            .justify_center()
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.toggle_create_membership(member_of, key.clone(), cx)
+                            }))
+                            .child(checkbox_box(member, theme)),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "user-create-role-admin-{}-{row}",
+                                if member_of { "of" } else { "member" }
+                            )))
+                            .w(px(70.0))
+                            .flex()
+                            .justify_center()
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.toggle_create_role_admin(member_of, admin_key.clone(), cx)
+                            }))
+                            .child(checkbox_box(admin, theme)),
                     ),
             );
         }
 
-        div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_w(px(0.0))
-            .h_full()
-            .child(header)
-            .child(
-                div()
-                    .id("user-create-table-scroll")
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h(px(0.0))
-                    .overflow_y_scroll()
-                    .child(rows),
-            )
+        let body: AnyElement = if shown == 0 {
+            tree_message(t!("user.member.empty").to_string(), 8.0, theme.text_muted)
+                .into_any_element()
+        } else {
+            div()
+                .id(if member_of {
+                    "user-create-role-of-scroll"
+                } else {
+                    "user-create-members-scroll"
+                })
+                .flex()
+                .flex_col()
+                .h(px(150.0))
+                .overflow_y_scroll()
+                .child(rows)
+                .into_any_element()
+        };
+
+        section(
+            t!(if member_of {
+                "user.tab.member_of"
+            } else {
+                "user.tab.members"
+            })
+            .to_string(),
+            None,
+            div()
+                .flex()
+                .flex_col()
+                .w_full()
+                .border_1()
+                .border_color(rgb(theme.border))
+                .bg(rgb(theme.input_bg))
+                .overflow_hidden()
+                .child(header)
+                .child(body)
+                .into_any_element(),
+            theme,
+        )
+        .into_any_element()
     }
 
-    /// The 管理用户 preset's warning banner (the window's risk callout).
-    fn render_create_admin_warning(&self) -> AnyElement {
-        let theme = self.theme;
-        div()
-            .flex()
-            .flex_row()
-            .items_start()
-            .gap_2()
-            .w_full()
-            .p_3()
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(rgb(0xef4444))
-            .bg(rgba(0xef44441a))
-            .text_size(px(12.0))
-            .text_color(rgb(theme.danger))
-            .child(tree_icon("icons/warning.svg", theme.danger))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .child(t!("user.create.admin_warning").to_string()),
-            )
-            .into_any_element()
-    }
-
-    /// The 预览 SQL pane at the bottom of the window.
-    fn render_create_preview(&self) -> AnyElement {
+    /// SQL 预览: the script Save would run.
+    fn render_create_sql(&self) -> AnyElement {
         let theme = self.theme;
         let sql = self.create_user_sql();
         let text = if sql.trim().is_empty() {
@@ -2878,23 +2902,24 @@ impl AppView {
         let scroll = self
             .create_user_dialog
             .as_ref()
-            .map(|dialog| dialog.preview_scroll.clone())
+            .map(|dialog| dialog.sql_scroll.clone())
             .unwrap_or_default();
         div()
+            .id("user-create-sql")
             .flex()
             .flex_col()
-            .gap_1()
+            .gap_2()
             .w_full()
             .child(
                 div()
-                    .text_size(px(12.0))
-                    .text_color(rgb(theme.text))
-                    .child(t!("user.tab.sql").to_string()),
+                    .text_size(px(11.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(t!("user.create.preview_sql").to_string()),
             )
             .child(
                 div()
-                    .id("user-create-sql")
-                    .h(px(120.0))
+                    .id("user-create-sql-scroll")
+                    .h(px(CREATE_PREVIEW_HEIGHT))
                     .flex_none()
                     .overflow_y_scroll()
                     .track_scroll(&scroll)
@@ -2904,6 +2929,7 @@ impl AppView {
                     .p_2()
                     .child(
                         div()
+                            .font_family("Consolas")
                             .text_size(px(12.0))
                             .text_color(rgb(theme.text))
                             .child(text),
@@ -2912,16 +2938,21 @@ impl AppView {
             .into_any_element()
     }
 
-    /// The window's footer: 取消 / 预览 SQL / 保存.
+    /// The window's footer: the error line, the account badge and 取消 / 保存.
     pub(super) fn create_user_footer(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
         let Some(dialog) = self.create_user_dialog.as_ref() else {
             return div().into_any_element();
         };
-        let busy = dialog.saving;
+        let busy = dialog.saving || dialog.loading;
         let is_edit = dialog.is_edit();
-        let subject = dialog.editor.account.user.trim().to_string();
-        let save_label = if is_edit {
+        let subject = match dialog.original_account() {
+            Some((user, host)) => format!("{user}@{host}"),
+            None => dialog.editor.account.user.trim().to_string(),
+        };
+        let save_label = if dialog.saving {
+            t!("user.create.saving").to_string()
+        } else if is_edit {
             t!("design.save").to_string()
         } else {
             t!("user.create.submit").to_string()
@@ -2942,22 +2973,34 @@ impl AppView {
                 false,
                 cx.listener(|this, _event, window, cx| this.create_user_close(window, cx)),
             ))
-            .child(self.dialog_button(
-                "user-create-preview",
-                t!("user.create.preview_sql").to_string(),
-                false,
-                cx.listener(|this, _event, _window, cx| this.toggle_create_preview(cx)),
-            ))
-            .child(self.dialog_button(
+            .child(self.win_button(
                 "user-create-submit",
                 save_label,
-                true,
+                if busy {
+                    ButtonKind::Disabled
+                } else {
+                    ButtonKind::Default
+                },
                 cx.listener(move |this, _event, _window, cx| {
                     if !busy {
                         this.submit_create_user(cx);
                     }
                 }),
             ));
+        // The footer's left cell reports state: the failure reason, or a brief 已保存 confirmation.
+        let status: AnyElement = if let Some(error) = dialog.error.as_ref() {
+            div()
+                .text_color(rgb(theme.danger))
+                .child(error.clone())
+                .into_any_element()
+        } else if dialog.saved {
+            div()
+                .text_color(rgb(theme.primary))
+                .child(t!("user.create.saved").to_string())
+                .into_any_element()
+        } else {
+            div().into_any_element()
+        };
         div()
             .flex()
             .flex_row()
@@ -2971,132 +3014,124 @@ impl AppView {
                     .flex_1()
                     .min_w(px(0.0))
                     .text_size(px(12.0))
-                    .text_color(rgb(theme.danger))
-                    .child(
-                        self.create_user_dialog
-                            .as_ref()
-                            .and_then(|dialog| dialog.error.clone())
-                            .unwrap_or_default(),
-                    ),
+                    .child(status),
             )
             .child(right)
             .into_any_element()
     }
 }
 
-/// The open privilege-level list of the create window: which database row it belongs to.
-pub(super) struct CreateLevelMenu {
-    pub(super) index: usize,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn row(
-        name: &str,
-        selected: bool,
-        level: CreateLevel,
-        specific: bool,
-        tables: &[&str],
-    ) -> CreateDatabaseRow {
-        CreateDatabaseRow {
+    #[test]
+    fn templates_are_progressive() {
+        assert!(ServerTemplate::None.privileges().is_empty());
+        assert!(
+            ServerTemplate::ReadWrite
+                .privileges()
+                .is_superset(&ServerTemplate::ReadOnly.privileges())
+        );
+        assert!(
+            ServerTemplate::Developer
+                .privileges()
+                .is_superset(&ServerTemplate::ReadWrite.privileges())
+        );
+        assert_eq!(
+            ServerTemplate::Admin.privileges().len(),
+            Privilege::ALL.len()
+        );
+    }
+
+    #[test]
+    fn an_edit_dialog_remembers_its_identity() {
+        let dialog = UserCreateDialog::new(
+            0,
+            "caching_sha2_password".to_string(),
+            Some(("root".to_string(), "localhost".to_string())),
+        );
+        assert!(dialog.is_edit());
+        assert_eq!(
+            dialog.original_account(),
+            Some(&("root".to_string(), "localhost".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_new_dialog_is_not_an_edit() {
+        let dialog = UserCreateDialog::new(0, "caching_sha2_password".to_string(), None);
+        assert!(!dialog.is_edit());
+        assert_eq!(dialog.original_account(), None);
+    }
+
+    #[test]
+    fn resource_limit_fields_parse_empty_as_unlimited() {
+        assert_eq!(parse_limit(""), 0);
+        assert_eq!(parse_limit("  "), 0);
+        assert_eq!(parse_limit("abc"), 0);
+        assert_eq!(parse_limit("250"), 250);
+    }
+
+    fn grant(database: &str, name: &str) -> ObjectGrant {
+        ObjectGrant {
+            database: database.to_string(),
             name: name.to_string(),
-            selected,
-            level,
-            specific,
-            tables: tables.iter().map(|table| table.to_string()).collect(),
+            privileges: [Privilege::Select].into_iter().collect(),
         }
     }
 
-    fn dialog(kind: CreateKind, databases: Vec<CreateDatabaseRow>) -> UserCreateDialog {
-        let mut dialog = UserCreateDialog::new(
-            0,
-            "test".to_string(),
-            "caching_sha2_password".to_string(),
-            None,
+    #[test]
+    fn rebuild_maps_whole_database_table_and_ungranted_rows() {
+        let mut dialog = UserCreateDialog::new(0, "caching_sha2_password".to_string(), None);
+        dialog.databases = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        dialog.editor.grants = vec![grant("a", ""), grant("b", "t1"), grant("b", "t2")];
+        dialog.rebuild_db_grants();
+
+        assert_eq!(dialog.db_grants.len(), 3);
+        assert!(dialog.db_grants[0].enabled);
+        assert_eq!(dialog.db_grants[0].scope, GrantScope::AllTables);
+        assert!(dialog.db_grants[1].enabled);
+        assert_eq!(dialog.db_grants[1].scope, GrantScope::SpecificTables);
+        assert_eq!(
+            dialog.db_grants[1].tables,
+            vec!["t1".to_string(), "t2".to_string()]
         );
-        dialog.kind = kind;
-        dialog.databases = databases;
-        dialog
+        assert!(!dialog.db_grants[2].enabled);
+        assert_eq!(dialog.object_grants().len(), 3);
     }
 
     #[test]
-    fn unselected_databases_are_skipped() {
-        let dialog = dialog(
-            CreateKind::Regular,
-            vec![
-                row("app", true, CreateLevel::ReadOnly, false, &[]),
-                row("mysql", false, CreateLevel::All, false, &[]),
-            ],
-        );
-        let grants = create_object_grants(&dialog);
+    fn specific_scope_without_tables_falls_back_to_a_database_grant() {
+        let mut dialog = UserCreateDialog::new(0, "caching_sha2_password".to_string(), None);
+        dialog.databases = vec!["a".to_string()];
+        dialog.rebuild_db_grants();
+        dialog.db_grants[0].enabled = true;
+        dialog.db_grants[0].scope = GrantScope::SpecificTables;
+        dialog.db_grants[0].privileges.insert(Privilege::Select);
+
+        let grants = dialog.object_grants();
         assert_eq!(grants.len(), 1);
-        assert_eq!(grants[0].database, "app");
-        assert_eq!(grants[0].name, "");
-        assert!(grants[0].privileges.contains(&Privilege::Select));
-        assert!(!grants[0].privileges.contains(&Privilege::Insert));
+        assert_eq!(grants[0].database, "a");
+        assert!(grants[0].name.is_empty());
     }
 
     #[test]
-    fn specific_tables_expand_into_per_table_grants() {
-        let dialog = dialog(
-            CreateKind::Regular,
-            vec![row(
-                "app",
-                true,
-                CreateLevel::ReadWrite,
-                true,
-                &["orders", "users"],
-            )],
-        );
-        let grants = create_object_grants(&dialog);
-        assert_eq!(grants.len(), 2);
-        assert_eq!(grants[0].name, "orders");
-        assert_eq!(grants[1].name, "users");
-        assert!(grants[0].privileges.contains(&Privilege::Insert));
-    }
+    fn rebuild_keeps_granted_databases_missing_from_the_listing() {
+        let mut dialog = UserCreateDialog::new(0, "caching_sha2_password".to_string(), None);
+        dialog.databases = vec!["a".to_string()];
+        dialog.editor.grants = vec![grant("only_in_grants", "")];
+        dialog.rebuild_db_grants();
 
-    #[test]
-    fn specific_without_tables_falls_back_to_database_grant() {
-        let dialog = dialog(
-            CreateKind::Regular,
-            vec![row("app", true, CreateLevel::ReadOnly, true, &[])],
-        );
-        let grants = create_object_grants(&dialog);
-        assert_eq!(grants.len(), 1);
-        assert_eq!(grants[0].name, "");
-    }
-
-    #[test]
-    fn admin_grants_every_database() {
-        let dialog = dialog(
-            CreateKind::Admin,
-            vec![
-                row("app", false, CreateLevel::ReadOnly, false, &[]),
-                row("mysql", false, CreateLevel::ReadOnly, false, &[]),
-            ],
-        );
-        let grants = create_object_grants(&dialog);
-        assert_eq!(grants.len(), 2);
+        assert_eq!(dialog.db_grants.len(), 2);
         assert!(
-            grants
+            dialog
+                .db_grants
                 .iter()
-                .all(|grant| grant.privileges.contains(&Privilege::Select))
+                .any(|row| row.name == "only_in_grants" && row.enabled)
         );
-        assert!(grants[0].privileges.len() > CreateLevel::ReadOnly.privileges().len());
-    }
-
-    #[test]
-    fn selected_database_count_counts_checked_rows() {
-        let dialog = dialog(
-            CreateKind::Regular,
-            vec![
-                row("app", true, CreateLevel::ReadOnly, false, &[]),
-                row("mysql", false, CreateLevel::ReadOnly, false, &[]),
-                row("logs", true, CreateLevel::ReadOnly, false, &[]),
-            ],
-        );
-        assert_eq!(dialog.selected_database_count(), 2);
+        let grants = dialog.object_grants();
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].database, "only_in_grants");
     }
 }

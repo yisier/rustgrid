@@ -191,6 +191,7 @@ impl AppView {
 
     pub(super) fn select_main_tab(&mut self, tab: MainTab, cx: &mut Context<'_, Self>) {
         self.main_tab = tab;
+        self.privilege_manager_active = false;
         if tab == MainTab::Users {
             self.refresh_users(cx);
             self.privilege_manager = None;
@@ -198,8 +199,6 @@ impl AppView {
             self.active_query = None;
             self.active_design = None;
             self.saved_query_selected = None;
-            // Navicat shows the account details pane by default on the Users tab.
-            self.info_open = true;
             cx.notify();
             return;
         }

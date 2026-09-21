@@ -1897,6 +1897,7 @@ impl AppView {
         self.active_design = Some(self.designs.len() - 1);
         self.active_grid = None;
         self.active_query = None;
+        self.privilege_manager_active = false;
         entity.update(cx, |design, cx| {
             design.load_schema(cx);
             design.load_option_catalogs(cx);
@@ -1944,6 +1945,7 @@ impl AppView {
         self.active_design = Some(self.designs.len() - 1);
         self.active_grid = None;
         self.active_query = None;
+        self.privilege_manager_active = false;
         // Start with one field so the grid is not empty.
         entity.update(cx, |design, cx| {
             design.add_field(cx);
@@ -1986,6 +1988,7 @@ impl AppView {
         self.active_design = index;
         self.active_query = None;
         self.active_grid = None;
+        self.privilege_manager_active = false;
         self.query_completion = None;
         cx.notify();
     }

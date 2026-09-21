@@ -195,6 +195,9 @@ pub struct UserAccount {
     pub host: String,
     /// The authentication plugin, e.g. `caching_sha2_password`, `mysql_native_password`, `auth_socket`.
     pub plugin: String,
+    /// Whether the account has a password set (`authentication_string` is non-empty). The server
+    /// only stores the hash, so the plaintext cannot be shown.
+    pub password_set: bool,
     pub password_expired: bool,
     /// `password_lifetime` in days; `None` means the server default (`DEFAULT`).
     pub password_lifetime: Option<u32>,

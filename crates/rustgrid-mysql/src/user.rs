@@ -19,9 +19,9 @@ use crate::connection::map_query_error;
 
 /// The `mysql.user` columns the account editor reads. `plugin`, `password_expired`, the resource
 /// limits and the TLS columns are the ones the 常规/高级 tabs edit.
-const ACCOUNT_QUERY: &str = "SELECT User, Host, plugin, password_expired, password_lifetime, \
-     account_locked, max_questions, max_updates, max_connections, max_user_connections, \
-     ssl_type, ssl_cipher, x509_issuer, x509_subject \
+const ACCOUNT_QUERY: &str = "SELECT User, Host, plugin, authentication_string, password_expired, \
+     password_lifetime, account_locked, max_questions, max_updates, max_connections, \
+     max_user_connections, ssl_type, ssl_cipher, x509_issuer, x509_subject \
      FROM mysql.user";
 
 /// Every account on the server, ordered by user then host.
@@ -122,6 +122,7 @@ fn read_account(row: &MySqlRow) -> UserAccount {
         user: text(row, "User"),
         host: text(row, "Host"),
         plugin: text(row, "plugin"),
+        password_set: !text(row, "authentication_string").is_empty(),
         password_expired: flag(row, "password_expired"),
         password_lifetime: int(row, "password_lifetime").map(|value| value.max(0) as u32),
         account_locked: flag(row, "account_locked"),
@@ -241,7 +242,22 @@ fn edit_statements(edit: &UserEdit) -> Vec<String> {
     let account = &edit.account;
     let target = quote_account(&account.user, &account.host);
     let is_new = edit.original.is_none();
-    let mut statements = account_statements(edit, &target, is_new);
+    let mut statements = Vec::new();
+
+    // A renamed account keeps its grants and role edges, so rename first and address every
+    // following statement at the new identity.
+    if let Some(original) = &edit.original {
+        let old_user = &original.account.user;
+        let old_host = &original.account.host;
+        if old_user != &account.user || old_host != &account.host {
+            statements.push(format!(
+                "RENAME USER {} TO {target}",
+                quote_account(old_user, old_host)
+            ));
+        }
+    }
+
+    statements.extend(account_statements(edit, &target, is_new));
     statements.extend(server_privilege_statements(edit, &target));
     statements.extend(object_grant_statements(edit, &target));
     statements.extend(role_statements(edit, &target));
@@ -262,6 +278,9 @@ fn account_statements(edit: &UserEdit, target: &str, is_new: bool) -> Vec<String
         clauses.push(format!("IDENTIFIED WITH {}", quote_string(&account.plugin)));
     }
 
+    // MySQL's account-option order is `[REQUIRE ...] [WITH ...] [PASSWORD ...] [ACCOUNT ...]`;
+    // putting the resource limits before REQUIRE is a syntax error (1064) on ALTER USER.
+    clauses.push(require_clause(account));
     clauses.push(format!(
         "WITH MAX_QUERIES_PER_HOUR {} MAX_UPDATES_PER_HOUR {} \
          MAX_CONNECTIONS_PER_HOUR {} MAX_USER_CONNECTIONS {}",
@@ -270,7 +289,6 @@ fn account_statements(edit: &UserEdit, target: &str, is_new: bool) -> Vec<String
         account.max_connections,
         account.max_user_connections
     ));
-    clauses.push(require_clause(account));
     clauses.push(format!(
         "ACCOUNT {}",
         if account.account_locked {
@@ -398,10 +416,12 @@ fn object_grant_statements(edit: &UserEdit, target: &str) -> Vec<String> {
         }
 
         if new.is_empty() {
-            statements.push(format!(
-                "REVOKE ALL PRIVILEGES, GRANT OPTION ON {} FROM {}",
-                object, target
-            ));
+            // `REVOKE ALL [PRIVILEGES], GRANT OPTION` has no `ON` clause (it only strips a user's
+            // global privileges), so an object that loses every privilege is emptied by revoking
+            // exactly what it held above, plus its GRANT OPTION here.
+            if old.contains(&Privilege::GrantOption) {
+                statements.push(format!("REVOKE GRANT OPTION ON {} FROM {}", object, target));
+            }
             continue;
         }
 
@@ -773,6 +793,34 @@ fn object_privilege_statements(
         }
         statements.push(statement);
     }
+
+    // Accounts that are no longer listed at all (removed with 删除权限) lose every privilege they
+    // held on this object.
+    for ((user, host), old) in current {
+        if rows
+            .iter()
+            .any(|row| row.user == *user && row.host == *host)
+        {
+            continue;
+        }
+        let removed: Vec<&str> = old
+            .iter()
+            .filter(|privilege| **privilege != Privilege::GrantOption)
+            .map(|privilege| privilege.sql_name())
+            .collect();
+        let target = quote_account(user, host);
+        if !removed.is_empty() {
+            statements.push(format!(
+                "REVOKE {} ON {} FROM {}",
+                removed.join(", "),
+                object,
+                target
+            ));
+        }
+        if old.contains(&Privilege::GrantOption) {
+            statements.push(format!("REVOKE GRANT OPTION ON {} FROM {}", object, target));
+        }
+    }
     statements
 }
 
@@ -792,4 +840,193 @@ fn parse_grantee(grantee: &str) -> (String, String) {
     let user = grantee[..at].trim_matches('\'').replace("''", "'");
     let host = grantee[at + 3..].trim_matches('\'').replace("''", "'");
     (user, host)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(user: &str, host: &str, privileges: &[Privilege]) -> ObjectPrivilegeRow {
+        ObjectPrivilegeRow {
+            user: user.to_string(),
+            host: host.to_string(),
+            privileges: privileges.iter().copied().collect(),
+        }
+    }
+
+    fn current(
+        entries: &[(&str, &str, &[Privilege])],
+    ) -> BTreeMap<(String, String), BTreeSet<Privilege>> {
+        entries
+            .iter()
+            .map(|(user, host, privileges)| {
+                (
+                    (user.to_string(), host.to_string()),
+                    privileges.iter().copied().collect(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn grants_new_privileges_on_a_database() {
+        let statements = object_privilege_statements(
+            "shop",
+            "",
+            &current(&[]),
+            &[row("alice", "%", &[Privilege::Select, Privilege::Insert])],
+        );
+        assert_eq!(
+            statements,
+            vec!["GRANT INSERT, SELECT ON `shop`.* TO 'alice'@'%'"]
+        );
+    }
+
+    #[test]
+    fn revokes_only_the_deselected_privileges() {
+        let statements = object_privilege_statements(
+            "shop",
+            "orders",
+            &current(&[("alice", "%", &[Privilege::Select, Privilege::Insert])]),
+            &[row("alice", "%", &[Privilege::Select])],
+        );
+        assert_eq!(
+            statements,
+            vec!["REVOKE INSERT ON `shop`.`orders` FROM 'alice'@'%'"]
+        );
+    }
+
+    #[test]
+    fn revokes_every_privilege_of_a_removed_account() {
+        let statements = object_privilege_statements(
+            "shop",
+            "",
+            &current(&[("alice", "%", &[Privilege::Select, Privilege::GrantOption])]),
+            &[],
+        );
+        assert_eq!(
+            statements,
+            vec![
+                "REVOKE SELECT ON `shop`.* FROM 'alice'@'%'",
+                "REVOKE GRANT OPTION ON `shop`.* FROM 'alice'@'%'",
+            ]
+        );
+    }
+
+    #[test]
+    fn leaves_untouched_accounts_alone() {
+        let statements = object_privilege_statements(
+            "shop",
+            "",
+            &current(&[
+                ("alice", "%", &[Privilege::Select]),
+                ("bob", "localhost", &[Privilege::Insert]),
+            ]),
+            &[row("alice", "%", &[Privilege::Select])],
+        );
+        assert_eq!(
+            statements,
+            vec!["REVOKE INSERT ON `shop`.* FROM 'bob'@'localhost'"]
+        );
+    }
+
+    #[test]
+    fn splits_a_grantee_into_user_and_host() {
+        assert_eq!(
+            parse_grantee("'root'@'localhost'"),
+            ("root".to_string(), "localhost".to_string())
+        );
+        assert_eq!(
+            parse_grantee("'o''brien'@'%'"),
+            ("o'brien".to_string(), "%".to_string())
+        );
+    }
+
+    #[test]
+    fn account_options_are_emitted_in_mysql_order() {
+        let original = UserDetails {
+            account: UserAccount {
+                user: "test".to_string(),
+                host: "%".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let edit = UserEdit {
+            original: Some(original),
+            account: UserAccount {
+                user: "test".to_string(),
+                host: "%".to_string(),
+                plugin: "mysql_native_password".to_string(),
+                ..Default::default()
+            },
+            password: None,
+            server_privileges: BTreeSet::new(),
+            grants: Vec::new(),
+            roles: Vec::new(),
+            members: Vec::new(),
+        };
+        let alter = edit_statements(&edit)
+            .into_iter()
+            .find(|statement| statement.starts_with("ALTER USER"))
+            .expect("an ALTER USER statement");
+        let require = alter.find("REQUIRE").expect("REQUIRE");
+        let with = alter.find("WITH").expect("WITH");
+        let expire = alter.find("PASSWORD EXPIRE").expect("PASSWORD EXPIRE");
+        assert!(
+            require < with && with < expire,
+            "clauses out of order: {alter}"
+        );
+    }
+
+    #[test]
+    fn emptying_an_object_revokes_it_without_the_on_less_all_form() {
+        let original = UserDetails {
+            account: UserAccount {
+                user: "test".to_string(),
+                host: "%".to_string(),
+                ..Default::default()
+            },
+            grants: vec![ObjectGrant {
+                database: "test".to_string(),
+                name: "t".to_string(),
+                privileges: [Privilege::Select, Privilege::GrantOption]
+                    .into_iter()
+                    .collect(),
+            }],
+            ..Default::default()
+        };
+        let edit = UserEdit {
+            original: Some(original),
+            account: UserAccount {
+                user: "test".to_string(),
+                host: "%".to_string(),
+                plugin: "mysql_native_password".to_string(),
+                ..Default::default()
+            },
+            password: None,
+            server_privileges: BTreeSet::new(),
+            grants: Vec::new(),
+            roles: Vec::new(),
+            members: Vec::new(),
+        };
+        let statements = edit_statements(&edit);
+        let joined = statements.join("\n");
+        assert!(
+            !joined.contains("REVOKE ALL PRIVILEGES, GRANT OPTION ON"),
+            "the ON-less REVOKE ALL form is invalid for an object: {joined}"
+        );
+        assert!(
+            statements
+                .iter()
+                .any(|s| s == "REVOKE SELECT ON `test`.`t` FROM 'test'@'%'"),
+            "{joined}"
+        );
+        assert!(
+            statements
+                .iter()
+                .any(|s| s == "REVOKE GRANT OPTION ON `test`.`t` FROM 'test'@'%'"),
+            "{joined}"
+        );
+    }
 }

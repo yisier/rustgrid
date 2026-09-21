@@ -645,7 +645,7 @@ impl AppView {
     /// Open the object-info pane for a backup file.
     pub(super) fn open_backup_info(&mut self, index: usize, cx: &mut Context<'_, Self>) {
         self.backup_selected = Some(BackupSelection::File(index));
-        self.info_open = true;
+        self.set_info_open(true, cx);
         cx.notify();
     }
 
@@ -739,6 +739,7 @@ impl AppView {
         self.active_query = Some(self.queries.len() - 1);
         self.active_grid = None;
         self.active_design = None;
+        self.privilege_manager_active = false;
         self.query_completion = None;
         self.query_focus_pending = true;
         self.main_tab = MainTab::Queries;
