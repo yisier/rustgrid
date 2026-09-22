@@ -343,28 +343,119 @@ pub(super) struct DbGrant {
     pub(super) name: String,
     pub(super) enabled: bool,
     pub(super) scope: GrantScope,
+    /// The tables picked for the 指定具体表 scope.
     pub(super) tables: Vec<String>,
+    /// The table whose privileges the detail pane edits (an index into `tables` by name).
+    pub(super) active_table: Option<String>,
+    /// The privileges granted on the whole database (the 全部表 scope).
     pub(super) privileges: BTreeSet<Privilege>,
+    /// The privileges granted per table (the 指定具体表 scope), keyed by table name.
+    pub(super) table_privileges: BTreeMap<String, BTreeSet<Privilege>>,
+}
+
+/// The i18n key naming a privilege set: the matching quick preset, or 自定义.
+fn privilege_preset_key(privileges: &BTreeSet<Privilege>) -> &'static str {
+    if *privileges == DbTemplate::ReadOnly.privileges() {
+        "user.create.db_template.read_only"
+    } else if *privileges == DbTemplate::ReadWrite.privileges() {
+        "user.create.db_template.read_write"
+    } else if *privileges == DbTemplate::Full.privileges() {
+        "user.create.db_template.full"
+    } else {
+        "user.create.custom"
+    }
+}
+
+/// The badge for one privilege set: the preset name (with its count) or 未授权.
+fn privilege_summary(privileges: &BTreeSet<Privilege>) -> (String, bool) {
+    if privileges.is_empty() {
+        return (t!("user.create.unauthorized").to_string(), false);
+    }
+    (
+        format!(
+            "{} ({})",
+            t!(privilege_preset_key(privileges)),
+            privileges.len()
+        ),
+        true,
+    )
 }
 
 impl DbGrant {
+    /// The privilege set the detail pane edits: the whole database for 全部表, otherwise the active
+    /// table's own set (empty when no table is active).
+    fn active_privileges(&self) -> BTreeSet<Privilege> {
+        match self.scope {
+            GrantScope::AllTables => self.privileges.clone(),
+            GrantScope::SpecificTables => self
+                .active_table
+                .as_ref()
+                .and_then(|table| self.table_privileges.get(table))
+                .cloned()
+                .unwrap_or_default(),
+        }
+    }
+
+    /// The set the detail pane mutates, for the active scope. `None` for 指定具体表 with no active
+    /// table, so a stray toggle cannot silently change the wrong grant.
+    fn active_privileges_mut(&mut self) -> Option<&mut BTreeSet<Privilege>> {
+        match self.scope {
+            GrantScope::AllTables => Some(&mut self.privileges),
+            GrantScope::SpecificTables => {
+                let table = self.active_table.clone()?;
+                Some(self.table_privileges.entry(table).or_default())
+            }
+        }
+    }
+
+    /// Make `table` the active 指定具体表 row, selecting it if it is not picked yet.
+    fn activate_table(&mut self, table: &str) {
+        self.scope = GrantScope::SpecificTables;
+        self.enabled = true;
+        if !self.tables.iter().any(|picked| picked == table) {
+            self.tables.push(table.to_string());
+        }
+        self.active_table = Some(table.to_string());
+        self.table_privileges.entry(table.to_string()).or_default();
+    }
+
+    /// Every privilege set this row actually applies, for the list badge: one per picked table for
+    /// 指定具体表, else the single whole-database set.
+    fn effective_sets(&self) -> Vec<BTreeSet<Privilege>> {
+        if self.scope == GrantScope::SpecificTables && !self.tables.is_empty() {
+            self.tables
+                .iter()
+                .map(|table| {
+                    self.table_privileges
+                        .get(table)
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .collect()
+        } else {
+            vec![self.privileges.clone()]
+        }
+    }
+
     /// The badge shown in the database list: the preset name (with its privilege count) or 未授权,
-    /// plus whether the database is granted (for its colour).
+    /// plus whether the database is granted (for its colour). Per-table differences read 自定义.
     fn summary(&self) -> (String, bool) {
-        if !self.enabled || self.privileges.is_empty() {
+        if !self.enabled {
             return (t!("user.create.unauthorized").to_string(), false);
         }
-        let count = self.privileges.len();
-        let name = if self.privileges == DbTemplate::ReadOnly.privileges() {
-            t!("user.create.db_template.read_only").to_string()
-        } else if self.privileges == DbTemplate::ReadWrite.privileges() {
-            t!("user.create.db_template.read_write").to_string()
-        } else if self.privileges == DbTemplate::Full.privileges() {
-            t!("user.create.db_template.full").to_string()
+        let sets = self.effective_sets();
+        let union: BTreeSet<Privilege> = sets.iter().flat_map(|set| set.iter().copied()).collect();
+        if union.is_empty() {
+            return (t!("user.create.unauthorized").to_string(), false);
+        }
+        if sets.iter().all(|set| *set == sets[0]) {
+            privilege_summary(&sets[0])
         } else {
-            t!("user.create.custom").to_string()
-        };
-        (format!("{name} ({count})"), true)
+            (
+                format!("{} ({})", t!("user.create.custom"), union.len()),
+                true,
+            )
+        }
     }
 }
 
@@ -465,6 +556,46 @@ impl UserCreateDialog {
         }
     }
 
+    /// Load an account's details into the editor and mirror its role edges into the 角色 lists'
+    /// edit state, so the 成员属于 / 成员 check boxes reflect what the account already holds.
+    pub(super) fn apply_details(&mut self, details: UserDetails) {
+        self.editor.apply_details(details);
+        let (roles, members) = self
+            .editor
+            .original
+            .as_ref()
+            .map(|details| {
+                let roles = details
+                    .roles
+                    .iter()
+                    .map(|edge| {
+                        (
+                            (edge.role_user.clone(), edge.role_host.clone()),
+                            edge.admin_option,
+                        )
+                    })
+                    .collect();
+                let members = details
+                    .members
+                    .iter()
+                    .map(|edge| {
+                        (
+                            (edge.member_user.clone(), edge.member_host.clone()),
+                            edge.admin_option,
+                        )
+                    })
+                    .collect();
+                (roles, members)
+            })
+            .unwrap_or_default();
+        self.context = Some(UserAccountContext {
+            user: self.editor.account.user.clone(),
+            host: self.editor.account.host.clone(),
+            roles,
+            members,
+        });
+    }
+
     /// `(user, host)` of the account being edited, for the window title.
     pub(super) fn original_account(&self) -> Option<&(String, String)> {
         self.editor.original_account.as_ref()
@@ -504,7 +635,9 @@ impl UserCreateDialog {
                     enabled: true,
                     scope: GrantScope::AllTables,
                     tables: Vec::new(),
+                    active_table: None,
                     privileges: whole.privileges.clone(),
+                    table_privileges: BTreeMap::new(),
                 });
                 continue;
             }
@@ -519,21 +652,32 @@ impl UserCreateDialog {
                     enabled: false,
                     scope: GrantScope::AllTables,
                     tables: Vec::new(),
+                    active_table: None,
                     privileges: BTreeSet::new(),
+                    table_privileges: BTreeMap::new(),
                 });
             } else {
+                // Keep each table's own privileges (they may differ), rather than flattening them
+                // into one set shared by the whole scope.
+                let tables: Vec<String> = table_grants
+                    .iter()
+                    .map(|grant| grant.name.clone())
+                    .collect();
+                let mut table_privileges: BTreeMap<String, BTreeSet<Privilege>> = BTreeMap::new();
+                for grant in &table_grants {
+                    table_privileges
+                        .entry(grant.name.clone())
+                        .or_default()
+                        .extend(grant.privileges.iter().copied());
+                }
                 rows.push(DbGrant {
                     name: database.clone(),
                     enabled: true,
                     scope: GrantScope::SpecificTables,
-                    tables: table_grants
-                        .iter()
-                        .map(|grant| grant.name.clone())
-                        .collect(),
-                    privileges: table_grants
-                        .iter()
-                        .flat_map(|grant| grant.privileges.iter().copied())
-                        .collect(),
+                    active_table: tables.first().cloned(),
+                    tables,
+                    privileges: BTreeSet::new(),
+                    table_privileges,
                 });
             }
         }
@@ -554,7 +698,7 @@ impl UserCreateDialog {
                     grants.push(ObjectGrant {
                         database: row.name.clone(),
                         name: table.clone(),
-                        privileges: row.privileges.clone(),
+                        privileges: row.table_privileges.get(table).cloned().unwrap_or_default(),
                     });
                 }
             } else {
@@ -1006,7 +1150,7 @@ impl AppView {
                 };
                 dialog.loading = false;
                 match details {
-                    Ok(details) => dialog.editor.apply_details(details),
+                    Ok(details) => dialog.apply_details(details),
                     Err(error) => dialog.error = Some(error.to_string()),
                 }
                 if let Ok(accounts) = accounts {
@@ -1347,7 +1491,10 @@ impl AppView {
                 return;
             }
             dialog.active_database = Some(index);
-            let row = &dialog.db_grants[index];
+            let row = &mut dialog.db_grants[index];
+            if row.scope == GrantScope::SpecificTables && row.active_table.is_none() {
+                row.active_table = row.tables.first().cloned();
+            }
             (row.scope == GrantScope::SpecificTables).then(|| row.name.clone())
         };
         if let Some(database) = load {
@@ -1374,7 +1521,9 @@ impl AppView {
                 row.enabled = false;
                 row.scope = GrantScope::AllTables;
                 row.tables.clear();
+                row.active_table = None;
                 row.privileges.clear();
+                row.table_privileges.clear();
             }
         }
         cx.notify();
@@ -1395,9 +1544,14 @@ impl AppView {
             row.scope = scope;
             if scope == GrantScope::SpecificTables {
                 row.enabled = true;
+                if row.active_table.is_none() {
+                    row.active_table = row.tables.first().cloned();
+                }
                 Some(row.name.clone())
             } else {
                 row.tables.clear();
+                row.active_table = None;
+                row.table_privileges.clear();
                 None
             }
         };
@@ -1408,7 +1562,8 @@ impl AppView {
         }
     }
 
-    /// Apply a quick preset to the active database.
+    /// Apply a quick preset to the active target: the whole database for 全部表, else the active
+    /// table.
     pub(super) fn apply_create_database_template(
         &mut self,
         template: DbTemplate,
@@ -1418,13 +1573,25 @@ impl AppView {
             && let Some(index) = dialog.active_database
             && let Some(row) = dialog.db_grants.get_mut(index)
         {
-            row.privileges = template.privileges();
-            row.enabled = !row.privileges.is_empty();
+            if row.scope == GrantScope::SpecificTables && row.active_table.is_none() {
+                // A preset needs a table to land on; default to the first picked one.
+                if let Some(first) = row.tables.first().cloned() {
+                    row.activate_table(&first);
+                }
+            }
+            let privileges = template.privileges();
+            let is_all_tables = row.scope == GrantScope::AllTables;
+            if let Some(target) = row.active_privileges_mut() {
+                *target = privileges.clone();
+            }
+            if is_all_tables {
+                row.enabled = !privileges.is_empty();
+            }
         }
         cx.notify();
     }
 
-    /// Toggle one privilege on the active database.
+    /// Toggle one privilege on the active target (whole database or active table).
     pub(super) fn toggle_create_database_privilege(
         &mut self,
         privilege: Privilege,
@@ -1434,28 +1601,48 @@ impl AppView {
             && let Some(index) = dialog.active_database
             && let Some(row) = dialog.db_grants.get_mut(index)
         {
-            if !row.privileges.remove(&privilege) {
-                row.privileges.insert(privilege);
+            if let Some(target) = row.active_privileges_mut()
+                && !target.remove(&privilege)
+            {
+                target.insert(privilege);
             }
+            // Keep the row participating even at zero privileges so clearing a table revokes it.
             row.enabled = true;
         }
         cx.notify();
     }
 
-    /// Select every object privilege on the active database, or clear them if all are already set.
+    /// Select every object privilege on the active target, or clear them if all are already set.
     pub(super) fn toggle_create_database_privileges_all(&mut self, cx: &mut Context<'_, Self>) {
         if let Some(dialog) = self.create_user_dialog.as_mut()
             && let Some(index) = dialog.active_database
             && let Some(row) = dialog.db_grants.get_mut(index)
         {
-            let all: BTreeSet<Privilege> = Privilege::OBJECT.into_iter().collect();
-            if row.privileges == all {
-                row.privileges.clear();
-                row.enabled = false;
-            } else {
-                row.privileges = all;
-                row.enabled = true;
+            let is_all_tables = row.scope == GrantScope::AllTables;
+            let mut cleared = false;
+            if let Some(target) = row.active_privileges_mut() {
+                let all: BTreeSet<Privilege> = Privilege::OBJECT.into_iter().collect();
+                if *target == all {
+                    target.clear();
+                    cleared = true;
+                } else {
+                    *target = all;
+                }
             }
+            // Clearing a whole-database grant leaves the database unconfigured; a table scope stays
+            // selected so its revoke is still emitted.
+            row.enabled = !(cleared && is_all_tables);
+        }
+        cx.notify();
+    }
+
+    /// Make one table the active 指定具体表 row the detail pane edits, selecting it if needed.
+    pub(super) fn activate_create_table(&mut self, name: String, cx: &mut Context<'_, Self>) {
+        if let Some(dialog) = self.create_user_dialog.as_mut()
+            && let Some(index) = dialog.active_database
+            && let Some(row) = dialog.db_grants.get_mut(index)
+        {
+            row.activate_table(&name);
         }
         cx.notify();
     }
@@ -1468,8 +1655,12 @@ impl AppView {
         {
             if let Some(position) = row.tables.iter().position(|table| *table == name) {
                 row.tables.remove(position);
+                row.table_privileges.remove(&name);
+                if row.active_table.as_deref() == Some(name.as_str()) {
+                    row.active_table = row.tables.first().cloned();
+                }
             } else {
-                row.tables.push(name);
+                row.activate_table(&name);
             }
         }
         cx.notify();
@@ -1488,7 +1679,18 @@ impl AppView {
         };
         let tables = dialog.tables.get(&database).cloned().unwrap_or_default();
         if let Some(row) = dialog.db_grants.get_mut(index) {
-            row.tables = if all { tables } else { Vec::new() };
+            if all {
+                row.tables = tables;
+                if row.active_table.is_none() {
+                    row.active_table = row.tables.first().cloned();
+                }
+                row.enabled = true;
+            } else {
+                row.tables.clear();
+                row.active_table = None;
+                row.table_privileges.clear();
+                row.enabled = false;
+            }
         }
         cx.notify();
     }
@@ -1659,7 +1861,7 @@ impl AppView {
                 dialog.loading = false;
                 match result {
                     Ok(Ok(details)) => {
-                        dialog.editor.apply_details(details);
+                        dialog.apply_details(details);
                         app.sync_create_editor_fields(cx);
                     }
                     Ok(Err(error)) => dialog.error = Some(error.to_string()),
@@ -1728,6 +1930,20 @@ impl AppView {
             Some(edit) => connection.user_edit_sql(&edit),
             None => String::new(),
         }
+    }
+
+    /// Whether Save would change anything: a new account always would, an edit only when its diff
+    /// is non-empty. Drives the footer's disabled Save button.
+    pub(super) fn create_user_has_changes(&self) -> bool {
+        let Some(dialog) = self.create_user_dialog.as_ref() else {
+            return false;
+        };
+        let Some(connection) = self.connection_arc(dialog.connection_index) else {
+            return false;
+        };
+        self.create_user_edit()
+            .map(|edit| !connection.user_edit_groups(&edit).is_empty())
+            .unwrap_or(false)
     }
 
     /// Copy the SQL 预览 script to the clipboard.
@@ -2777,10 +2993,11 @@ impl AppView {
             return div().into_any_element();
         };
         let name = row.name.clone();
-        let enabled = row.enabled;
         let scope = row.scope;
         let tables = row.tables.clone();
-        let privileges = row.privileges.clone();
+        let active_table = row.active_table.clone();
+        let table_privileges = row.table_privileges.clone();
+        let privileges = row.active_privileges();
 
         // The scope selector (全部表 / 指定具体表).
         let mut scopes = div().flex().flex_row().items_center().gap_1().flex_none();
@@ -2869,13 +3086,13 @@ impl AppView {
             .text_color(rgb(theme.text_muted))
             .child(format!("{} {}.*", t!("user.create.grant_applies_to"), name));
 
-        // The quick presets.
+        // The quick presets, matched against the active target's own set.
         let mut presets = div().flex().flex_row().items_center().gap_2().w_full();
         for template in DbTemplate::ALL {
             let active = if template == DbTemplate::None {
-                !enabled
+                privileges.is_empty()
             } else {
-                enabled && privileges == template.privileges()
+                !privileges.is_empty() && privileges == template.privileges()
             };
             presets = presets.child(
                 div()
@@ -2980,12 +3197,35 @@ impl AppView {
             )
             .child(groups);
 
+        let has_target = scope == GrantScope::AllTables || active_table.is_some();
+        let fine_grained_hint = if scope == GrantScope::SpecificTables {
+            active_table
+                .as_ref()
+                .map(|table| t!("user.create.fine_grained_for", table = table.clone()).to_string())
+        } else {
+            None
+        };
+        let fine_grained_body: AnyElement = if has_target {
+            fine_grained.into_any_element()
+        } else {
+            tree_message(
+                t!("user.create.select_table_first").to_string(),
+                8.0,
+                theme.text_muted,
+            )
+            .into_any_element()
+        };
+
         let mut column = div()
+            .id("user-create-db-detail")
             .flex()
             .flex_col()
             .gap_4()
             .flex_1()
             .min_w(px(0.0))
+            .min_h(px(0.0))
+            .h_full()
+            .overflow_y_scroll()
             .child(header)
             .child(target)
             .child(section(
@@ -2998,15 +3238,21 @@ impl AppView {
             column = column.child(section(
                 t!("user.create.specific_tables").to_string(),
                 Some(t!("user.create.tables_selected", count = tables.len()).to_string()),
-                self.render_create_table_picker(&name, &tables, cx),
+                self.render_create_table_picker(
+                    &name,
+                    &tables,
+                    active_table.as_deref(),
+                    &table_privileges,
+                    cx,
+                ),
                 theme,
             ));
         }
         column = column
             .child(section(
                 t!("user.create.fine_grained").to_string(),
-                None,
-                fine_grained.into_any_element(),
+                fine_grained_hint,
+                fine_grained_body,
                 theme,
             ))
             .child(
@@ -3026,11 +3272,14 @@ impl AppView {
         column.into_any_element()
     }
 
-    /// The 指定具体表 picker of the active database.
+    /// The 指定具体表 picker of the active database. Clicking a table's name makes it active; its
+    /// check box picks it into the scope, and each selected table shows its own privilege summary.
     fn render_create_table_picker(
         &self,
         database: &str,
         selected: &[String],
+        active: Option<&str>,
+        privileges: &BTreeMap<String, BTreeSet<Privilege>>,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let theme = self.theme;
@@ -3058,25 +3307,80 @@ impl AppView {
         }
         for (index, table) in tables.iter().enumerate() {
             let checked = selected.iter().any(|picked| picked == table);
-            let name = table.clone();
-            list = list.child(
-                div()
-                    .id(SharedString::from(format!("user-create-table-{index}")))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .h(px(CREATE_ROW_HEIGHT))
-                    .px_2()
-                    .flex_none()
-                    .cursor_pointer()
-                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.toggle_create_table(name.clone(), cx)
-                    }))
-                    .child(checkbox_box(checked, theme))
-                    .child(div().text_size(px(12.0)).child(table.clone())),
-            );
+            let is_active = active == Some(table.as_str());
+            let empty = BTreeSet::new();
+            let (badge, authorized) = privilege_summary(privileges.get(table).unwrap_or(&empty));
+            let activate_name = table.clone();
+            let toggle_name = table.clone();
+            let mut entry = div()
+                .id(SharedString::from(format!("user-create-table-{index}")))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .h(px(CREATE_ROW_HEIGHT))
+                .px_2()
+                .flex_none()
+                .rounded(px(4.0))
+                .cursor_pointer()
+                .when(is_active, move |style| {
+                    style.bg(rgb(theme.tree_selected_bg))
+                })
+                .when(!is_active, move |style| {
+                    style.hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                })
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    this.activate_create_table(activate_name.clone(), cx)
+                }))
+                .child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "user-create-table-check-{index}"
+                        )))
+                        .flex()
+                        .items_center()
+                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                            cx.stop_propagation();
+                            this.toggle_create_table(toggle_name.clone(), cx);
+                        }))
+                        .child(checkbox_box(checked, theme)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_size(px(12.0))
+                        .text_color(rgb(if is_active {
+                            theme.tree_selected_text
+                        } else {
+                            theme.text
+                        }))
+                        .child(table.clone()),
+                );
+            if authorized {
+                entry = entry.child(
+                    div()
+                        .flex_none()
+                        .px_2()
+                        .py_0p5()
+                        .rounded(px(9.0))
+                        .text_size(px(10.5))
+                        .bg(rgb(theme.tree_hover_bg))
+                        .text_color(rgb(theme.primary))
+                        .child(badge),
+                );
+            } else {
+                entry = entry.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(10.5))
+                        .text_color(rgb(theme.text_muted))
+                        .child(badge),
+                );
+            }
+            list = list.child(entry);
         }
         let actions =
             div()
@@ -3175,8 +3479,9 @@ impl AppView {
         let mut rows = div().flex().flex_col();
         let mut shown = 0usize;
         for (user, host) in candidates {
-            // A role cannot be granted to itself.
-            if member_of && *user == current && *host == current_host {
+            // An account cannot be granted to itself (MySQL rejects `GRANT x TO x`), so it is never
+            // a candidate member in either direction.
+            if *user == current && *host == current_host {
                 continue;
             }
             let key = (user.clone(), host.clone());
@@ -3371,6 +3676,9 @@ impl AppView {
             return div().into_any_element();
         };
         let busy = dialog.saving || dialog.loading;
+        // Nothing to submit when the editor still matches the loaded account; keep Save disabled so
+        // an untouched edit never opens the change preview.
+        let disabled = busy || !self.create_user_has_changes();
         let is_edit = dialog.is_edit();
         let subject = match dialog.original_account() {
             Some((user, host)) => format!("{user}@{host}"),
@@ -3402,13 +3710,13 @@ impl AppView {
             .child(self.win_button(
                 "user-create-submit",
                 save_label,
-                if busy {
+                if disabled {
                     ButtonKind::Disabled
                 } else {
                     ButtonKind::Default
                 },
                 cx.listener(move |this, _event, _window, cx| {
-                    if !busy {
+                    if !disabled {
                         this.submit_create_user(cx);
                     }
                 }),
@@ -3531,10 +3839,14 @@ mod tests {
     }
 
     fn grant(database: &str, name: &str) -> ObjectGrant {
+        grant_with(database, name, &[Privilege::Select])
+    }
+
+    fn grant_with(database: &str, name: &str, privileges: &[Privilege]) -> ObjectGrant {
         ObjectGrant {
             database: database.to_string(),
             name: name.to_string(),
-            privileges: [Privilege::Select].into_iter().collect(),
+            privileges: privileges.iter().copied().collect(),
         }
     }
 
@@ -3542,7 +3854,20 @@ mod tests {
     fn rebuild_maps_whole_database_table_and_ungranted_rows() {
         let mut dialog = UserCreateDialog::new(0, "caching_sha2_password".to_string(), None);
         dialog.databases = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        dialog.editor.grants = vec![grant("a", ""), grant("b", "t1"), grant("b", "t2")];
+        dialog.editor.grants = vec![
+            grant("a", ""),
+            grant("b", "t1"),
+            grant_with(
+                "b",
+                "t2",
+                &[
+                    Privilege::Select,
+                    Privilege::Insert,
+                    Privilege::Update,
+                    Privilege::Delete,
+                ],
+            ),
+        ];
         dialog.rebuild_db_grants();
 
         assert_eq!(dialog.db_grants.len(), 3);
@@ -3554,8 +3879,94 @@ mod tests {
             dialog.db_grants[1].tables,
             vec!["t1".to_string(), "t2".to_string()]
         );
+        assert_eq!(dialog.db_grants[1].active_table.as_deref(), Some("t1"));
         assert!(!dialog.db_grants[2].enabled);
         assert_eq!(dialog.object_grants().len(), 3);
+    }
+
+    #[test]
+    fn per_table_privileges_are_kept_apart() {
+        let mut dialog = UserCreateDialog::new(0, "caching_sha2_password".to_string(), None);
+        dialog.databases = vec!["shop".to_string()];
+        dialog.editor.grants = vec![
+            grant("shop", "account"),
+            grant_with(
+                "shop",
+                "orders",
+                &[
+                    Privilege::Select,
+                    Privilege::Insert,
+                    Privilege::Update,
+                    Privilege::Delete,
+                ],
+            ),
+        ];
+        dialog.rebuild_db_grants();
+
+        let row = &dialog.db_grants[0];
+        assert_eq!(
+            row.table_privileges.get("account"),
+            Some(&[Privilege::Select].into_iter().collect())
+        );
+        assert_eq!(
+            row.table_privileges.get("orders"),
+            Some(
+                &[
+                    Privilege::Select,
+                    Privilege::Insert,
+                    Privilege::Update,
+                    Privilege::Delete,
+                ]
+                .into_iter()
+                .collect()
+            )
+        );
+        // A mixed set is no longer flattened into one preset shared by both tables.
+        assert_eq!(row.summary().0, format!("{} (4)", t!("user.create.custom")));
+
+        let grants = dialog.object_grants();
+        let account = grants
+            .iter()
+            .find(|grant| grant.name == "account")
+            .expect("the account grant");
+        let orders = grants
+            .iter()
+            .find(|grant| grant.name == "orders")
+            .expect("the orders grant");
+        assert_eq!(
+            account.privileges,
+            [Privilege::Select].into_iter().collect()
+        );
+        assert_eq!(orders.privileges.len(), 4);
+    }
+
+    #[test]
+    fn editing_one_table_does_not_touch_another() {
+        let mut dialog = UserCreateDialog::new(0, "caching_sha2_password".to_string(), None);
+        dialog.databases = vec!["shop".to_string()];
+        dialog.rebuild_db_grants();
+        dialog.db_grants[0].activate_table("account");
+        dialog.db_grants[0].activate_table("orders");
+
+        dialog.db_grants[0]
+            .active_privileges_mut()
+            .expect("an active table")
+            .insert(Privilege::Select);
+        dialog.db_grants[0].active_table = Some("account".to_string());
+        dialog.db_grants[0]
+            .active_privileges_mut()
+            .expect("an active table")
+            .insert(Privilege::Insert);
+
+        let row = &dialog.db_grants[0];
+        assert_eq!(
+            row.table_privileges.get("orders"),
+            Some(&[Privilege::Select].into_iter().collect())
+        );
+        assert_eq!(
+            row.table_privileges.get("account"),
+            Some(&[Privilege::Insert].into_iter().collect())
+        );
     }
 
     #[test]
@@ -3590,5 +4001,54 @@ mod tests {
         let grants = dialog.object_grants();
         assert_eq!(grants.len(), 1);
         assert_eq!(grants[0].database, "only_in_grants");
+    }
+
+    #[test]
+    fn loading_details_populates_the_role_lists() {
+        use rustgrid_core::RoleMembership;
+
+        let mut dialog = UserCreateDialog::new(
+            0,
+            "caching_sha2_password".to_string(),
+            Some(("test".to_string(), "%".to_string())),
+        );
+        dialog.apply_details(UserDetails {
+            account: UserAccount {
+                user: "test".to_string(),
+                host: "%".to_string(),
+                ..Default::default()
+            },
+            roles: vec![RoleMembership {
+                role_user: "root".to_string(),
+                role_host: "%".to_string(),
+                member_user: "test".to_string(),
+                member_host: "%".to_string(),
+                admin_option: true,
+            }],
+            members: vec![RoleMembership {
+                role_user: "test".to_string(),
+                role_host: "%".to_string(),
+                member_user: "alice".to_string(),
+                member_host: "localhost".to_string(),
+                admin_option: false,
+            }],
+            ..Default::default()
+        });
+
+        let context = dialog.context.as_ref().expect("a role context");
+        assert_eq!(
+            context.roles.get(&("root".to_string(), "%".to_string())),
+            Some(&true),
+            "{:?}",
+            context.roles
+        );
+        assert_eq!(
+            context
+                .members
+                .get(&("alice".to_string(), "localhost".to_string())),
+            Some(&false),
+            "{:?}",
+            context.members
+        );
     }
 }

@@ -294,8 +294,16 @@ fn edit_statements(edit: &UserEdit) -> Vec<String> {
 
 fn account_statements_inner(edit: &UserEdit, target: &str, is_new: bool) -> Vec<String> {
     let account = &edit.account;
+    // The account as loaded; `None` while creating, in which case every option is written.
+    let original = edit.original.as_ref().map(|details| &details.account);
+    // Only emit an option when it differs from the loaded account, so an untouched editor produces
+    // no statement at all (the confirmation diff stays empty and Save can be disabled).
+    let changed = |same: bool| original.is_none() || !same;
+
     let mut clauses: Vec<String> = Vec::new();
 
+    // The password hash is rewritten only when the user asked for it (or always when creating), so
+    // a plain attribute edit never touches the stored secret.
     if let Some(password) = &edit.password {
         clauses.push(format!(
             "IDENTIFIED WITH {} BY {}",
@@ -308,35 +316,61 @@ fn account_statements_inner(edit: &UserEdit, target: &str, is_new: bool) -> Vec<
 
     // MySQL's account-option order is `[REQUIRE ...] [WITH ...] [PASSWORD ...] [ACCOUNT ...]`;
     // putting the resource limits before REQUIRE is a syntax error (1064) on ALTER USER.
-    clauses.push(require_clause(account));
-    clauses.push(format!(
-        "WITH MAX_QUERIES_PER_HOUR {} MAX_UPDATES_PER_HOUR {} \
-         MAX_CONNECTIONS_PER_HOUR {} MAX_USER_CONNECTIONS {}",
-        account.max_questions,
-        account.max_updates,
-        account.max_connections,
-        account.max_user_connections
-    ));
-    clauses.push(format!(
-        "ACCOUNT {}",
-        if account.account_locked {
-            "LOCK"
-        } else {
-            "UNLOCK"
+    let require = require_clause(account);
+    if changed(original.is_some_and(|original| require_clause(original) == require)) {
+        clauses.push(require);
+    }
+    if changed(original.is_some_and(|original| {
+        original.max_questions == account.max_questions
+            && original.max_updates == account.max_updates
+            && original.max_connections == account.max_connections
+            && original.max_user_connections == account.max_user_connections
+    })) {
+        clauses.push(format!(
+            "WITH MAX_QUERIES_PER_HOUR {} MAX_UPDATES_PER_HOUR {} \
+             MAX_CONNECTIONS_PER_HOUR {} MAX_USER_CONNECTIONS {}",
+            account.max_questions,
+            account.max_updates,
+            account.max_connections,
+            account.max_user_connections
+        ));
+    }
+    if changed(original.is_some_and(|original| original.account_locked == account.account_locked)) {
+        clauses.push(format!(
+            "ACCOUNT {}",
+            if account.account_locked {
+                "LOCK"
+            } else {
+                "UNLOCK"
+            }
+        ));
+    }
+    if changed(
+        original.is_some_and(|original| original.password_lifetime == account.password_lifetime),
+    ) {
+        match account.password_lifetime {
+            None => clauses.push("PASSWORD EXPIRE DEFAULT".to_string()),
+            Some(0) => clauses.push("PASSWORD EXPIRE NEVER".to_string()),
+            Some(days) => clauses.push(format!("PASSWORD EXPIRE INTERVAL {days} DAY")),
         }
-    ));
-    match account.password_lifetime {
-        None => clauses.push("PASSWORD EXPIRE DEFAULT".to_string()),
-        Some(0) => clauses.push("PASSWORD EXPIRE NEVER".to_string()),
-        Some(days) => clauses.push(format!("PASSWORD EXPIRE INTERVAL {days} DAY")),
     }
 
-    let verb = if is_new { "CREATE USER" } else { "ALTER USER" };
-    let mut statements = vec![format!("{verb} {target} {}", clauses.join(" "))];
+    let mut statements = Vec::new();
+    if is_new || !clauses.is_empty() {
+        let verb = if is_new { "CREATE USER" } else { "ALTER USER" };
+        statements.push(format!("{verb} {target} {}", clauses.join(" ")));
+    }
 
     // Expiring the password immediately is its own clause, so it cannot share the statement with
-    // the lifetime policy above.
-    if account.password_expired {
+    // the lifetime policy above. Re-emit it after a password change (which clears the flag), but
+    // leave an already-expired password alone otherwise.
+    if account.password_expired
+        && (edit.password.is_some()
+            || changed(
+                original
+                    .is_some_and(|original| original.password_expired == account.password_expired),
+            ))
+    {
         statements.push(format!("ALTER USER {target} PASSWORD EXPIRE"));
     }
     statements
@@ -976,6 +1010,7 @@ mod tests {
             account: UserAccount {
                 user: "test".to_string(),
                 host: "%".to_string(),
+                password_lifetime: Some(30),
                 ..Default::default()
             },
             ..Default::default()
@@ -986,6 +1021,11 @@ mod tests {
                 user: "test".to_string(),
                 host: "%".to_string(),
                 plugin: "mysql_native_password".to_string(),
+                // A real REQUIRE change, a limit change and a lifetime change: every option below
+                // is diffed, so each must actually differ from the loaded account to be emitted.
+                ssl_type: "ANY".to_string(),
+                max_questions: 10,
+                password_lifetime: Some(90),
                 ..Default::default()
             },
             password: None,
@@ -1004,6 +1044,70 @@ mod tests {
         assert!(
             require < with && with < expire,
             "clauses out of order: {alter}"
+        );
+    }
+
+    #[test]
+    fn an_unchanged_account_produces_no_statements() {
+        let account = UserAccount {
+            user: "test".to_string(),
+            host: "%".to_string(),
+            plugin: "caching_sha2_password".to_string(),
+            max_questions: 5,
+            password_lifetime: Some(90),
+            account_locked: true,
+            ..Default::default()
+        };
+        let original = UserDetails {
+            account: account.clone(),
+            ..Default::default()
+        };
+        let edit = UserEdit {
+            original: Some(original),
+            account,
+            password: None,
+            server_privileges: BTreeSet::new(),
+            grants: Vec::new(),
+            roles: Vec::new(),
+            members: Vec::new(),
+        };
+        assert!(edit_groups(&edit).is_empty(), "{:?}", edit_groups(&edit));
+        assert!(edit_statements(&edit).is_empty());
+        assert_eq!(edit_sql(&edit), "");
+    }
+
+    #[test]
+    fn renaming_without_attribute_changes_only_renames() {
+        let account = UserAccount {
+            user: "test".to_string(),
+            host: "%".to_string(),
+            plugin: "caching_sha2_password".to_string(),
+            max_questions: 5,
+            password_lifetime: Some(90),
+            ..Default::default()
+        };
+        let original = UserDetails {
+            account: account.clone(),
+            ..Default::default()
+        };
+        let edit = UserEdit {
+            original: Some(original),
+            account: UserAccount {
+                user: "renamed".to_string(),
+                ..account
+            },
+            password: None,
+            server_privileges: BTreeSet::new(),
+            grants: Vec::new(),
+            roles: Vec::new(),
+            members: Vec::new(),
+        };
+        assert_eq!(
+            edit_statements(&edit),
+            vec![
+                "RENAME USER 'test'@'%' TO 'renamed'@'%'",
+                "FLUSH PRIVILEGES",
+            ]
         );
     }
 
@@ -1075,6 +1179,7 @@ mod tests {
                 user: "test".to_string(),
                 host: "%".to_string(),
                 plugin: "mysql_native_password".to_string(),
+                max_questions: 10,
                 ..Default::default()
             },
             password: None,
