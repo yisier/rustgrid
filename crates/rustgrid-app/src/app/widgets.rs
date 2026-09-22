@@ -534,6 +534,81 @@ impl AppView {
                         ));
                 }
             }
+            ContextTarget::Routine {
+                connection_index,
+                database_index,
+                name,
+                kind,
+            } => {
+                let ci = *connection_index;
+                let di = *database_index;
+                let kind = *kind;
+                let design_name = name.clone();
+                let run_name = name.clone();
+                let drop_name = name.clone();
+                items = items
+                    .child(self.context_item(
+                        "routine-design",
+                        t!("routine.design").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            let Some(database) = this.database_name(ci, di) else {
+                                return;
+                            };
+                            this.open_routine_by_name(ci, database, design_name.clone(), kind, cx);
+                        }),
+                    ))
+                    .child(self.context_item(
+                        "routine-run",
+                        t!("routine.run").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            let Some(database) = this.database_name(ci, di) else {
+                                return;
+                            };
+                            this.run_routine_by_name(ci, database, kind, run_name.clone(), cx);
+                        }),
+                    ))
+                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(self.context_item(
+                        "routine-delete",
+                        t!("routine.delete").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.confirm_delete_routine(ci, di, drop_name.clone(), kind, cx);
+                        }),
+                    ));
+            }
+            ContextTarget::NewRoutine {
+                connection_index,
+                database_index,
+            } => {
+                let ci = *connection_index;
+                let di = *database_index;
+                items = items
+                    .child(self.context_item(
+                        "new-function",
+                        t!("routine.new_function").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            let Some(database) = this.database_name(ci, di) else {
+                                return;
+                            };
+                            this.open_new_routine(ci, database, RoutineKind::Function, cx);
+                        }),
+                    ))
+                    .child(self.context_item(
+                        "new-procedure",
+                        t!("routine.new_procedure").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            let Some(database) = this.database_name(ci, di) else {
+                                return;
+                            };
+                            this.open_new_routine(ci, database, RoutineKind::Procedure, cx);
+                        }),
+                    ));
+            }
             ContextTarget::BackupFile { index } => {
                 let index = *index;
                 items = items

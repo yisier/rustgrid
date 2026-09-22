@@ -20,8 +20,9 @@ use rustgrid_config::{AppSettings, ConfigStore, LanguageSetting, ThemeSetting};
 use rustgrid_core::{
     BackupObjectKind, CellValue, Connection, ConnectionConfig, DriverRegistry, Error,
     FilterCondition, FilterConjunction, FilterGroup, FilterNode, FilterOperator, ObjectGrant,
-    ObjectPrivilegeRow, PageRequest, Privilege, QueryResult, RowInsert, RowUpdate, SavedBackup,
-    SavedQuery, TableStatus, UserAccount, UserDetails, UserEdit, UserEditSection,
+    ObjectPrivilegeRow, PageRequest, Privilege, QueryResult, RoutineEdit, RoutineInfo, RoutineKind,
+    RowInsert, RowUpdate, SavedBackup, SavedQuery, TableStatus, UserAccount, UserDetails, UserEdit,
+    UserEditSection,
 };
 use rustgrid_export::ExportFormat;
 
@@ -29,7 +30,8 @@ use crate::form::{ConnectionForm, FORM_FIELDS, FormField};
 use crate::runtime::Runtime;
 use crate::session::{
     Category, CategoryExpansion, CellRange, CellSelection, ConnectionNode, ConnectionStatus,
-    DatabaseNode, GridState, Loadable, QueryTab, SortRule, compute_column_widths,
+    DatabaseNode, GridState, Loadable, QueryTab, RoutineTab, RoutineTabState, SortRule,
+    compute_column_widths,
 };
 use crate::sql::{self, SqlSpan, SqlToken};
 use crate::theme::Theme;
@@ -718,6 +720,18 @@ enum ContextTarget {
         /// Which pane the row was right-clicked in, so Rename edits the name in place there.
         pane: RowPane,
     },
+    /// A stored routine in the connection tree's Functions category.
+    Routine {
+        connection_index: usize,
+        database_index: usize,
+        name: String,
+        kind: RoutineKind,
+    },
+    /// The Functions toolbar's "New" menu: pick a function or a procedure.
+    NewRoutine {
+        connection_index: usize,
+        database_index: usize,
+    },
     /// A backup file in the Backup main tab's list.
     BackupFile {
         index: usize,
@@ -792,6 +806,8 @@ struct ObjectPane {
     database_index: usize,
     category: Category,
     selected: Option<String>,
+    /// The kind of the selected routine, when `category` is [`Category::Functions`].
+    selected_routine: Option<RoutineKind>,
     scroll: ScrollHandle,
     hscroll_grab: Option<f32>,
     /// Focus target for the list, so F2 reaches [`AppView::begin_rename_table`].
@@ -990,6 +1006,14 @@ enum DeleteConfirm {
         connection_index: usize,
         user: String,
         host: String,
+        label: String,
+    },
+    /// Drop a stored routine from the Functions tab or the connection tree.
+    Routine {
+        connection_index: usize,
+        database_index: usize,
+        name: String,
+        kind: RoutineKind,
         label: String,
     },
 }
@@ -1229,6 +1253,8 @@ pub struct AppView {
     /// The Users-list search text.
     user_search: String,
     user_search_input: Entity<TextInput>,
+    /// The routine editor's find bar field.
+    routine_find_input: Entity<TextInput>,
     /// The account highlighted in the Users list, as an index into `users`.
     selected_user: Option<usize>,
     /// Keeps the Users list's scroll position across re-renders.
@@ -1303,6 +1329,8 @@ mod privilege_manager;
 mod query;
 mod query_editor;
 mod query_view;
+mod routine;
+mod routine_view;
 mod shell;
 mod sidebar;
 mod tabs;
@@ -1538,6 +1566,38 @@ impl AppView {
                     }))
                 })
             },
+            routine_find_input: {
+                let weak = app.clone();
+                let submit = weak.clone();
+                cx.new(move |cx| {
+                    TextInput::new(
+                        Theme::dark(),
+                        "",
+                        TextInputOptions {
+                            placeholder: t!("routine.find").to_string().into(),
+                            icon: Some("icons/search.svg"),
+                            clearable: true,
+                            ..Default::default()
+                        },
+                        cx,
+                    )
+                    .on_change(Rc::new(move |text, _window, cx| {
+                        let _ = weak.update(cx, |app, cx| {
+                            if let Some(routine) = app
+                                .active_query
+                                .and_then(|index| app.queries.get_mut(index))
+                                .and_then(|tab| tab.routine.as_mut())
+                            {
+                                routine.find_query = text.to_string();
+                            }
+                            cx.notify();
+                        });
+                    }))
+                    .on_submit(Rc::new(move |_window, cx| {
+                        let _ = submit.update(cx, |app, cx| app.routine_find_next(cx));
+                    }))
+                })
+            },
             selected_user: None,
             users_scroll: ScrollHandle::new(),
             info_user: Loadable::Idle,
@@ -1728,6 +1788,22 @@ impl AppView {
                                     }
                                 }
                             }
+                            match &database.routines {
+                                Loadable::Idle => 0u8.hash(&mut hasher),
+                                Loadable::Loading => 1u8.hash(&mut hasher),
+                                Loadable::Failed(error) => {
+                                    2u8.hash(&mut hasher);
+                                    error.hash(&mut hasher);
+                                }
+                                Loadable::Loaded(routines) => {
+                                    3u8.hash(&mut hasher);
+                                    routines.len().hash(&mut hasher);
+                                    for routine in routines {
+                                        routine.name.hash(&mut hasher);
+                                        routine.kind.hash(&mut hasher);
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1761,6 +1837,10 @@ impl AppView {
         for query in &self.queries {
             query.id.hash(&mut hasher);
             query.name.hash(&mut hasher);
+            if let Some(routine) = &query.routine {
+                routine.name.hash(&mut hasher);
+                routine.kind.hash(&mut hasher);
+            }
         }
         hasher.finish()
     }
@@ -1791,6 +1871,8 @@ impl AppView {
         self.object_search_input
             .update(cx, |input, cx| input.set_theme(theme, cx));
         self.user_search_input
+            .update(cx, |input, cx| input.set_theme(theme, cx));
+        self.routine_find_input
             .update(cx, |input, cx| input.set_theme(theme, cx));
         if let Some(input) = self.db_name_input.as_ref() {
             input.update(cx, |input, cx| input.set_theme(theme, cx));

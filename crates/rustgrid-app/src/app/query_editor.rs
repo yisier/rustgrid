@@ -54,6 +54,12 @@ impl AppView {
         let layout = styled.layout().clone();
         *self.query_editor_layout.borrow_mut() = layout;
         *self.query_editor_text.borrow_mut() = query.sql.clone();
+        // A routine editor can turn line wrapping off; ordinary query editors always wrap.
+        let wrap = query
+            .routine
+            .as_ref()
+            .map(|routine| routine.word_wrap)
+            .unwrap_or(true);
 
         let mut gutter = div()
             .absolute()
@@ -127,6 +133,7 @@ impl AppView {
                     .font_family("Consolas")
                     .text_size(px(12.5))
                     .line_height(px(18.0))
+                    .when(!wrap, |style| style.whitespace_nowrap())
                     .child(styled)
                     .child({
                         let entity = cx.entity();
@@ -507,7 +514,15 @@ impl AppView {
                     return;
                 }
                 "s" => {
-                    self.begin_save_query(window, cx);
+                    let is_routine = self
+                        .queries
+                        .get(index)
+                        .is_some_and(|tab| tab.routine.is_some());
+                    if is_routine {
+                        self.save_routine(cx);
+                    } else {
+                        self.begin_save_query(window, cx);
+                    }
                     cx.stop_propagation();
                     return;
                 }

@@ -5,6 +5,7 @@ use crate::model::{
     BackupObjectKind, ColumnInfo, ConnectionConfig, DatabaseInfo, DriverId, ObjectDump,
     PageRequest, QueryResult, RowInsert, RowUpdate, TableInfo, TablePage, TableSchema, TableStatus,
 };
+use crate::routine::{RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind};
 use crate::user::{ObjectPrivilegeRow, UserAccount, UserDetails, UserEdit, UserEditSection};
 
 #[async_trait]
@@ -287,5 +288,62 @@ pub trait Connection: Send + Sync {
         _rows: &[ObjectPrivilegeRow],
     ) -> String {
         String::new()
+    }
+
+    // ----- Stored routines (functions and procedures) -------------------------------------------
+    //
+    // Engine-agnostic routine administration used by the Functions main tab and its editor.
+    // Drivers without an equivalent capability keep the defaults, which report the feature as
+    // unsupported rather than silently succeeding.
+
+    /// List a database's stored routines (functions and procedures), ordered by name, with the
+    /// metadata the routine list and the editor's 信息 tab show.
+    async fn list_routine_infos(&self, _database: &str) -> Result<Vec<RoutineInfo>> {
+        Err(Error::Query(
+            "routine management is not supported by this driver".to_string(),
+        ))
+    }
+
+    /// Load one stored routine's full `CREATE` statement and session settings.
+    async fn routine_details(
+        &self,
+        _database: &str,
+        _kind: RoutineKind,
+        _name: &str,
+    ) -> Result<RoutineDetails> {
+        Err(Error::Query(
+            "routine management is not supported by this driver".to_string(),
+        ))
+    }
+
+    /// The SQL script [`Connection::save_routine`] runs, for the editor's SQL preview.
+    /// `original` names the routine to drop first when it already exists.
+    fn routine_sql(
+        &self,
+        _database: &str,
+        _original: Option<(&str, RoutineKind)>,
+        _edit: &RoutineEdit,
+    ) -> String {
+        String::new()
+    }
+
+    /// Create or replace a stored routine in `database`. `original` names the existing routine to
+    /// drop first (a routine cannot always be replaced in place), when it already exists.
+    async fn save_routine(
+        &self,
+        _database: &str,
+        _original: Option<(&str, RoutineKind)>,
+        _edit: &RoutineEdit,
+    ) -> Result<()> {
+        Err(Error::Query(
+            "routine management is not supported by this driver".to_string(),
+        ))
+    }
+
+    /// Drop a stored routine.
+    async fn drop_routine(&self, _database: &str, _kind: RoutineKind, _name: &str) -> Result<()> {
+        Err(Error::Query(
+            "routine management is not supported by this driver".to_string(),
+        ))
     }
 }

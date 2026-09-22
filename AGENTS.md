@@ -26,7 +26,7 @@ not a later refactor.
   tests; the rest are `impl AppView` submodules: `tree`, `database`, `db_dialog`, `objects`,
   `sidebar`, `tabs`, `toolbar`, `query`, `query_view`, `query_editor`, `grid`, `grid_input`,
   `grid_commit`, `grid_view`, `grid_cell`, `grid_scroll`, `grid_toolbar`, `dialogs`,
-  `export`, `import`, `widgets`, `form`). New view code goes in the matching submodule, **not** `mod.rs`.
+  `export`, `import`, `routine`, `routine_view`, `widgets`, `form`). New view code goes in the matching submodule, **not** `mod.rs`.
   `ui/` is the internal design system (buttons, scrollbars, text fields, dropdowns, ...) and the
   wrapper layer over gpui-kit: put shared chrome there, never one-off `div`s in feature code. Several subtrees are child
   `Entity` views wired through `WeakEntity<AppView>` + `notify_*` invalidation: the Tables/Views
@@ -314,11 +314,21 @@ shadcn chrome described above. Implemented today:
     run). Save is one path for both flows; changing the username/host emits `RENAME USER` before
     the rest of the script so the account keeps its grants and role edges, and a successful save
     reloads the account in place. Passwords are prompted on connect, never stored in a profile.
+11. Stored routines (functions and procedures): the `Functions` main tab lists a database's
+    routines from the connection tree's selection, with the toolbar 设计函数 / 新建函数 /
+    删除函数 / 运行函数 (and a matching right-click menu in the object list and the connection
+    tree's Functions category). 设计函数 opens a routine editor as a main-content tab that reuses
+    the SQL editor: its toolbar is 保存 / 运行 / 停止 / 查找 / 自动换行 and its sub-tabs are
+    定义 (the full editable `CREATE ...` statement, loaded from `SHOW CREATE`), 信息 (metadata
+    and creation settings) and SQL 预览 (the script Save runs). Save derives the routine's kind
+    and name from the statement, drops the original and replays the `CREATE` through
+    `Connection::save_routine`; 运行 calls the routine (`SELECT` for a function, `CALL` for a
+    procedure) in a new query tab, running it immediately when it takes no arguments.
 
-Still out of scope: a second database engine, and the disabled placeholder UI (the `Functions`
-main tab, the `Design/New/Delete Table` toolbar buttons, and the query editor's
-`Query Builder`/`Snippets` items are deliberate stubs — leave them disabled unless asked). The
-abstractions above are what make more engines cheap later — do not build those features early.
+Still out of scope: a second database engine, and the disabled placeholder UI (the
+`Design/New/Delete Table` toolbar buttons and the query editor's `Query Builder`/`Snippets`
+items are deliberate stubs — leave them disabled unless asked). The abstractions above are what
+make more engines cheap later — do not build those features early.
 
 ## Gotchas
 

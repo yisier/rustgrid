@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use rustgrid_core::{
     CellValue, ColumnInfo, Connection, ConnectionProfile, FilterCondition, FilterConjunction,
-    FilterNode, FilterOperator, QueryResult, SortColumn, TableInfo,
+    FilterNode, FilterOperator, QueryResult, RoutineDetails, RoutineInfo, RoutineKind, SortColumn,
+    TableInfo,
 };
 
 #[derive(Default)]
@@ -34,6 +35,9 @@ pub struct ConnectionNode {
 pub struct DatabaseNode {
     pub name: String,
     pub tables: Loadable<Vec<TableInfo>>,
+    /// The database's stored routines (functions and procedures), loaded lazily when the
+    /// Functions tab or the connection tree's Functions category needs them.
+    pub routines: Loadable<Vec<RoutineInfo>>,
     pub opened: bool,
     pub expanded: bool,
     pub categories: CategoryExpansion,
@@ -254,6 +258,78 @@ impl CellSelection {
     }
 }
 
+/// Which sub-tab of a routine editor is showing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RoutineTab {
+    /// The editable `CREATE ...` statement.
+    Definition,
+    /// Read-only metadata.
+    Info,
+    /// The SQL the Save button runs.
+    Sql,
+}
+
+impl RoutineTab {
+    /// Every sub-tab, in the order the editor presents them.
+    pub const ALL: [RoutineTab; 3] = [RoutineTab::Definition, RoutineTab::Info, RoutineTab::Sql];
+
+    /// The i18n key for the sub-tab's label.
+    pub fn label_key(self) -> &'static str {
+        match self {
+            RoutineTab::Definition => "routine.tab.definition",
+            RoutineTab::Info => "routine.tab.info",
+            RoutineTab::Sql => "routine.tab.sql",
+        }
+    }
+
+    pub fn id(self) -> &'static str {
+        match self {
+            RoutineTab::Definition => "routine-tab-definition",
+            RoutineTab::Info => "routine-tab-info",
+            RoutineTab::Sql => "routine-tab-sql",
+        }
+    }
+}
+
+/// The routine-editor state carried by a [`QueryTab`] whose `routine` is set. A routine editor
+/// reuses the SQL editor (and its tab) but adds the routine's identity, metadata and the
+/// 定义/信息/SQL 预览 sub-tabs.
+pub struct RoutineTabState {
+    pub kind: RoutineKind,
+    /// The routine's current name (the name Save will create).
+    pub name: String,
+    /// The routine's name in the database, `None` until a new routine is saved.
+    pub original_name: Option<String>,
+    pub original_kind: Option<RoutineKind>,
+    /// The routine's full loaded state (metadata + session settings), for the 信息 tab.
+    pub details: Option<RoutineDetails>,
+    pub tab: RoutineTab,
+    /// Whether the definition editor wraps long lines.
+    pub word_wrap: bool,
+    /// Whether the find bar is showing.
+    pub find_open: bool,
+    pub find_query: String,
+    /// A save is in flight.
+    pub saving: bool,
+}
+
+impl RoutineTabState {
+    pub fn new(kind: RoutineKind, name: String) -> Self {
+        Self {
+            kind,
+            name,
+            original_name: None,
+            original_kind: None,
+            details: None,
+            tab: RoutineTab::Definition,
+            word_wrap: true,
+            find_open: false,
+            find_query: String::new(),
+            saving: false,
+        }
+    }
+}
+
 /// An open SQL editor tab. `sql` is the editable document; `caret` and `anchor` are byte
 /// offsets into it, so they can be matched against `TextLayout` indices directly.
 pub struct QueryTab {
@@ -272,6 +348,8 @@ pub struct QueryTab {
     pub grid_id: Option<u64>,
     /// Undo history for the editor: `(sql, caret, anchor)` snapshots before each edit.
     pub undo: Vec<(String, usize, usize)>,
+    /// `Some` when this tab edits a stored routine instead of a free-form query.
+    pub routine: Option<RoutineTabState>,
 }
 
 impl QueryTab {
@@ -289,6 +367,7 @@ impl QueryTab {
             result: Loadable::Idle,
             grid_id: None,
             undo: Vec::new(),
+            routine: None,
         }
     }
 

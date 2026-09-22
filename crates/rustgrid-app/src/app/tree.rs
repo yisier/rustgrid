@@ -330,6 +330,7 @@ impl AppView {
                                             DatabaseNode {
                                                 name: database.name,
                                                 tables: existing.tables,
+                                                routines: existing.routines,
                                                 opened: existing.opened,
                                                 expanded: existing.expanded,
                                                 categories: existing.categories,
@@ -338,6 +339,7 @@ impl AppView {
                                             DatabaseNode {
                                                 name: database.name,
                                                 tables: Loadable::Idle,
+                                                routines: Loadable::Idle,
                                                 opened: false,
                                                 expanded: false,
                                                 categories: Default::default(),
@@ -365,6 +367,7 @@ impl AppView {
         cx: &mut Context<'_, Self>,
     ) {
         let mut should_load = false;
+        let mut should_load_routines = false;
         let mut just_opened = false;
 
         if let Some(node) = self.connections.get_mut(connection_index)
@@ -380,6 +383,11 @@ impl AppView {
                 if matches!(database.tables, Loadable::Idle | Loadable::Failed(_)) {
                     should_load = true;
                 }
+                if self.main_tab == MainTab::Functions
+                    && matches!(database.routines, Loadable::Idle | Loadable::Failed(_))
+                {
+                    should_load_routines = true;
+                }
             }
         }
 
@@ -388,6 +396,19 @@ impl AppView {
             && let Some(database_name) = self.database_name(connection_index, database_index)
         {
             self.load_tables(
+                connection_index,
+                database_index,
+                connection,
+                database_name,
+                cx,
+            );
+        }
+
+        if should_load_routines
+            && let Some(connection) = self.connection_arc(connection_index)
+            && let Some(database_name) = self.database_name(connection_index, database_index)
+        {
+            self.load_routines(
                 connection_index,
                 database_index,
                 connection,
@@ -409,6 +430,7 @@ impl AppView {
                 }
                 _ => match self.main_tab {
                     MainTab::Views => Category::Views,
+                    MainTab::Functions => Category::Functions,
                     MainTab::Queries => Category::Queries,
                     _ => Category::Tables,
                 },
@@ -463,6 +485,7 @@ impl AppView {
             return;
         }
         let mut should_load = false;
+        let mut should_load_routines = false;
         if let Some(node) = self.connections.get_mut(connection_index)
             && let Loadable::Loaded(databases) = &mut node.databases
             && let Some(database) = databases.get_mut(database_index)
@@ -473,6 +496,11 @@ impl AppView {
             {
                 should_load = true;
             }
+            if category == Category::Functions
+                && matches!(database.routines, Loadable::Idle | Loadable::Failed(_))
+            {
+                should_load_routines = true;
+            }
         }
 
         if should_load
@@ -480,6 +508,13 @@ impl AppView {
             && let Some(name) = self.database_name(connection_index, database_index)
         {
             self.load_tables(connection_index, database_index, connection, name, cx);
+        }
+
+        if should_load_routines
+            && let Some(connection) = self.connection_arc(connection_index)
+            && let Some(name) = self.database_name(connection_index, database_index)
+        {
+            self.load_routines(connection_index, database_index, connection, name, cx);
         }
 
         self.open_object_pane(connection_index, database_index, category, cx);
@@ -490,6 +525,7 @@ impl AppView {
         match category {
             Category::Tables => self.main_tab = MainTab::Tables,
             Category::Views => self.main_tab = MainTab::Views,
+            Category::Functions => self.main_tab = MainTab::Functions,
             Category::Queries => self.main_tab = MainTab::Queries,
             _ => {}
         }
@@ -578,6 +614,87 @@ impl AppView {
             });
         })
         .detach();
+    }
+
+    /// Load a database's stored routines (functions and procedures) into its node.
+    pub(super) fn load_routines(
+        &mut self,
+        connection_index: usize,
+        database_index: usize,
+        connection: Arc<dyn Connection>,
+        database_name: String,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(node) = self.connections.get_mut(connection_index)
+            && let Loadable::Loaded(databases) = &mut node.databases
+            && let Some(database) = databases.get_mut(database_index)
+        {
+            database.routines = Loadable::Loading;
+        }
+
+        let runtime = self.runtime.clone();
+        cx.spawn(async move |this, cx| {
+            let result = match runtime
+                .spawn(async move { connection.list_routine_infos(&database_name).await })
+                .await
+            {
+                Ok(inner) => inner,
+                Err(error) => Err(Error::other(error)),
+            };
+
+            let _ = this.update(cx, |view, cx| {
+                if let Some(node) = view.connections.get_mut(connection_index)
+                    && let Loadable::Loaded(databases) = &mut node.databases
+                    && let Some(database) = databases.get_mut(database_index)
+                {
+                    database.routines = match result {
+                        Ok(routines) => Loadable::Loaded(routines),
+                        Err(error) => Loadable::Failed(error.to_string()),
+                    };
+                }
+                view.notify_object_pane(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Re-fetch a database's routines after one was created or dropped, locating it by the live
+    /// connection rather than an index the routine editor does not carry.
+    pub(super) fn reload_routines(
+        &mut self,
+        connection: &Arc<dyn Connection>,
+        database: &str,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(connection_index) = self.connections.iter().position(|node| {
+            matches!(
+                &node.status,
+                ConnectionStatus::Connected(active) if Arc::ptr_eq(active, connection)
+            )
+        }) else {
+            return;
+        };
+        let database_index =
+            self.connections
+                .get(connection_index)
+                .and_then(|node| match &node.databases {
+                    Loadable::Loaded(databases) => databases
+                        .iter()
+                        .position(|existing| existing.name == database),
+                    _ => None,
+                });
+        if let Some(database_index) = database_index
+            && let Some(connection) = self.connection_arc(connection_index)
+        {
+            self.load_routines(
+                connection_index,
+                database_index,
+                connection,
+                database.to_string(),
+                cx,
+            );
+        }
     }
 
     pub(super) fn select_table(

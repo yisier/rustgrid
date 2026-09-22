@@ -38,6 +38,13 @@ impl AppView {
                 .into_any_element()
         } else if self.main_tab == MainTab::Backups {
             self.render_backups(cx).into_any_element()
+        } else if self.main_tab == MainTab::Functions && self.object_pane.is_none() {
+            div()
+                .flex_1()
+                .p_3()
+                .text_color(rgb(theme.text_muted))
+                .child(t!("routine.open_database").to_string())
+                .into_any_element()
         } else if let Some(pane) = self.object_pane.clone() {
             div()
                 .flex()
@@ -184,25 +191,27 @@ impl TabBar {
             .child(t!("object.header").to_string())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn query_tab(
         &self,
         theme: Theme,
         index: usize,
         id: u64,
-        name: Option<String>,
+        title: String,
+        routine: Option<RoutineKind>,
         active: bool,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
-        let title = match name {
-            Some(name) => format!("{name} - {}", t!("common.query")),
-            None => format!("{} - {}", t!("query.untitled"), t!("common.query")),
-        };
         let tab_id = SharedString::from(format!("query-tab-{id}"));
         let close_id = SharedString::from(format!("query-tab-close-{id}"));
         let activate = self.app.clone();
         let close = self.app.clone();
         let menu = self.app.clone();
         let middle = self.app.clone();
+        let (icon, icon_color) = match routine {
+            Some(_) => ("icons/functions.svg", theme.icon_functions),
+            None => ("icons/queries.svg", theme.icon_queries),
+        };
 
         div()
             .id(tab_id)
@@ -256,7 +265,7 @@ impl TabBar {
                     let _ = middle.update(cx, |app, cx| app.close_query(index, cx));
                 }),
             )
-            .child(tree_icon("icons/queries.svg", theme.icon_queries))
+            .child(tree_icon(icon, icon_color))
             .child(
                 div()
                     .overflow_hidden()
@@ -519,11 +528,34 @@ impl Render for TabBar {
                     Some((index, grid.state.id, title, grid.state.is_view))
                 })
                 .collect();
-            let query_tabs: Vec<(usize, u64, Option<String>)> = app
+            let query_tabs: Vec<(usize, u64, String, Option<RoutineKind>)> = app
                 .queries
                 .iter()
                 .enumerate()
-                .map(|(index, query)| (index, query.id, query.name.clone()))
+                .map(|(index, query)| {
+                    let routine_kind = query.routine.as_ref().map(|routine| routine.kind);
+                    let title = match &query.routine {
+                        Some(routine) => {
+                            let connection_name = query
+                                .connection_index
+                                .and_then(|connection| app.connections.get(connection))
+                                .map(|node| node.profile.name.clone())
+                                .unwrap_or_default();
+                            format!(
+                                "{} @{} ({}) - {}",
+                                routine.name,
+                                query.database.clone().unwrap_or_default(),
+                                connection_name,
+                                t!(routine.kind.label_key())
+                            )
+                        }
+                        None => match &query.name {
+                            Some(name) => format!("{name} - {}", t!("common.query")),
+                            None => format!("{} - {}", t!("query.untitled"), t!("common.query")),
+                        },
+                    };
+                    (index, query.id, title, routine_kind)
+                })
                 .collect();
             let design_tabs: Vec<(usize, u64, String, bool)> = app
                 .designs
@@ -602,12 +634,13 @@ impl Render for TabBar {
                 cx,
             ));
         }
-        for (index, id, name) in query_tabs {
+        for (index, id, title, routine) in query_tabs {
             strip = strip.child(self.query_tab(
                 theme,
                 index,
                 id,
-                name,
+                title,
+                routine,
                 active_query == Some(index),
                 cx,
             ));

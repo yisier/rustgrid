@@ -6,7 +6,10 @@ impl AppView {
         query: &QueryTab,
         _window: &Window,
         cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
+        if query.routine.is_some() {
+            return self.render_routine_view(query, cx);
+        }
         let theme = self.theme;
 
         let toolbar = div()
@@ -141,6 +144,7 @@ impl AppView {
             .child(toolbar)
             .child(controls)
             .child(body)
+            .into_any_element()
     }
 
     #[allow(clippy::too_many_arguments)]

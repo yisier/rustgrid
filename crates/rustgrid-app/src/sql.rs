@@ -5,6 +5,8 @@ use sqlparser::dialect::MySqlDialect;
 use sqlparser::keywords::Keyword;
 use sqlparser::tokenizer::{Location, Token, TokenWithSpan, Tokenizer, Whitespace};
 
+use rustgrid_core::RoutineKind;
+
 /// A coarse token category used only for syntax coloring.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SqlToken {
@@ -128,6 +130,111 @@ fn is_keyword(token: &Token, keyword: &str) -> bool {
     matches!(token, Token::Word(word) if word.keyword != Keyword::NoKeyword && word.value.eq_ignore_ascii_case(keyword))
 }
 
+/// The significant (non-whitespace, non-EOF) tokens of `sql`, in order.
+fn meaningful_tokens(sql: &str) -> Vec<Token> {
+    let dialect = MySqlDialect {};
+    let mut tokenizer = Tokenizer::new(&dialect, sql);
+    match tokenizer.tokenize() {
+        Ok(tokens) => tokens
+            .into_iter()
+            .filter(|token| !matches!(token, Token::Whitespace(_) | Token::EOF))
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// The routine kind of a `Word` token, when it is the `FUNCTION`/`PROCEDURE` keyword.
+fn routine_kind_of(word: &sqlparser::tokenizer::Word) -> Option<RoutineKind> {
+    match word.keyword {
+        Keyword::PROCEDURE => Some(RoutineKind::Procedure),
+        Keyword::FUNCTION => Some(RoutineKind::Function),
+        _ => None,
+    }
+}
+
+/// Parse a routine's kind and name from its `CREATE ... FUNCTION|PROCEDURE name(...)` statement.
+/// Returns `None` when the statement does not name a routine.
+pub fn routine_identity(sql: &str) -> Option<(RoutineKind, String)> {
+    let tokens = meaningful_tokens(sql);
+    let position = tokens
+        .iter()
+        .position(|token| matches!(token, Token::Word(word) if routine_kind_of(word).is_some()))?;
+    let kind = match &tokens[position] {
+        Token::Word(word) => routine_kind_of(word)?,
+        _ => return None,
+    };
+    let name = tokens[position + 1..]
+        .iter()
+        .find_map(|token| match token {
+            Token::Word(word) => Some(word.value.clone()),
+            _ => None,
+        })?;
+    Some((kind, name))
+}
+
+/// Parse a routine's parameter names from its `CREATE ... name(...)` statement, in order. The
+/// parameter list is the first parenthesized group after the routine name; a leading mode keyword
+/// (`IN`/`OUT`/`INOUT`) is skipped, so `IN a int` and `a int` both yield `a`.
+pub fn routine_parameters(sql: &str) -> Vec<String> {
+    let tokens = meaningful_tokens(sql);
+    let Some(position) = tokens
+        .iter()
+        .position(|token| matches!(token, Token::Word(word) if routine_kind_of(word).is_some()))
+    else {
+        return Vec::new();
+    };
+    let Some(open) = tokens[position..]
+        .iter()
+        .position(|token| matches!(token, Token::LParen))
+        .map(|offset| position + offset)
+    else {
+        return Vec::new();
+    };
+
+    let mut parameters = Vec::new();
+    let mut current: Vec<&Token> = Vec::new();
+    let mut depth = 0usize;
+    for token in &tokens[open + 1..] {
+        match token {
+            Token::LParen => {
+                depth += 1;
+                current.push(token);
+            }
+            Token::RParen => {
+                if depth == 0 {
+                    parameters.extend(parameter_name(&current));
+                    break;
+                }
+                depth -= 1;
+                current.push(token);
+            }
+            Token::Comma if depth == 0 => {
+                parameters.extend(parameter_name(&current));
+                current.clear();
+            }
+            _ => current.push(token),
+        }
+    }
+    parameters
+}
+
+/// The name of one parameter group: the first word, skipping a leading `IN`/`OUT`/`INOUT`.
+fn parameter_name(tokens: &[&Token]) -> Option<String> {
+    let mut words = tokens.iter().filter_map(|token| match token {
+        Token::Word(word) => Some(word.value.clone()),
+        _ => None,
+    });
+    let first = words.next()?;
+    if ["IN", "OUT", "INOUT"]
+        .iter()
+        .any(|mode| first.eq_ignore_ascii_case(mode))
+    {
+        words.next()
+    } else {
+        Some(first)
+    }
+}
+
 fn classify(token: &Token) -> Option<SqlToken> {
     match token {
         Token::Word(word) => Some(if word.quote_style.is_some() {
@@ -226,6 +333,25 @@ mod tests {
     #[test]
     fn keyword_list_is_populated() {
         assert!(keywords().contains(&"SELECT"));
+    }
+
+    #[test]
+    fn parses_routine_identity_and_parameters() {
+        let procedure = "CREATE DEFINER=`root`@`localhost` PROCEDURE `123`(IN a int, b varchar(10))\nBEGIN\nEND";
+        assert_eq!(
+            routine_identity(procedure),
+            Some((RoutineKind::Procedure, "123".to_string()))
+        );
+        assert_eq!(routine_parameters(procedure), vec!["a", "b"]);
+
+        let function = "CREATE FUNCTION new_function()\nRETURNS int\nBEGIN\nRETURN 0;\nEND";
+        assert_eq!(
+            routine_identity(function),
+            Some((RoutineKind::Function, "new_function".to_string()))
+        );
+        assert!(routine_parameters(function).is_empty());
+
+        assert_eq!(routine_identity("SELECT 1"), None);
     }
 
     #[test]

@@ -26,6 +26,7 @@ struct TreeDatabase {
     expanded: bool,
     categories: CategoryExpansion,
     tables: Loadable<Vec<TreeTable>>,
+    routines: Loadable<Vec<RoutineInfo>>,
 }
 
 struct TreeTable {
@@ -76,6 +77,19 @@ fn snapshot_connections(app: &AppView) -> Vec<TreeConnection> {
                                             })
                                             .collect(),
                                     ),
+                                }
+                            } else {
+                                Loadable::Idle
+                            },
+                            // Routine leaves are only read when the Functions category is expanded.
+                            routines: if database.expanded {
+                                match &database.routines {
+                                    Loadable::Idle => Loadable::Idle,
+                                    Loadable::Loading => Loadable::Loading,
+                                    Loadable::Failed(error) => Loadable::Failed(error.clone()),
+                                    Loadable::Loaded(routines) => {
+                                        Loadable::Loaded(routines.clone())
+                                    }
                                 }
                             } else {
                                 Loadable::Idle
@@ -444,7 +458,6 @@ impl TreePane {
             Category::Queries => theme.icon_queries,
             Category::Backups => theme.icon_backups,
         };
-        let has_objects = matches!(category, Category::Tables | Category::Views);
         let click_id = cat_id.clone();
         let app = self.app.clone();
 
@@ -482,33 +495,154 @@ impl TreePane {
         let mut sub = div().flex().flex_col();
 
         if expanded {
-            if !has_objects {
-                sub = sub.child(tree_message(
-                    t!("common.empty").to_string(),
-                    52.0,
-                    theme.text_muted,
-                ));
-            } else if let Loadable::Loaded(tables) = &database.tables {
-                let want_view = category == Category::Views;
-                let mut leaf_index = 0usize;
-                for table in tables.iter() {
-                    if table.is_view != want_view {
-                        continue;
+            match category {
+                Category::Tables | Category::Views => {
+                    if let Loadable::Loaded(tables) = &database.tables {
+                        let want_view = category == Category::Views;
+                        let mut leaf_index = 0usize;
+                        for table in tables.iter() {
+                            if table.is_view != want_view {
+                                continue;
+                            }
+                            sub = sub.child(self.render_table(
+                                connection_index,
+                                database_index,
+                                leaf_index,
+                                &database.name,
+                                table,
+                                cx,
+                            ));
+                            leaf_index += 1;
+                        }
                     }
-                    sub = sub.child(self.render_table(
-                        connection_index,
-                        database_index,
-                        leaf_index,
-                        &database.name,
-                        table,
-                        cx,
+                }
+                Category::Functions => match &database.routines {
+                    Loadable::Idle | Loadable::Loading => {
+                        sub = sub.child(tree_message(
+                            t!("common.loading").to_string(),
+                            52.0,
+                            theme.text_muted,
+                        ));
+                    }
+                    Loadable::Failed(error) => {
+                        sub = sub.child(tree_message(error.clone(), 52.0, theme.danger));
+                    }
+                    Loadable::Loaded(routines) => {
+                        for (index, routine) in routines.iter().enumerate() {
+                            sub = sub.child(self.render_routine(
+                                connection_index,
+                                database_index,
+                                index,
+                                &database.name,
+                                routine,
+                                cx,
+                            ));
+                        }
+                    }
+                },
+                _ => {
+                    sub = sub.child(tree_message(
+                        t!("common.empty").to_string(),
+                        52.0,
+                        theme.text_muted,
                     ));
-                    leaf_index += 1;
                 }
             }
         }
 
         div().flex().flex_col().child(row).child(sub)
+    }
+
+    /// One stored routine leaf under the connection tree's Functions category.
+    fn render_routine(
+        &self,
+        connection_index: usize,
+        database_index: usize,
+        routine_index: usize,
+        database_name: &str,
+        routine: &RoutineInfo,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
+        let theme = self.theme;
+        let routine_id = format!("rtn-{connection_index}-{database_index}-{routine_index}");
+        let selected = self.selected.as_deref() == Some(routine_id.as_str());
+        let name = routine.name.clone();
+        let click_name = name.clone();
+        let kind = routine.kind;
+        let click_id = routine_id.clone();
+        let database_name = database_name.to_string();
+        let app = self.app.clone();
+        let menu_app = self.app.clone();
+        let menu_name = routine.name.clone();
+
+        div()
+            .id(SharedString::from(routine_id))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .w_full()
+            .h(px(22.0))
+            .pl(px(54.0))
+            .pr_2()
+            .rounded_sm()
+            .cursor_pointer()
+            .when(selected, move |style| {
+                style
+                    .bg(rgb(theme.tree_selected_bg))
+                    .text_color(rgb(theme.tree_selected_text))
+            })
+            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            .on_click(cx.listener(move |this, event, window, cx| {
+                window.focus(&this.focus, cx);
+                this.selected = Some(click_id.clone());
+                this.selected_table = None;
+                let double_click =
+                    matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2);
+                if double_click {
+                    let _ = app.update(cx, |app, cx| {
+                        app.open_routine_by_name(
+                            connection_index,
+                            database_name.clone(),
+                            click_name.clone(),
+                            kind,
+                            cx,
+                        );
+                    });
+                }
+                cx.notify();
+            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    window.focus(&this.focus, cx);
+                    this.selected = Some(format!(
+                        "rtn-{connection_index}-{database_index}-{routine_index}"
+                    ));
+                    this.selected_table = None;
+                    let _ = menu_app.update(cx, |app, cx| {
+                        app.context_menu = Some(ContextMenu {
+                            target: ContextTarget::Routine {
+                                connection_index,
+                                database_index,
+                                name: menu_name.clone(),
+                                kind,
+                            },
+                            position: event.position,
+                        });
+                        cx.notify();
+                    });
+                    cx.notify();
+                }),
+            )
+            .child(tree_icon("icons/functions.svg", theme.icon_functions))
+            .child(
+                div()
+                    .flex_1()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .child(name),
+            )
     }
 
     fn render_table(

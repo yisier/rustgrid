@@ -951,6 +951,11 @@ impl AppView {
                 t!("user.delete_confirm", name = label.clone()).to_string(),
                 t!("user.delete_button").to_string(),
             ),
+            Some(DeleteConfirm::Routine { label, .. }) => (
+                t!("routine.delete_title").to_string(),
+                t!("routine.delete_confirm", name = label.clone()).to_string(),
+                t!("routine.delete_button").to_string(),
+            ),
             None => (String::new(), String::new(), t!("form.ok").to_string()),
         }
     }

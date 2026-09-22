@@ -119,7 +119,12 @@ impl AppView {
         let active = self.main_tab == tab;
         let enabled = matches!(
             tab,
-            MainTab::Tables | MainTab::Views | MainTab::Users | MainTab::Queries | MainTab::Backups
+            MainTab::Tables
+                | MainTab::Views
+                | MainTab::Functions
+                | MainTab::Users
+                | MainTab::Queries
+                | MainTab::Backups
         );
         self.main_button(
             SharedString::from(format!("main-tab-{}", tab as usize)),
@@ -204,6 +209,7 @@ impl AppView {
         let category = match tab {
             MainTab::Tables => Category::Tables,
             MainTab::Views => Category::Views,
+            MainTab::Functions => Category::Functions,
             MainTab::Queries => Category::Queries,
             _ => return,
         };
@@ -211,8 +217,18 @@ impl AppView {
             pane.update(cx, |pane, cx| {
                 pane.category = category;
                 pane.selected = None;
+                pane.selected_routine = None;
                 cx.notify();
             });
+        }
+        if category == Category::Functions
+            && let Some(pane) = self.object_pane.as_ref()
+        {
+            let (connection_index, database_index) = {
+                let pane = pane.read(cx);
+                (pane.connection_index, pane.database_index)
+            };
+            self.ensure_routines_loaded(connection_index, database_index, cx);
         }
         self.clear_object_search(cx);
         self.active_grid = None;

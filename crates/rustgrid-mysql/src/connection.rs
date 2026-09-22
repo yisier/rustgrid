@@ -3,9 +3,9 @@ use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use rustgrid_core::{
     BackupObjectKind, CellValue, ColumnDef, ColumnInfo, Connection, DatabaseInfo, DriverId, Error,
     FilterCondition, FilterConjunction, FilterNode, FilterOperator, ForeignKeyDef, IndexDef,
-    ObjectDump, ObjectKind, ObjectPrivilegeRow, PageRequest, QueryResult, Result, RowInsert,
-    RowUpdate, TableInfo, TableOptions, TablePage, TableSchema, TableStatus, TriggerDef,
-    UserAccount, UserDetails, UserEdit,
+    ObjectDump, ObjectKind, ObjectPrivilegeRow, PageRequest, QueryResult, Result, RoutineDetails,
+    RoutineEdit, RoutineInfo, RoutineKind, RowInsert, RowUpdate, TableInfo, TableOptions,
+    TablePage, TableSchema, TableStatus, TriggerDef, UserAccount, UserDetails, UserEdit,
 };
 use sqlx::mysql::{MySqlColumn, MySqlRow};
 use sqlx::{
@@ -1089,6 +1089,41 @@ impl Connection for MysqlConnection {
     ) -> String {
         crate::user::object_privileges_sql(database, name, original, rows)
     }
+
+    async fn list_routine_infos(&self, database: &str) -> Result<Vec<RoutineInfo>> {
+        crate::routine::list_routine_infos(&self.pool, database).await
+    }
+
+    async fn routine_details(
+        &self,
+        database: &str,
+        kind: RoutineKind,
+        name: &str,
+    ) -> Result<RoutineDetails> {
+        crate::routine::routine_details(&self.pool, database, kind, name).await
+    }
+
+    fn routine_sql(
+        &self,
+        database: &str,
+        original: Option<(&str, RoutineKind)>,
+        edit: &RoutineEdit,
+    ) -> String {
+        crate::routine::routine_sql(database, original, edit)
+    }
+
+    async fn save_routine(
+        &self,
+        database: &str,
+        original: Option<(&str, RoutineKind)>,
+        edit: &RoutineEdit,
+    ) -> Result<()> {
+        crate::routine::save_routine(&self.pool, database, original, edit).await
+    }
+
+    async fn drop_routine(&self, database: &str, kind: RoutineKind, name: &str) -> Result<()> {
+        crate::routine::drop_routine(&self.pool, database, kind, name).await
+    }
 }
 
 /// Build the DDL that turns `original` into `modified`; exposed free so it can be unit tested
@@ -1515,7 +1550,7 @@ fn quote_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
-fn quote_identifier(identifier: &str) -> String {
+pub(crate) fn quote_identifier(identifier: &str) -> String {
     format!("`{}`", identifier.replace('`', "``"))
 }
 

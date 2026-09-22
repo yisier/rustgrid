@@ -159,6 +159,13 @@ impl AppView {
                 host,
                 ..
             } => self.delete_user(connection_index, user, host, cx),
+            DeleteConfirm::Routine {
+                connection_index,
+                database_index,
+                name,
+                kind,
+                ..
+            } => self.delete_routine(connection_index, database_index, name, kind, cx),
         }
         cx.notify();
     }

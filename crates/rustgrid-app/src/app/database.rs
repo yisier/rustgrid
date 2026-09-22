@@ -14,6 +14,7 @@ impl AppView {
             database.opened = false;
             database.expanded = false;
             database.tables = Loadable::Idle;
+            database.routines = Loadable::Idle;
             database.categories = CategoryExpansion::default();
         }
         self.completion_generation = self.completion_generation.wrapping_add(1);
