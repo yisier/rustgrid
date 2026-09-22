@@ -550,6 +550,7 @@ user.privilege.accounts_for: "作用于 %{account}（点击上方账号可切换
 user.privilege.select_object: "请选择左侧的数据库或表"
 user.privilege.select_account_first: "请先在上方勾选并点击一个账号"
 user.privilege.unsaved: "未保存"
+user.privilege.preview_header: "对象 %{object} 变更预览 (Diff)"
 user.priv.alter: "Alter"
 user.priv.alter_routine: "Alter Routine"
 user.priv.create: "Create"

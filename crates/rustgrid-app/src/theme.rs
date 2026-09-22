@@ -28,6 +28,10 @@ pub struct Theme {
     pub scroll_track: u32,
     pub scroll_thumb: u32,
     pub primary: u32,
+    /// Brand accent used to brighten active state (selected main tab icon + label).
+    pub brand: u32,
+    /// Restrained brand tint used as the active main-tab background.
+    pub brand_muted: u32,
     pub overlay: u32,
     pub tree_hover_bg: u32,
     pub tree_selected_bg: u32,
@@ -82,6 +86,8 @@ impl Theme {
             scroll_track: 0xf4f4f5,
             scroll_thumb: 0xa1a1aa,
             primary: 0x18181b,
+            brand: 0x2563eb,
+            brand_muted: 0xdbeafe,
             overlay: 0x0000004d,
             tree_hover_bg: 0xf4f4f5,
             tree_selected_bg: 0xf4f4f5,
@@ -136,6 +142,8 @@ impl Theme {
             scroll_track: 0x18181b,
             scroll_thumb: 0x52525b,
             primary: 0xfafafa,
+            brand: 0x60a5fa,
+            brand_muted: 0x172554,
             overlay: 0x000000a6,
             tree_hover_bg: 0x18181b,
             tree_selected_bg: 0x27272a,

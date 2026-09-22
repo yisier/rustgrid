@@ -1040,8 +1040,8 @@ const MAIN_TABS: [(MainTab, &str, &str); 6] = [
     (MainTab::Tables, "icons/tables.svg", "main.tables"),
     (MainTab::Views, "icons/views.svg", "main.views"),
     (MainTab::Functions, "icons/functions.svg", "main.functions"),
+    (MainTab::Queries, "icons/new_query.svg", "main.queries"),
     (MainTab::Users, "icons/user.svg", "main.users"),
-    (MainTab::Queries, "icons/queries.svg", "main.queries"),
     (MainTab::Backups, "icons/backups.svg", "main.backups"),
 ];
 
@@ -2472,7 +2472,7 @@ fn render_titlebar(theme: Theme) -> impl IntoElement {
                 .flex_1()
                 .h_full()
                 .px_3()
-                .text_sm()
+                .text_size(px(12.5))
                 .window_control_area(WindowControlArea::Drag)
                 .child(
                     img(ImageSource::Resource(Resource::Embedded("logo.png".into())))

@@ -12,7 +12,9 @@ use super::user_create::{DbTemplate, db_privilege_groups, privilege_summary, sec
 use super::*;
 
 /// Height of one account row in the account list.
-const PM_ROW_HEIGHT: f32 = 26.0;
+const PM_ROW_HEIGHT: f32 = 22.0;
+/// Height of one object row (database/table) in the left list.
+const PM_OBJECT_ROW_HEIGHT: f32 = 22.0;
 /// Width of the left object list.
 const PM_OBJECT_WIDTH: f32 = 240.0;
 /// Max height of the account list before it scrolls.
@@ -70,6 +72,8 @@ pub(super) struct PrivilegeManager {
     dirty: bool,
     error: Option<String>,
     sql_scroll: ScrollHandle,
+    /// Whether the change-preview popup is open (Save shows it before writing anything).
+    confirm_open: bool,
 }
 
 impl PrivilegeManager {
@@ -100,6 +104,7 @@ impl PrivilegeManager {
             dirty: false,
             error: None,
             sql_scroll: ScrollHandle::new(),
+            confirm_open: false,
         }
     }
 
@@ -366,7 +371,55 @@ impl PrivilegeManager {
             .object_privileges_sql(database, name, &self.original, &self.rows)
     }
 
+    /// The annotated script the change-preview popup shows: a header naming the object, then the
+    /// statements that [`Self::execute_save`] would run. Mirrors the account editor's change diff.
+    fn confirm_preview(&self) -> String {
+        let Some((database, name)) = self.selected.as_ref() else {
+            return String::new();
+        };
+        let mut out = String::new();
+        out.push_str(&format!(
+            "-- {}\n",
+            t!(
+                "user.privilege.preview_header",
+                object = object_spec(database, name)
+            )
+        ));
+        let sql = self.preview_sql();
+        if sql.trim().is_empty() {
+            out.push_str(&format!("-- {}\n", t!("design.no_changes")));
+        } else {
+            out.push('\n');
+            out.push_str(&sql);
+            out.push('\n');
+        }
+        out
+    }
+
+    fn copy_sql(&mut self, cx: &mut Context<'_, Self>) {
+        let sql = self.preview_sql();
+        if !sql.trim().is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(sql));
+        }
+    }
+
+    /// Open the change-preview popup; the actual write happens in [`Self::execute_save`].
     fn save(&mut self, cx: &mut Context<'_, Self>) {
+        if self.selected.is_none() || self.saving {
+            return;
+        }
+        self.confirm_open = true;
+        self.error = None;
+        cx.notify();
+    }
+
+    /// Close the change-preview popup without saving.
+    fn close_confirm(&mut self, cx: &mut Context<'_, Self>) {
+        self.confirm_open = false;
+        cx.notify();
+    }
+
+    fn execute_save(&mut self, cx: &mut Context<'_, Self>) {
         let Some((database, name)) = self.selected.clone() else {
             return;
         };
@@ -374,6 +427,7 @@ impl PrivilegeManager {
             return;
         }
         self.saving = true;
+        self.confirm_open = false;
         let connection = self.connection.clone();
         let runtime = self.runtime.clone();
         let rows = self.rows.clone();
@@ -411,7 +465,7 @@ impl Render for PrivilegeManager {
             self.connection_name,
             t!("user.privilege_manager")
         );
-        div()
+        let mut root = div()
             .id("object-privileges")
             .relative()
             .flex()
@@ -421,45 +475,191 @@ impl Render for PrivilegeManager {
             .text_color(rgb(theme.text))
             .text_size(px(12.5))
             .track_focus(&self.focus)
-            .on_key_down(cx.listener(|_this, event: &KeyDownEvent, window, _cx| {
-                if event.keystroke.key == "escape" {
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key != "escape" || this.saving {
+                    return;
+                }
+                // ESC dismisses the open change preview first, then closes the window.
+                if this.confirm_open {
+                    this.close_confirm(cx);
+                } else {
                     window.remove_window();
                 }
             }))
             .child(export::child_window_titlebar(title, theme))
-            .child(self.render_toolbar(cx))
             .child(self.render_subtabs(cx))
             .child(self.render_body(cx))
+            .child(self.render_footer(cx));
+        if self.confirm_open {
+            root = root.child(self.render_confirm(cx));
+        }
+        root
     }
 }
 
 impl PrivilegeManager {
-    fn render_toolbar(&self, cx: &mut Context<'_, Self>) -> Div {
+    /// The window's bottom bar: the error / 未保存 state on the left, the Save button on the right.
+    /// Save opens the change-preview popup instead of writing straight away.
+    fn render_footer(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
+        let enabled = self.selected.is_some() && !self.saving;
+        let label = if self.saving {
+            t!("user.create.saving").to_string()
+        } else {
+            t!("design.save").to_string()
+        };
         div()
             .flex()
             .flex_row()
             .items_center()
             .justify_between()
             .gap_2()
-            .px_2()
-            .py_1()
+            .w_full()
             .flex_none()
-            .bg(rgb(theme.toolbar_bg))
-            .border_b_1()
+            .px_4()
+            .py_2()
+            .bg(rgb(theme.dialog_bg))
+            .border_t_1()
             .border_color(rgb(theme.border))
-            .child(ui::toolbar_item(
-                "op-save",
-                "icons/save.svg",
-                t!("design.save").to_string(),
-                self.selected.is_some() && !self.saving,
-                theme,
-                cx.listener(|this, _event, _window, cx| this.save(cx)),
-            ))
             .child(self.render_status())
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .flex_none()
+                    .child(ui::button(
+                        "op-save",
+                        label,
+                        if enabled {
+                            ButtonKind::Default
+                        } else {
+                            ButtonKind::Disabled
+                        },
+                        theme,
+                        cx.listener(|this, _event, _window, cx| {
+                            if !this.saving {
+                                this.save(cx);
+                            }
+                        }),
+                    )),
+            )
+            .into_any_element()
     }
 
-    /// The toolbar's right cell: the error, or a brief hint reporting what is selected.
+    /// The change-preview popup: the annotated script plus 关闭 / 确认并执行.
+    fn render_confirm(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let preview = self.confirm_preview();
+
+        let mut code = div()
+            .id("op-confirm-sql")
+            .flex()
+            .flex_col()
+            .max_h(px(360.0))
+            .overflow_y_scroll()
+            .rounded(px(6.0))
+            .bg(rgb(0x0d1117))
+            .p_3();
+        for line in preview.lines() {
+            let comment = line.trim_start().starts_with("--");
+            code = code.child(
+                div()
+                    .font_family("Consolas")
+                    .text_size(px(12.0))
+                    .line_height(px(18.0))
+                    .text_color(rgb(if comment { 0x8b949e } else { 0xc9d1d9 }))
+                    .child(line.to_string()),
+            );
+        }
+
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .w_full()
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(t!("user.create.confirm_title").to_string()),
+            )
+            .child(
+                div()
+                    .id("op-confirm-copy")
+                    .cursor_pointer()
+                    .text_size(px(11.0))
+                    .text_color(rgb(theme.primary))
+                    .hover(move |style| style.text_color(rgb(theme.text)))
+                    .on_click(cx.listener(|this, _event, _window, cx| this.copy_sql(cx)))
+                    .child(t!("user.create.copy_sql").to_string()),
+            );
+
+        let panel = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_4()
+            .w(px(720.0))
+            .max_h(px(560.0))
+            .bg(rgb(theme.dialog_bg))
+            .border_1()
+            .border_color(rgb(theme.border))
+            .rounded(px(8.0))
+            .shadow(ui::dialog_shadow())
+            .child(header)
+            .child(code)
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(t!("user.create.confirm_hint").to_string()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_end()
+                    .gap_2()
+                    .w_full()
+                    .child(ui::dialog_button(
+                        "op-confirm-close",
+                        t!("user.create.confirm_close").to_string(),
+                        false,
+                        theme,
+                        cx.listener(|this, _event, _window, cx| this.close_confirm(cx)),
+                    ))
+                    .child(ui::dialog_button(
+                        "op-confirm-execute",
+                        t!("user.create.confirm_execute").to_string(),
+                        true,
+                        theme,
+                        cx.listener(|this, _event, _window, cx| this.execute_save(cx)),
+                    )),
+            )
+            .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
+                cx.stop_propagation();
+            });
+
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .occlude()
+            .bg(rgba(0x00000040))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _event, _window, cx| this.close_confirm(cx)),
+            )
+            .child(panel)
+            .into_any_element()
+    }
+
+    /// The footer's left cell: the error, or a brief hint reporting what is selected.
     fn render_status(&self) -> AnyElement {
         let theme = self.theme;
         if let Some(error) = self.error.as_ref() {
@@ -586,7 +786,7 @@ impl PrivilegeManager {
     /// The left object list: every database, expandable into its tables.
     fn render_object_list(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
-        let mut list = div().flex().flex_col().p_2().gap_1();
+        let mut list = div().flex().flex_col().py_1().px_1().gap_0p5();
         if self.loading && self.databases.is_empty() {
             list = list.child(tree_message(
                 t!("common.loading").to_string(),
@@ -609,7 +809,7 @@ impl PrivilegeManager {
                     .flex_row()
                     .items_center()
                     .gap_1()
-                    .h(px(28.0))
+                    .h(px(PM_OBJECT_ROW_HEIGHT))
                     .px_2()
                     .flex_none()
                     .rounded(px(4.0))
@@ -672,8 +872,8 @@ impl PrivilegeManager {
                             .flex_row()
                             .items_center()
                             .gap_1()
-                            .h(px(28.0))
-                            .pl(px(30.0))
+                            .h(px(PM_OBJECT_ROW_HEIGHT))
+                            .pl(px(26.0))
                             .pr_2()
                             .flex_none()
                             .rounded(px(4.0))
@@ -689,7 +889,7 @@ impl PrivilegeManager {
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.select_node(node.clone(), cx)
                             }))
-                            .child(tree_icon("icons/table.svg", theme.icon_table))
+                            .child(tree_icon("icons/tables.svg", theme.icon_table))
                             .child(
                                 div()
                                     .flex_1()
@@ -735,7 +935,7 @@ impl PrivilegeManager {
 
         let (icon, kind) = if is_table {
             (
-                tree_icon("icons/table.svg", theme.icon_table),
+                tree_icon("icons/tables.svg", theme.icon_table),
                 t!("user.create.table_level").to_string(),
             )
         } else {
@@ -837,13 +1037,13 @@ impl PrivilegeManager {
             .id("op-detail")
             .flex()
             .flex_col()
-            .gap_4()
+            .gap_3()
             .flex_1()
             .min_w(px(0.0))
             .min_h(px(0.0))
             .h_full()
             .overflow_y_scroll()
-            .p_4()
+            .p_3()
             .child(header)
             .child(target)
             .child(section(

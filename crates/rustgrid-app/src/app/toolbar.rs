@@ -100,14 +100,6 @@ impl AppView {
                 true,
                 cx.listener(|this, _event, window, cx| this.open_new_form(window, cx)),
             ))
-            .child(self.main_button(
-                "main-query",
-                "icons/queries.svg",
-                t!("main.new_query").to_string(),
-                false,
-                true,
-                cx.listener(|this, _event, _window, cx| this.open_new_query(cx)),
-            ))
             .child(main_separator(theme));
 
         for (tab, icon, label_key) in MAIN_TABS {
@@ -154,7 +146,7 @@ impl AppView {
     ) -> impl IntoElement {
         let theme = self.theme;
         let text_color = if active {
-            theme.tree_selected_text
+            theme.brand
         } else if enabled {
             theme.text
         } else {
@@ -173,7 +165,7 @@ impl AppView {
             .rounded_sm()
             .cursor_pointer()
             .text_color(rgb(text_color))
-            .when(active, move |style| style.bg(rgb(theme.tree_selected_bg)))
+            .when(active, move |style| style.bg(rgb(theme.brand_muted)))
             .when(!active && enabled, move |style| {
                 style.hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
             })

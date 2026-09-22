@@ -184,7 +184,7 @@ impl AppView {
                     .items_center()
                     .child(self.toolbar_item(
                         "obj-new-query",
-                        "icons/queries.svg",
+                        "icons/new_query.svg",
                         t!("main.new_query").to_string(),
                         true,
                         cx.listener(|this, _event, _window, cx| this.open_new_query(cx)),

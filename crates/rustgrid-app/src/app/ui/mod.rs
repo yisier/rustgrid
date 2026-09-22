@@ -30,8 +30,7 @@ pub(super) enum ButtonKind {
     Default,
     Danger,
     Selected,
-    /// Kept as part of the design-system vocabulary; no call site disables a push button today.
-    #[allow(dead_code)]
+    /// A push button that is rendered but cannot be clicked (e.g. Save with nothing selected).
     Disabled,
 }
 

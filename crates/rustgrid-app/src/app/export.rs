@@ -1643,7 +1643,7 @@ pub(super) fn child_window_titlebar(title: String, theme: Theme) -> impl IntoEle
                 .flex_1()
                 .h_full()
                 .px_3()
-                .text_sm()
+                .text_size(px(12.5))
                 .window_control_area(WindowControlArea::Drag)
                 .child(
                     img(ImageSource::Resource(Resource::Embedded("logo.png".into())))
