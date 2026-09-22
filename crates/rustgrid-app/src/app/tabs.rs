@@ -26,18 +26,7 @@ impl AppView {
                 }))
                 .into_any_element()
         } else if self.main_tab == MainTab::Users {
-            match self
-                .privilege_manager
-                .clone()
-                .filter(|_| self.privilege_manager_active)
-            {
-                Some(manager) => manager
-                    .cached(cached_style(|d| {
-                        d.flex().flex_col().flex_1().min_w(px(0.0)).min_h(px(0.0))
-                    }))
-                    .into_any_element(),
-                None => self.render_users(cx).into_any_element(),
-            }
+            self.render_users(cx).into_any_element()
         } else if self.main_tab == MainTab::Queries {
             div()
                 .flex()
@@ -193,74 +182,6 @@ impl TabBar {
             }))
             .child(tree_icon("icons/tables.svg", theme.icon_tables))
             .child(t!("object.header").to_string())
-    }
-
-    /// The privilege manager's tab, shown alongside the 对象 tab while it is open. Clicking it
-    /// activates the manager; its ✕ closes (and drops) the manager.
-    fn privilege_manager_tab(
-        &self,
-        theme: Theme,
-        connection_name: String,
-        active: bool,
-        cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
-        let activate = self.app.clone();
-        let close = self.app.clone();
-        let title = format!("{connection_name} - {}", t!("user.privilege_manager"));
-
-        div()
-            .id("tab-privilege-manager")
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_1()
-            .h_full()
-            .px_2()
-            .flex_none()
-            .cursor_pointer()
-            .text_size(px(12.0))
-            .when(active, |style| {
-                style
-                    .bg(rgb(theme.editor_bg))
-                    .border_t_1()
-                    .border_l_1()
-                    .border_r_1()
-                    .border_color(rgb(theme.border))
-            })
-            .when(!active, |style| {
-                style
-                    .bg(rgb(theme.button_bg))
-                    .border_1()
-                    .border_color(rgb(theme.border))
-            })
-            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-            .on_click(cx.listener(move |_this, _event, _window, cx| {
-                let _ = activate.update(cx, |app, cx| app.activate_privilege_manager(cx));
-            }))
-            .child(tree_icon("icons/gear.svg", theme.icon_users))
-            .child(
-                div()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .max_w(px(160.0))
-                    .child(title),
-            )
-            .child(
-                div()
-                    .id("tab-privilege-manager-close")
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .w(px(16.0))
-                    .h(px(16.0))
-                    .cursor_pointer()
-                    .hover(move |style| style.bg(rgb(theme.button_hover_bg)))
-                    .on_click(cx.listener(move |_this, _event, _window, cx| {
-                        cx.stop_propagation();
-                        let _ = close.update(cx, |app, cx| app.close_privilege_manager(cx));
-                    }))
-                    .child("✕"),
-            )
     }
 
     fn query_tab(
@@ -571,30 +492,11 @@ impl TabBar {
 
 impl Render for TabBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let (
-            theme,
-            active_grid,
-            active_query,
-            active_design,
-            privilege_manager,
-            privilege_manager_active,
-            grid_tabs,
-            query_tabs,
-            design_tabs,
-        ) = {
+        let (theme, active_grid, active_query, active_design, grid_tabs, query_tabs, design_tabs) = {
             let Some(app) = self.app.upgrade() else {
                 return div().into_any_element();
             };
             let app = app.read(cx);
-            let on_users_tab = app.main_tab == MainTab::Users;
-            let privilege_manager = if on_users_tab {
-                app.privilege_manager
-                    .as_ref()
-                    .map(|manager| manager.read(cx).connection_name.clone())
-            } else {
-                None
-            };
-            let privilege_manager_active = on_users_tab && app.privilege_manager_active;
             let grid_tabs: Vec<(usize, u64, String, bool)> = app
                 .grids
                 .iter()
@@ -659,8 +561,6 @@ impl Render for TabBar {
                 app.active_grid,
                 app.active_query,
                 app.active_design,
-                privilege_manager,
-                privilege_manager_active,
                 grid_tabs,
                 query_tabs,
                 design_tabs,
@@ -680,15 +580,6 @@ impl Render for TabBar {
             .overflow_x_scroll()
             .track_scroll(&self.scroll);
 
-        // The privilege manager sits right next to the pinned 对象 tab, at the same level.
-        if let Some(connection_name) = privilege_manager {
-            strip = strip.child(self.privilege_manager_tab(
-                theme,
-                connection_name,
-                privilege_manager_active,
-                cx,
-            ));
-        }
         for (index, id, title, is_view) in grid_tabs {
             strip = strip.child(self.table_tab(
                 theme,
@@ -735,10 +626,7 @@ impl Render for TabBar {
             .bg(rgb(theme.toolbar_bg))
             .child(self.object_tab(
                 theme,
-                active_grid.is_none()
-                    && active_query.is_none()
-                    && active_design.is_none()
-                    && !privilege_manager_active,
+                active_grid.is_none() && active_query.is_none() && active_design.is_none(),
                 cx,
             ));
         if needs_scroll {

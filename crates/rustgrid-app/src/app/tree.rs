@@ -661,7 +661,6 @@ impl AppView {
         self.active_grid = index;
         self.active_query = None;
         self.active_design = None;
-        self.privilege_manager_active = false;
         self.query_completion = None;
         cx.notify();
     }

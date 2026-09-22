@@ -203,14 +203,14 @@ pub(super) enum DbTemplate {
 }
 
 impl DbTemplate {
-    const ALL: [DbTemplate; 4] = [
+    pub(super) const ALL: [DbTemplate; 4] = [
         DbTemplate::None,
         DbTemplate::ReadOnly,
         DbTemplate::ReadWrite,
         DbTemplate::Full,
     ];
 
-    fn label_key(self) -> &'static str {
+    pub(super) fn label_key(self) -> &'static str {
         match self {
             DbTemplate::None => "user.create.db_template.none",
             DbTemplate::ReadOnly => "user.create.db_template.read_only",
@@ -241,7 +241,7 @@ impl DbTemplate {
 }
 
 /// The grouped object privileges the 权限 detail pane shows as check boxes.
-fn db_privilege_groups() -> [(&'static str, Vec<Privilege>); 3] {
+pub(super) fn db_privilege_groups() -> [(&'static str, Vec<Privilege>); 3] {
     [
         (
             "user.create.priv_group.dml",
@@ -354,7 +354,7 @@ pub(super) struct DbGrant {
 }
 
 /// The i18n key naming a privilege set: the matching quick preset, or 自定义.
-fn privilege_preset_key(privileges: &BTreeSet<Privilege>) -> &'static str {
+pub(super) fn privilege_preset_key(privileges: &BTreeSet<Privilege>) -> &'static str {
     if *privileges == DbTemplate::ReadOnly.privileges() {
         "user.create.db_template.read_only"
     } else if *privileges == DbTemplate::ReadWrite.privileges() {
@@ -367,7 +367,7 @@ fn privilege_preset_key(privileges: &BTreeSet<Privilege>) -> &'static str {
 }
 
 /// The badge for one privilege set: the preset name (with its count) or 未授权.
-fn privilege_summary(privileges: &BTreeSet<Privilege>) -> (String, bool) {
+pub(super) fn privilege_summary(privileges: &BTreeSet<Privilege>) -> (String, bool) {
     if privileges.is_empty() {
         return (t!("user.create.unauthorized").to_string(), false);
     }
@@ -788,7 +788,12 @@ pub(super) struct UserAccountContext {
 // ----- Layout helpers ------------------------------------------------------------------------
 
 /// A titled block: a small heading above its content.
-fn section(title: String, hint: Option<String>, content: AnyElement, theme: Theme) -> Div {
+pub(super) fn section(
+    title: String,
+    hint: Option<String>,
+    content: AnyElement,
+    theme: Theme,
+) -> Div {
     let mut head = div()
         .flex()
         .flex_row()
@@ -1279,6 +1284,7 @@ impl AppView {
         }
         let weak = cx.weak_entity();
         let app_entity = cx.entity();
+        let focus = self.create_user_focus.clone();
         let title = match self
             .create_user_dialog
             .as_ref()
@@ -1309,7 +1315,11 @@ impl AppView {
                     window.activate_window();
                     let view =
                         cx.new(|cx| UserCreateWindow::new(view_weak.clone(), &app_entity, cx));
-                    cx.new(|cx| gpui_kit::component::Root::new(view, window, cx))
+                    let root = cx.new(|cx| gpui_kit::component::Root::new(view, window, cx));
+                    // Give the window root the focus so ESC reaches its key handler even when no
+                    // field is focused yet.
+                    window.focus(&focus, cx);
+                    root
                 },
             );
             match opened {
@@ -2179,7 +2189,6 @@ fn make_create_field_input(
 ) -> Entity<TextInput> {
     let change = app.clone();
     let submit = app.clone();
-    let cancel = app.clone();
     cx.new(move |cx| {
         TextInput::new(
             theme,
@@ -2197,9 +2206,8 @@ fn make_create_field_input(
         .on_submit(Rc::new(move |_window, cx| {
             let _ = submit.update(cx, |app, cx| app.submit_create_user(cx));
         }))
-        .on_cancel(Rc::new(move |_window, cx| {
-            let _ = cancel.update(cx, |app, cx| app.cancel_create_user(cx));
-        }))
+        // No `on_cancel`: ESC must reach the window root, which closes the whole window. Handling it
+        // here would clear the editor state first and leave a blank window behind.
     })
 }
 
@@ -2270,6 +2278,26 @@ impl AppView {
             .size_full()
             .bg(rgb(theme.dialog_face))
             .text_color(rgb(theme.text))
+            .track_focus(&self.create_user_focus)
+            // ESC dismisses the open change preview first, then closes the whole window (there is no
+            // 取消 button any more, so this and the native close button are the only ways out).
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key != "escape" {
+                    return;
+                }
+                if let Some(dialog) = this.create_user_dialog.as_ref() {
+                    if dialog.saving {
+                        return;
+                    }
+                    if dialog.confirm_open {
+                        this.close_create_confirm(cx);
+                        return;
+                    }
+                }
+                // Close even when a nested control already cleared the dialog state, so the OS
+                // window never lingers blank.
+                this.create_user_close(window, cx);
+            }))
             .child(export::child_window_titlebar(title, theme))
             .child(
                 div()
@@ -3700,27 +3728,20 @@ impl AppView {
                     .child(t!("user.create.account_badge", name = subject).to_string()),
             );
         }
-        right = right
-            .child(self.dialog_button(
-                "user-create-cancel",
-                t!("form.cancel").to_string(),
-                false,
-                cx.listener(|this, _event, window, cx| this.create_user_close(window, cx)),
-            ))
-            .child(self.win_button(
-                "user-create-submit",
-                save_label,
-                if disabled {
-                    ButtonKind::Disabled
-                } else {
-                    ButtonKind::Default
-                },
-                cx.listener(move |this, _event, _window, cx| {
-                    if !disabled {
-                        this.submit_create_user(cx);
-                    }
-                }),
-            ));
+        right = right.child(self.win_button(
+            "user-create-submit",
+            save_label,
+            if disabled {
+                ButtonKind::Disabled
+            } else {
+                ButtonKind::Default
+            },
+            cx.listener(move |this, _event, _window, cx| {
+                if !disabled {
+                    this.submit_create_user(cx);
+                }
+            }),
+        ));
         // The footer's left cell reports state: the failure reason, a brief 已保存 confirmation, or
         // a summary of what the account will hold (the prototype's "就绪 · 已配置 …").
         let granted = dialog.db_grants.iter().filter(|row| row.enabled).count();

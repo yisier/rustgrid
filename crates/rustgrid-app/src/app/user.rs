@@ -133,19 +133,19 @@ impl AppView {
                     .flex_row()
                     .items_center()
                     .child(self.toolbar_item(
-                        "user-edit",
-                        "icons/insert_field.svg",
-                        t!("user.edit").to_string(),
-                        has_selection,
-                        cx.listener(|this, _event, _window, cx| this.open_selected_user(cx)),
-                    ))
-                    .child(toolbar_separator(theme))
-                    .child(self.toolbar_item(
                         "user-new",
                         "icons/add_field.svg",
                         t!("user.new").to_string(),
                         has_connection,
                         cx.listener(|this, _event, _window, cx| this.open_create_user(cx)),
+                    ))
+                    .child(toolbar_separator(theme))
+                    .child(self.toolbar_item(
+                        "user-edit",
+                        "icons/insert_field.svg",
+                        t!("user.edit").to_string(),
+                        has_selection,
+                        cx.listener(|this, _event, _window, cx| this.open_selected_user(cx)),
                     ))
                     .child(toolbar_separator(theme))
                     .child(self.toolbar_item(
@@ -199,10 +199,22 @@ impl AppView {
                         continue;
                     };
                     let is_selected = selected == Some(*index);
-                    let background = if row % 2 == 1 {
-                        theme.row_alt_bg
+                    // A selected row uses the app's selection colours (the same blue the grid uses),
+                    // so it is unmistakable — the previous `tree_selected_bg` is the same light grey
+                    // as hover in the light palette and read as "not selected".
+                    let (background, foreground, icon_color) = if is_selected {
+                        (
+                            theme.grid_selection_bg,
+                            theme.grid_selection_text,
+                            theme.grid_selection_text,
+                        )
                     } else {
-                        theme.editor_bg
+                        let background = if row % 2 == 1 {
+                            theme.row_alt_bg
+                        } else {
+                            theme.editor_bg
+                        };
+                        (background, theme.text, theme.icon_users)
                     };
                     let row_index = *index;
                     list = list.child(
@@ -216,19 +228,18 @@ impl AppView {
                             .px_2()
                             .cursor_pointer()
                             .text_size(px(12.5))
-                            .bg(rgb(if is_selected {
-                                theme.tree_selected_bg
-                            } else {
-                                background
-                            }))
-                            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                            .text_color(rgb(foreground))
+                            .bg(rgb(background))
+                            .when(!is_selected, move |style| {
+                                style.hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                            })
                             .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
                                 this.select_user(row_index, cx);
                                 if event.click_count() == 2 {
                                     this.open_selected_user(cx);
                                 }
                             }))
-                            .child(tree_icon("icons/user.svg", theme.icon_users))
+                            .child(tree_icon("icons/user.svg", icon_color))
                             .child(
                                 div()
                                     .overflow_hidden()
@@ -328,8 +339,13 @@ impl AppView {
         .detach();
     }
 
-    /// Show the privilege manager for the current connection.
+    /// Open the 对象权限 window for the current connection (an object-centric view of the grants
+    /// the account editor manages from the account side).
     pub(super) fn open_privilege_manager(&mut self, cx: &mut Context<'_, Self>) {
+        if self.object_privileges_window.is_some() {
+            self.focus_object_privileges(cx);
+            return;
+        }
         let Some(connection_index) = self.users_connection_index(cx) else {
             return;
         };
@@ -346,39 +362,70 @@ impl AppView {
         let manager = cx.new(|cx| {
             privilege_manager::PrivilegeManager::new(
                 connection,
-                connection_name,
+                connection_name.clone(),
                 runtime,
                 theme,
                 cx,
             )
         });
         manager.update(cx, |manager, cx| manager.load(cx));
-        self.privilege_manager = Some(manager);
-        self.privilege_manager_active = true;
-        self.active_grid = None;
-        self.active_query = None;
-        self.active_design = None;
-        self.selected_user = None;
+        self.object_privileges = Some(manager.clone());
+
+        let focus = manager.read(cx).focus_handle();
+        let title = format!("{} - {}", connection_name, t!("user.privilege_manager"));
+        let weak = cx.weak_entity();
+        cx.defer(move |cx: &mut App| {
+            let Some(app) = weak.upgrade() else {
+                return;
+            };
+            let bounds = Bounds::centered(None, size(px(980.0), px(680.0)), cx);
+            let opened = cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some(title.clone().into()),
+                        appears_transparent: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                move |window, cx| {
+                    #[cfg(target_os = "windows")]
+                    crate::win_resize::install(window);
+                    window.activate_window();
+                    let root = cx.new(|cx| gpui_kit::component::Root::new(manager, window, cx));
+                    window.focus(&focus, cx);
+                    root
+                },
+            );
+            match opened {
+                Ok(handle) => app.update(cx, |app, cx| {
+                    app.object_privileges_window = Some(handle);
+                    cx.notify();
+                }),
+                Err(error) => app.update(cx, |app, cx| {
+                    app.error_dialog = Some(error.to_string());
+                    cx.notify();
+                }),
+            }
+        });
         cx.notify();
     }
 
-    /// Make the privilege manager's tab the active one, without reloading it.
-    pub(super) fn activate_privilege_manager(&mut self, cx: &mut Context<'_, Self>) {
-        if self.privilege_manager.is_none() {
-            return;
+    /// Raise the already-open 对象权限 window.
+    fn focus_object_privileges(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(handle) = self.object_privileges_window {
+            let _ = handle.update(cx, |_, window, _| {
+                window.activate_window();
+                window.refresh();
+            });
         }
-        self.privilege_manager_active = true;
-        self.active_grid = None;
-        self.active_query = None;
-        self.active_design = None;
-        self.query_completion = None;
-        cx.notify();
     }
 
-    /// Close the privilege manager's tab and drop its state.
+    /// Drop the 对象权限 window's state (the OS window was closed).
     pub(super) fn close_privilege_manager(&mut self, cx: &mut Context<'_, Self>) {
-        self.privilege_manager = None;
-        self.privilege_manager_active = false;
+        self.object_privileges = None;
+        self.object_privileges_window = None;
         cx.notify();
     }
 

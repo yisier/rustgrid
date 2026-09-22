@@ -1669,7 +1669,7 @@ pub(super) fn child_window_titlebar(title: String, theme: Theme) -> impl IntoEle
                     "export-titlebar-max",
                     "□",
                     theme,
-                    |window, _cx| window.zoom_window(),
+                    |window, _cx| toggle_maximize(window),
                 ))
                 .child(export_titlebar_button(
                     "export-titlebar-close",

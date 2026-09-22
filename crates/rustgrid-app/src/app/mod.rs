@@ -1053,8 +1053,8 @@ const OBJECT_BOTTOM_MARGIN: f32 = 20.0;
 pub(super) const SIDEBAR_DEFAULT_WIDTH: f32 = 260.0;
 pub(super) const SIDEBAR_MIN_WIDTH: f32 = 150.0;
 pub(super) const SIDEBAR_MAX_WIDTH: f32 = 560.0;
-pub(super) const INFO_DEFAULT_WIDTH: f32 = 300.0;
-pub(super) const INFO_MIN_WIDTH: f32 = 220.0;
+pub(super) const INFO_DEFAULT_WIDTH: f32 = 230.0;
+pub(super) const INFO_MIN_WIDTH: f32 = 180.0;
 pub(super) const INFO_MAX_WIDTH: f32 = 640.0;
 /// Width of a pane's drag-to-resize divider.
 pub(super) const PANE_DIVIDER_WIDTH: f32 = 5.0;
@@ -1256,11 +1256,13 @@ pub struct AppView {
     create_user_database_search: Option<Entity<TextInput>>,
     /// The OS window hosting the "New User" dialog, if open.
     create_user_window: Option<WindowHandle<gpui_kit::component::Root>>,
-    /// The open privilege manager. It owns its own tab in the main tab strip (at the same level
-    /// as the 对象 tab), so it stays open while the user switches back to the Users list.
-    privilege_manager: Option<Entity<privilege_manager::PrivilegeManager>>,
-    /// Whether the privilege manager's tab is the active one (as opposed to the object/Users tab).
-    privilege_manager_active: bool,
+    /// Focus target for the account window: focusing it at open keeps ESC (and any key handler on
+    /// the window root) working even when no field has the focus.
+    create_user_focus: FocusHandle,
+    /// The open 对象权限 window's manager entity (kept so theme changes reach it).
+    object_privileges: Option<Entity<privilege_manager::PrivilegeManager>>,
+    /// The OS window hosting the 对象权限 manager, if open.
+    object_privileges_window: Option<WindowHandle<gpui_kit::component::Root>>,
     /// The OS window hosting the Backup/Restore UI, if open.
     backup_window: Option<WindowHandle<gpui_kit::component::Root>>,
     /// The open export wizard, if any.
@@ -1553,8 +1555,9 @@ impl AppView {
             create_user_max_user_connections: None,
             create_user_database_search: None,
             create_user_window: None,
-            privilege_manager: None,
-            privilege_manager_active: false,
+            create_user_focus: cx.focus_handle(),
+            object_privileges: None,
+            object_privileges_window: None,
             backup_window: None,
             export_wizard: None,
             export_window: None,
@@ -1759,11 +1762,6 @@ impl AppView {
             query.id.hash(&mut hasher);
             query.name.hash(&mut hasher);
         }
-        self.privilege_manager_active.hash(&mut hasher);
-        if let Some(manager) = &self.privilege_manager {
-            let manager = manager.read(cx);
-            manager.connection_name.hash(&mut hasher);
-        }
         hasher.finish()
     }
 
@@ -1837,7 +1835,7 @@ impl AppView {
         for design in &self.designs {
             design.update(cx, |design, cx| design.set_theme(theme, cx));
         }
-        if let Some(manager) = self.privilege_manager.as_ref() {
+        if let Some(manager) = self.object_privileges.as_ref() {
             manager.update(cx, |manager, cx| manager.set_theme(theme, cx));
         }
         for combo in [
@@ -1911,7 +1909,7 @@ impl AppView {
                 .text_color(rgb(theme.text))
                 .child(format!("{count} {}", t!("common.backup")))
                 .into_any_element()
-        } else if self.main_tab == MainTab::Users && !self.privilege_manager_active {
+        } else if self.main_tab == MainTab::Users {
             div()
                 .flex_1()
                 .min_w(px(0.0))
@@ -2503,7 +2501,7 @@ fn render_titlebar(theme: Theme) -> impl IntoElement {
                     "□",
                     theme,
                     |window, _cx| {
-                        window.zoom_window();
+                        toggle_maximize(window);
                     },
                 ))
                 .child(titlebar_button(
@@ -2515,6 +2513,18 @@ fn render_titlebar(theme: Theme) -> impl IntoElement {
                     },
                 )),
         )
+}
+
+/// Toggle the window between maximized and restored.
+///
+/// gpui's `Window::zoom_window()` only maximizes on Windows (it calls `SW_MAXIMIZE`, a no-op when
+/// the window is already maximized), so a second click on the maximize button did nothing. Use the
+/// Windows helper, which calls `SW_RESTORE`, there; other platforms' `zoom()` already toggles.
+fn toggle_maximize(window: &mut Window) {
+    #[cfg(target_os = "windows")]
+    crate::win_resize::toggle_maximize(window);
+    #[cfg(not(target_os = "windows"))]
+    window.zoom_window();
 }
 
 fn titlebar_button(

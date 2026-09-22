@@ -739,7 +739,6 @@ impl AppView {
         self.active_query = Some(self.queries.len() - 1);
         self.active_grid = None;
         self.active_design = None;
-        self.privilege_manager_active = false;
         self.query_completion = None;
         self.query_focus_pending = true;
         self.main_tab = MainTab::Queries;
@@ -1790,6 +1789,8 @@ impl AppView {
             self.import_wizard = None;
             self.create_user_window = None;
             self.create_user_dialog = None;
+            self.object_privileges = None;
+            self.object_privileges_window = None;
             cx.quit();
             return;
         }
@@ -1833,6 +1834,13 @@ impl AppView {
             // The user closed the account window from the OS chrome: drop its state too, so the
             // toolbar buttons are not left permanently short-circuited by a stale window handle.
             self.cancel_create_user(cx);
+        }
+        if self
+            .object_privileges_window
+            .as_ref()
+            .is_some_and(|handle| handle.window_id() == id)
+        {
+            self.close_privilege_manager(cx);
         }
     }
 
@@ -2409,7 +2417,7 @@ fn backup_window_titlebar(title: String, theme: Theme) -> impl IntoElement {
                     "backup-titlebar-max",
                     "□",
                     theme,
-                    |window, _cx| window.zoom_window(),
+                    |window, _cx| toggle_maximize(window),
                 ))
                 .child(backup_titlebar_button(
                     "backup-titlebar-close",
