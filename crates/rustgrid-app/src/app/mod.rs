@@ -20,9 +20,9 @@ use rustgrid_config::{AppSettings, ConfigStore, LanguageSetting, ThemeSetting};
 use rustgrid_core::{
     BackupObjectKind, CellValue, Connection, ConnectionConfig, DriverRegistry, Error,
     FilterCondition, FilterConjunction, FilterGroup, FilterNode, FilterOperator, ObjectGrant,
-    ObjectPrivilegeRow, PageRequest, Privilege, QueryResult, RoutineEdit, RoutineInfo, RoutineKind,
-    RowInsert, RowUpdate, SavedBackup, SavedQuery, TableStatus, UserAccount, UserDetails, UserEdit,
-    UserEditSection,
+    ObjectPrivilegeRow, PageRequest, Privilege, QueryResult, RoutineDetails, RoutineEdit,
+    RoutineInfo, RoutineKind, RowInsert, RowUpdate, SavedBackup, SavedQuery, TableStatus,
+    UserAccount, UserDetails, UserEdit, UserEditSection,
 };
 use rustgrid_export::ExportFormat;
 
@@ -1064,8 +1064,8 @@ const MAIN_TABS: [(MainTab, &str, &str); 6] = [
     (MainTab::Tables, "icons/tables.svg", "main.tables"),
     (MainTab::Views, "icons/views.svg", "main.views"),
     (MainTab::Functions, "icons/functions.svg", "main.functions"),
-    (MainTab::Queries, "icons/new_query.svg", "main.queries"),
     (MainTab::Users, "icons/user.svg", "main.users"),
+    (MainTab::Queries, "icons/new_query.svg", "main.queries"),
     (MainTab::Backups, "icons/backups.svg", "main.backups"),
 ];
 
@@ -1246,6 +1246,11 @@ pub struct AppView {
     info_table_selected: Option<(usize, usize, String)>,
     /// The selected table's status for the table info pane.
     info_table_status: Loadable<TableStatus>,
+    /// The selected stored routine `(connection, database, name, kind)` driving the routine info
+    /// pane, set by the connection tree and the Functions object list.
+    info_routine_selected: Option<(usize, usize, String, RoutineKind)>,
+    /// The selected routine's details for the routine info pane.
+    info_routine: Loadable<RoutineDetails>,
     /// The Users main tab's loaded accounts for `users_connection`.
     users: Loadable<Vec<UserAccount>>,
     /// The connection whose users the Users tab shows.
@@ -1541,6 +1546,8 @@ impl AppView {
             info_database: Loadable::Idle,
             info_table_selected: None,
             info_table_status: Loadable::Idle,
+            info_routine_selected: None,
+            info_routine: Loadable::Idle,
             users: Loadable::Idle,
             users_connection: None,
             user_search: String::new(),
@@ -2522,6 +2529,23 @@ fn tree_icon(path: &'static str, color: u32) -> Svg {
         .h(px(16.0))
         .flex_none()
         .text_color(rgb(color))
+}
+
+/// The asset path for a stored routine's icon: Navicat shows `fx` for functions and a distinct
+/// code-block glyph for procedures.
+pub(super) fn routine_icon(kind: RoutineKind) -> &'static str {
+    match kind {
+        RoutineKind::Function => "icons/function.svg",
+        RoutineKind::Procedure => "icons/procedure.svg",
+    }
+}
+
+/// The tint for a stored routine's icon, matched to [`routine_icon`].
+pub(super) fn routine_icon_color(kind: RoutineKind, theme: Theme) -> u32 {
+    match kind {
+        RoutineKind::Function => theme.icon_functions,
+        RoutineKind::Procedure => theme.icon_procedure,
+    }
 }
 
 fn tree_message(text: String, indent: f32, color: u32) -> impl IntoElement {

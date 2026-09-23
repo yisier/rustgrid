@@ -862,14 +862,24 @@ impl ObjectPane {
                     cx.notify();
                 }),
             )
-            .child(tree_icon("icons/functions.svg", theme.icon_functions))
+            .child(tree_icon(
+                routine_icon(kind),
+                routine_icon_color(kind, theme),
+            ))
             .child(div().overflow_hidden().whitespace_nowrap().child(name))
     }
 
     /// Select one routine in the Functions list.
     fn select_routine(&mut self, name: String, kind: RoutineKind, cx: &mut Context<'_, Self>) {
-        self.selected = Some(name);
+        self.selected = Some(name.clone());
         self.selected_routine = Some(kind);
+        let connection_index = self.connection_index;
+        let database_index = self.database_index;
+        if let Some(app) = self.app.upgrade() {
+            app.update(cx, |app, _| {
+                app.set_info_routine(connection_index, database_index, name.clone(), kind);
+            });
+        }
         self.notify_app(cx);
         cx.notify();
     }

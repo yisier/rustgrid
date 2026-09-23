@@ -458,6 +458,7 @@ impl AppView {
         self.rename_edit = None;
         self.rename_blur = None;
         self.saved_query_selected = None;
+        self.clear_info_selection();
         self.object_pane =
             Some(cx.new(|cx| {
                 ObjectPane::new(app, connection_index, database_index, category, theme, cx)
@@ -471,7 +472,7 @@ impl AppView {
         category: Category,
         cx: &mut Context<'_, Self>,
     ) {
-        self.clear_info_table();
+        self.clear_info_selection();
         if category == Category::Backups {
             // Selecting the Backups category scopes the Backup main tab to this database. The
             // backup files themselves live in the middle pane, not as tree leaves.

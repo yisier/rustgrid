@@ -532,6 +532,16 @@ impl AppView {
                     }) {
                         app.close_query(index, cx);
                     }
+                    // Drop the routine info selection when it pointed at the routine just removed.
+                    if app.info_routine_selected.as_ref().is_some_and(
+                        |(_, selected_database, selected_name, selected_kind)| {
+                            *selected_database == database_index
+                                && selected_name == &tab_name
+                                && *selected_kind == kind
+                        },
+                    ) {
+                        app.clear_info_selection();
+                    }
                     app.reload_routines(&list_connection, &list_database, cx);
                     cx.notify();
                 }

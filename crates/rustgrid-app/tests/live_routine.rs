@@ -15,7 +15,7 @@ use rustgrid_core::{ConnectionConfig, Driver, DriverId, RoutineEdit, RoutineKind
 use rustgrid_mysql::MysqlDriver;
 
 fn config() -> ConnectionConfig {
-    if let Some(password) = std::env::var("RUSTGRID_MYSQL_PASSWORD").ok() {
+    if let Ok(password) = std::env::var("RUSTGRID_MYSQL_PASSWORD") {
         return ConnectionConfig {
             driver: DriverId::new("mysql"),
             host: std::env::var("RUSTGRID_MYSQL_HOST").unwrap_or_else(|_| "127.0.0.1".to_string()),
@@ -73,8 +73,14 @@ async fn live_routine_lifecycle() {
         .expect("create scratch database");
 
     // 1. A fresh database has no routines.
-    let routines = connection.list_routine_infos(db).await.expect("list routines");
-    assert!(routines.is_empty(), "expected no routines, got {routines:?}");
+    let routines = connection
+        .list_routine_infos(db)
+        .await
+        .expect("list routines");
+    assert!(
+        routines.is_empty(),
+        "expected no routines, got {routines:?}"
+    );
 
     // 2. Create a function and a procedure.
     let function_sql = "CREATE FUNCTION `test_add`(a int, b int)\nRETURNS int\nDETERMINISTIC\nBEGIN\n    RETURN a + b;\nEND".to_string();
@@ -107,7 +113,10 @@ async fn live_routine_lifecycle() {
         .expect("save procedure");
 
     // 3. The list reports both, with the right kinds and metadata.
-    let mut routines = connection.list_routine_infos(db).await.expect("list routines");
+    let mut routines = connection
+        .list_routine_infos(db)
+        .await
+        .expect("list routines");
     routines.sort_by(|a, b| a.name.cmp(&b.name));
     assert_eq!(routines.len(), 2, "got {routines:?}");
     assert_eq!(routines[0].name, "test_add");
@@ -136,12 +145,19 @@ async fn live_routine_lifecycle() {
 
     // 5. The function actually runs.
     let result = connection
-        .execute_query(Some(db), &format!("SELECT `{db}`.`test_add`(2, 3) AS total"))
+        .execute_query(
+            Some(db),
+            &format!("SELECT `{db}`.`test_add`(2, 3) AS total"),
+        )
         .await
         .expect("run function");
     assert!(result.has_result_set);
     assert_eq!(
-        result.rows.first().and_then(|row| row.first()).map(|cell| cell.as_display()),
+        result
+            .rows
+            .first()
+            .and_then(|row| row.first())
+            .map(|cell| cell.as_display()),
         Some("5".to_string())
     );
 
@@ -159,7 +175,10 @@ async fn live_routine_lifecycle() {
         )
         .await
         .expect("update function");
-    let routines = connection.list_routine_infos(db).await.expect("list routines");
+    let routines = connection
+        .list_routine_infos(db)
+        .await
+        .expect("list routines");
     assert!(routines.iter().any(|routine| routine.name == "test_add2"));
     assert!(!routines.iter().any(|routine| routine.name == "test_add"));
 
@@ -173,7 +192,10 @@ async fn live_routine_lifecycle() {
             definition: updated_sql,
         },
     );
-    assert!(preview.contains("DROP FUNCTION IF EXISTS"), "preview: {preview}");
+    assert!(
+        preview.contains("DROP FUNCTION IF EXISTS"),
+        "preview: {preview}"
+    );
     assert!(preview.contains("CREATE FUNCTION"), "preview: {preview}");
 
     // 8. Dropping both leaves the database empty again.
@@ -185,8 +207,14 @@ async fn live_routine_lifecycle() {
         .drop_routine(db, RoutineKind::Procedure, "test_proc")
         .await
         .expect("drop procedure");
-    let routines = connection.list_routine_infos(db).await.expect("list routines");
-    assert!(routines.is_empty(), "expected no routines, got {routines:?}");
+    let routines = connection
+        .list_routine_infos(db)
+        .await
+        .expect("list routines");
+    assert!(
+        routines.is_empty(),
+        "expected no routines, got {routines:?}"
+    );
 
     // 9. Clean up.
     connection

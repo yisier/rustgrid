@@ -231,6 +231,8 @@ impl AppView {
             self.ensure_routines_loaded(connection_index, database_index, cx);
         }
         self.clear_object_search(cx);
+        // The object list's highlight is gone, so its routine detail should not linger either.
+        self.clear_info_routine();
         self.active_grid = None;
         self.active_query = None;
         self.active_design = None;

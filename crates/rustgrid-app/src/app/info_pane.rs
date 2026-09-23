@@ -14,6 +14,7 @@ enum InfoTarget {
     Connection(usize),
     Database(usize, usize),
     Table(usize, usize, String),
+    Routine(usize, usize, String, RoutineKind),
     Query(usize),
     BackupFile(usize),
     BackupConfig(usize),
@@ -29,6 +30,9 @@ impl InfoTarget {
             InfoTarget::Database(connection, database) => format!("db:{connection}:{database}"),
             InfoTarget::Table(connection, database, name) => {
                 format!("tbl:{connection}:{database}:{name}")
+            }
+            InfoTarget::Routine(connection, database, name, kind) => {
+                format!("rtn:{connection}:{database}:{}:{name}", kind.sql_name())
             }
             InfoTarget::Query(index) => format!("query:{index}"),
             InfoTarget::BackupFile(index) => format!("bfile:{index}"),
@@ -260,6 +264,14 @@ impl AppView {
             return InfoTarget::User(connection, index);
         }
 
+        // The routine selection (set by the object list or the connection tree) describes a routine
+        // while the Functions tab is showing.
+        if self.main_tab == MainTab::Functions
+            && let Some((connection, database, name, kind)) = self.info_routine_selected.clone()
+        {
+            return InfoTarget::Routine(connection, database, name, kind);
+        }
+
         // The table selection (set by the object list or the connection tree) describes a table
         // while the Tables/Views tabs are showing.
         if matches!(self.main_tab, MainTab::Tables | MainTab::Views)
@@ -296,6 +308,21 @@ impl AppView {
             {
                 return InfoTarget::Database(connection, database);
             }
+        } else if let Some(rest) = selected.strip_prefix("rtn-") {
+            // A routine leaf (`rtn-<connection>-<database>-<index>`) describes that routine.
+            let mut parts = rest.splitn(3, '-');
+            if let (Some(connection), Some(database), Some(routine_index)) =
+                (parts.next(), parts.next(), parts.next())
+                && let (Ok(connection), Ok(database), Ok(routine_index)) = (
+                    connection.parse::<usize>(),
+                    database.parse::<usize>(),
+                    routine_index.parse::<usize>(),
+                )
+                && let Some((name, kind)) =
+                    self.routine_identity(connection, database, routine_index)
+            {
+                return InfoTarget::Routine(connection, database, name, kind);
+            }
         }
         InfoTarget::None
     }
@@ -309,11 +336,53 @@ impl AppView {
         name: String,
     ) {
         self.info_table_selected = Some((connection_index, database_index, name));
+        self.info_routine_selected = None;
     }
 
-    /// Drop the table info selection when a connection/database/category row is selected.
-    pub(super) fn clear_info_table(&mut self) {
+    /// Record the stored routine the info pane should describe. Called by the object list and the
+    /// connection tree.
+    pub(super) fn set_info_routine(
+        &mut self,
+        connection_index: usize,
+        database_index: usize,
+        name: String,
+        kind: RoutineKind,
+    ) {
+        self.info_routine_selected = Some((connection_index, database_index, name, kind));
         self.info_table_selected = None;
+    }
+
+    /// Resolve a connection-tree routine leaf's index to its name and kind, for the info pane.
+    fn routine_identity(
+        &self,
+        connection_index: usize,
+        database_index: usize,
+        routine_index: usize,
+    ) -> Option<(String, RoutineKind)> {
+        self.connections
+            .get(connection_index)
+            .and_then(|node| match &node.databases {
+                Loadable::Loaded(databases) => databases.get(database_index),
+                _ => None,
+            })
+            .and_then(|database| match &database.routines {
+                Loadable::Loaded(routines) => routines.get(routine_index),
+                _ => None,
+            })
+            .map(|routine| (routine.name.clone(), routine.kind))
+    }
+
+    /// Drop both the table and routine info selections when a connection/database/category row is
+    /// selected.
+    pub(super) fn clear_info_selection(&mut self) {
+        self.info_table_selected = None;
+        self.info_routine_selected = None;
+    }
+
+    /// Drop only the routine info selection, leaving any table selection in place. Used when the
+    /// object list clears its highlight (switching main tabs).
+    pub(super) fn clear_info_routine(&mut self) {
+        self.info_routine_selected = None;
     }
 
     /// Kick off the async introspection the newly-selected object needs. Called every render but
@@ -328,6 +397,7 @@ impl AppView {
         self.info_server = Loadable::Idle;
         self.info_database = Loadable::Idle;
         self.info_table_status = Loadable::Idle;
+        self.info_routine = Loadable::Idle;
         self.info_user = Loadable::Idle;
 
         match target {
@@ -406,6 +476,31 @@ impl AppView {
                 })
                 .detach();
             }
+            InfoTarget::Routine(connection_index, database_index, name, kind) => {
+                let Some(connection) = self.connection_arc(connection_index) else {
+                    self.info_routine = Loadable::Failed(t!("info.not_connected").to_string());
+                    return;
+                };
+                let Some(database) = self.database_name(connection_index, database_index) else {
+                    return;
+                };
+                let runtime = self.runtime.clone();
+                cx.spawn(async move |this, cx| {
+                    let result = runtime
+                        .spawn(
+                            async move { connection.routine_details(&database, kind, &name).await },
+                        )
+                        .await;
+                    let _ = this.update(cx, |app, cx| {
+                        app.info_routine = match result {
+                            Ok(inner) => loadable(inner),
+                            Err(error) => Loadable::Failed(error.to_string()),
+                        };
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
             InfoTarget::User(connection_index, index) => {
                 let Some(connection) = self.connection_arc(connection_index) else {
                     self.info_user = Loadable::Failed(t!("info.not_connected").to_string());
@@ -458,6 +553,7 @@ impl AppView {
             InfoTarget::Table(connection, database, name) => {
                 self.table_info(connection, database, &name, theme)
             }
+            InfoTarget::Routine(_, _, name, kind) => self.routine_info(&name, kind, theme),
             InfoTarget::User(_, index) => self.user_info(index, theme),
         }
     }
@@ -691,6 +787,87 @@ impl AppView {
             theme.icon_table
         };
         info_panel(icon, color, name, &kind, &fields)
+    }
+
+    /// The details pane for a stored routine (the Functions tab's selection): its kind, timestamps,
+    /// definer, access characteristics and comment, mirroring Navicat's object details page. The
+    /// full `CREATE` statement lives in the routine editor's 定义 tab.
+    fn routine_info(&self, name: &str, kind: RoutineKind, theme: Theme) -> AnyElement {
+        let details = match &self.info_routine {
+            Loadable::Loaded(details) => Some(details),
+            _ => None,
+        };
+        let info = details.map(|details| &details.info);
+        let field = |label: &str, value: Option<String>| {
+            (label.to_string(), value.unwrap_or_else(|| "--".to_string()))
+        };
+        let mut fields = vec![(
+            t!("routine.field.kind").to_string(),
+            kind.sql_name().to_string(),
+        )];
+        if kind == RoutineKind::Function {
+            fields.push(field(
+                &t!("routine.field.returns"),
+                info.map(|info| info.return_type.clone())
+                    .filter(|value| !value.is_empty()),
+            ));
+        }
+        fields.push(field(
+            &t!("routine.field.definer"),
+            info.map(|info| info.definer.clone()),
+        ));
+        fields.push(field(
+            &t!("routine.field.created"),
+            info.and_then(|info| info.created.clone()),
+        ));
+        fields.push(field(
+            &t!("routine.field.modified"),
+            info.and_then(|info| info.modified.clone()),
+        ));
+        fields.push(field(
+            &t!("routine.field.security"),
+            info.map(|info| info.security_type.clone()),
+        ));
+        fields.push(field(
+            &t!("routine.field.data_access"),
+            info.map(|info| info.data_access.clone()),
+        ));
+        fields.push((
+            t!("routine.field.deterministic").to_string(),
+            info.map(|info| {
+                if info.deterministic {
+                    t!("common.yes").to_string()
+                } else {
+                    t!("common.no").to_string()
+                }
+            })
+            .unwrap_or_else(|| "--".to_string()),
+        ));
+        fields.push(field(
+            &t!("routine.field.comment"),
+            info.map(|info| info.comment.clone()),
+        ));
+        if let Some(details) = details {
+            fields.push(field(
+                &t!("routine.field.sql_mode"),
+                Some(details.sql_mode.clone()).filter(|value| !value.is_empty()),
+            ));
+            fields.push(field(
+                &t!("routine.field.charset"),
+                Some(details.character_set_client.clone()).filter(|value| !value.is_empty()),
+            ));
+            fields.push(field(
+                &t!("routine.field.collation"),
+                Some(details.collation_connection.clone()).filter(|value| !value.is_empty()),
+            ));
+        }
+        info_panel(
+            routine_icon(kind),
+            routine_icon_color(kind, theme),
+            name,
+            t!(kind.label_key()).as_ref(),
+            &fields,
+        )
     }
 
     fn saved_query_info(&self, index: usize, theme: Theme) -> AnyElement {

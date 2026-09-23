@@ -222,7 +222,7 @@ impl TreePane {
                 this.selected = Some(format!("conn-{index}"));
                 if let Some(app) = this.app.upgrade() {
                     app.update(cx, |app, cx| {
-                        app.clear_info_table();
+                        app.clear_info_selection();
                         cx.notify();
                     });
                 }
@@ -341,7 +341,7 @@ impl TreePane {
                 this.selected = Some(format!("db-{connection_index}-{database_index}"));
                 if let Some(app) = this.app.upgrade() {
                     app.update(cx, |app, cx| {
-                        app.clear_info_table();
+                        app.clear_info_selection();
                         cx.notify();
                     });
                 }
@@ -597,6 +597,15 @@ impl TreePane {
                 window.focus(&this.focus, cx);
                 this.selected = Some(click_id.clone());
                 this.selected_table = None;
+                let _ = app.update(cx, |app, cx| {
+                    app.set_info_routine(
+                        connection_index,
+                        database_index,
+                        click_name.clone(),
+                        kind,
+                    );
+                    cx.notify();
+                });
                 let double_click =
                     matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2);
                 if double_click {
@@ -635,7 +644,10 @@ impl TreePane {
                     cx.notify();
                 }),
             )
-            .child(tree_icon("icons/functions.svg", theme.icon_functions))
+            .child(tree_icon(
+                routine_icon(kind),
+                routine_icon_color(kind, theme),
+            ))
             .child(
                 div()
                     .flex_1()
