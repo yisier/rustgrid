@@ -1170,6 +1170,55 @@ impl AppView {
             .collect()
     }
 
+    /// The in-scope query files filtered by `search`, ordered by the Queries 详细列表's current
+    /// sort. Returns indices into `query_files`.
+    pub(super) fn sorted_visible_query_files(&self, cx: &App, search: &str) -> Vec<usize> {
+        let needle = search.trim().to_lowercase();
+        let mut indices: Vec<usize> = self
+            .visible_query_files(cx)
+            .into_iter()
+            .filter(|index| {
+                needle.is_empty()
+                    || self.query_files[*index]
+                        .name
+                        .to_lowercase()
+                        .contains(&needle)
+            })
+            .collect();
+        let sort = self.query_sort;
+        indices.sort_by(|&a, &b| {
+            let left = &self.query_files[a];
+            let right = &self.query_files[b];
+            let ordering = match sort.column {
+                QuerySortColumn::Name => left.name.to_lowercase().cmp(&right.name.to_lowercase()),
+                QuerySortColumn::Modified => left.modified.cmp(&right.modified),
+                QuerySortColumn::Size => left.size.cmp(&right.size),
+            };
+            let ordering = if sort.descending {
+                ordering.reverse()
+            } else {
+                ordering
+            };
+            ordering.then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+        });
+        indices
+    }
+
+    /// Sort the Queries 详细列表 by `column`, flipping the direction when it is already active.
+    pub(super) fn toggle_query_sort(
+        &mut self,
+        column: QuerySortColumn,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.query_sort.column == column {
+            self.query_sort.descending = !self.query_sort.descending;
+        } else {
+            self.query_sort.column = column;
+            self.query_sort.descending = false;
+        }
+        cx.notify();
+    }
+
     /// Whether the highlighted query file is inside the current scope (so Delete is enabled).
     pub(super) fn query_selected_in_scope(&self, cx: &App) -> bool {
         let Some(file) = self

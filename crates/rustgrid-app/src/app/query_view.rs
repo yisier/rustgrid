@@ -201,19 +201,20 @@ impl AppView {
         }
     }
 
-    /// The saved-query file list shown under the Queries main tab. Like the Backup tab, it is
-    /// scoped to the selected (opened) database and behaves like a folder of `.sql` files:
-    /// double-click opens, right-click (or F2 / Ctrl+C / Ctrl+V) manages the file.
+    /// The saved-query list shown under the Queries main tab. Like the Backup tab, it is scoped to
+    /// the selected (opened) database and behaves like a folder of `.sql` files: double-click opens,
+    /// right-click (or F2 / Ctrl+C / Ctrl+V) manages the file. The list offers the shared
+    /// 详细列表 / 平铺网格 layouts.
     pub(super) fn render_saved_queries(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
-        let mut list = div()
+        let container = div()
             .id("saved-query-list")
             .flex()
             .flex_col()
             .flex_1()
             .min_w(px(0.0))
             .min_h(px(0.0))
-            .overflow_y_scroll()
+            .overflow_hidden()
             .track_focus(&self.query_list_focus)
             .key_context(QUERY_LIST_CONTEXT)
             .on_action(cx.listener(|this, _: &RenameQueryFile, window, cx| {
@@ -238,7 +239,17 @@ impl AppView {
                     }
                 }),
             )
-            .py_1();
+            // The 平铺 grid draws its own horizontal scrollbar; these keep its drag alive anywhere
+            // in the window while the pointer leaves the 14px track.
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                this.query_grid_drag(event, cx);
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                    this.query_grid_end(cx);
+                }),
+            );
 
         if self.query_scope(cx).is_none() {
             return div()
@@ -252,107 +263,323 @@ impl AppView {
                 .into_any_element();
         }
 
-        let mut has_any = false;
-        let query = self.object_search.trim().to_lowercase();
-        let visible: Vec<usize> = self
-            .visible_query_files(cx)
-            .into_iter()
-            .filter(|index| {
-                query.is_empty()
-                    || self.query_files[*index]
-                        .name
-                        .to_lowercase()
-                        .contains(&query)
-            })
-            .collect();
-        for index in visible {
-            has_any = true;
-            let file = &self.query_files[index];
-            let selected = self.saved_query_selected == Some(index);
-            let rename = self
-                .query_rename
-                .as_ref()
-                .filter(|edit| edit.index == index)
-                .map(|edit| edit.input.clone());
-            list = list.child(query_file_row(
-                SharedString::from(format!("query-file-{index}")),
+        let visible = self.sorted_visible_query_files(cx, &self.object_search);
+        let body = match self.view_mode(VIEW_PAGE_QUERIES) {
+            ViewMode::Detail => self.render_query_detail(&visible, theme, cx),
+            ViewMode::Grid => self.render_query_tiles(&visible, theme, cx),
+        };
+        container.child(body).into_any_element()
+    }
+
+    /// The Queries 详细列表: a sortable table of the in-scope saved queries.
+    fn render_query_detail(
+        &self,
+        visible: &[usize],
+        theme: Theme,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let sort = self.query_sort;
+        let header = ui::detail_header_row(theme)
+            .child(div().flex_1().min_w(px(0.0)).child(ui::detail_header_cell(
+                "query-sort-name",
+                t!("common.name").to_string(),
+                (sort.column == QuerySortColumn::Name).then_some(sort.descending),
                 theme,
-                file.name.clone(),
-                selected,
-                rename,
-                cx.listener(move |this, event, _window, cx| {
-                    this.saved_query_selected = Some(index);
-                    if matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2) {
-                        this.open_saved_query(index, cx);
-                    }
-                    cx.notify();
+                cx.listener(|this, _event, _window, cx| {
+                    this.toggle_query_sort(QuerySortColumn::Name, cx)
                 }),
-                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                    this.saved_query_selected = Some(index);
-                    this.context_menu = Some(ContextMenu {
-                        target: ContextTarget::QueryFile { index },
-                        position: event.position,
-                    });
-                    cx.notify();
-                }),
-            ));
+            )))
+            .child(
+                div()
+                    .w(px(QUERY_MODIFIED_WIDTH))
+                    .flex_none()
+                    .child(ui::detail_header_cell(
+                        "query-sort-modified",
+                        t!("backup.field.modified").to_string(),
+                        (sort.column == QuerySortColumn::Modified).then_some(sort.descending),
+                        theme,
+                        cx.listener(|this, _event, _window, cx| {
+                            this.toggle_query_sort(QuerySortColumn::Modified, cx)
+                        }),
+                    )),
+            )
+            .child(
+                div()
+                    .w(px(QUERY_SIZE_WIDTH))
+                    .flex_none()
+                    .child(ui::detail_header_cell(
+                        "query-sort-size",
+                        t!("backup.field.size").to_string(),
+                        (sort.column == QuerySortColumn::Size).then_some(sort.descending),
+                        theme,
+                        cx.listener(|this, _event, _window, cx| {
+                            this.toggle_query_sort(QuerySortColumn::Size, cx)
+                        }),
+                    )),
+            );
+
+        let mut body = ui::detail_body();
+        if visible.is_empty() {
+            body = body.child(query_empty_state(theme));
+        }
+        for &index in visible {
+            body = body.child(self.query_detail_row(index, theme, cx));
+        }
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .min_w(px(0.0))
+            .overflow_hidden()
+            .child(ui::detail_card(theme).child(header).child(body))
+            .into_any_element()
+    }
+
+    /// One 详细列表 row of a saved query.
+    fn query_detail_row(
+        &self,
+        index: usize,
+        theme: Theme,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
+        let file = &self.query_files[index];
+        let selected = self.saved_query_selected == Some(index);
+        let name: AnyElement = match self.query_rename_input(index) {
+            Some(input) => div()
+                .flex_1()
+                .min_w(px(0.0))
+                .h(px(22.0))
+                .child(input)
+                .into_any_element(),
+            None => div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .flex_1()
+                .min_w(px(0.0))
+                .text_color(rgb(theme.text))
+                .child(ui::leading_icon_badge(
+                    "icons/queries.svg",
+                    theme.icon_queries,
+                    24.0,
+                ))
+                .child(
+                    div()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .child(file.name.clone()),
+                )
+                .child(ui::tag_chip(QUERY_TAG.to_string(), theme))
+                .into_any_element(),
+        };
+        ui::detail_row(
+            SharedString::from(format!("query-file-{index}")),
+            selected,
+            theme,
+        )
+        .on_click(cx.listener(move |this, event, _window, cx| {
+            this.saved_query_selected = Some(index);
+            if matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2) {
+                this.open_saved_query(index, cx);
+            }
+            cx.notify();
+        }))
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                this.saved_query_selected = Some(index);
+                this.context_menu = Some(ContextMenu {
+                    target: ContextTarget::QueryFile { index },
+                    position: event.position,
+                });
+                cx.notify();
+            }),
+        )
+        .child(name)
+        .child(
+            div()
+                .w(px(QUERY_MODIFIED_WIDTH))
+                .flex_none()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_color(rgb(theme.text_muted))
+                .child(query_modified_text(file)),
+        )
+        .child(
+            div()
+                .w(px(QUERY_SIZE_WIDTH))
+                .flex_none()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_color(rgb(theme.text_muted))
+                .child(human_size(file.size)),
+        )
+    }
+
+    /// The Queries 平铺网格: the in-scope saved queries in a column-major grid (items fill a column
+    /// top-to-bottom, then wrap to the next column), scrolling horizontally like the object list.
+    fn render_query_tiles(
+        &self,
+        visible: &[usize],
+        theme: Theme,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        if visible.is_empty() {
+            return div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h(px(0.0))
+                .child(query_empty_state(theme))
+                .into_any_element();
+        }
+        let rows = self.query_grid.rows_per_column();
+        let mut columns = ui::grid_columns();
+        let mut column = ui::grid_column();
+        let mut count = 0usize;
+        for &index in visible {
+            if count == rows {
+                columns = columns.child(column);
+                column = ui::grid_column();
+                count = 0;
+            }
+            column = column.child(self.query_grid_item(index, theme, cx));
+            count += 1;
+        }
+        if count > 0 {
+            columns = columns.child(column);
         }
 
-        if !has_any {
-            list = list.child(
-                div()
-                    .p_3()
-                    .text_color(rgb(theme.text_muted))
-                    .child(t!("common.empty").to_string()),
+        let mut grid = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .min_w(px(0.0))
+            .overflow_hidden();
+        grid = grid.child(self.query_grid.scroller("query-grid-scroll").child(columns));
+        if self.query_grid.overflows() {
+            grid = grid.child(
+                self.query_grid
+                    .scrollbar("query-grid-hscrollbar", theme)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                            this.query_grid_begin(event.position.x, cx);
+                        }),
+                    ),
             );
         }
-        list.into_any_element()
+        grid.into_any_element()
+    }
+
+    /// One item of a 平铺网格 column: the query's icon badge and name.
+    fn query_grid_item(
+        &self,
+        index: usize,
+        theme: Theme,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
+        let file = &self.query_files[index];
+        let selected = self.saved_query_selected == Some(index);
+        let title: AnyElement = match self.query_rename_input(index) {
+            Some(input) => div()
+                .flex_1()
+                .min_w(px(0.0))
+                .h(px(20.0))
+                .child(input)
+                .into_any_element(),
+            None => div()
+                .flex_1()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_color(rgb(theme.text))
+                .child(file.name.clone())
+                .into_any_element(),
+        };
+        ui::grid_item(
+            SharedString::from(format!("query-tile-{index}")),
+            selected,
+            theme,
+        )
+        .on_click(cx.listener(move |this, event, _window, cx| {
+            this.saved_query_selected = Some(index);
+            if matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2) {
+                this.open_saved_query(index, cx);
+            }
+            cx.notify();
+        }))
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                this.saved_query_selected = Some(index);
+                this.context_menu = Some(ContextMenu {
+                    target: ContextTarget::QueryFile { index },
+                    position: event.position,
+                });
+                cx.notify();
+            }),
+        )
+        .child(ui::leading_icon_badge(
+            "icons/queries.svg",
+            theme.icon_queries,
+            20.0,
+        ))
+        .child(title)
+    }
+
+    /// Start dragging the 平铺 grid's horizontal scrollbar.
+    fn query_grid_begin(&mut self, mouse_x: Pixels, cx: &mut Context<'_, Self>) {
+        if self.query_grid.begin(mouse_x) {
+            cx.notify();
+        }
+    }
+
+    /// Continue dragging the 平铺 grid's horizontal scrollbar.
+    fn query_grid_drag(&mut self, event: &MouseMoveEvent, cx: &mut Context<'_, Self>) {
+        if self.query_grid.drag(event) {
+            cx.notify();
+        }
+    }
+
+    /// Finish dragging the 平铺 grid's horizontal scrollbar.
+    fn query_grid_end(&mut self, cx: &mut Context<'_, Self>) {
+        if self.query_grid.end() {
+            cx.notify();
+        }
+    }
+
+    /// The in-place rename editor for a query file, when it belongs to this row.
+    fn query_rename_input(&self, index: usize) -> Option<Entity<TextInput>> {
+        self.query_rename
+            .as_ref()
+            .filter(|edit| edit.index == index)
+            .map(|edit| edit.input.clone())
     }
 }
 
-/// One row of the saved-query file list: an icon and the file name. When `rename` is set the row
-/// draws the in-place editor instead of its title.
-fn query_file_row(
-    id: SharedString,
-    theme: Theme,
-    title: String,
-    selected: bool,
-    rename: Option<Entity<TextInput>>,
-    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    on_right_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    let title_element: AnyElement = match rename {
-        Some(input) => div()
-            .flex_1()
-            .min_w(px(0.0))
-            .h(px(20.0))
-            .child(input)
-            .into_any_element(),
-        None => div()
-            .text_size(px(12.0))
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .child(title)
-            .into_any_element(),
-    };
+/// The tag chip shown beside a saved query's name.
+const QUERY_TAG: &str = "SQL";
+
+/// Column widths of the Queries 详细列表, shared by the header and its rows.
+const QUERY_MODIFIED_WIDTH: f32 = 190.0;
+const QUERY_SIZE_WIDTH: f32 = 110.0;
+
+/// A saved query's modified timestamp, or `--` when the filesystem did not report one.
+fn query_modified_text(file: &QueryFileInfo) -> String {
+    file.modified
+        .map(format_file_time)
+        .unwrap_or_else(|| "--".to_string())
+}
+
+/// The muted message shown when a query layout has no rows.
+fn query_empty_state(theme: Theme) -> AnyElement {
     div()
-        .id(id)
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_1()
-        .w_full()
-        .h(px(24.0))
-        .px_2()
-        .cursor_pointer()
-        .when(selected, move |style| {
-            style
-                .bg(rgb(theme.tree_selected_bg))
-                .text_color(rgb(theme.tree_selected_text))
-        })
-        .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-        .on_click(on_click)
-        .on_mouse_down(MouseButton::Right, on_right_click)
-        .child(tree_icon("icons/queries.svg", theme.icon_queries))
-        .child(div().flex_1().min_w(px(0.0)).child(title_element))
+        .p_3()
+        .text_color(rgb(theme.text_muted))
+        .child(t!("common.empty").to_string())
+        .into_any_element()
 }

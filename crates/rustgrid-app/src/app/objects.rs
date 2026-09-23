@@ -180,6 +180,15 @@ impl AppView {
     pub(super) fn render_query_object_toolbar(&self, cx: &mut Context<'_, Self>) -> Div {
         let theme = self.theme;
         let delete_enabled = self.query_selected_in_scope(cx);
+        // The 详细列表 / 平铺网格 switch sits between the actions and the search box; the shared
+        // `ui` control remembers the choice per page.
+        let weak = cx.weak_entity();
+        let on_select = Rc::new(
+            move |mode: ViewMode, _event: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                let _ = weak.update(cx, |app, cx| app.set_view_mode(VIEW_PAGE_QUERIES, mode, cx));
+            },
+        );
+        let view_mode = self.view_mode(VIEW_PAGE_QUERIES);
         div()
             .flex()
             .flex_row()
@@ -214,8 +223,17 @@ impl AppView {
                                 this.confirm_delete_saved_query(index, cx);
                             }
                         }),
+                    ))
+                    .child(toolbar_separator(theme))
+                    .child(self.toolbar_item(
+                        "obj-refresh-query",
+                        "icons/refresh.svg",
+                        t!("common.refresh").to_string(),
+                        true,
+                        cx.listener(|this, _event, _window, cx| this.refresh_query_files(cx)),
                     )),
             )
+            .child(ui::view_mode_toggle(theme, view_mode, on_select))
             .child(self.render_object_search(cx))
     }
 

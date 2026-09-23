@@ -18,10 +18,16 @@ use crate::theme::Theme;
 mod calendar;
 mod combo;
 mod text_input;
+mod views;
 
 pub(crate) use calendar::compact_calendar;
 pub(crate) use combo::{ComboBox, ComboOption};
 pub(crate) use text_input::{TextInput, TextInputOptions};
+pub(super) use views::{
+    ColumnGrid, ViewMode, detail_body, detail_card, detail_header_cell, detail_header_row,
+    detail_row, grid_column, grid_columns, grid_item, leading_icon_badge, tag_chip,
+    view_mode_toggle,
+};
 
 /// The variant of a push button. See `win_button` / `dialog_button`.
 #[derive(Clone, Copy, PartialEq, Eq)]

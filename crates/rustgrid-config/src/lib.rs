@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 const CURRENT_VERSION: u32 = 1;
 const PROFILES_FILE: &str = "connections.json";
-const SETTINGS_VERSION: u32 = 3;
+const SETTINGS_VERSION: u32 = 4;
 const SETTINGS_FILE: &str = "settings.json";
 const QUERIES_VERSION: u32 = 1;
 const QUERIES_FILE: &str = "queries.json";
@@ -95,13 +95,17 @@ struct SettingsFile {
     /// `false` until the user chooses to reveal it.
     #[serde(default)]
     show_info_pane: bool,
+    /// The remembered list layout per page, keyed by a stable page id (e.g. `"queries"`).
+    #[serde(default)]
+    view_modes: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct AppSettings {
     pub theme: ThemeSetting,
     pub language: LanguageSetting,
     pub show_info_pane: bool,
+    pub view_modes: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -257,6 +261,7 @@ impl ConfigStore {
             theme: file.theme,
             language: file.language,
             show_info_pane: file.show_info_pane,
+            view_modes: file.view_modes,
         })
     }
 
@@ -267,6 +272,7 @@ impl ConfigStore {
             theme: settings.theme,
             language: settings.language,
             show_info_pane: settings.show_info_pane,
+            view_modes: settings.view_modes.clone(),
         };
         let contents = serde_json::to_string_pretty(&file)?;
         fs::write(self.settings_path(), contents)?;

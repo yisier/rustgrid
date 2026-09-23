@@ -41,8 +41,9 @@ use crate::theme::Theme;
 use gpui_kit::component::calendar::{CalendarEvent, CalendarState};
 
 use ui::{
-    ButtonKind, ComboBox, ComboOption, TextInput, TextInputOptions, checkbox_box, form_tab,
-    main_separator, scrollbar_fractions, scrollbar_thumb, toolbar_separator,
+    ButtonKind, ColumnGrid, ComboBox, ComboOption, TextInput, TextInputOptions, ViewMode,
+    checkbox_box, form_tab, main_separator, scrollbar_fractions, scrollbar_thumb,
+    toolbar_separator,
 };
 
 // Cell-navigation actions for the in-place grid editor. gpui-kit's `Root` binds `tab`/`shift-tab`
@@ -66,6 +67,9 @@ const BACKUP_LIST_CONTEXT: &str = "BackupList";
 
 /// Key context applied to the saved-query file list.
 const QUERY_LIST_CONTEXT: &str = "QueryList";
+
+/// The stable settings key for the Queries tab's remembered list layout.
+pub(super) const VIEW_PAGE_QUERIES: &str = "queries";
 
 /// The six text inputs of the connection form, created when the form opens. Order follows
 /// [`FORM_FIELDS`] so `FormField as usize` indexes the array.
@@ -206,6 +210,30 @@ struct QueryFileInfo {
     size: u64,
     created: Option<std::time::SystemTime>,
     modified: Option<std::time::SystemTime>,
+}
+
+/// A saved-query column the Queries 详细列表 can sort by.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum QuerySortColumn {
+    Name,
+    Modified,
+    Size,
+}
+
+/// The Queries list's sort: which column and whether descending.
+#[derive(Clone, Copy)]
+struct QuerySort {
+    column: QuerySortColumn,
+    descending: bool,
+}
+
+impl Default for QuerySort {
+    fn default() -> Self {
+        Self {
+            column: QuerySortColumn::Name,
+            descending: false,
+        }
+    }
 }
 
 /// An in-app copy of a query file, so Ctrl+C / Ctrl+V works like copying a file in Explorer.
@@ -1124,6 +1152,10 @@ pub struct AppView {
     query_rename_focus_pending: bool,
     /// Focus target for the query file list, so F2 / Ctrl+C / Ctrl+V reach it.
     query_list_focus: FocusHandle,
+    /// The Queries 详细列表's current sort column and direction.
+    query_sort: QuerySort,
+    /// The Queries 平铺网格's horizontal scroll state.
+    query_grid: ColumnGrid,
     /// Saved backup configurations loaded from `backups.json`.
     backup_configs: Vec<SavedBackup>,
     /// Backup files found under the config dir's `backups/` tree.
@@ -1235,6 +1267,9 @@ pub struct AppView {
     sidebar_open: bool,
     /// Whether the right-hand object-info pane is shown (bottom-right toggle).
     info_open: bool,
+    /// The remembered list layout per page (详细列表 / 平铺网格), keyed by a stable page id and
+    /// persisted in settings so each page keeps its own choice.
+    view_modes: BTreeMap<String, String>,
     /// The selection the info pane is currently loaded for, so async loads fire once per change.
     info_loaded_for: Option<String>,
     /// The connected server's `(version, sessions)` for the connection info pane.
@@ -1432,6 +1467,8 @@ impl AppView {
             query_rename_blur: None,
             query_rename_focus_pending: false,
             query_list_focus: cx.focus_handle(),
+            query_sort: QuerySort::default(),
+            query_grid: ColumnGrid::default(),
             backup_configs,
             backup_files: Vec::new(),
             backup_selected: None,
@@ -1541,6 +1578,7 @@ impl AppView {
             // The info pane stays hidden until the user reveals it; the choice is remembered in
             // settings, so it is restored here instead of being forced open on the Users tab.
             info_open: settings.show_info_pane,
+            view_modes: settings.view_modes.clone(),
             info_loaded_for: None,
             info_server: Loadable::Idle,
             info_database: Loadable::Idle,
@@ -1640,11 +1678,7 @@ impl AppView {
             return;
         }
         self.theme_setting = setting;
-        let _ = self.config.save_settings(&AppSettings {
-            theme: setting,
-            language: self.language,
-            show_info_pane: self.info_open,
-        });
+        self.persist_settings();
         self.notify_object_pane(cx);
         cx.notify();
     }
@@ -1655,11 +1689,7 @@ impl AppView {
         }
         self.language = language;
         rust_i18n::set_locale(language.locale());
-        let _ = self.config.save_settings(&AppSettings {
-            theme: self.theme_setting,
-            language,
-            show_info_pane: self.info_open,
-        });
+        self.persist_settings();
         self.notify_object_pane(cx);
         cx.notify();
     }
@@ -1672,12 +1702,49 @@ impl AppView {
             return;
         }
         self.info_open = open;
+        self.persist_settings();
+        cx.notify();
+    }
+
+    /// Write the current settings to disk. Every preference change funnels through here so new
+    /// fields are persisted once.
+    fn persist_settings(&self) {
         let _ = self.config.save_settings(&AppSettings {
             theme: self.theme_setting,
             language: self.language,
-            show_info_pane: open,
+            show_info_pane: self.info_open,
+            view_modes: self.view_modes.clone(),
         });
+    }
+
+    /// The remembered list layout for a page, defaulting to 详细列表.
+    pub(super) fn view_mode(&self, page: &str) -> ViewMode {
+        self.view_modes
+            .get(page)
+            .map(|value| ViewMode::from_id(value))
+            .unwrap_or_default()
+    }
+
+    /// Remember a page's list layout and re-render it.
+    pub(super) fn set_view_mode(&mut self, page: &str, mode: ViewMode, cx: &mut Context<'_, Self>) {
+        if self.view_mode(page) == mode {
+            return;
+        }
+        self.view_modes
+            .insert(page.to_string(), mode.id().to_string());
+        self.persist_settings();
         cx.notify();
+        // The 平铺 grid scrolls horizontally, and its scroll extents are only known after a layout
+        // pass; schedule one more frame so the scrollbar appears without waiting for a resize.
+        if mode == ViewMode::Grid {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(32))
+                    .await;
+                let _ = this.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
+        }
     }
 
     /// Re-render the object pane (if any) after state it reads from `AppView` — loaded tables,
@@ -2520,6 +2587,31 @@ fn tree_driver_icon(driver: &str, color: u32, badge: u32) -> AnyElement {
             .into_any_element();
     }
     tree_icon(path, color).into_any_element()
+}
+
+/// A compact human-readable byte size for list columns, e.g. `512 B`, `2 KB`, `1.5 MB`.
+pub(super) fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64;
+    let mut unit = 0usize;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if value >= 10.0 || value.fract() < 0.05 {
+        format!("{value:.0} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+/// A filesystem timestamp for list columns, e.g. `2026-09-18 11:20:15`.
+pub(super) fn format_file_time(time: std::time::SystemTime) -> String {
+    let time: chrono::DateTime<chrono::Local> = time.into();
+    time.format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
 fn tree_icon(path: &'static str, color: u32) -> Svg {
