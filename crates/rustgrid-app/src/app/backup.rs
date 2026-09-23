@@ -488,23 +488,27 @@ impl AppView {
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                if this.backup_columns.borrow_mut().drag_resize(event) {
+                    cx.notify();
+                }
                 this.drag_marquee(MarqueeTarget::Backups, event, cx);
             }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                    if this.backup_columns.borrow_mut().end_resize() {
+                        cx.notify();
+                    }
                     this.end_marquee(cx);
                 }),
             )
             .child(
                 div()
-                    .id("backup-scroll")
                     .flex()
                     .flex_col()
                     .flex_1()
                     .min_h(px(0.0))
-                    .overflow_y_scroll()
-                    .track_scroll(&self.backup_scroll)
+                    .min_w(px(0.0))
                     .child(body),
             );
         if let Some(rect) = self.marquee_rect_for(MarqueeTarget::Backups) {
@@ -513,24 +517,79 @@ impl AppView {
         list.into_any_element()
     }
 
+    /// The content-fitted widths of the Backup 详细列表 columns (名称 / 修改日期 / 文件大小 / 备注).
+    fn backup_detail_widths(&self, cx: &App) -> Vec<f32> {
+        let mut longest = [
+            ui::approx_text_width(&t!("common.name")) + 30.0,
+            ui::approx_text_width(&t!("backup.field.modified")),
+            ui::approx_text_width(&t!("backup.field.size")),
+            ui::approx_text_width(&t!("backup.field.comment")),
+        ];
+        for index in self.visible_backup_files(cx) {
+            let file = &self.backup_files[index];
+            longest[0] = longest[0].max(ui::approx_text_width(&file.name) + 30.0);
+            longest[1] = longest[1].max(ui::approx_text_width(
+                &file
+                    .modified
+                    .map(format_file_time)
+                    .unwrap_or_else(|| "--".to_string()),
+            ));
+            longest[2] = longest[2].max(ui::approx_text_width(&format_size_only(file.size)));
+            longest[3] =
+                longest[3].max(ui::approx_text_width(&single_line(&file.manifest.comment)));
+        }
+        for index in self.visible_backup_configs(cx) {
+            let config = &self.backup_configs[index];
+            longest[0] = longest[0].max(ui::approx_text_width(&config.name) + 30.0);
+            longest[3] = longest[3].max(ui::approx_text_width(&saved_config_counts(config)));
+        }
+        vec![
+            ui::detail_column_width(longest[0], 200.0),
+            ui::detail_column_width(longest[1], 140.0),
+            ui::detail_column_width(longest[2], 80.0),
+            ui::detail_column_width(longest[3], 160.0),
+        ]
+    }
+
     /// The Backup 详细列表: 名称 / 修改日期 / 文件大小 / 备注.
     fn render_backup_detail(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
-        let header = ui::detail_header_row(theme)
-            .child(div().w(px(ui::DETAIL_NAME_WIDTH)).flex_none().child(
-                ui::detail_header_cell_plain(t!("common.name").to_string(), theme),
-            ))
-            .child(div().w(px(ui::DETAIL_MODIFIED_WIDTH)).flex_none().child(
-                ui::detail_header_cell_plain(t!("backup.field.modified").to_string(), theme),
-            ))
-            .child(div().w(px(ui::DETAIL_SIZE_WIDTH)).flex_none().child(
-                ui::detail_header_cell_plain(t!("backup.field.size").to_string(), theme),
-            ))
-            .child(div().w(px(ui::DETAIL_COMMENT_WIDTH)).flex_none().child(
-                ui::detail_header_cell_plain(t!("backup.field.comment").to_string(), theme),
+        let fitted = self.backup_detail_widths(cx);
+        let widths = self.backup_columns.borrow_mut().resolve(&fitted);
+        let mut header = ui::detail_header_row(theme);
+        for (index, label) in [
+            t!("common.name").to_string(),
+            t!("backup.field.modified").to_string(),
+            t!("backup.field.size").to_string(),
+            t!("backup.field.comment").to_string(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let width = widths[index];
+            header = header.child(ui::detail_header_column(
+                SharedString::from(format!("backup-resize-{index}")),
+                width,
+                self.backup_columns.borrow().resizing(index),
+                theme,
+                ui::detail_header_cell_plain(label, theme),
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
+                    this.backup_columns
+                        .borrow_mut()
+                        .begin_resize(index, event.position.x, width);
+                    cx.notify();
+                }),
             ));
+        }
 
-        let mut body = ui::detail_body();
+        let mut list = ui::DetailList::new(
+            "backup-detail",
+            &self.backup_hscroll,
+            &self.backup_scroll,
+            ui::detail_content_width(&widths),
+            header,
+        );
         let mut has_any = false;
         for index in self.visible_backup_files(cx) {
             has_any = true;
@@ -544,7 +603,7 @@ impl AppView {
                 .map(|edit| edit.input.clone());
             let name: AnyElement = match rename {
                 Some(input) => div()
-                    .w(px(ui::DETAIL_NAME_WIDTH))
+                    .w(px(widths[0]))
                     .flex_none()
                     .h(px(22.0))
                     .child(input)
@@ -554,7 +613,7 @@ impl AppView {
                     .flex_row()
                     .items_center()
                     .gap_2()
-                    .w(px(ui::DETAIL_NAME_WIDTH))
+                    .w(px(widths[0]))
                     .flex_none()
                     .overflow_hidden()
                     .text_color(rgb(theme.text))
@@ -608,7 +667,7 @@ impl AppView {
             .child(name)
             .child(
                 div()
-                    .w(px(ui::DETAIL_MODIFIED_WIDTH))
+                    .w(px(widths[1]))
                     .flex_none()
                     .overflow_hidden()
                     .whitespace_nowrap()
@@ -617,7 +676,7 @@ impl AppView {
             )
             .child(
                 div()
-                    .w(px(ui::DETAIL_SIZE_WIDTH))
+                    .w(px(widths[2]))
                     .flex_none()
                     .overflow_hidden()
                     .whitespace_nowrap()
@@ -626,14 +685,14 @@ impl AppView {
             )
             .child(
                 div()
-                    .w(px(ui::DETAIL_COMMENT_WIDTH))
+                    .w(px(widths[3]))
                     .flex_none()
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_color(rgb(muted))
                     .child(single_line(&file.manifest.comment)),
             );
-            body = body.child(backup_row_with_rect(
+            list = list.child(backup_row_with_rect(
                 cx.weak_entity(),
                 row,
                 MarqueeTarget::Backups,
@@ -678,7 +737,7 @@ impl AppView {
                     .flex_row()
                     .items_center()
                     .gap_2()
-                    .w(px(ui::DETAIL_NAME_WIDTH))
+                    .w(px(widths[0]))
                     .flex_none()
                     .overflow_hidden()
                     .text_color(rgb(theme.text))
@@ -696,28 +755,28 @@ impl AppView {
             )
             .child(
                 div()
-                    .w(px(ui::DETAIL_MODIFIED_WIDTH))
+                    .w(px(widths[1]))
                     .flex_none()
                     .text_color(rgb(theme.text_muted))
                     .child(""),
             )
             .child(
                 div()
-                    .w(px(ui::DETAIL_SIZE_WIDTH))
+                    .w(px(widths[2]))
                     .flex_none()
                     .text_color(rgb(theme.text_muted))
                     .child(""),
             )
             .child(
                 div()
-                    .w(px(ui::DETAIL_COMMENT_WIDTH))
+                    .w(px(widths[3]))
                     .flex_none()
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_color(rgb(theme.text_muted))
                     .child(saved_config_counts(config)),
             );
-            body = body.child(backup_row_with_rect(
+            list = list.child(backup_row_with_rect(
                 cx.weak_entity(),
                 row,
                 MarqueeTarget::Backups,
@@ -726,17 +785,14 @@ impl AppView {
         }
 
         if !has_any {
-            body = body.child(
+            list = list.child(
                 div()
                     .p_3()
                     .text_color(rgb(theme.text_muted))
                     .child(t!("backup.empty").to_string()),
             );
         }
-        ui::detail_card(theme)
-            .child(header)
-            .child(body)
-            .into_any_element()
+        list.render(theme)
     }
 
     /// The Backup 平铺网格: the backup files and saved profiles in a column-major grid.

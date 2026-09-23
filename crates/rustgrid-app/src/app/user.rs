@@ -3,11 +3,6 @@
 
 use super::*;
 
-/// The width of the Users 详细列表's resource-limit columns.
-const USER_LIMIT_WIDTH: f32 = 120.0;
-/// The width of the Users 详细列表's 超级用户 column.
-const USER_SUPER_WIDTH: f32 = 90.0;
-
 /// The window-space key of one account, used by the Users list's multi-selection.
 fn user_key(account: &UserAccount) -> String {
     format!("{}@{}", account.user, account.host)
@@ -261,29 +256,71 @@ impl AppView {
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                if this.users_columns.borrow_mut().drag_resize(event) {
+                    cx.notify();
+                }
                 this.drag_marquee(MarqueeTarget::Users, event, cx);
             }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                    if this.users_columns.borrow_mut().end_resize() {
+                        cx.notify();
+                    }
                     this.end_marquee(cx);
                 }),
             )
             .child(
                 div()
-                    .id("users-scroll")
                     .flex()
                     .flex_col()
                     .flex_1()
                     .min_h(px(0.0))
-                    .overflow_y_scroll()
-                    .track_scroll(&self.users_scroll)
+                    .min_w(px(0.0))
                     .child(body),
             );
         if let Some(rect) = self.marquee_rect_for(MarqueeTarget::Users) {
             container = container.child(rect);
         }
         container.into_any_element()
+    }
+
+    /// The content-fitted widths of the Users 详细列表 columns (名称 + the four resource limits +
+    /// 超级用户), in render order.
+    fn users_detail_widths(&self, visible: &[(usize, String, UserAccount)]) -> Vec<f32> {
+        let yes = t!("common.yes").to_string();
+        let no = t!("common.no").to_string();
+        let mut longest = [
+            ui::approx_text_width(&t!("common.name")) + 30.0,
+            ui::approx_text_width(&t!("user.col.max_questions")),
+            ui::approx_text_width(&t!("user.col.max_updates")),
+            ui::approx_text_width(&t!("user.col.max_connections")),
+            ui::approx_text_width(&t!("user.col.max_user_connections")),
+            ui::approx_text_width(&t!("user.col.superuser")),
+        ];
+        for (_, _, account) in visible {
+            longest[0] = longest[0].max(ui::approx_text_width(&account.label()) + 30.0);
+            longest[1] = longest[1].max(ui::approx_text_width(&account.max_questions.to_string()));
+            longest[2] = longest[2].max(ui::approx_text_width(&account.max_updates.to_string()));
+            longest[3] =
+                longest[3].max(ui::approx_text_width(&account.max_connections.to_string()));
+            longest[4] = longest[4].max(ui::approx_text_width(
+                &account.max_user_connections.to_string(),
+            ));
+            longest[5] = longest[5].max(ui::approx_text_width(if account.is_super_user() {
+                &yes
+            } else {
+                &no
+            }));
+        }
+        vec![
+            ui::detail_column_width(longest[0], 180.0),
+            ui::detail_column_width(longest[1], 72.0),
+            ui::detail_column_width(longest[2], 72.0),
+            ui::detail_column_width(longest[3], 72.0),
+            ui::detail_column_width(longest[4], 72.0),
+            ui::detail_column_width(longest[5], 64.0),
+        ]
     }
 
     /// The Users 详细列表: the account's name plus its resource limits and super-user flag.
@@ -293,45 +330,44 @@ impl AppView {
         theme: Theme,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
-        let header = ui::detail_header_row(theme)
-            .child(
-                div()
-                    .w(px(ui::DETAIL_NAME_WIDTH))
-                    .flex_none()
-                    .child(t!("common.name").to_string()),
-            )
-            .child(
-                div()
-                    .w(px(USER_LIMIT_WIDTH))
-                    .flex_none()
-                    .child(t!("user.col.max_questions").to_string()),
-            )
-            .child(
-                div()
-                    .w(px(USER_LIMIT_WIDTH))
-                    .flex_none()
-                    .child(t!("user.col.max_updates").to_string()),
-            )
-            .child(
-                div()
-                    .w(px(USER_LIMIT_WIDTH))
-                    .flex_none()
-                    .child(t!("user.col.max_connections").to_string()),
-            )
-            .child(
-                div()
-                    .w(px(USER_LIMIT_WIDTH))
-                    .flex_none()
-                    .child(t!("user.col.max_user_connections").to_string()),
-            )
-            .child(
-                div()
-                    .w(px(USER_SUPER_WIDTH))
-                    .flex_none()
-                    .child(t!("user.col.superuser").to_string()),
-            );
+        let fitted = self.users_detail_widths(visible);
+        let widths = self.users_columns.borrow_mut().resolve(&fitted);
+        let mut header = ui::detail_header_row(theme);
+        for (index, label) in [
+            t!("common.name").to_string(),
+            t!("user.col.max_questions").to_string(),
+            t!("user.col.max_updates").to_string(),
+            t!("user.col.max_connections").to_string(),
+            t!("user.col.max_user_connections").to_string(),
+            t!("user.col.superuser").to_string(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let width = widths[index];
+            header = header.child(ui::detail_header_column(
+                SharedString::from(format!("users-resize-{index}")),
+                width,
+                self.users_columns.borrow().resizing(index),
+                theme,
+                ui::detail_header_cell_plain(label, theme),
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
+                    this.users_columns
+                        .borrow_mut()
+                        .begin_resize(index, event.position.x, width);
+                    cx.notify();
+                }),
+            ));
+        }
 
-        let mut body = ui::detail_body();
+        let mut list = ui::DetailList::new(
+            "users-detail",
+            &self.users_hscroll,
+            &self.users_scroll,
+            ui::detail_content_width(&widths),
+            header,
+        );
         for (index, key, account) in visible {
             let selected = self.users_selection.contains(key);
             let label = account.label();
@@ -343,7 +379,7 @@ impl AppView {
                     .text_color(rgb(theme.text_muted))
                     .child(text)
             };
-            body = body.child(
+            list = list.child(
                 ui::detail_row(
                     SharedString::from(format!("user-row-{index}")),
                     selected,
@@ -374,7 +410,7 @@ impl AppView {
                         .flex_row()
                         .items_center()
                         .gap_2()
-                        .w(px(ui::DETAIL_NAME_WIDTH))
+                        .w(px(widths[0]))
                         .flex_none()
                         .overflow_hidden()
                         .text_color(rgb(theme.text))
@@ -401,31 +437,31 @@ impl AppView {
                 )
                 .child(
                     div()
-                        .w(px(USER_LIMIT_WIDTH))
+                        .w(px(widths[1]))
                         .flex_none()
                         .child(value(account.max_questions.to_string())),
                 )
                 .child(
                     div()
-                        .w(px(USER_LIMIT_WIDTH))
+                        .w(px(widths[2]))
                         .flex_none()
                         .child(value(account.max_updates.to_string())),
                 )
                 .child(
                     div()
-                        .w(px(USER_LIMIT_WIDTH))
+                        .w(px(widths[3]))
                         .flex_none()
                         .child(value(account.max_connections.to_string())),
                 )
                 .child(
                     div()
-                        .w(px(USER_LIMIT_WIDTH))
+                        .w(px(widths[4]))
                         .flex_none()
                         .child(value(account.max_user_connections.to_string())),
                 )
                 .child(
                     div()
-                        .w(px(USER_SUPER_WIDTH))
+                        .w(px(widths[5]))
                         .flex_none()
                         .whitespace_nowrap()
                         .text_align(gpui::TextAlign::Left)
@@ -437,15 +473,7 @@ impl AppView {
                 ),
             );
         }
-        div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h(px(0.0))
-            .min_w(px(0.0))
-            .overflow_hidden()
-            .child(ui::detail_card(theme).child(header).child(body))
-            .into_any_element()
+        list.render(theme)
     }
 
     /// The Users 平铺网格: the accounts in a column-major grid.

@@ -3,9 +3,14 @@
 //!
 //! Pages pick a layout and remember the choice per page (see `AppView::view_mode`); the chrome
 //! lives here so every page shows the same 详细列表 / 平铺网格 look. Feature code composes the
-//! helpers below ([`detail_card`], [`detail_header_row`], [`detail_header_cell`], [`detail_row`],
-//! [`ColumnGrid`], [`grid_columns`], [`grid_column`], [`grid_item`], [`leading_icon_badge`],
-//! [`tag_chip`]) with its own rows.
+//! helpers below ([`DetailList`], [`detail_content_width`], [`DetailColumns`],
+//! [`detail_column_width`], [`detail_header_row`], [`detail_header_cell`],
+//! [`detail_header_column`], [`detail_row`], [`ColumnGrid`], [`grid_columns`], [`grid_column`],
+//! [`grid_item`], [`leading_icon_badge`], [`tag_chip`]) with its own rows.
+//!
+//! A 详细列表's columns are fitted to their content (header label and the widest visible cell) and
+//! can be dragged wider or narrower from the handle on each header cell's right edge; the page owns
+//! the [`DetailColumns`] state and hands its resolved widths to both the header and the rows.
 //!
 //! The 平铺网格 is column-major, matching the object list: items fill a column top-to-bottom and
 //! wrap to the next column to the right, so the grid scrolls horizontally. [`ColumnGrid`] owns the
@@ -15,9 +20,11 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, Bounds, ClickEvent, Div, FontWeight, IntoElement, MouseButton, MouseMoveEvent, Pixels,
-    Point, ScrollHandle, SharedString, Stateful, Window, div, prelude::*, px, rgb, rgba, svg,
+    AnyElement, App, Bounds, ClickEvent, CursorStyle, Div, FontWeight, IntoElement, MouseButton,
+    MouseDownEvent, MouseMoveEvent, Pixels, Point, ScrollHandle, SharedString, Stateful, Window,
+    div, prelude::*, px, rgb, rgba, svg,
 };
+use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 
 use super::{hscrollbar_track, scrollbar_fractions, scrollbar_thumb};
 use crate::theme::Theme;
@@ -32,13 +39,6 @@ pub(crate) const GRID_ITEM_WIDTH: f32 = 220.0;
 pub(crate) const GRID_ITEM_MAX_WIDTH: f32 = 620.0;
 /// The bottom margin a column leaves before it decides it has no room for another row.
 pub(crate) const GRID_BOTTOM_MARGIN: f32 = 16.0;
-
-/// Shared column widths of the app's 详细列表 pages. They match Navicat's compact layout: the
-/// columns are left-packed at modest fixed widths instead of stretching to fill a wide window.
-pub(crate) const DETAIL_NAME_WIDTH: f32 = 280.0;
-pub(crate) const DETAIL_MODIFIED_WIDTH: f32 = 150.0;
-pub(crate) const DETAIL_SIZE_WIDTH: f32 = 90.0;
-pub(crate) const DETAIL_COMMENT_WIDTH: f32 = 200.0;
 
 /// The callback type of [`view_mode_toggle`], shared by every caller.
 pub(crate) type ViewModeHandler = Rc<dyn Fn(ViewMode, &ClickEvent, &mut Window, &mut App)>;
@@ -177,17 +177,247 @@ impl Render for ModeTooltip {
     }
 }
 
-/// The full-bleed container of a 详细列表 (its header plus scrolling body). It fills its pane edge
-/// to edge — callers add the header and the body and let it own the clip.
-pub(crate) fn detail_card(theme: Theme) -> Div {
+/// The natural content width of a 详细列表 whose fixed columns have the given widths: their sum
+/// plus the `gap_3` between columns and the `px_3` padding on both sides. Pages hand it to
+/// [`DetailList`] so the frame knows when the row is wider than the viewport and must show a
+/// horizontal scrollbar.
+pub(crate) fn detail_content_width(widths: &[f32]) -> f32 {
+    let gaps = widths.len().saturating_sub(1) as f32 * 12.0;
+    widths.iter().sum::<f32>() + gaps + 24.0
+}
+
+/// The narrowest a 详细列表 column can be dragged to.
+pub(crate) const DETAIL_MIN_COLUMN_WIDTH: f32 = 48.0;
+/// The widest a 详细列表 column can be dragged to.
+pub(crate) const DETAIL_MAX_COLUMN_WIDTH: f32 = 720.0;
+/// The horizontal room a 详细列表 column adds around its widest text, so the header's sort badge
+/// and the `gap_3` gutter never clip it.
+const DETAIL_COLUMN_PADDING: f32 = 20.0;
+
+/// The content-fitted width of one 详细列表 column: `longest` (the widest header label or cell,
+/// measured with [`approx_text_width`]) plus padding, clamped between `min` and
+/// [`DETAIL_MAX_COLUMN_WIDTH`]. Pages compute it per column, then hand the list to
+/// [`DetailColumns::resolve`] so a user-dragged width can override it.
+pub(crate) fn detail_column_width(longest: f32, min: f32) -> f32 {
+    (longest + DETAIL_COLUMN_PADDING).clamp(min, DETAIL_MAX_COLUMN_WIDTH)
+}
+
+/// The live width state of one 详细列表. Pages fit the widths to their content each render and pass
+/// them to [`resolve`](Self::resolve); a column the user has dragged keeps its override until the
+/// list's column count changes (e.g. the object list switching from Tables to Views). The list's
+/// mouse handlers drive the drag through [`begin_resize`](Self::begin_resize) /
+/// [`drag_resize`](Self::drag_resize) / [`end_resize`](Self::end_resize).
+#[derive(Default)]
+pub(crate) struct DetailColumns {
+    /// The user's dragged widths, indexed by column; `None` means "use the fitted width".
+    overrides: Vec<Option<f32>>,
+    resize: Option<DetailResize>,
+}
+
+/// The active edge drag of a 详细列表.
+#[derive(Clone, Copy)]
+struct DetailResize {
+    column: usize,
+    start_x: f32,
+    start_width: f32,
+}
+
+impl DetailColumns {
+    /// Resolve the widths to render: each fitted width, replaced by the user's override when set.
+    /// A change in the column count resets the overrides, since the columns no longer correspond.
+    pub(crate) fn resolve(&mut self, fitted: &[f32]) -> Vec<f32> {
+        if self.overrides.len() != fitted.len() {
+            self.overrides = vec![None; fitted.len()];
+            self.resize = None;
+        }
+        fitted
+            .iter()
+            .enumerate()
+            .map(|(column, width)| self.overrides[column].unwrap_or(*width))
+            .collect()
+    }
+
+    /// Begin dragging the right edge of `column`, starting from its current `width`.
+    pub(crate) fn begin_resize(&mut self, column: usize, mouse_x: Pixels, width: f32) {
+        if column >= self.overrides.len() {
+            return;
+        }
+        self.resize = Some(DetailResize {
+            column,
+            start_x: f32::from(mouse_x),
+            start_width: width,
+        });
+    }
+
+    /// Continue a drag. Returns whether the widths changed, so the caller re-renders.
+    pub(crate) fn drag_resize(&mut self, event: &MouseMoveEvent) -> bool {
+        let Some(resize) = self.resize else {
+            return false;
+        };
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.resize = None;
+            return true;
+        }
+        let delta = f32::from(event.position.x) - resize.start_x;
+        let width =
+            (resize.start_width + delta).clamp(DETAIL_MIN_COLUMN_WIDTH, DETAIL_MAX_COLUMN_WIDTH);
+        match self.overrides.get_mut(resize.column) {
+            Some(slot) if *slot != Some(width) => {
+                *slot = Some(width);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// End a drag. Returns whether one was active.
+    pub(crate) fn end_resize(&mut self) -> bool {
+        self.resize.take().is_some()
+    }
+
+    /// Whether `column`'s edge is being dragged, so its handle paints active.
+    pub(crate) fn resizing(&self, column: usize) -> bool {
+        self.resize.is_some_and(|resize| resize.column == column)
+    }
+}
+
+/// One 详细列表 header column: a fixed-width, relatively positioned cell with a right-edge drag
+/// handle straddling the `gap_3` gutter. `content` is the header cell; `on_resize_start` begins the
+/// drag (the page routes it to [`DetailColumns::begin_resize`]).
+pub(crate) fn detail_header_column(
+    handle_id: impl Into<SharedString>,
+    width: f32,
+    active: bool,
+    theme: Theme,
+    content: impl IntoElement,
+    on_resize_start: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let handle = div()
+        .id(handle_id.into())
+        .absolute()
+        .top(px(0.0))
+        .bottom(px(0.0))
+        .right(px(-3.0))
+        .w(px(6.0))
+        .cursor(CursorStyle::ResizeColumn)
+        .when(active, move |handle| handle.bg(rgb(theme.primary)))
+        .on_mouse_down(MouseButton::Left, on_resize_start);
     div()
+        .relative()
         .flex()
-        .flex_col()
-        .flex_1()
-        .min_h(px(0.0))
-        .min_w(px(0.0))
-        .overflow_hidden()
-        .bg(rgb(theme.editor_bg))
+        .flex_row()
+        .items_center()
+        .h_full()
+        .w(px(width))
+        .flex_none()
+        .child(content)
+        .child(handle)
+}
+
+/// The scrolling frame of a 详细列表: a sticky header and the rows, scrolled horizontally together,
+/// with the rows additionally scrolling vertically. gpui paints no scrollbars for `overflow_*`, so
+/// the frame overlays the kit's [`Scrollbar`] on both axes and keeps them visible. The two handles
+/// are owned by the page so the scroll position survives re-renders.
+pub(crate) struct DetailList {
+    id: &'static str,
+    hscroll: ScrollHandle,
+    vscroll: ScrollHandle,
+    content_width: f32,
+    header: Div,
+    rows: Div,
+}
+
+impl DetailList {
+    /// Start a list. `content_width` is [`detail_content_width`] of the page's fixed columns; the
+    /// header is the [`detail_header_row`] the page built.
+    pub(crate) fn new(
+        id: &'static str,
+        hscroll: &ScrollHandle,
+        vscroll: &ScrollHandle,
+        content_width: f32,
+        header: Div,
+    ) -> Self {
+        Self {
+            id,
+            hscroll: hscroll.clone(),
+            vscroll: vscroll.clone(),
+            content_width,
+            header,
+            rows: div().flex().flex_col().min_w(px(content_width)),
+        }
+    }
+
+    /// Append one row (or the empty-state message) to the list.
+    pub(crate) fn child(mut self, child: impl IntoElement) -> Self {
+        self.rows = self.rows.child(child);
+        self
+    }
+
+    /// Build the frame. The header and the vertical scroller share one horizontally-scrolled
+    /// container of at least `content_width`, so the header stays aligned with its rows while the
+    /// pane is too narrow and the columns are left-packed when it is wide.
+    pub(crate) fn render(self, theme: Theme) -> AnyElement {
+        let Self {
+            id,
+            hscroll,
+            vscroll,
+            content_width,
+            header,
+            rows,
+        } = self;
+        div()
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .min_w(px(0.0))
+            .overflow_hidden()
+            .bg(rgb(theme.editor_bg))
+            .child(
+                div()
+                    .id(SharedString::from(format!("{id}-hscroll")))
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .track_scroll(&hscroll)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .h_full()
+                            .w_full()
+                            .min_w(px(content_width))
+                            .child(header)
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("{id}-vscroll")))
+                                    .flex()
+                                    .flex_col()
+                                    .flex_1()
+                                    .min_h(px(0.0))
+                                    .min_w(px(content_width))
+                                    .overflow_y_scroll()
+                                    .track_scroll(&vscroll)
+                                    .child(rows),
+                            ),
+                    ),
+            )
+            .child(
+                Scrollbar::horizontal(&hscroll)
+                    .id(SharedString::from(format!("{id}-hscrollbar")))
+                    .mode(ScrollbarMode::Always),
+            )
+            .child(
+                Scrollbar::vertical(&vscroll)
+                    .id(SharedString::from(format!("{id}-vscrollbar")))
+                    .mode(ScrollbarMode::Always),
+            )
+            .into_any_element()
+    }
 }
 
 /// The sticky header strip of a 详细列表. It shares [`detail_row`]'s `gap_3` so the header cells
@@ -205,18 +435,6 @@ pub(crate) fn detail_header_row(theme: Theme) -> Div {
         .bg(rgb(theme.header_bg))
         .border_b_1()
         .border_color(rgb(theme.border))
-}
-
-/// The scrolling body of a 详细列表.
-pub(crate) fn detail_body() -> Stateful<Div> {
-    div()
-        .id("detail-body")
-        .flex()
-        .flex_col()
-        .flex_1()
-        .min_h(px(0.0))
-        .min_w(px(0.0))
-        .overflow_y_scroll()
 }
 
 /// One clickable header cell of a 详细列表. `sort` is `Some(descending)` when this column is the

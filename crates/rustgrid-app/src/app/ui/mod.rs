@@ -24,10 +24,10 @@ pub(crate) use calendar::compact_calendar;
 pub(crate) use combo::{ComboBox, ComboOption};
 pub(crate) use text_input::{TextInput, TextInputOptions};
 pub(super) use views::{
-    ColumnGrid, DETAIL_COMMENT_WIDTH, DETAIL_MODIFIED_WIDTH, DETAIL_NAME_WIDTH, DETAIL_SIZE_WIDTH,
-    ViewMode, approx_text_width, detail_body, detail_card, detail_header_cell,
-    detail_header_cell_plain, detail_header_row, detail_row, grid_column, grid_columns,
-    grid_item_sized, grid_item_width, leading_icon_badge, marquee_rect, tag_chip, view_mode_toggle,
+    ColumnGrid, DetailColumns, DetailList, ViewMode, approx_text_width, detail_column_width,
+    detail_content_width, detail_header_cell, detail_header_cell_plain, detail_header_column,
+    detail_header_row, detail_row, grid_column, grid_columns, grid_item_sized, grid_item_width,
+    leading_icon_badge, marquee_rect, tag_chip, view_mode_toggle,
 };
 
 /// The variant of a push button. See `win_button` / `dialog_button`.

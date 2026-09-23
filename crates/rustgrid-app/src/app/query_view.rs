@@ -245,11 +245,17 @@ impl AppView {
             // The 平铺 grid draws its own horizontal scrollbar; these keep its drag alive anywhere
             // in the window while the pointer leaves the 14px track.
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                if this.query_detail_columns.borrow_mut().drag_resize(event) {
+                    cx.notify();
+                }
                 this.query_grid_drag(event, cx);
             }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                    if this.query_detail_columns.borrow_mut().end_resize() {
+                        cx.notify();
+                    }
                     this.query_grid_end(cx);
                 }),
             );
@@ -274,6 +280,28 @@ impl AppView {
         container.child(body).into_any_element()
     }
 
+    /// The content-fitted widths of the Queries 详细列表 columns (名称 / 修改日期 / 文件大小).
+    fn query_detail_widths(&self, visible: &[usize]) -> Vec<f32> {
+        let mut longest = [
+            ui::approx_text_width(&t!("common.name")) + 64.0,
+            ui::approx_text_width(&t!("backup.field.modified")),
+            ui::approx_text_width(&t!("backup.field.size")),
+        ];
+        for index in visible {
+            let Some(file) = self.query_files.get(*index) else {
+                continue;
+            };
+            longest[0] = longest[0].max(ui::approx_text_width(&file.name) + 64.0);
+            longest[1] = longest[1].max(ui::approx_text_width(&query_modified_text(file)));
+            longest[2] = longest[2].max(ui::approx_text_width(&human_size(file.size)));
+        }
+        vec![
+            ui::detail_column_width(longest[0], 220.0),
+            ui::detail_column_width(longest[1], 140.0),
+            ui::detail_column_width(longest[2], 80.0),
+        ]
+    }
+
     /// The Queries 详细列表: a sortable table of the in-scope saved queries.
     fn render_query_detail(
         &self,
@@ -282,64 +310,76 @@ impl AppView {
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let sort = self.query_sort;
-        let header =
-            ui::detail_header_row(theme)
-                .child(div().w(px(ui::DETAIL_NAME_WIDTH)).flex_none().child(
-                    ui::detail_header_cell(
-                        "query-sort-name",
-                        t!("common.name").to_string(),
-                        (sort.column == QuerySortColumn::Name).then_some(sort.descending),
-                        theme,
-                        cx.listener(|this, _event, _window, cx| {
-                            this.toggle_query_sort(QuerySortColumn::Name, cx)
-                        }),
-                    ),
-                ))
-                .child(div().w(px(ui::DETAIL_MODIFIED_WIDTH)).flex_none().child(
-                    ui::detail_header_cell(
-                        "query-sort-modified",
-                        t!("backup.field.modified").to_string(),
-                        (sort.column == QuerySortColumn::Modified).then_some(sort.descending),
-                        theme,
-                        cx.listener(|this, _event, _window, cx| {
-                            this.toggle_query_sort(QuerySortColumn::Modified, cx)
-                        }),
-                    ),
-                ))
-                .child(div().w(px(ui::DETAIL_SIZE_WIDTH)).flex_none().child(
-                    ui::detail_header_cell(
-                        "query-sort-size",
-                        t!("backup.field.size").to_string(),
-                        (sort.column == QuerySortColumn::Size).then_some(sort.descending),
-                        theme,
-                        cx.listener(|this, _event, _window, cx| {
-                            this.toggle_query_sort(QuerySortColumn::Size, cx)
-                        }),
-                    ),
-                ));
+        let fitted = self.query_detail_widths(visible);
+        let widths = self.query_detail_columns.borrow_mut().resolve(&fitted);
+        let mut header = ui::detail_header_row(theme);
+        for (index, (id, label, column)) in [
+            (
+                "query-sort-name",
+                t!("common.name").to_string(),
+                QuerySortColumn::Name,
+            ),
+            (
+                "query-sort-modified",
+                t!("backup.field.modified").to_string(),
+                QuerySortColumn::Modified,
+            ),
+            (
+                "query-sort-size",
+                t!("backup.field.size").to_string(),
+                QuerySortColumn::Size,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let width = widths[index];
+            let cell = ui::detail_header_cell(
+                id,
+                label,
+                (sort.column == column).then_some(sort.descending),
+                theme,
+                cx.listener(move |this, _event, _window, cx| this.toggle_query_sort(column, cx)),
+            );
+            header = header.child(ui::detail_header_column(
+                SharedString::from(format!("query-resize-{index}")),
+                width,
+                self.query_detail_columns.borrow().resizing(index),
+                theme,
+                cell,
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
+                    this.query_detail_columns.borrow_mut().begin_resize(
+                        index,
+                        event.position.x,
+                        width,
+                    );
+                    cx.notify();
+                }),
+            ));
+        }
 
-        let mut body = ui::detail_body();
+        let mut list = ui::DetailList::new(
+            "query-detail",
+            &self.query_detail_hscroll,
+            &self.query_detail_vscroll,
+            ui::detail_content_width(&widths),
+            header,
+        );
         if visible.is_empty() {
-            body = body.child(query_empty_state(theme));
+            list = list.child(query_empty_state(theme));
         }
         for &index in visible {
-            body = body.child(self.query_detail_row(index, theme, cx));
+            list = list.child(self.query_detail_row(index, &widths, theme, cx));
         }
-        div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h(px(0.0))
-            .min_w(px(0.0))
-            .overflow_hidden()
-            .child(ui::detail_card(theme).child(header).child(body))
-            .into_any_element()
+        list.render(theme)
     }
 
     /// One 详细列表 row of a saved query.
     fn query_detail_row(
         &self,
         index: usize,
+        widths: &[f32],
         theme: Theme,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
@@ -347,7 +387,7 @@ impl AppView {
         let selected = self.saved_query_selected == Some(index);
         let name: AnyElement = match self.query_rename_input(index) {
             Some(input) => div()
-                .w(px(ui::DETAIL_NAME_WIDTH))
+                .w(px(widths[0]))
                 .flex_none()
                 .h(px(22.0))
                 .child(input)
@@ -357,7 +397,7 @@ impl AppView {
                 .flex_row()
                 .items_center()
                 .gap_2()
-                .w(px(ui::DETAIL_NAME_WIDTH))
+                .w(px(widths[0]))
                 .flex_none()
                 .overflow_hidden()
                 .text_color(rgb(theme.text))
@@ -401,7 +441,7 @@ impl AppView {
         .child(name)
         .child(
             div()
-                .w(px(ui::DETAIL_MODIFIED_WIDTH))
+                .w(px(widths[1]))
                 .flex_none()
                 .overflow_hidden()
                 .whitespace_nowrap()
@@ -410,7 +450,7 @@ impl AppView {
         )
         .child(
             div()
-                .w(px(ui::DETAIL_SIZE_WIDTH))
+                .w(px(widths[2]))
                 .flex_none()
                 .overflow_hidden()
                 .whitespace_nowrap()

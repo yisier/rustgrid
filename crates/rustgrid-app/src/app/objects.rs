@@ -35,18 +35,6 @@ fn view_page_for_category(category: Category) -> &'static str {
     }
 }
 
-/// The Functions 详细列表's 名 / 函数类型 / 决定性 column widths.
-const ROUTINE_NAME_WIDTH: f32 = 300.0;
-const ROUTINE_KIND_WIDTH: f32 = 110.0;
-const ROUTINE_DETERMINISTIC_WIDTH: f32 = 90.0;
-/// The Views 详细列表's 可以更新 column width.
-const VIEW_UPDATABLE_WIDTH: f32 = 120.0;
-/// The Tables 详细列表's overview column widths (the name column fills the rest).
-const TABLE_AUTO_INCREMENT_WIDTH: f32 = 140.0;
-const TABLE_DATA_LENGTH_WIDTH: f32 = 120.0;
-const TABLE_ENGINE_WIDTH: f32 = 100.0;
-const TABLE_ROWS_WIDTH: f32 = 90.0;
-
 /// A padded list message (loading/failed/empty) coloured by `color`.
 fn object_message(color: u32, text: String) -> AnyElement {
     div()
@@ -714,6 +702,10 @@ impl ObjectPane {
             selected: None,
             selected_routine: None,
             grid: ColumnGrid::default(),
+            detail_hscroll: ScrollHandle::new(),
+            detail_vscroll: ScrollHandle::new(),
+            table_columns: Rc::new(RefCell::new(DetailColumns::default())),
+            routine_columns: Rc::new(RefCell::new(DetailColumns::default())),
             visible_keys: Vec::new(),
             focus: cx.focus_handle(),
             theme,
@@ -811,6 +803,88 @@ impl ObjectPane {
         }
     }
 
+    /// The content-fitted widths of the Tables/Views 详细列表 columns, matching the header order of
+    /// [`render_table_detail`](Self::render_table_detail).
+    fn table_detail_widths(
+        &self,
+        tables: &[&rustgrid_core::TableInfo],
+        statuses: Option<&[(String, rustgrid_core::TableStatus)]>,
+    ) -> Vec<f32> {
+        let yes = t!("common.yes").to_string();
+        let no = t!("common.no").to_string();
+        let mut longest = vec![ui::approx_text_width(&t!("common.name")) + 30.0];
+        match self.category {
+            Category::Views => {
+                longest.push(ui::approx_text_width(&t!("view.field.updatable")));
+            }
+            Category::Tables => longest.extend([
+                ui::approx_text_width(&t!("table.col.auto_increment")),
+                ui::approx_text_width(&t!("table.col.modified")),
+                ui::approx_text_width(&t!("table.col.data_length")),
+                ui::approx_text_width(&t!("table.col.engine")),
+                ui::approx_text_width(&t!("table.col.rows")),
+                ui::approx_text_width(&t!("table.col.comment")),
+            ]),
+            _ => {}
+        }
+        for table in tables {
+            longest[0] = longest[0].max(ui::approx_text_width(&table.name) + 30.0);
+            let status = statuses.and_then(|list| {
+                list.iter()
+                    .find(|(name, _)| name == &table.name)
+                    .map(|(_, status)| status)
+            });
+            match self.category {
+                Category::Views => {
+                    longest[1] = longest[1].max(ui::approx_text_width(if table.updatable {
+                        &yes
+                    } else {
+                        &no
+                    }));
+                }
+                Category::Tables => {
+                    if let Some(status) = status {
+                        longest[1] = longest[1].max(ui::approx_text_width(
+                            &status
+                                .auto_increment
+                                .map(|value| value.to_string())
+                                .unwrap_or_default(),
+                        ));
+                        longest[2] = longest[2].max(ui::approx_text_width(
+                            &status.updated.clone().unwrap_or_default(),
+                        ));
+                        longest[3] = longest[3].max(ui::approx_text_width(
+                            &status.data_length.map(human_size).unwrap_or_default(),
+                        ));
+                        longest[4] = longest[4].max(ui::approx_text_width(
+                            &status.engine.clone().unwrap_or_default(),
+                        ));
+                        longest[5] = longest[5].max(ui::approx_text_width(
+                            &status
+                                .rows
+                                .map(|value| value.to_string())
+                                .unwrap_or_default(),
+                        ));
+                        longest[6] = longest[6].max(ui::approx_text_width(&single_line(
+                            &status.comment.clone().unwrap_or_default(),
+                        )));
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mins: &[f32] = match self.category {
+            Category::Views => &[220.0, 100.0],
+            Category::Tables => &[220.0, 110.0, 140.0, 100.0, 90.0, 80.0, 160.0],
+            _ => &[220.0],
+        };
+        longest
+            .iter()
+            .zip(mins)
+            .map(|(longest, min)| ui::detail_column_width(*longest, *min))
+            .collect()
+    }
+
     /// The Tables/Views 详细列表. Tables show Navicat's overview columns (auto-increment, modified,
     /// data length, engine, rows, comment); views show 名 + 可以更新.
     fn render_table_detail(
@@ -822,53 +896,52 @@ impl ObjectPane {
         theme: Theme,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
-        let column = |width: f32, label: String| {
-            div()
-                .w(px(width))
-                .flex_none()
-                .child(ui::detail_header_cell_plain(label, theme))
+        let labels: Vec<String> = match self.category {
+            Category::Views => vec![
+                t!("common.name").to_string(),
+                t!("view.field.updatable").to_string(),
+            ],
+            Category::Tables => vec![
+                t!("common.name").to_string(),
+                t!("table.col.auto_increment").to_string(),
+                t!("table.col.modified").to_string(),
+                t!("table.col.data_length").to_string(),
+                t!("table.col.engine").to_string(),
+                t!("table.col.rows").to_string(),
+                t!("table.col.comment").to_string(),
+            ],
+            _ => vec![t!("common.name").to_string()],
         };
-
-        let mut header = ui::detail_header_row(theme).child(div().flex_1().min_w(px(0.0)).child(
-            ui::detail_header_cell_plain(t!("common.name").to_string(), theme),
-        ));
-        match self.category {
-            Category::Views => {
-                header = header.child(column(
-                    VIEW_UPDATABLE_WIDTH,
-                    t!("view.field.updatable").to_string(),
-                ));
-            }
-            Category::Tables => {
-                header = header
-                    .child(column(
-                        TABLE_AUTO_INCREMENT_WIDTH,
-                        t!("table.col.auto_increment").to_string(),
-                    ))
-                    .child(column(
-                        ui::DETAIL_MODIFIED_WIDTH,
-                        t!("table.col.modified").to_string(),
-                    ))
-                    .child(column(
-                        TABLE_DATA_LENGTH_WIDTH,
-                        t!("table.col.data_length").to_string(),
-                    ))
-                    .child(column(
-                        TABLE_ENGINE_WIDTH,
-                        t!("table.col.engine").to_string(),
-                    ))
-                    .child(column(TABLE_ROWS_WIDTH, t!("table.col.rows").to_string()))
-                    .child(column(
-                        ui::DETAIL_COMMENT_WIDTH,
-                        t!("table.col.comment").to_string(),
-                    ));
-            }
-            _ => {}
+        let fitted = self.table_detail_widths(tables, statuses);
+        let widths = self.table_columns.borrow_mut().resolve(&fitted);
+        let mut header = ui::detail_header_row(theme);
+        for (index, label) in labels.into_iter().enumerate() {
+            let width = widths[index];
+            header = header.child(ui::detail_header_column(
+                SharedString::from(format!("object-resize-{index}")),
+                width,
+                self.table_columns.borrow().resizing(index),
+                theme,
+                ui::detail_header_cell_plain(label, theme),
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
+                    this.table_columns
+                        .borrow_mut()
+                        .begin_resize(index, event.position.x, width);
+                    cx.notify();
+                }),
+            ));
         }
 
-        let mut body = ui::detail_body();
+        let mut list = ui::DetailList::new(
+            "object-detail",
+            &self.detail_hscroll,
+            &self.detail_vscroll,
+            ui::detail_content_width(&widths),
+            header,
+        );
         if tables.is_empty() {
-            body = body.child(
+            list = list.child(
                 div()
                     .p_3()
                     .text_color(rgb(theme.text_muted))
@@ -882,22 +955,29 @@ impl ObjectPane {
                     .find(|(name, _)| name == &table.name)
                     .map(|(_, status)| status)
             });
-            let row = self.table_row(table, status, selected.contains(&key), rename, theme, cx);
-            body = body.child(object_row_with_rect(self.app.clone(), row, key));
+            let row = self.table_row(
+                table,
+                status,
+                selected.contains(&key),
+                rename,
+                &widths,
+                theme,
+                cx,
+            );
+            list = list.child(object_row_with_rect(self.app.clone(), row, key));
         }
-        ui::detail_card(theme)
-            .child(header)
-            .child(body)
-            .into_any_element()
+        list.render(theme)
     }
 
     /// One table/view row of the 详细列表.
+    #[allow(clippy::too_many_arguments)]
     fn table_row(
         &self,
         table: &rustgrid_core::TableInfo,
         status: Option<&rustgrid_core::TableStatus>,
         selected: bool,
         rename: Option<&RenameRow>,
+        widths: &[f32],
         theme: Theme,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement + use<> {
@@ -937,8 +1017,8 @@ impl ObjectPane {
             .flex_row()
             .items_center()
             .gap_2()
-            .flex_1()
-            .min_w(px(0.0))
+            .w(px(widths[0]))
+            .flex_none()
             .overflow_hidden()
             .child(ui::leading_icon_badge(
                 if is_view {
@@ -1001,7 +1081,7 @@ impl ObjectPane {
         .when(self.category == Category::Views, |row| {
             row.child(
                 div()
-                    .w(px(VIEW_UPDATABLE_WIDTH))
+                    .w(px(widths[1]))
                     .flex_none()
                     .whitespace_nowrap()
                     .text_color(rgb(theme.text_muted))
@@ -1046,12 +1126,12 @@ impl ObjectPane {
                     .text_color(rgb(theme.text_muted))
                     .child(text)
             };
-            row.child(cell(TABLE_AUTO_INCREMENT_WIDTH, auto_increment))
-                .child(cell(ui::DETAIL_MODIFIED_WIDTH, modified))
-                .child(cell(TABLE_DATA_LENGTH_WIDTH, data_length))
-                .child(cell(TABLE_ENGINE_WIDTH, engine))
-                .child(cell(TABLE_ROWS_WIDTH, rows))
-                .child(cell(ui::DETAIL_COMMENT_WIDTH, comment))
+            row.child(cell(widths[1], auto_increment))
+                .child(cell(widths[2], modified))
+                .child(cell(widths[3], data_length))
+                .child(cell(widths[4], engine))
+                .child(cell(widths[5], rows))
+                .child(cell(widths[6], comment))
         })
     }
 
@@ -1198,6 +1278,40 @@ impl ObjectPane {
         .child(label)
     }
 
+    /// The content-fitted widths of the Functions 详细列表 columns (名 / 修改日期 / 函数类型 /
+    /// 决定性 / 注释).
+    fn routine_detail_widths(&self, routines: &[&RoutineInfo]) -> Vec<f32> {
+        let yes = t!("common.yes").to_string();
+        let no = t!("common.no").to_string();
+        let mut longest = [
+            ui::approx_text_width(&t!("common.name")) + 30.0,
+            ui::approx_text_width(&t!("routine.col.modified")),
+            ui::approx_text_width(&t!("routine.col.kind")),
+            ui::approx_text_width(&t!("routine.col.deterministic")),
+            ui::approx_text_width(&t!("routine.field.comment")),
+        ];
+        for routine in routines {
+            longest[0] = longest[0].max(ui::approx_text_width(&routine.name) + 30.0);
+            longest[1] = longest[1].max(ui::approx_text_width(
+                &routine.modified.clone().unwrap_or_default(),
+            ));
+            longest[2] = longest[2].max(ui::approx_text_width(routine.kind.sql_name()));
+            longest[3] = longest[3].max(ui::approx_text_width(if routine.deterministic {
+                &yes
+            } else {
+                &no
+            }));
+            longest[4] = longest[4].max(ui::approx_text_width(&single_line(&routine.comment)));
+        }
+        vec![
+            ui::detail_column_width(longest[0], 220.0),
+            ui::detail_column_width(longest[1], 140.0),
+            ui::detail_column_width(longest[2], 100.0),
+            ui::detail_column_width(longest[3], 90.0),
+            ui::detail_column_width(longest[4], 160.0),
+        ]
+    }
+
     /// The Functions 详细列表: an icon plus the routine name.
     fn render_routine_detail(
         &self,
@@ -1206,35 +1320,44 @@ impl ObjectPane {
         theme: Theme,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
-        let header =
-            ui::detail_header_row(theme)
-                .child(div().w(px(ROUTINE_NAME_WIDTH)).flex_none().child(
-                    ui::detail_header_cell_plain(t!("common.name").to_string(), theme),
-                ))
-                .child(div().w(px(ui::DETAIL_MODIFIED_WIDTH)).flex_none().child(
-                    ui::detail_header_cell_plain(t!("routine.col.modified").to_string(), theme),
-                ))
-                .child(div().w(px(ROUTINE_KIND_WIDTH)).flex_none().child(
-                    ui::detail_header_cell_plain(t!("routine.col.kind").to_string(), theme),
-                ))
-                .child(div().w(px(ROUTINE_DETERMINISTIC_WIDTH)).flex_none().child(
-                    ui::detail_header_cell_plain(
-                        t!("routine.col.deterministic").to_string(),
-                        theme,
-                    ),
-                ))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .child(ui::detail_header_cell_plain(
-                            t!("routine.field.comment").to_string(),
-                            theme,
-                        )),
-                );
-        let mut body = ui::detail_body();
+        let fitted = self.routine_detail_widths(routines);
+        let widths = self.routine_columns.borrow_mut().resolve(&fitted);
+        let mut header = ui::detail_header_row(theme);
+        for (index, label) in [
+            t!("common.name").to_string(),
+            t!("routine.col.modified").to_string(),
+            t!("routine.col.kind").to_string(),
+            t!("routine.col.deterministic").to_string(),
+            t!("routine.field.comment").to_string(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let width = widths[index];
+            header = header.child(ui::detail_header_column(
+                SharedString::from(format!("routine-resize-{index}")),
+                width,
+                self.routine_columns.borrow().resizing(index),
+                theme,
+                ui::detail_header_cell_plain(label, theme),
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
+                    this.routine_columns
+                        .borrow_mut()
+                        .begin_resize(index, event.position.x, width);
+                    cx.notify();
+                }),
+            ));
+        }
+        let mut list = ui::DetailList::new(
+            "routine-detail",
+            &self.detail_hscroll,
+            &self.detail_vscroll,
+            ui::detail_content_width(&widths),
+            header,
+        );
         if routines.is_empty() {
-            body = body.child(
+            list = list.child(
                 div()
                     .p_3()
                     .text_color(rgb(theme.text_muted))
@@ -1243,13 +1366,10 @@ impl ObjectPane {
         }
         for routine in routines {
             let key = routine.name.clone();
-            let row = self.routine_row(routine, selected.contains(&key), theme, cx);
-            body = body.child(object_row_with_rect(self.app.clone(), row, key));
+            let row = self.routine_row(routine, selected.contains(&key), &widths, theme, cx);
+            list = list.child(object_row_with_rect(self.app.clone(), row, key));
         }
-        ui::detail_card(theme)
-            .child(header)
-            .child(body)
-            .into_any_element()
+        list.render(theme)
     }
 
     /// One routine row of the Functions 详细列表.
@@ -1257,6 +1377,7 @@ impl ObjectPane {
         &self,
         routine: &RoutineInfo,
         selected: bool,
+        widths: &[f32],
         theme: Theme,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement + use<> {
@@ -1311,7 +1432,7 @@ impl ObjectPane {
                 .flex_row()
                 .items_center()
                 .gap_2()
-                .w(px(ROUTINE_NAME_WIDTH))
+                .w(px(widths[0]))
                 .flex_none()
                 .overflow_hidden()
                 .child(ui::leading_icon_badge(
@@ -1329,7 +1450,7 @@ impl ObjectPane {
         )
         .child(
             div()
-                .w(px(ui::DETAIL_MODIFIED_WIDTH))
+                .w(px(widths[1]))
                 .flex_none()
                 .overflow_hidden()
                 .whitespace_nowrap()
@@ -1338,7 +1459,7 @@ impl ObjectPane {
         )
         .child(
             div()
-                .w(px(ROUTINE_KIND_WIDTH))
+                .w(px(widths[2]))
                 .flex_none()
                 .overflow_hidden()
                 .whitespace_nowrap()
@@ -1347,7 +1468,7 @@ impl ObjectPane {
         )
         .child(
             div()
-                .w(px(ROUTINE_DETERMINISTIC_WIDTH))
+                .w(px(widths[3]))
                 .flex_none()
                 .whitespace_nowrap()
                 .text_color(rgb(theme.text_muted))
@@ -1359,8 +1480,8 @@ impl ObjectPane {
         )
         .child(
             div()
-                .flex_1()
-                .min_w(px(0.0))
+                .w(px(widths[4]))
+                .flex_none()
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_color(rgb(theme.text_muted))
@@ -1787,6 +1908,13 @@ impl Render for ObjectPane {
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                let resized = match this.category {
+                    Category::Functions => this.routine_columns.borrow_mut().drag_resize(event),
+                    _ => this.table_columns.borrow_mut().drag_resize(event),
+                };
+                if resized {
+                    cx.notify();
+                }
                 if this.grid.drag(event) {
                     cx.notify();
                 }
@@ -1799,6 +1927,11 @@ impl Render for ObjectPane {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                    let table = this.table_columns.borrow_mut().end_resize();
+                    let routine = this.routine_columns.borrow_mut().end_resize();
+                    if table || routine {
+                        cx.notify();
+                    }
                     if this.grid.end() {
                         cx.notify();
                     }

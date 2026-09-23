@@ -346,7 +346,11 @@ shadcn chrome described above. Implemented today:
     **defaults to 平铺网格**. Both layouts come from the shared `ui` chrome, so all pages look the
     same: one `ui::grid_item`/`grid_column` tile template (20px rows, 16px `leading_icon_badge`) and
     one `ui::detail_header_row`/`detail_row` table template (shared `gap_3` so header and data
-    columns line up, 22px badges). The detail lists have Navicat's compact fixed-width columns:
+    columns line up, 22px badges). The detail lists have Navicat's compact columns, but each is
+    **fitted to its content** (the widest of its header label and its visible cells, via
+    `ui::detail_column_width`) and **drag-resizable** from the handle on its header's right edge
+    (per-page `ui::DetailColumns` state, seeded through `resolve` and updated by `begin_resize` /
+    `drag_resize` / `end_resize`; a page routes its list's mouse-move/up to those):
     Backup 名称/修改日期/文件大小/备注, Queries 名称/修改日期/文件大小, Users 名称 + the resource
     limits + 超级用户, Functions 名/修改日期/函数类型/决定性/注释, Views 名/可以更新, Tables
     名/自动递增值/修改日期/数据长度/引擎/行/注释 (the table overview columns come from

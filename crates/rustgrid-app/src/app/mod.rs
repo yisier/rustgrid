@@ -42,8 +42,8 @@ use crate::theme::Theme;
 use gpui_kit::component::calendar::{CalendarEvent, CalendarState};
 
 use ui::{
-    ButtonKind, ColumnGrid, ComboBox, ComboOption, TextInput, TextInputOptions, ViewMode,
-    checkbox_box, form_tab, main_separator, scrollbar_fractions, scrollbar_thumb,
+    ButtonKind, ColumnGrid, ComboBox, ComboOption, DetailColumns, TextInput, TextInputOptions,
+    ViewMode, checkbox_box, form_tab, main_separator, scrollbar_fractions, scrollbar_thumb,
     toolbar_separator,
 };
 
@@ -883,6 +883,14 @@ struct ObjectPane {
     selected_routine: Option<RoutineKind>,
     /// The column-major 平铺网格's horizontal scroll state.
     grid: ColumnGrid,
+    /// The 详细列表's scroll state: rows scroll vertically, the header and rows together scroll
+    /// horizontally.
+    detail_hscroll: ScrollHandle,
+    detail_vscroll: ScrollHandle,
+    /// The Tables 详细列表's content-fitted / user-resized column widths.
+    table_columns: Rc<RefCell<DetailColumns>>,
+    /// The Functions 详细列表's content-fitted / user-resized column widths.
+    routine_columns: Rc<RefCell<DetailColumns>>,
     /// The visible row keys of the last render, in display order (Shift-extend / marquee base).
     visible_keys: Vec<String>,
     /// Focus target for the list, so F2 reaches [`AppView::begin_rename_table`].
@@ -1231,6 +1239,10 @@ pub struct AppView {
     backup_focus: FocusHandle,
     /// Keeps the Backup list's scroll position across re-renders.
     backup_scroll: ScrollHandle,
+    /// The Backup 详细列表's horizontal scroll state (the header scrolls with the rows).
+    backup_hscroll: ScrollHandle,
+    /// The Backup 详细列表's content-fitted / user-resized column widths.
+    backup_columns: Rc<RefCell<DetailColumns>>,
     /// The Backup list's 平铺网格 scroll state.
     backup_grid: ColumnGrid,
     /// The Backup-list search text and its shared field.
@@ -1258,6 +1270,11 @@ pub struct AppView {
     query_editor_text: RefCell<String>,
     query_editor_measured: bool,
     query_result_scroll: UniformListScrollHandle,
+    /// The saved-query 详细列表's scroll state (vertical rows, horizontal header + rows).
+    query_detail_hscroll: ScrollHandle,
+    query_detail_vscroll: ScrollHandle,
+    /// The saved-query 详细列表's content-fitted / user-resized column widths.
+    query_detail_columns: Rc<RefCell<DetailColumns>>,
     query_connection_combo: Option<Entity<ComboBox>>,
     query_database_combo: Option<Entity<ComboBox>>,
     query_completion: Option<Completion>,
@@ -1385,6 +1402,10 @@ pub struct AppView {
     selected_user: Option<usize>,
     /// Keeps the Users list's scroll position across re-renders.
     users_scroll: ScrollHandle,
+    /// The Users 详细列表's horizontal scroll state (the header scrolls with the rows).
+    users_hscroll: ScrollHandle,
+    /// The Users 详细列表's content-fitted / user-resized column widths.
+    users_columns: Rc<RefCell<DetailColumns>>,
     /// The selected account's details, for the info pane.
     info_user: Loadable<UserDetails>,
     /// The open account window, if any: the create/edit flow launched from the Users toolbar.
@@ -1573,6 +1594,8 @@ impl AppView {
             backup_rename_focus_pending: false,
             backup_focus: cx.focus_handle(),
             backup_scroll: ScrollHandle::new(),
+            backup_hscroll: ScrollHandle::new(),
+            backup_columns: Rc::new(RefCell::new(DetailColumns::default())),
             backup_grid: ColumnGrid::default(),
             backup_search: String::new(),
             backup_search_input: {
@@ -1613,6 +1636,9 @@ impl AppView {
             query_editor_text: RefCell::new(String::new()),
             query_editor_measured: false,
             query_result_scroll: UniformListScrollHandle::new(),
+            query_detail_hscroll: ScrollHandle::new(),
+            query_detail_vscroll: ScrollHandle::new(),
+            query_detail_columns: Rc::new(RefCell::new(DetailColumns::default())),
             query_connection_combo: None,
             query_database_combo: None,
             query_completion: None,
@@ -1763,6 +1789,8 @@ impl AppView {
             },
             selected_user: None,
             users_scroll: ScrollHandle::new(),
+            users_hscroll: ScrollHandle::new(),
+            users_columns: Rc::new(RefCell::new(DetailColumns::default())),
             users_selection: ListSelection::default(),
             users_row_rects: std::collections::HashMap::new(),
             users_focus: cx.focus_handle(),
