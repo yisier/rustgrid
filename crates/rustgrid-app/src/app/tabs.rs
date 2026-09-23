@@ -45,6 +45,13 @@ impl AppView {
                 .text_color(rgb(theme.text_muted))
                 .child(t!("routine.open_database").to_string())
                 .into_any_element()
+        } else if self.main_tab == MainTab::Views && self.object_pane.is_none() {
+            div()
+                .flex_1()
+                .p_3()
+                .text_color(rgb(theme.text_muted))
+                .child(t!("view.open_database").to_string())
+                .into_any_element()
         } else if let Some(pane) = self.object_pane.clone() {
             div()
                 .flex()
@@ -198,7 +205,8 @@ impl TabBar {
         index: usize,
         id: u64,
         title: String,
-        routine: Option<RoutineKind>,
+        icon: &'static str,
+        icon_color: u32,
         active: bool,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
@@ -208,10 +216,6 @@ impl TabBar {
         let close = self.app.clone();
         let menu = self.app.clone();
         let middle = self.app.clone();
-        let (icon, icon_color) = match routine {
-            Some(_) => ("icons/functions.svg", theme.icon_functions),
-            None => ("icons/queries.svg", theme.icon_queries),
-        };
 
         div()
             .id(tab_id)
@@ -528,33 +532,48 @@ impl Render for TabBar {
                     Some((index, grid.state.id, title, grid.state.is_view))
                 })
                 .collect();
-            let query_tabs: Vec<(usize, u64, String, Option<RoutineKind>)> = app
+            let query_tabs: Vec<(usize, u64, String, &'static str, u32)> = app
                 .queries
                 .iter()
                 .enumerate()
                 .map(|(index, query)| {
-                    let routine_kind = query.routine.as_ref().map(|routine| routine.kind);
-                    let title = match &query.routine {
-                        Some(routine) => {
-                            let connection_name = query
-                                .connection_index
-                                .and_then(|connection| app.connections.get(connection))
-                                .map(|node| node.profile.name.clone())
-                                .unwrap_or_default();
+                    let connection_name = query
+                        .connection_index
+                        .and_then(|connection| app.connections.get(connection))
+                        .map(|node| node.profile.name.clone())
+                        .unwrap_or_default();
+                    let (icon, icon_color, title) = if let Some(view) = &query.view {
+                        (
+                            "icons/views.svg",
+                            app.theme.icon_views,
+                            format!(
+                                "{} @{} ({}) - {}",
+                                view.name,
+                                query.database.clone().unwrap_or_default(),
+                                connection_name,
+                                t!("common.view")
+                            ),
+                        )
+                    } else if let Some(routine) = &query.routine {
+                        (
+                            "icons/functions.svg",
+                            app.theme.icon_functions,
                             format!(
                                 "{} @{} ({}) - {}",
                                 routine.name,
                                 query.database.clone().unwrap_or_default(),
                                 connection_name,
                                 t!(routine.kind.label_key())
-                            )
-                        }
-                        None => match &query.name {
+                            ),
+                        )
+                    } else {
+                        let title = match &query.name {
                             Some(name) => format!("{name} - {}", t!("common.query")),
                             None => format!("{} - {}", t!("query.untitled"), t!("common.query")),
-                        },
+                        };
+                        ("icons/queries.svg", app.theme.icon_queries, title)
                     };
-                    (index, query.id, title, routine_kind)
+                    (index, query.id, title, icon, icon_color)
                 })
                 .collect();
             let design_tabs: Vec<(usize, u64, String, bool)> = app
@@ -634,13 +653,14 @@ impl Render for TabBar {
                 cx,
             ));
         }
-        for (index, id, title, routine) in query_tabs {
+        for (index, id, title, icon, icon_color) in query_tabs {
             strip = strip.child(self.query_tab(
                 theme,
                 index,
                 id,
                 title,
-                routine,
+                icon,
+                icon_color,
                 active_query == Some(index),
                 cx,
             ));

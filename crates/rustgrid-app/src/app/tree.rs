@@ -755,6 +755,7 @@ impl AppView {
             undo: Vec::new(),
             sql: None,
             show_toolbar: true,
+            show_footer: true,
             editable: true,
             sort_rules: Vec::new(),
             sort_open: false,

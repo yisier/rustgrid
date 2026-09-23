@@ -46,6 +46,9 @@ impl AppView {
         if category == Category::Functions {
             return self.render_routine_object_toolbar(pane, cx);
         }
+        if category == Category::Views {
+            return self.render_view_object_toolbar(pane, cx);
+        }
         let design_enabled = category == Category::Tables && open_enabled;
         let new_enabled = category == Category::Tables;
         let export_enabled = category == Category::Tables && open_enabled;
@@ -358,6 +361,137 @@ impl AppView {
                                 return;
                             };
                             this.run_routine_by_name(connection_index, database, kind, name, cx);
+                        }),
+                    )),
+            )
+            .child(self.render_object_search(cx))
+    }
+
+    /// The toolbar for the Views object list (Navicat's 打开视图 / 设计视图 / 新建视图 /
+    /// 删除视图 / 导出向导).
+    fn render_view_object_toolbar(
+        &self,
+        pane: &Entity<ObjectPane>,
+        cx: &mut Context<'_, Self>,
+    ) -> Div {
+        let theme = self.theme;
+        let has_selection = {
+            let pane = pane.read(cx);
+            pane.selected.is_some()
+        };
+        let has_database = {
+            let pane = pane.read(cx);
+            self.database_name(pane.connection_index, pane.database_index)
+                .is_some()
+        };
+        let pane_for_open = pane.clone();
+        let pane_for_design = pane.clone();
+        let pane_for_new = pane.clone();
+        let pane_for_delete = pane.clone();
+        let pane_for_export = pane.clone();
+
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .bg(rgb(theme.toolbar_bg))
+            .border_b_1()
+            .border_color(rgb(theme.border))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .child(self.toolbar_item(
+                        "view-open",
+                        "icons/views.svg",
+                        t!("view.open").to_string(),
+                        has_selection,
+                        cx.listener(move |this, _event, _window, cx| {
+                            let Some((connection_index, database_index, name, _)) =
+                                object_selection(&pane_for_open, cx)
+                            else {
+                                return;
+                            };
+                            let Some(database) =
+                                this.database_name(connection_index, database_index)
+                            else {
+                                return;
+                            };
+                            this.select_table(connection_index, database, name, true, cx);
+                        }),
+                    ))
+                    .child(toolbar_separator(theme))
+                    .child(self.toolbar_item(
+                        "view-design",
+                        "icons/design_table.svg",
+                        t!("view.design").to_string(),
+                        has_selection,
+                        cx.listener(move |this, _event, _window, cx| {
+                            let Some((connection_index, database_index, name, _)) =
+                                object_selection(&pane_for_design, cx)
+                            else {
+                                return;
+                            };
+                            let Some(database) =
+                                this.database_name(connection_index, database_index)
+                            else {
+                                return;
+                            };
+                            this.open_view(connection_index, database, name, cx);
+                        }),
+                    ))
+                    .child(toolbar_separator(theme))
+                    .child(self.toolbar_item(
+                        "view-new",
+                        "icons/new_table.svg",
+                        t!("view.new").to_string(),
+                        has_database,
+                        cx.listener(move |this, _event, _window, cx| {
+                            let (connection_index, database_index) = {
+                                let pane = pane_for_new.read(cx);
+                                (pane.connection_index, pane.database_index)
+                            };
+                            let Some(database) =
+                                this.database_name(connection_index, database_index)
+                            else {
+                                return;
+                            };
+                            this.open_new_view(connection_index, database, cx);
+                        }),
+                    ))
+                    .child(toolbar_separator(theme))
+                    .child(self.toolbar_item(
+                        "view-delete",
+                        "icons/delete_table.svg",
+                        t!("view.delete").to_string(),
+                        has_selection,
+                        cx.listener(move |this, _event, _window, cx| {
+                            let Some((connection_index, database_index, name, _)) =
+                                object_selection(&pane_for_delete, cx)
+                            else {
+                                return;
+                            };
+                            this.confirm_delete_view(connection_index, database_index, name, cx);
+                        }),
+                    ))
+                    .child(toolbar_separator(theme))
+                    .child(self.toolbar_item(
+                        "view-export",
+                        "icons/export.svg",
+                        t!("object.export_wizard").to_string(),
+                        has_selection,
+                        cx.listener(move |this, _event, _window, cx| {
+                            let Some((connection_index, database_index, name, _)) =
+                                object_selection(&pane_for_export, cx)
+                            else {
+                                return;
+                            };
+                            this.open_export_wizard(connection_index, database_index, &name, cx);
                         }),
                     )),
             )

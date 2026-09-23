@@ -166,6 +166,12 @@ impl AppView {
                 kind,
                 ..
             } => self.delete_routine(connection_index, database_index, name, kind, cx),
+            DeleteConfirm::View {
+                connection_index,
+                database_index,
+                name,
+                ..
+            } => self.delete_view(connection_index, database_index, name, cx),
         }
         cx.notify();
     }

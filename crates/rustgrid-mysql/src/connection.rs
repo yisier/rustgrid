@@ -6,6 +6,7 @@ use rustgrid_core::{
     ObjectDump, ObjectKind, ObjectPrivilegeRow, PageRequest, QueryResult, Result, RoutineDetails,
     RoutineEdit, RoutineInfo, RoutineKind, RowInsert, RowUpdate, TableInfo, TableOptions,
     TablePage, TableSchema, TableStatus, TriggerDef, UserAccount, UserDetails, UserEdit,
+    ViewDetails, ViewEdit,
 };
 use sqlx::mysql::{MySqlColumn, MySqlRow};
 use sqlx::{
@@ -1124,6 +1125,27 @@ impl Connection for MysqlConnection {
     async fn drop_routine(&self, database: &str, kind: RoutineKind, name: &str) -> Result<()> {
         crate::routine::drop_routine(&self.pool, database, kind, name).await
     }
+
+    async fn view_details(&self, database: &str, name: &str) -> Result<ViewDetails> {
+        crate::view::view_details(&self.pool, database, name).await
+    }
+
+    fn view_sql(&self, database: &str, original: Option<&str>, edit: &ViewEdit) -> String {
+        crate::view::view_sql(database, original, edit)
+    }
+
+    async fn save_view(
+        &self,
+        database: &str,
+        original: Option<&str>,
+        edit: &ViewEdit,
+    ) -> Result<()> {
+        crate::view::save_view(&self.pool, database, original, edit).await
+    }
+
+    async fn drop_view(&self, database: &str, name: &str) -> Result<()> {
+        crate::view::drop_view(&self.pool, database, name).await
+    }
 }
 
 /// Build the DDL that turns `original` into `modified`; exposed free so it can be unit tested
@@ -1552,6 +1574,28 @@ fn quote_literal(value: &str) -> String {
 
 pub(crate) fn quote_identifier(identifier: &str) -> String {
     format!("`{}`", identifier.replace('`', "``"))
+}
+
+/// Read a text column by any of its candidate names (case-insensitive), tolerating a missing
+/// column (older servers) or a `NULL` value. Temporal columns (`CREATED`, `LAST_ALTERED`) are
+/// decoded as datetimes and formatted.
+pub(crate) fn column_text(row: &MySqlRow, names: &[&str]) -> Option<String> {
+    for name in names {
+        let Some(index) = row
+            .columns()
+            .iter()
+            .position(|column| column.name().eq_ignore_ascii_case(name))
+        else {
+            continue;
+        };
+        if let Ok(value) = row.try_get::<Option<String>, _>(index) {
+            return value;
+        }
+        if let Ok(value) = row.try_get::<Option<chrono::NaiveDateTime>, _>(index) {
+            return value.map(|value| value.format("%Y-%m-%d %H:%M:%S").to_string());
+        }
+    }
+    None
 }
 
 /// Escape a string for use inside a single-quoted SQL literal (used by `SHOW ... LIKE '<name>'`,

@@ -235,6 +235,41 @@ fn parameter_name(tokens: &[&Token]) -> Option<String> {
     }
 }
 
+/// The view name of a `CREATE ... VIEW \`name\` AS ...` statement, or `None` when the statement
+/// does not name a view.
+pub fn view_identity(sql: &str) -> Option<String> {
+    let tokens = meaningful_tokens(sql);
+    let position = tokens
+        .iter()
+        .position(|token| matches!(token, Token::Word(word) if word.keyword == Keyword::VIEW))?;
+    tokens[position + 1..].iter().find_map(|token| match token {
+        Token::Word(word) => Some(word.value.clone()),
+        _ => None,
+    })
+}
+
+/// The `SELECT` of a `CREATE ... VIEW name AS <select>` statement — the first `AS` keyword after
+/// the `VIEW` keyword — used by the designer's 解释 to `EXPLAIN` the view's query.
+pub fn view_select(sql: &str) -> Option<String> {
+    let dialect = MySqlDialect {};
+    let mut tokenizer = Tokenizer::new(&dialect, sql);
+    let tokens = tokenizer.tokenize_with_location().ok()?;
+    let starts = line_starts(sql);
+    let mut seen_view = false;
+    for TokenWithSpan { token, span } in &tokens {
+        match token {
+            Token::Word(word) if !seen_view && word.keyword == Keyword::VIEW => seen_view = true,
+            Token::Word(word) if seen_view && word.keyword == Keyword::AS => {
+                let offset = location_to_offset(sql, &starts, span.end);
+                let select = sql[offset..].trim().trim_end_matches(';').trim();
+                return (!select.is_empty()).then(|| select.to_string());
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn classify(token: &Token) -> Option<SqlToken> {
     match token {
         Token::Word(word) => Some(if word.quote_style.is_some() {
@@ -352,6 +387,22 @@ mod tests {
         assert!(routine_parameters(function).is_empty());
 
         assert_eq!(routine_identity("SELECT 1"), None);
+    }
+
+    #[test]
+    fn parses_view_identity_and_select() {
+        let definition = "CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`localhost` SQL SECURITY DEFINER \
+                          VIEW `view_wms_count_inventory` AS SELECT `a` AS `id` FROM `t`";
+        assert_eq!(
+            view_identity(definition),
+            Some("view_wms_count_inventory".to_string())
+        );
+        assert_eq!(
+            view_select(definition),
+            Some("SELECT `a` AS `id` FROM `t`".to_string())
+        );
+        assert_eq!(view_identity("SELECT 1"), None);
+        assert_eq!(view_select("SELECT 1"), None);
     }
 
     #[test]

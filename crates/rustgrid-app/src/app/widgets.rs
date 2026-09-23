@@ -425,10 +425,15 @@ impl AppView {
                 let rename_name = name.clone();
                 let export_name = name.clone();
 
-                items = items
-                    .child(self.context_item(
+                items = items.child(
+                    self.context_item(
                         "table-open",
-                        t!("object.open_table").to_string(),
+                        t!(if is_view {
+                            "view.open"
+                        } else {
+                            "object.open_table"
+                        })
+                        .to_string(),
                         cx.listener(move |this, _event, _window, cx| {
                             this.context_menu = None;
                             let Some(database) = this.database_name(ci, di) else {
@@ -436,8 +441,48 @@ impl AppView {
                             };
                             this.select_table(ci, database, open_name.clone(), is_view, cx);
                         }),
-                    ))
-                    .child(self.context_item(
+                    ),
+                );
+
+                // A view is designed with the view designer, exported from its data and dropped
+                // with `DROP VIEW`; it has no rows of its own, so the table-only operations
+                // (Empty/Truncate/Rename/Import) are not offered.
+                if is_view {
+                    let view_design_name = design_name.clone();
+                    let view_export_name = export_name.clone();
+                    let view_drop_name = drop_name.clone();
+                    items = items
+                        .child(self.context_item(
+                            "view-design",
+                            t!("view.design").to_string(),
+                            cx.listener(move |this, _event, _window, cx| {
+                                this.context_menu = None;
+                                let Some(database) = this.database_name(ci, di) else {
+                                    return;
+                                };
+                                this.open_view(ci, database, view_design_name.clone(), cx);
+                            }),
+                        ))
+                        .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                        .child(self.context_item(
+                            "view-export",
+                            t!("object.export_wizard").to_string(),
+                            cx.listener(move |this, _event, _window, cx| {
+                                this.context_menu = None;
+                                this.open_export_wizard(ci, di, &view_export_name, cx);
+                            }),
+                        ))
+                        .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                        .child(self.context_item(
+                            "view-drop",
+                            t!("view.delete").to_string(),
+                            cx.listener(move |this, _event, _window, cx| {
+                                this.context_menu = None;
+                                this.confirm_delete_view(ci, di, view_drop_name.clone(), cx);
+                            }),
+                        ));
+                } else {
+                    items = items.child(self.context_item(
                         "table-design",
                         t!("object.design_table").to_string(),
                         cx.listener(move |this, _event, _window, cx| {
@@ -448,9 +493,8 @@ impl AppView {
                             this.open_design_table(ci, database, design_name.clone(), is_view, cx);
                         }),
                     ));
+                }
 
-                // Views have no rows of their own and are dropped with `DROP VIEW`, so only the
-                // table-only operations are offered here.
                 if !is_view {
                     items = items
                         .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))

@@ -40,7 +40,7 @@ impl AppView {
         let Some(database) = self.database_name(connection_index, database_index) else {
             return;
         };
-        let tables = self.database_table_names(connection_index, database_index);
+        let tables = self.database_object_names(connection_index, database_index);
         if tables.is_empty() {
             return;
         }
@@ -116,6 +116,26 @@ impl AppView {
                     .map(|table| table.name.clone())
                     .collect()
             })
+            .unwrap_or_default()
+    }
+
+    /// Every exportable object name of an open database (tables and views), in catalog order.
+    pub(super) fn database_object_names(
+        &self,
+        connection_index: usize,
+        database_index: usize,
+    ) -> Vec<String> {
+        self.connections
+            .get(connection_index)
+            .and_then(|node| match &node.databases {
+                Loadable::Loaded(databases) => databases.get(database_index),
+                _ => None,
+            })
+            .and_then(|database| match &database.tables {
+                Loadable::Loaded(tables) => Some(tables),
+                _ => None,
+            })
+            .map(|tables| tables.iter().map(|table| table.name.clone()).collect())
             .unwrap_or_default()
     }
 

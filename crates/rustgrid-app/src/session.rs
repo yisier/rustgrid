@@ -4,7 +4,7 @@ use std::sync::Arc;
 use rustgrid_core::{
     CellValue, ColumnInfo, Connection, ConnectionProfile, FilterCondition, FilterConjunction,
     FilterNode, FilterOperator, QueryResult, RoutineDetails, RoutineInfo, RoutineKind, SortColumn,
-    TableInfo,
+    TableInfo, ViewDetails,
 };
 
 #[derive(Default)]
@@ -330,6 +330,112 @@ impl RoutineTabState {
     }
 }
 
+/// Which sub-tab of a view designer is showing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ViewTab {
+    /// The editable `CREATE ... VIEW` statement.
+    Definition,
+    /// Read-only creation settings and metadata.
+    Advanced,
+    /// The SQL the Save button runs.
+    Sql,
+}
+
+impl ViewTab {
+    /// Every sub-tab, in the order the designer presents them.
+    pub const ALL: [ViewTab; 3] = [ViewTab::Definition, ViewTab::Advanced, ViewTab::Sql];
+
+    /// The i18n key for the sub-tab's label.
+    pub fn label_key(self) -> &'static str {
+        match self {
+            ViewTab::Definition => "view.tab.definition",
+            ViewTab::Advanced => "view.tab.advanced",
+            ViewTab::Sql => "view.tab.sql",
+        }
+    }
+
+    pub fn id(self) -> &'static str {
+        match self {
+            ViewTab::Definition => "view-tab-definition",
+            ViewTab::Advanced => "view-tab-advanced",
+            ViewTab::Sql => "view-tab-sql",
+        }
+    }
+}
+
+/// Which sub-tab of the view designer's bottom explain panel is showing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ViewExplainTab {
+    /// The executed `EXPLAIN` statement and its status.
+    Info,
+    /// The `EXPLAIN` result table.
+    Result,
+}
+
+impl ViewExplainTab {
+    /// The i18n key for the sub-tab's label.
+    pub fn label_key(self) -> &'static str {
+        match self {
+            ViewExplainTab::Info => "view.explain.tab.info",
+            ViewExplainTab::Result => "view.explain.tab.result",
+        }
+    }
+
+    pub fn id(self) -> &'static str {
+        match self {
+            ViewExplainTab::Info => "view-explain-tab-info",
+            ViewExplainTab::Result => "view-explain-tab-result",
+        }
+    }
+}
+
+/// The view-designer state carried by a [`QueryTab`] whose `view` is set. A view designer reuses
+/// the SQL editor (and its tab) but adds the view's identity, metadata and the
+/// 定义/高级/SQL 预览 sub-tabs.
+pub struct ViewTabState {
+    /// The view's current name (the name Save will create).
+    pub name: String,
+    /// The view's name in the database, `None` until a new view is saved.
+    pub original_name: Option<String>,
+    /// The view's full loaded state (metadata + definition), for the 高级 tab.
+    pub details: Option<ViewDetails>,
+    pub tab: ViewTab,
+    /// A save is in flight.
+    pub saving: bool,
+
+    /// Whether the bottom 信息/解释 panel is showing.
+    pub explain_open: bool,
+    /// Which bottom panel sub-tab is active.
+    pub explain_tab: ViewExplainTab,
+    /// The `EXPLAIN` statement that was run (shown on the 信息 tab).
+    pub explain_sql: String,
+    /// An explain run is in flight.
+    pub explain_running: bool,
+    pub explain_elapsed: Option<std::time::Duration>,
+    pub explain_error: Option<String>,
+    /// The id of the grid in `AppView::grids` showing the explain plan, if any.
+    pub explain_grid_id: Option<u64>,
+}
+
+impl ViewTabState {
+    pub fn new(name: String) -> Self {
+        Self {
+            name,
+            original_name: None,
+            details: None,
+            tab: ViewTab::Definition,
+            saving: false,
+            explain_open: false,
+            explain_tab: ViewExplainTab::Info,
+            explain_sql: String::new(),
+            explain_running: false,
+            explain_elapsed: None,
+            explain_error: None,
+            explain_grid_id: None,
+        }
+    }
+}
+
 /// An open SQL editor tab. `sql` is the editable document; `caret` and `anchor` are byte
 /// offsets into it, so they can be matched against `TextLayout` indices directly.
 pub struct QueryTab {
@@ -350,6 +456,8 @@ pub struct QueryTab {
     pub undo: Vec<(String, usize, usize)>,
     /// `Some` when this tab edits a stored routine instead of a free-form query.
     pub routine: Option<RoutineTabState>,
+    /// `Some` when this tab designs a database view instead of a free-form query.
+    pub view: Option<ViewTabState>,
 }
 
 impl QueryTab {
@@ -368,6 +476,7 @@ impl QueryTab {
             grid_id: None,
             undo: Vec::new(),
             routine: None,
+            view: None,
         }
     }
 
@@ -426,6 +535,9 @@ pub struct GridState {
     pub sql: Option<String>,
     /// Whether the grid toolbar (transaction/filter/sort/...) is shown.
     pub show_toolbar: bool,
+    /// Whether the grid's bottom action bar and status line are shown. Off for grids embedded in
+    /// another view (e.g. the view designer's explain panel), where they would be redundant.
+    pub show_footer: bool,
     /// Whether cells may be edited. Query grids only allow this with an inferred table.
     pub editable: bool,
     /// The `ORDER BY` applied to the table when pages are fetched.

@@ -137,14 +137,22 @@ impl AppView {
             return;
         }
         let active_id = self.active_grid_id(cx);
-        let grid_id = self.queries.remove(index).grid_id;
-        if let Some(id) = grid_id
-            && let Some(position) = self
+        let removed = self.queries.remove(index);
+        let mut grid_ids: Vec<u64> = Vec::new();
+        if let Some(id) = removed.grid_id {
+            grid_ids.push(id);
+        }
+        if let Some(id) = removed.view.as_ref().and_then(|view| view.explain_grid_id) {
+            grid_ids.push(id);
+        }
+        for id in grid_ids {
+            if let Some(position) = self
                 .grids
                 .iter()
                 .position(|grid| grid.read(cx).state.id == id)
-        {
-            self.grids.remove(position);
+            {
+                self.grids.remove(position);
+            }
         }
         match self.active_query {
             Some(active) if active == index => {
@@ -602,6 +610,7 @@ impl AppView {
                     undo: Vec::new(),
                     sql: Some(sql),
                     show_toolbar: false,
+                    show_footer: true,
                     editable,
                     sort_rules: Vec::new(),
                     sort_open: false,

@@ -654,9 +654,11 @@ impl Render for GridView {
             root = root.child(self.render_record_limit_panel(cx));
         }
 
-        root = root
-            .child(self.render_grid_controls(cx))
-            .child(self.render_grid_status());
+        if self.state.show_footer {
+            root = root
+                .child(self.render_grid_controls(cx))
+                .child(self.render_grid_status());
+        }
 
         root.on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
             this.grid_hscroll_drag(event, cx);

@@ -4,6 +4,7 @@ pub mod model;
 pub mod registry;
 pub mod routine;
 pub mod user;
+pub mod view;
 
 pub use driver::{Connection, Driver};
 pub use error::{Error, Result};
@@ -20,3 +21,4 @@ pub use user::{
     ObjectGrant, ObjectPrivilegeRow, Privilege, RoleMembership, UserAccount, UserDetails, UserEdit,
     UserEditSection,
 };
+pub use view::{ViewDetails, ViewEdit, ViewInfo};

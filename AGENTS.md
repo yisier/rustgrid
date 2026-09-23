@@ -26,7 +26,7 @@ not a later refactor.
   tests; the rest are `impl AppView` submodules: `tree`, `database`, `db_dialog`, `objects`,
   `sidebar`, `tabs`, `toolbar`, `query`, `query_view`, `query_editor`, `grid`, `grid_input`,
   `grid_commit`, `grid_view`, `grid_cell`, `grid_scroll`, `grid_toolbar`, `dialogs`,
-  `export`, `import`, `routine`, `routine_view`, `widgets`, `form`). New view code goes in the matching submodule, **not** `mod.rs`.
+  `export`, `import`, `routine`, `routine_view`, `view`, `view_view`, `widgets`, `form`). New view code goes in the matching submodule, **not** `mod.rs`.
   `ui/` is the internal design system (buttons, scrollbars, text fields, dropdowns, ...) and the
   wrapper layer over gpui-kit: put shared chrome there, never one-off `div`s in feature code. Several subtrees are child
   `Entity` views wired through `WeakEntity<AppView>` + `notify_*` invalidation: the Tables/Views
@@ -324,6 +324,19 @@ shadcn chrome described above. Implemented today:
     and name from the statement, drops the original and replays the `CREATE` through
     `Connection::save_routine`; 运行 calls the routine (`SELECT` for a function, `CALL` for a
     procedure) in a new query tab, running it immediately when it takes no arguments.
+12. Views: the `Views` main tab lists a database's views from the connection tree's selection, with
+    the toolbar 打开视图 / 设计视图 / 新建视图 / 删除视图 / 导出向导 (and a matching right-click
+    menu in the object list and the connection tree's Views category). 设计视图 opens a view
+    designer as a main-content tab that reuses the SQL editor: its toolbar is 保存 / 预览 / 解释 /
+    视图创建工具 (a deliberate stub) / 美化SQL and its sub-tabs are 定义 (the full editable
+    `CREATE ... VIEW` statement, loaded from `SHOW CREATE VIEW`), 高级 (definer, security,
+    algorithm, check option, updatability, timestamps and charset/collation) and SQL 预览 (the
+    script Save runs). Save derives the view name from the statement, drops the original and
+    replays the `CREATE` through `Connection::save_view`; 预览 opens the saved view's data in a
+    grid and 解释 runs `EXPLAIN` over the definition's `SELECT`, showing the result in a bottom
+    信息/解释 panel inside the designer (信息 is the executed statement plus status, 解释 is the
+    plan grid, reusing `GridView`). The designer is a `QueryTab` whose `view` (a `ViewTabState`) is
+    set, exactly like the routine editor.
 
 Still out of scope: a second database engine, and the disabled placeholder UI (the
 `Design/New/Delete Table` toolbar buttons and the query editor's `Query Builder`/`Snippets`

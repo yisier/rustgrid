@@ -10,6 +10,9 @@ impl AppView {
         if query.routine.is_some() {
             return self.render_routine_view(query, cx);
         }
+        if query.view.is_some() {
+            return self.render_view_view(query, cx);
+        }
         let theme = self.theme;
 
         let toolbar = div()

@@ -7,6 +7,7 @@ use crate::model::{
 };
 use crate::routine::{RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind};
 use crate::user::{ObjectPrivilegeRow, UserAccount, UserDetails, UserEdit, UserEditSection};
+use crate::view::{ViewDetails, ViewEdit};
 
 #[async_trait]
 pub trait Driver: Send + Sync {
@@ -344,6 +345,45 @@ pub trait Connection: Send + Sync {
     async fn drop_routine(&self, _database: &str, _kind: RoutineKind, _name: &str) -> Result<()> {
         Err(Error::Query(
             "routine management is not supported by this driver".to_string(),
+        ))
+    }
+
+    // ----- Views ---------------------------------------------------------------------------------
+    //
+    // Engine-agnostic view administration used by the Views main tab and its designer. Drivers
+    // without an equivalent capability keep the defaults, which report the feature as unsupported
+    // rather than silently succeeding.
+
+    /// Load one view's full `CREATE` statement and creation settings.
+    async fn view_details(&self, _database: &str, _name: &str) -> Result<ViewDetails> {
+        Err(Error::Query(
+            "view management is not supported by this driver".to_string(),
+        ))
+    }
+
+    /// The SQL script [`Connection::save_view`] runs, for the designer's SQL 预览 page.
+    /// `original` names the view to drop first when it already exists.
+    fn view_sql(&self, _database: &str, _original: Option<&str>, _edit: &ViewEdit) -> String {
+        String::new()
+    }
+
+    /// Create or replace a view in `database`. `original` names the existing view to drop first,
+    /// when it already exists.
+    async fn save_view(
+        &self,
+        _database: &str,
+        _original: Option<&str>,
+        _edit: &ViewEdit,
+    ) -> Result<()> {
+        Err(Error::Query(
+            "view management is not supported by this driver".to_string(),
+        ))
+    }
+
+    /// Drop a view.
+    async fn drop_view(&self, _database: &str, _name: &str) -> Result<()> {
+        Err(Error::Query(
+            "view management is not supported by this driver".to_string(),
         ))
     }
 }

@@ -514,12 +514,13 @@ impl AppView {
                     return;
                 }
                 "s" => {
-                    let is_routine = self
-                        .queries
-                        .get(index)
-                        .is_some_and(|tab| tab.routine.is_some());
+                    let tab = self.queries.get(index);
+                    let is_routine = tab.is_some_and(|tab| tab.routine.is_some());
+                    let is_view = tab.is_some_and(|tab| tab.view.is_some());
                     if is_routine {
                         self.save_routine(cx);
+                    } else if is_view {
+                        self.save_view(cx);
                     } else {
                         self.begin_save_query(window, cx);
                     }

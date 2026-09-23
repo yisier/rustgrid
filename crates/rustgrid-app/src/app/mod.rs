@@ -22,7 +22,7 @@ use rustgrid_core::{
     FilterCondition, FilterConjunction, FilterGroup, FilterNode, FilterOperator, ObjectGrant,
     ObjectPrivilegeRow, PageRequest, Privilege, QueryResult, RoutineDetails, RoutineEdit,
     RoutineInfo, RoutineKind, RowInsert, RowUpdate, SavedBackup, SavedQuery, TableStatus,
-    UserAccount, UserDetails, UserEdit, UserEditSection,
+    UserAccount, UserDetails, UserEdit, UserEditSection, ViewEdit,
 };
 use rustgrid_export::ExportFormat;
 
@@ -31,7 +31,7 @@ use crate::runtime::Runtime;
 use crate::session::{
     Category, CategoryExpansion, CellRange, CellSelection, ConnectionNode, ConnectionStatus,
     DatabaseNode, GridState, Loadable, QueryTab, RoutineTab, RoutineTabState, SortRule,
-    compute_column_widths,
+    ViewExplainTab, ViewTab, ViewTabState, compute_column_widths,
 };
 use crate::sql::{self, SqlSpan, SqlToken};
 use crate::theme::Theme;
@@ -1044,6 +1044,13 @@ enum DeleteConfirm {
         kind: RoutineKind,
         label: String,
     },
+    /// Drop a view from the Views tab or the connection tree.
+    View {
+        connection_index: usize,
+        database_index: usize,
+        name: String,
+        label: String,
+    },
 }
 
 /// Which designer grid a [`DeleteConfirm::DesignRows`] confirmation applies to.
@@ -1384,6 +1391,8 @@ mod tree;
 mod ui;
 mod user;
 mod user_create;
+mod view;
+mod view_view;
 mod widgets;
 
 pub use shell::AppShell;
@@ -1922,6 +1931,10 @@ impl AppView {
             if let Some(routine) = &query.routine {
                 routine.name.hash(&mut hasher);
                 routine.kind.hash(&mut hasher);
+            }
+            if let Some(view) = &query.view {
+                view.name.hash(&mut hasher);
+                view.original_name.hash(&mut hasher);
             }
         }
         hasher.finish()

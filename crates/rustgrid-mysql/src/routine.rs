@@ -8,9 +8,9 @@
 
 use rustgrid_core::{Error, Result, RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind};
 use sqlx::mysql::MySqlRow;
-use sqlx::{AssertSqlSafe, Column, MySqlPool, Row};
+use sqlx::{AssertSqlSafe, MySqlPool};
 
-use crate::connection::{map_query_error, quote_identifier};
+use crate::connection::{column_text, map_query_error, quote_identifier};
 
 /// The routine columns the list and 信息 tab read.
 const ROUTINE_COLUMNS: &str = "routine_name, routine_type, routine_comment, data_type, definer, \
@@ -180,28 +180,6 @@ fn read_routine_info(row: &MySqlRow) -> RoutineInfo {
         created: column_text(row, &["created"]),
         modified: column_text(row, &["last_altered", "modified"]),
     }
-}
-
-/// Read a text column by any of its candidate names (case-insensitive), tolerating a missing
-/// column (older servers) or a `NULL` value. Temporal columns (`CREATED`, `LAST_ALTERED`) are
-/// decoded as datetimes and formatted.
-fn column_text(row: &MySqlRow, names: &[&str]) -> Option<String> {
-    for name in names {
-        let Some(index) = row
-            .columns()
-            .iter()
-            .position(|column| column.name().eq_ignore_ascii_case(name))
-        else {
-            continue;
-        };
-        if let Ok(value) = row.try_get::<Option<String>, _>(index) {
-            return value;
-        }
-        if let Ok(value) = row.try_get::<Option<chrono::NaiveDateTime>, _>(index) {
-            return value.map(|value| value.format("%Y-%m-%d %H:%M:%S").to_string());
-        }
-    }
-    None
 }
 
 #[cfg(test)]
