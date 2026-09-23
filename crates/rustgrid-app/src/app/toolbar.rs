@@ -95,10 +95,18 @@ impl AppView {
             .child(self.main_button(
                 "main-connect",
                 "icons/connection.svg",
-                t!("main.connection").to_string(),
+                t!("main.new_connection").to_string(),
                 false,
                 true,
                 cx.listener(|this, _event, window, cx| this.open_new_form(window, cx)),
+            ))
+            .child(self.main_button(
+                "main-query",
+                "icons/new_query.svg",
+                t!("main.new_query").to_string(),
+                false,
+                true,
+                cx.listener(|this, _event, _window, cx| this.open_new_query(cx)),
             ))
             .child(main_separator(theme));
 

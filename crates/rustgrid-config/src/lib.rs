@@ -18,6 +18,8 @@ const QUERIES_DIR: &str = "queries";
 const BACKUPS_VERSION: u32 = 1;
 const BACKUPS_FILE: &str = "backups.json";
 const BACKUPS_DIR: &str = "backups";
+const DATABASES_VERSION: u32 = 1;
+const DATABASES_FILE: &str = "databases.json";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -129,6 +131,15 @@ struct BackupsFile {
     version: u32,
     #[serde(default)]
     backups: Vec<SavedBackup>,
+}
+
+/// The last database list seen for each connection (keyed by `ConnectionProfile::id`), so the save
+/// dialog can offer databases without opening the connection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DatabasesFile {
+    version: u32,
+    #[serde(default)]
+    databases: BTreeMap<String, Vec<String>>,
 }
 
 impl Default for BackupsFile {
@@ -318,6 +329,31 @@ impl ConfigStore {
         };
         let contents = serde_json::to_string_pretty(&file)?;
         fs::write(self.root.join(BACKUPS_FILE), contents)?;
+        Ok(())
+    }
+
+    /// The remembered database names per connection profile id.
+    pub fn load_database_cache(&self) -> ConfigResult<BTreeMap<String, Vec<String>>> {
+        let path = self.root.join(DATABASES_FILE);
+        if !path.exists() {
+            return Ok(BTreeMap::new());
+        }
+        let contents = fs::read_to_string(path)?;
+        let file: DatabasesFile = serde_json::from_str(&contents)?;
+        Ok(file.databases)
+    }
+
+    pub fn save_database_cache(
+        &self,
+        databases: &BTreeMap<String, Vec<String>>,
+    ) -> ConfigResult<()> {
+        fs::create_dir_all(&self.root)?;
+        let file = DatabasesFile {
+            version: DATABASES_VERSION,
+            databases: databases.clone(),
+        };
+        let contents = serde_json::to_string_pretty(&file)?;
+        fs::write(self.root.join(DATABASES_FILE), contents)?;
         Ok(())
     }
 }

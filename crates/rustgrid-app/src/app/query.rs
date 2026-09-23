@@ -3,6 +3,10 @@ use super::*;
 
 impl AppView {
     pub(super) fn default_query_connection(&self, cx: &Context<'_, Self>) -> Option<usize> {
+        // A database picked in the connection tree wins, even before its connection is connected.
+        if let Some((connection_index, _)) = self.tree_selected_database(cx) {
+            return Some(connection_index);
+        }
         if let Some(pane) = self.object_pane.as_ref() {
             let pane = pane.read(cx);
             if matches!(
@@ -24,6 +28,14 @@ impl AppView {
         connection_index: usize,
         cx: &Context<'_, Self>,
     ) -> Option<String> {
+        // A database picked in the connection tree is the current database, so a new query defaults
+        // to it rather than to whatever the object pane last opened.
+        if let Some((selected_connection, database_index)) = self.tree_selected_database(cx)
+            && selected_connection == connection_index
+            && let Some(name) = self.database_name(connection_index, database_index)
+        {
+            return Some(name);
+        }
         if let Some(pane) = self.object_pane.as_ref() {
             let pane = pane.read(cx);
             if pane.connection_index == connection_index
@@ -36,6 +48,22 @@ impl AppView {
             .get(connection_index)
             .and_then(|node| node.profile.database.clone())
             .filter(|name| !name.is_empty())
+    }
+
+    /// The database selected in the connection tree (`db-…` or the Queries category `cat-…-q`), as
+    /// `(connection_index, database_index)`. `None` when any other row is selected.
+    fn tree_selected_database(&self, cx: &App) -> Option<(usize, usize)> {
+        let selected = self.tree_pane.read(cx).selected.clone()?;
+        if let Some(rest) = selected.strip_prefix("db-") {
+            let mut parts = rest.splitn(2, '-');
+            return Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?));
+        }
+        if let Some(rest) = selected.strip_prefix("cat-") {
+            let mut parts = rest.splitn(3, '-');
+            let pair = (parts.next()?.parse().ok()?, parts.next()?.parse().ok()?);
+            return (parts.next()? == "q").then_some(pair);
+        }
+        None
     }
 
     pub(super) fn open_new_query(&mut self, cx: &mut Context<'_, Self>) {
@@ -920,20 +948,7 @@ impl AppView {
         input.update(cx, |input, cx| input.focus_state(window, cx));
         self.query_name_input = Some(input);
 
-        if self.save_location_combo.is_none() {
-            let weak = cx.weak_entity();
-            let combo = cx.new(|cx| {
-                ComboBox::new(theme, Vec::new(), String::new(), 380.0, cx).on_select(Rc::new(
-                    move |value, _window, cx| {
-                        let _ = weak.update(cx, |app, cx| app.save_location_selected(value, cx));
-                    },
-                ))
-            });
-            combo.update(cx, |combo, cx| {
-                combo.set_icon("icons/database.svg", theme.icon_database, cx);
-            });
-            self.save_location_combo = Some(combo);
-        }
+        self.ensure_save_dialog_combos(theme, cx);
 
         self.save_query_dialog = Some(SaveQueryDialog {
             tab_index: index,
@@ -946,78 +961,158 @@ impl AppView {
         cx.notify();
     }
 
-    /// Build the dropdown rows for the save-location picker, one per (connection, database) pair.
-    /// Connections whose databases are not loaded yet contribute a single connection-only row; the
-    /// current location is always present so the picker never shows an empty selection.
-    pub(super) fn query_save_location_options(
-        &self,
-        connection_index: Option<usize>,
-        database: &str,
-    ) -> Vec<(String, String)> {
-        let mut options: Vec<(String, String)> = Vec::new();
-        for (index, node) in self.connections.iter().enumerate() {
-            match &node.databases {
-                Loadable::Loaded(databases) if !databases.is_empty() => {
-                    for entry in databases {
-                        options.push((
-                            encode_save_location(index, &entry.name),
-                            format!("{}/{}", node.profile.name, entry.name),
-                        ));
-                    }
-                }
-                _ => options.push((encode_save_location(index, ""), node.profile.name.clone())),
-            }
+    /// Create the save dialog's connection and database pickers once.
+    fn ensure_save_dialog_combos(&mut self, theme: Theme, cx: &mut Context<'_, Self>) {
+        if self.save_connection_combo.is_none() {
+            let weak = cx.weak_entity();
+            let combo = cx.new(|cx| {
+                ComboBox::new(
+                    theme,
+                    Vec::new(),
+                    String::new(),
+                    SAVE_DIALOG_COMBO_WIDTH,
+                    cx,
+                )
+                .on_select(Rc::new(move |value, _window, cx| {
+                    let _ = weak.update(cx, |app, cx| app.save_connection_selected(value, cx));
+                }))
+                .full_width()
+            });
+            combo.update(cx, |combo, cx| {
+                combo.set_icon("icons/connection.svg", theme.icon_connection, cx);
+            });
+            self.save_connection_combo = Some(combo);
         }
-        if let Some(index) = connection_index {
-            let value = encode_save_location(index, database);
-            if !options.iter().any(|(candidate, _)| *candidate == value) {
-                let name = self
-                    .connections
-                    .get(index)
-                    .map(|node| node.profile.name.clone())
-                    .unwrap_or_default();
-                let label = if database.is_empty() {
-                    name
-                } else {
-                    format!("{name}/{database}")
-                };
-                options.insert(0, (value, label));
-            }
+        if self.save_database_combo.is_none() {
+            let weak = cx.weak_entity();
+            let combo = cx.new(|cx| {
+                ComboBox::new(
+                    theme,
+                    Vec::new(),
+                    String::new(),
+                    SAVE_DIALOG_COMBO_WIDTH,
+                    cx,
+                )
+                .on_select(Rc::new(move |value, _window, cx| {
+                    let _ = weak.update(cx, |app, cx| app.save_database_selected(value, cx));
+                }))
+                .full_width()
+            });
+            combo.update(cx, |combo, cx| {
+                combo.set_icon("icons/database.svg", theme.icon_database, cx);
+            });
+            self.save_database_combo = Some(combo);
         }
-        options
     }
 
-    pub(super) fn sync_save_location_combo(&mut self, cx: &mut Context<'_, Self>) {
+    /// The connection picker's rows: every configured connection profile.
+    fn save_connection_options(&self) -> Vec<ComboOption> {
+        self.connections
+            .iter()
+            .enumerate()
+            .map(|(index, node)| ComboOption::new(index.to_string(), node.profile.name.clone()))
+            .collect()
+    }
+
+    /// The database picker's rows: the connection's live databases, falling back to the last list
+    /// remembered for it so a database can be picked without opening the connection.
+    fn save_database_options(&self, connection_index: usize) -> Vec<ComboOption> {
+        let Some(node) = self.connections.get(connection_index) else {
+            return Vec::new();
+        };
+        let names: Vec<String> = match &node.databases {
+            Loadable::Loaded(databases) if !databases.is_empty() => databases
+                .iter()
+                .map(|database| database.name.clone())
+                .collect(),
+            _ => self
+                .database_cache
+                .get(&node.profile.id)
+                .cloned()
+                .unwrap_or_default(),
+        };
+        names.into_iter().map(ComboOption::plain).collect()
+    }
+
+    /// Remember a connection's database names (called when they load) so the save dialog can offer
+    /// them without opening the connection.
+    pub(super) fn remember_databases(&mut self, connection_index: usize) {
+        let Some(node) = self.connections.get(connection_index) else {
+            return;
+        };
+        let Loadable::Loaded(databases) = &node.databases else {
+            return;
+        };
+        let names: Vec<String> = databases
+            .iter()
+            .map(|database| database.name.clone())
+            .collect();
+        let id = node.profile.id.clone();
+        if self.database_cache.get(&id) == Some(&names) {
+            return;
+        }
+        self.database_cache.insert(id, names);
+        let _ = self.config.save_database_cache(&self.database_cache);
+    }
+
+    pub(super) fn sync_save_dialog_combos(&mut self, cx: &mut Context<'_, Self>) {
         let Some(dialog) = self.save_query_dialog.as_ref() else {
             return;
         };
         let connection_index = dialog.connection_index;
         let database = dialog.database.clone();
-        let options: Vec<ComboOption> = self
-            .query_save_location_options(connection_index, &database)
-            .into_iter()
-            .map(|(value, label)| ComboOption::new(value, label))
-            .collect();
-        let selected = connection_index
-            .map(|index| encode_save_location(index, &database))
+        let connection_options = self.save_connection_options();
+        let connection_selected = connection_index
+            .map(|index| index.to_string())
             .unwrap_or_default();
-        let placeholder = t!("query.save_location").to_string();
-        if let Some(combo) = self.save_location_combo.clone() {
+        let database_options = connection_index
+            .map(|index| self.save_database_options(index))
+            .unwrap_or_default();
+        let connection_placeholder = t!("info.connection").to_string();
+        let database_placeholder = t!("query.schema").to_string();
+        if let Some(combo) = self.save_connection_combo.clone() {
             combo.update(cx, |combo, cx| {
-                combo.set_options(options, cx);
-                combo.set_placeholder(placeholder, cx);
-                combo.set_selected(selected, cx);
+                combo.set_options(connection_options, cx);
+                combo.set_placeholder(connection_placeholder, cx);
+                combo.set_selected(connection_selected, cx);
+            });
+        }
+        if let Some(combo) = self.save_database_combo.clone() {
+            combo.update(cx, |combo, cx| {
+                combo.set_options(database_options, cx);
+                combo.set_placeholder(database_placeholder, cx);
+                combo.set_enabled(connection_index.is_some(), cx);
+                combo.set_selected(database, cx);
             });
         }
     }
 
-    pub(super) fn save_location_selected(&mut self, value: &str, cx: &mut Context<'_, Self>) {
-        let Some((connection_index, database)) = decode_save_location(value) else {
+    /// The user picked a connection: keep the database when it still exists, else reset it to the
+    /// connection's configured database when that is among the choices.
+    pub(super) fn save_connection_selected(&mut self, value: &str, cx: &mut Context<'_, Self>) {
+        let Ok(connection_index) = value.parse::<usize>() else {
             return;
         };
+        let options = self.save_database_options(connection_index);
+        let default = self
+            .connections
+            .get(connection_index)
+            .and_then(|node| node.profile.database.clone())
+            .filter(|database| options.iter().any(|option| &option.value == database));
         if let Some(dialog) = self.save_query_dialog.as_mut() {
+            let keep = options.iter().any(|option| option.value == dialog.database);
             dialog.connection_index = Some(connection_index);
-            dialog.database = database;
+            if !keep {
+                dialog.database = default.unwrap_or_default();
+            }
+            dialog.error = None;
+        }
+        cx.notify();
+    }
+
+    pub(super) fn save_database_selected(&mut self, value: &str, cx: &mut Context<'_, Self>) {
+        if let Some(dialog) = self.save_query_dialog.as_mut() {
+            dialog.database = value.to_string();
             dialog.error = None;
         }
         cx.notify();
@@ -1049,6 +1144,11 @@ impl AppView {
             self.save_query_error(t!("query.no_location").to_string(), cx);
             return;
         };
+        // A saved query always belongs to a database, so the location is not complete without one.
+        if database.is_empty() {
+            self.save_query_error(t!("query.no_database").to_string(), cx);
+            return;
+        }
         let Some(sql) = self.queries.get(tab_index).map(|tab| tab.sql.clone()) else {
             return;
         };
@@ -1495,17 +1595,8 @@ impl AppView {
     }
 }
 
-/// Separator joining the connection index and database name in a save-location option value.
-const SAVE_LOCATION_SEP: char = '\u{1f}';
-
-fn encode_save_location(connection_index: usize, database: &str) -> String {
-    format!("{connection_index}{SAVE_LOCATION_SEP}{database}")
-}
-
-fn decode_save_location(value: &str) -> Option<(usize, String)> {
-    let (connection, database) = value.split_once(SAVE_LOCATION_SEP)?;
-    Some((connection.parse().ok()?, database.to_string()))
-}
+/// The width of the save dialog's connection and database pickers.
+const SAVE_DIALOG_COMBO_WIDTH: f32 = 380.0;
 
 /// Scan the config dir's `queries/` tree for `.sql` files, sorted by name.
 pub(super) fn scan_query_files(config: &ConfigStore) -> Vec<QueryFileInfo> {
@@ -1560,28 +1651,4 @@ pub(super) fn scan_query_files(config: &ConfigStore) -> Vec<QueryFileInfo> {
     }
     files.sort_by_key(|file| file.name.to_lowercase());
     files
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn save_location_round_trips() {
-        let value = encode_save_location(3, "inventec_mx_wms");
-        assert_eq!(
-            decode_save_location(&value),
-            Some((3, "inventec_mx_wms".to_string()))
-        );
-        assert_eq!(
-            decode_save_location(&encode_save_location(0, "")),
-            Some((0, String::new()))
-        );
-    }
-
-    #[test]
-    fn save_location_rejects_malformed_values() {
-        assert_eq!(decode_save_location("no-separator"), None);
-        assert_eq!(decode_save_location("not-a-number\u{1f}db"), None);
-    }
 }

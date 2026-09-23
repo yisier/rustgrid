@@ -353,6 +353,7 @@ impl AppView {
                     };
                 }
                 view.completion_generation = view.completion_generation.wrapping_add(1);
+                view.remember_databases(index);
                 view.notify_object_pane(cx);
                 cx.notify();
             });

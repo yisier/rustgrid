@@ -536,13 +536,21 @@ impl AppView {
             name_row = name_row.child(div().w_full().h(px(26.0)).child(input.clone()));
         }
 
-        let mut location = div().flex().flex_col().gap_1().child(
+        let mut connection = div().flex().flex_col().gap_1().child(
             div()
                 .text_size(px(12.0))
-                .child(t!("query.save_location").to_string()),
+                .child(t!("info.connection").to_string()),
         );
-        if let Some(combo) = self.save_location_combo.as_ref() {
-            location = location.child(div().w_full().child(combo.clone()));
+        if let Some(combo) = self.save_connection_combo.as_ref() {
+            connection = connection.child(div().w_full().child(combo.clone()));
+        }
+        let mut schema = div().flex().flex_col().gap_1().child(
+            div()
+                .text_size(px(12.0))
+                .child(t!("query.schema").to_string()),
+        );
+        if let Some(combo) = self.save_database_combo.as_ref() {
+            schema = schema.child(div().w_full().child(combo.clone()));
         }
 
         let mut body = div()
@@ -551,7 +559,8 @@ impl AppView {
             .gap_3()
             .p_4()
             .child(name_row)
-            .child(location);
+            .child(connection)
+            .child(schema);
         if let Some(error) = dialog.error.as_ref() {
             body = body.child(
                 div()

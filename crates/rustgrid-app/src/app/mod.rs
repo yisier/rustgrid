@@ -1093,7 +1093,7 @@ const MAIN_TABS: [(MainTab, &str, &str); 6] = [
     (MainTab::Views, "icons/views.svg", "main.views"),
     (MainTab::Functions, "icons/functions.svg", "main.functions"),
     (MainTab::Users, "icons/user.svg", "main.users"),
-    (MainTab::Queries, "icons/new_query.svg", "main.queries"),
+    (MainTab::Queries, "icons/queries.svg", "main.queries"),
     (MainTab::Backups, "icons/backups.svg", "main.backups"),
 ];
 
@@ -1183,7 +1183,12 @@ pub struct AppView {
     /// The open "new table" name prompt, if any, and its shared name input.
     create_table_dialog: Option<CreateTableDialog>,
     create_table_input: Option<Entity<TextInput>>,
-    save_location_combo: Option<Entity<ComboBox>>,
+    /// The save-query dialog's connection and database pickers.
+    save_connection_combo: Option<Entity<ComboBox>>,
+    save_database_combo: Option<Entity<ComboBox>>,
+    /// The last database names seen per connection profile id, so the save dialog can offer
+    /// databases without opening the connection.
+    database_cache: BTreeMap<String, Vec<String>>,
     save_query_focus_pending: bool,
     query_focus: FocusHandle,
     query_focus_pending: bool,
@@ -1418,6 +1423,7 @@ impl AppView {
         let _ = config.migrate_legacy_queries();
         let query_files = query::scan_query_files(&config);
         let backup_configs = config.load_backups().unwrap_or_default();
+        let database_cache = config.load_database_cache().unwrap_or_default();
         // Claim Tab inside the cell editor so it advances to the next cell rather than moving
         // window focus (which is what the `Root` context binds it to).
         cx.bind_keys([
@@ -1485,7 +1491,9 @@ impl AppView {
             query_name_input: None,
             create_table_dialog: None,
             create_table_input: None,
-            save_location_combo: None,
+            save_connection_combo: None,
+            save_database_combo: None,
+            database_cache,
             save_query_focus_pending: false,
             query_focus: cx.focus_handle(),
             query_focus_pending: false,
@@ -1999,7 +2007,8 @@ impl AppView {
             self.db_collation_combo.as_ref(),
             self.query_connection_combo.as_ref(),
             self.query_database_combo.as_ref(),
-            self.save_location_combo.as_ref(),
+            self.save_connection_combo.as_ref(),
+            self.save_database_combo.as_ref(),
             self.language_combo.as_ref(),
         ]
         .into_iter()
@@ -2359,7 +2368,7 @@ impl Render for AppView {
         self.ensure_query_combos(cx);
         self.sync_db_combos(cx);
         self.sync_query_combos(cx);
-        self.sync_save_location_combo(cx);
+        self.sync_save_dialog_combos(cx);
         self.sync_language_combo(cx);
         self.sync_info(cx);
         self.sync_users(cx);
