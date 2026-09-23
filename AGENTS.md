@@ -337,6 +337,23 @@ shadcn chrome described above. Implemented today:
     信息/解释 panel inside the designer (信息 is the executed statement plus status, 解释 is the
     plan grid, reusing `GridView`). The designer is a `QueryTab` whose `view` (a `ViewTabState`) is
     set, exactly like the routine editor.
+13. List interaction: the Users, Backup, Tables and Views/Functions object lists all share one
+    Explorer-style list behaviour (`src/list_select.rs` + `app/list_ops.rs`): a plain click replaces
+    the selection, Ctrl/Cmd+click toggles a row, Shift+click extends from the anchor, and a
+    rubber-band drag over the list background selects every intersected row. Every page has the
+    icon-only 详细列表 / 平铺网格 toggle (tooltip on hover) placed to the left of, and adjacent
+    to, its search box; each page remembers its own layout by a stable `VIEW_PAGE_*` key and
+    **defaults to 平铺网格**. Both layouts come from the shared `ui` chrome, so all pages look the
+    same: one `ui::grid_item`/`grid_column` tile template (20px rows, 16px `leading_icon_badge`) and
+    one `ui::detail_header_row`/`detail_row` table template (shared `gap_3` so header and data
+    columns line up, 22px badges). The detail lists have Navicat's compact fixed-width columns:
+    Backup 名称/修改日期/文件大小/备注, Queries 名称/修改日期/文件大小, Users 名称 + the resource
+    limits + 超级用户, Functions 名/修改日期/函数类型/决定性/注释, Views 名/可以更新, Tables
+    名/自动递增值/修改日期/数据长度/引擎/行/注释 (the table overview columns come from
+    `Connection::table_statuses`, one bulk query loaded with `list_tables`). F2 renames the
+    selected item in place (accounts, backups and tables/views). Keep `ListSelection`
+    layout-independent so both layouts share the selection, and publish row rectangles through
+    `AppView::note_row_rect(MarqueeTarget::…, …)` from each row's `on_children_prepainted`.
 
 Still out of scope: a second database engine, and the disabled placeholder UI (the
 `Design/New/Delete Table` toolbar buttons and the query editor's `Query Builder`/`Snippets`

@@ -210,6 +210,8 @@ pub struct UserAccount {
     pub ssl_cipher: String,
     pub x509_issuer: String,
     pub x509_subject: String,
+    /// Whether the account holds the global `SUPER` privilege.
+    pub is_super_user: bool,
 }
 
 impl UserAccount {
@@ -217,8 +219,12 @@ impl UserAccount {
     pub fn label(&self) -> String {
         format!("{}@{}", self.user, self.host)
     }
-}
 
+    /// Whether the account has a super-user (`SUPER`) grant on the server.
+    pub fn is_super_user(&self) -> bool {
+        self.is_super_user
+    }
+}
 /// One row of `mysql.role_edges`: a role granted to (or, for the Members tab, a member of) an
 /// account.
 #[derive(Debug, Clone, PartialEq, Eq)]

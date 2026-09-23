@@ -3,8 +3,15 @@
 
 use super::*;
 
-/// The height of one account row in the Users list.
-const USER_ROW_HEIGHT: f32 = 22.0;
+/// The width of the Users 详细列表's resource-limit columns.
+const USER_LIMIT_WIDTH: f32 = 120.0;
+/// The width of the Users 详细列表's 超级用户 column.
+const USER_SUPER_WIDTH: f32 = 90.0;
+
+/// The window-space key of one account, used by the Users list's multi-selection.
+fn user_key(account: &UserAccount) -> String {
+    format!("{}@{}", account.user, account.host)
+}
 
 impl AppView {
     /// The connection whose accounts the Users tab shows: the connection tree's current selection
@@ -96,6 +103,21 @@ impl AppView {
             .collect()
     }
 
+    /// The visible accounts as `(index, selection key, account)`, in display order.
+    fn visible_users(&self) -> Vec<(usize, String, UserAccount)> {
+        let Loadable::Loaded(users) = &self.users else {
+            return Vec::new();
+        };
+        self.filtered_users()
+            .into_iter()
+            .filter_map(|index| {
+                users
+                    .get(index)
+                    .map(|account| (index, user_key(account), account.clone()))
+            })
+            .collect()
+    }
+
     /// The Users main tab body: the toolbar plus the account list.
     pub(super) fn render_users(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
@@ -116,6 +138,13 @@ impl AppView {
         let has_selection = self.selected_user.is_some();
         let has_connection =
             matches!(&self.users, Loadable::Loaded(_)) && self.users_connection.is_some();
+        let weak = cx.weak_entity();
+        let on_select = Rc::new(
+            move |mode: ViewMode, _event: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                let _ = weak.update(cx, |app, cx| app.set_view_mode(VIEW_PAGE_USERS, mode, cx));
+            },
+        );
+        let view_mode = self.view_mode(VIEW_PAGE_USERS);
         div()
             .flex()
             .flex_row()
@@ -170,16 +199,23 @@ impl AppView {
             )
             .child(
                 div()
-                    .w(px(220.0))
-                    .h(px(24.0))
-                    .child(self.user_search_input.clone()),
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(ui::view_mode_toggle(theme, view_mode, on_select))
+                    .child(
+                        div()
+                            .w(px(220.0))
+                            .h(px(24.0))
+                            .child(self.user_search_input.clone()),
+                    ),
             )
     }
 
     fn render_users_list(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
-        let rows = self.filtered_users();
-        let selected = self.selected_user;
+        let visible = self.visible_users();
 
         let body: AnyElement = match &self.users {
             Loadable::Idle | Loadable::Loading => {
@@ -192,84 +228,537 @@ impl AppView {
             Loadable::Loaded(users) if users.is_empty() => {
                 tree_message(t!("user.empty").to_string(), 8.0, theme.text_muted).into_any_element()
             }
-            Loadable::Loaded(users) => {
-                let mut list = div().flex().flex_col();
-                for (row, index) in rows.iter().enumerate() {
-                    let Some(account) = users.get(*index) else {
-                        continue;
-                    };
-                    let is_selected = selected == Some(*index);
-                    // A selected row uses the app's selection colours (the same blue the grid uses),
-                    // so it is unmistakable — the previous `tree_selected_bg` is the same light grey
-                    // as hover in the light palette and read as "not selected".
-                    let (background, foreground, icon_color) = if is_selected {
-                        (
-                            theme.grid_selection_bg,
-                            theme.grid_selection_text,
-                            theme.grid_selection_text,
-                        )
-                    } else {
-                        let background = if row % 2 == 1 {
-                            theme.row_alt_bg
-                        } else {
-                            theme.editor_bg
-                        };
-                        (background, theme.text, theme.icon_users)
-                    };
-                    let row_index = *index;
-                    list = list.child(
-                        div()
-                            .id(SharedString::from(format!("user-row-{row}")))
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_1()
-                            .h(px(USER_ROW_HEIGHT))
-                            .px_2()
-                            .cursor_pointer()
-                            .text_size(px(12.5))
-                            .text_color(rgb(foreground))
-                            .bg(rgb(background))
-                            .when(!is_selected, move |style| {
-                                style.hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-                            })
-                            .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
-                                this.select_user(row_index, cx);
-                                if event.click_count() == 2 {
-                                    this.open_selected_user(cx);
-                                }
-                            }))
-                            .child(tree_icon("icons/user.svg", icon_color))
-                            .child(
-                                div()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .child(account.label()),
-                            ),
-                    );
+            Loadable::Loaded(_) => {
+                let keys: Vec<String> = visible.iter().map(|(_, key, _)| key.clone()).collect();
+                match self.view_mode(VIEW_PAGE_USERS) {
+                    ViewMode::Detail => self.render_users_detail(&visible, theme, cx),
+                    ViewMode::Grid => self.render_users_tiles(&visible, &keys, theme, cx),
                 }
-                list.into_any_element()
             }
         };
 
-        div()
-            .id("users-scroll")
+        let mut container = div()
+            .id("users-list")
+            .relative()
             .flex()
             .flex_col()
             .flex_1()
             .min_h(px(0.0))
-            .overflow_y_scroll()
-            .track_scroll(&self.users_scroll)
-            .child(body)
+            .overflow_hidden()
+            .track_focus(&self.users_focus)
+            .key_context(USER_LIST_CONTEXT)
+            .on_action(cx.listener(|this, _: &RenameUserItem, window, cx| {
+                this.begin_rename_user(window, cx);
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    if this.user_rename.is_some() {
+                        return;
+                    }
+                    window.focus(&this.users_focus, cx);
+                    this.begin_marquee(MarqueeTarget::Users, event.position, event.modifiers, cx);
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                this.drag_marquee(MarqueeTarget::Users, event, cx);
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                    this.end_marquee(cx);
+                }),
+            )
+            .child(
+                div()
+                    .id("users-scroll")
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .overflow_y_scroll()
+                    .track_scroll(&self.users_scroll)
+                    .child(body),
+            );
+        if let Some(rect) = self.marquee_rect_for(MarqueeTarget::Users) {
+            container = container.child(rect);
+        }
+        container.into_any_element()
+    }
+
+    /// The Users 详细列表: the account's name plus its resource limits and super-user flag.
+    fn render_users_detail(
+        &self,
+        visible: &[(usize, String, UserAccount)],
+        theme: Theme,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let header = ui::detail_header_row(theme)
+            .child(
+                div()
+                    .w(px(ui::DETAIL_NAME_WIDTH))
+                    .flex_none()
+                    .child(t!("common.name").to_string()),
+            )
+            .child(
+                div()
+                    .w(px(USER_LIMIT_WIDTH))
+                    .flex_none()
+                    .child(t!("user.col.max_questions").to_string()),
+            )
+            .child(
+                div()
+                    .w(px(USER_LIMIT_WIDTH))
+                    .flex_none()
+                    .child(t!("user.col.max_updates").to_string()),
+            )
+            .child(
+                div()
+                    .w(px(USER_LIMIT_WIDTH))
+                    .flex_none()
+                    .child(t!("user.col.max_connections").to_string()),
+            )
+            .child(
+                div()
+                    .w(px(USER_LIMIT_WIDTH))
+                    .flex_none()
+                    .child(t!("user.col.max_user_connections").to_string()),
+            )
+            .child(
+                div()
+                    .w(px(USER_SUPER_WIDTH))
+                    .flex_none()
+                    .child(t!("user.col.superuser").to_string()),
+            );
+
+        let mut body = ui::detail_body();
+        for (index, key, account) in visible {
+            let selected = self.users_selection.contains(key);
+            let label = account.label();
+            let is_super = account.is_super_user();
+            let value = |text: String| {
+                div()
+                    .w_full()
+                    .text_align(gpui::TextAlign::Left)
+                    .text_color(rgb(theme.text_muted))
+                    .child(text)
+            };
+            body = body.child(
+                ui::detail_row(
+                    SharedString::from(format!("user-row-{index}")),
+                    selected,
+                    theme,
+                )
+                .on_click(cx.listener({
+                    let key = key.clone();
+                    move |this, event: &ClickEvent, _window, cx| {
+                        this.hit_user(&key, event.click_count(), event.modifiers(), cx);
+                    }
+                }))
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener({
+                        let key = key.clone();
+                        move |this, event: &MouseDownEvent, _window, cx| {
+                            if !this.users_selection.contains(&key) {
+                                this.set_user_selection_one(&key);
+                            }
+                            cx.notify();
+                            let _ = event;
+                        }
+                    }),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .w(px(ui::DETAIL_NAME_WIDTH))
+                        .flex_none()
+                        .overflow_hidden()
+                        .text_color(rgb(theme.text))
+                        .child(ui::leading_icon_badge(
+                            "icons/user.svg",
+                            theme.icon_users,
+                            22.0,
+                        ))
+                        .child(
+                            match self.user_rename.as_ref().filter(|edit| edit.key == *key) {
+                                Some(edit) => div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .h(px(20.0))
+                                    .child(edit.input.clone())
+                                    .into_any_element(),
+                                None => div()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .child(label)
+                                    .into_any_element(),
+                            },
+                        ),
+                )
+                .child(
+                    div()
+                        .w(px(USER_LIMIT_WIDTH))
+                        .flex_none()
+                        .child(value(account.max_questions.to_string())),
+                )
+                .child(
+                    div()
+                        .w(px(USER_LIMIT_WIDTH))
+                        .flex_none()
+                        .child(value(account.max_updates.to_string())),
+                )
+                .child(
+                    div()
+                        .w(px(USER_LIMIT_WIDTH))
+                        .flex_none()
+                        .child(value(account.max_connections.to_string())),
+                )
+                .child(
+                    div()
+                        .w(px(USER_LIMIT_WIDTH))
+                        .flex_none()
+                        .child(value(account.max_user_connections.to_string())),
+                )
+                .child(
+                    div()
+                        .w(px(USER_SUPER_WIDTH))
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .text_align(gpui::TextAlign::Left)
+                        .child(if is_super {
+                            t!("common.yes").to_string()
+                        } else {
+                            t!("common.no").to_string()
+                        }),
+                ),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .min_w(px(0.0))
+            .overflow_hidden()
+            .child(ui::detail_card(theme).child(header).child(body))
             .into_any_element()
     }
 
-    /// Select one account in the Users list, refreshing the details pane.
-    pub(super) fn select_user(&mut self, index: usize, cx: &mut Context<'_, Self>) {
-        self.selected_user = Some(index);
-        // Force the details pane to reload for the new account.
+    /// The Users 平铺网格: the accounts in a column-major grid.
+    fn render_users_tiles(
+        &self,
+        visible: &[(usize, String, UserAccount)],
+        keys: &[String],
+        theme: Theme,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        if visible.is_empty() {
+            return div()
+                .p_3()
+                .text_color(rgb(theme.text_muted))
+                .child(t!("common.empty").to_string())
+                .into_any_element();
+        }
+        let width = ui::grid_item_width(
+            visible
+                .iter()
+                .map(|(_, _, account)| ui::approx_text_width(&account.label()))
+                .fold(0.0, f32::max),
+        );
+        let rows = self.users_grid.rows_per_column();
+        let mut columns = ui::grid_columns();
+        let mut column = ui::grid_column();
+        let mut count = 0usize;
+        for ((index, key, account), visible_index) in visible.iter().zip(0..) {
+            if count == rows {
+                columns = columns.child(column);
+                column = ui::grid_column();
+                count = 0;
+            }
+            let selected = self.users_selection.contains(key);
+            let tile = ui::grid_item_sized(
+                SharedString::from(format!("user-tile-{index}")),
+                selected,
+                theme,
+                width,
+            )
+            .on_click(cx.listener({
+                let key = key.clone();
+                move |this, event: &ClickEvent, _window, cx| {
+                    this.hit_user(&key, event.click_count(), event.modifiers(), cx);
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener({
+                    let key = key.clone();
+                    move |this, _event: &MouseDownEvent, _window, cx| {
+                        if !this.users_selection.contains(&key) {
+                            this.set_user_selection_one(&key);
+                        }
+                        cx.notify();
+                    }
+                }),
+            )
+            .child(ui::leading_icon_badge(
+                "icons/user.svg",
+                theme.icon_users,
+                16.0,
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_color(rgb(theme.text))
+                    .child(account.label()),
+            );
+            let rect_key = key.clone();
+            let rect_app = cx.weak_entity();
+            let tile = div()
+                .on_children_prepainted(move |bounds, _window, cx| {
+                    let Some(rect) = bounds.first().copied() else {
+                        return;
+                    };
+                    let _ = rect_app.update(cx, |app, _| {
+                        app.note_row_rect(MarqueeTarget::Users, rect_key.clone(), rect);
+                    });
+                })
+                .child(tile);
+            let _ = visible_index;
+            column = column.child(tile);
+            count += 1;
+        }
+        let _ = keys;
+        if count > 0 {
+            columns = columns.child(column);
+        }
+
+        let mut grid = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .min_w(px(0.0))
+            .overflow_hidden();
+        grid = grid.child(self.users_grid.scroller("users-grid-scroll").child(columns));
+        if self.users_grid.overflows() {
+            grid = grid.child(
+                self.users_grid
+                    .scrollbar("users-grid-hscrollbar", theme)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                            if this.users_grid.begin(event.position.x) {
+                                cx.notify();
+                            }
+                        }),
+                    ),
+            );
+        }
+        grid.into_any_element()
+    }
+
+    /// The loaded account index for a selection key.
+    pub(super) fn user_index_by_key(&self, key: &str) -> Option<usize> {
+        match &self.users {
+            Loadable::Loaded(users) => users.iter().position(|account| user_key(account) == key),
+            _ => None,
+        }
+    }
+
+    /// One visible account row's selection key.
+    fn user_visible_keys(&self) -> Vec<String> {
+        self.visible_users()
+            .into_iter()
+            .map(|(_, key, _)| key)
+            .collect()
+    }
+
+    /// Apply one row hit (click) under the click's modifier mode.
+    pub(super) fn hit_user(
+        &mut self,
+        key: &str,
+        click_count: usize,
+        modifiers: Modifiers,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.user_rename.is_some() {
+            return;
+        }
+        let visible = self.user_visible_keys();
+        let mode = selection_mode(modifiers);
+        let mode = if click_count >= 2 && mode == SelectMode::Replace {
+            SelectMode::Replace
+        } else {
+            mode
+        };
+        // A Shift-click extends from the anchor rather than adding just the hit row.
+        if modifiers.shift {
+            self.users_selection.extend_to(&visible, key);
+        } else {
+            self.users_selection.hit(&visible, key, mode);
+        }
+        self.on_selection_changed(MarqueeTarget::Users, cx);
+        if click_count >= 2 {
+            self.open_selected_user(cx);
+        }
+    }
+
+    /// Replace the Users selection with one row (used by the right-click handler).
+    pub(super) fn set_user_selection_one(&mut self, key: &str) {
+        self.users_selection.select_one(key.to_string());
+        self.selected_user = self.user_index_by_key(key);
         self.info_loaded_for = None;
+    }
+
+    /// Start the in-place rename for the selected account (F2).
+    pub(super) fn begin_rename_user(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.begin_rename_user_by_key(None, window, cx);
+    }
+
+    /// Start the in-place rename for one account row, or the selected one when `key` is `None`.
+    pub(super) fn begin_rename_user_by_key(
+        &mut self,
+        key: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.user_rename.is_some() {
+            return;
+        }
+        let key = key.or_else(|| self.users_selection.single().map(str::to_string));
+        let Some(key) = key else {
+            return;
+        };
+        let Some(index) = self.user_index_by_key(&key) else {
+            return;
+        };
+        let account = match &self.users {
+            Loadable::Loaded(users) => users.get(index).cloned(),
+            _ => None,
+        };
+        let Some(account) = account else {
+            return;
+        };
+        let theme = self.theme;
+        let weak = cx.weak_entity();
+        let change = weak.clone();
+        let submit = weak.clone();
+        let cancel = weak.clone();
+        let initial = account.user.clone();
+        let input = cx.new(move |cx| {
+            TextInput::new(
+                theme,
+                initial,
+                TextInputOptions {
+                    bare: true,
+                    text_size: Some(12.0),
+                    ..Default::default()
+                },
+                cx,
+            )
+            .on_change(Rc::new(move |text, _window, cx| {
+                let _ = change.update(cx, |app, cx| {
+                    if let Some(edit) = app.user_rename.as_mut() {
+                        edit.new_name = text.to_string();
+                    }
+                    cx.notify();
+                });
+            }))
+            .on_submit(Rc::new(move |window, cx| {
+                let _ = submit.update(cx, |app, cx| {
+                    let focus = app.users_focus.clone();
+                    app.submit_user_rename(cx);
+                    window.focus(&focus, cx);
+                });
+            }))
+            .on_cancel(Rc::new(move |window, cx| {
+                let _ = cancel.update(cx, |app, cx| {
+                    let focus = app.users_focus.clone();
+                    app.user_rename = None;
+                    app.user_rename_blur = None;
+                    window.focus(&focus, cx);
+                    cx.notify();
+                });
+            }))
+        });
+        let focus = input.read(cx).focus_handle();
+        self.user_rename = Some(UserRenameEdit {
+            key: key.clone(),
+            user: account.user,
+            host: account.host,
+            new_name: key,
+            input,
+        });
+        self.user_rename_blur = Some(cx.on_blur(&focus, window, |app, _window, cx| {
+            if app.user_rename.is_some() {
+                app.submit_user_rename(cx);
+            }
+        }));
+        self.user_rename_focus_pending = true;
+        window.focus(&focus, cx);
         cx.notify();
+    }
+
+    /// Commit the in-place account rename: drop an empty/unchanged name, otherwise rename.
+    pub(super) fn submit_user_rename(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(edit) = self.user_rename.take() else {
+            return;
+        };
+        self.user_rename_blur = None;
+        let new_name = edit.new_name.trim().trim_end_matches('@').to_string();
+        let new_name = new_name.split('@').next().unwrap_or("").to_string();
+        if new_name.is_empty() || new_name == edit.user {
+            cx.notify();
+            return;
+        }
+        self.rename_user(edit.user, edit.host, new_name, cx);
+        cx.notify();
+    }
+
+    /// Rename a server account (`RENAME USER old TO new`), reloading the list.
+    pub(super) fn rename_user(
+        &mut self,
+        user: String,
+        host: String,
+        new_name: String,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(connection_index) = self.users_connection else {
+            return;
+        };
+        let Some(connection) = self.connection_arc(connection_index) else {
+            return;
+        };
+        let runtime = self.runtime.clone();
+        cx.spawn(async move |this, cx| {
+            let target_host = host.clone();
+            let result = runtime
+                .spawn(async move {
+                    connection
+                        .rename_user(&user, &host, &new_name, &target_host)
+                        .await
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| match result {
+                Ok(Ok(())) => app.refresh_users(cx),
+                Ok(Err(error)) => {
+                    app.error_dialog = Some(error.to_string());
+                    cx.notify();
+                }
+                Err(error) => {
+                    app.error_dialog = Some(error.to_string());
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// Open the selected account in the account window.

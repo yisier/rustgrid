@@ -282,21 +282,21 @@ impl AppView {
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let sort = self.query_sort;
-        let header = ui::detail_header_row(theme)
-            .child(div().flex_1().min_w(px(0.0)).child(ui::detail_header_cell(
-                "query-sort-name",
-                t!("common.name").to_string(),
-                (sort.column == QuerySortColumn::Name).then_some(sort.descending),
-                theme,
-                cx.listener(|this, _event, _window, cx| {
-                    this.toggle_query_sort(QuerySortColumn::Name, cx)
-                }),
-            )))
-            .child(
-                div()
-                    .w(px(QUERY_MODIFIED_WIDTH))
-                    .flex_none()
-                    .child(ui::detail_header_cell(
+        let header =
+            ui::detail_header_row(theme)
+                .child(div().w(px(ui::DETAIL_NAME_WIDTH)).flex_none().child(
+                    ui::detail_header_cell(
+                        "query-sort-name",
+                        t!("common.name").to_string(),
+                        (sort.column == QuerySortColumn::Name).then_some(sort.descending),
+                        theme,
+                        cx.listener(|this, _event, _window, cx| {
+                            this.toggle_query_sort(QuerySortColumn::Name, cx)
+                        }),
+                    ),
+                ))
+                .child(div().w(px(ui::DETAIL_MODIFIED_WIDTH)).flex_none().child(
+                    ui::detail_header_cell(
                         "query-sort-modified",
                         t!("backup.field.modified").to_string(),
                         (sort.column == QuerySortColumn::Modified).then_some(sort.descending),
@@ -304,13 +304,10 @@ impl AppView {
                         cx.listener(|this, _event, _window, cx| {
                             this.toggle_query_sort(QuerySortColumn::Modified, cx)
                         }),
-                    )),
-            )
-            .child(
-                div()
-                    .w(px(QUERY_SIZE_WIDTH))
-                    .flex_none()
-                    .child(ui::detail_header_cell(
+                    ),
+                ))
+                .child(div().w(px(ui::DETAIL_SIZE_WIDTH)).flex_none().child(
+                    ui::detail_header_cell(
                         "query-sort-size",
                         t!("backup.field.size").to_string(),
                         (sort.column == QuerySortColumn::Size).then_some(sort.descending),
@@ -318,8 +315,8 @@ impl AppView {
                         cx.listener(|this, _event, _window, cx| {
                             this.toggle_query_sort(QuerySortColumn::Size, cx)
                         }),
-                    )),
-            );
+                    ),
+                ));
 
         let mut body = ui::detail_body();
         if visible.is_empty() {
@@ -350,8 +347,8 @@ impl AppView {
         let selected = self.saved_query_selected == Some(index);
         let name: AnyElement = match self.query_rename_input(index) {
             Some(input) => div()
-                .flex_1()
-                .min_w(px(0.0))
+                .w(px(ui::DETAIL_NAME_WIDTH))
+                .flex_none()
                 .h(px(22.0))
                 .child(input)
                 .into_any_element(),
@@ -360,13 +357,14 @@ impl AppView {
                 .flex_row()
                 .items_center()
                 .gap_2()
-                .flex_1()
-                .min_w(px(0.0))
+                .w(px(ui::DETAIL_NAME_WIDTH))
+                .flex_none()
+                .overflow_hidden()
                 .text_color(rgb(theme.text))
                 .child(ui::leading_icon_badge(
                     "icons/queries.svg",
                     theme.icon_queries,
-                    24.0,
+                    22.0,
                 ))
                 .child(
                     div()
@@ -403,7 +401,7 @@ impl AppView {
         .child(name)
         .child(
             div()
-                .w(px(QUERY_MODIFIED_WIDTH))
+                .w(px(ui::DETAIL_MODIFIED_WIDTH))
                 .flex_none()
                 .overflow_hidden()
                 .whitespace_nowrap()
@@ -412,7 +410,7 @@ impl AppView {
         )
         .child(
             div()
-                .w(px(QUERY_SIZE_WIDTH))
+                .w(px(ui::DETAIL_SIZE_WIDTH))
                 .flex_none()
                 .overflow_hidden()
                 .whitespace_nowrap()
@@ -438,6 +436,13 @@ impl AppView {
                 .child(query_empty_state(theme))
                 .into_any_element();
         }
+        let width = ui::grid_item_width(
+            visible
+                .iter()
+                .filter_map(|index| self.query_files.get(*index))
+                .map(|file| ui::approx_text_width(&file.name))
+                .fold(0.0, f32::max),
+        );
         let rows = self.query_grid.rows_per_column();
         let mut columns = ui::grid_columns();
         let mut column = ui::grid_column();
@@ -448,7 +453,7 @@ impl AppView {
                 column = ui::grid_column();
                 count = 0;
             }
-            column = column.child(self.query_grid_item(index, theme, cx));
+            column = column.child(self.query_grid_item(index, theme, width, cx));
             count += 1;
         }
         if count > 0 {
@@ -483,6 +488,7 @@ impl AppView {
         &self,
         index: usize,
         theme: Theme,
+        width: f32,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let file = &self.query_files[index];
@@ -503,10 +509,11 @@ impl AppView {
                 .child(file.name.clone())
                 .into_any_element(),
         };
-        ui::grid_item(
+        ui::grid_item_sized(
             SharedString::from(format!("query-tile-{index}")),
             selected,
             theme,
+            width,
         )
         .on_click(cx.listener(move |this, event, _window, cx| {
             this.saved_query_selected = Some(index);
@@ -529,7 +536,7 @@ impl AppView {
         .child(ui::leading_icon_badge(
             "icons/queries.svg",
             theme.icon_queries,
-            20.0,
+            16.0,
         ))
         .child(title)
     }
@@ -566,10 +573,6 @@ impl AppView {
 
 /// The tag chip shown beside a saved query's name.
 const QUERY_TAG: &str = "SQL";
-
-/// Column widths of the Queries 详细列表, shared by the header and its rows.
-const QUERY_MODIFIED_WIDTH: f32 = 190.0;
-const QUERY_SIZE_WIDTH: f32 = 110.0;
 
 /// A saved query's modified timestamp, or `--` when the filesystem did not report one.
 fn query_modified_text(file: &QueryFileInfo) -> String {

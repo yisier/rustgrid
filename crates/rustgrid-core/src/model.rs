@@ -81,6 +81,9 @@ pub enum ObjectKind {
 pub struct TableInfo {
     pub name: String,
     pub kind: ObjectKind,
+    /// For a view, whether it is updatable (`IS_UPDATABLE = YES`); always `false` for a table.
+    #[serde(default)]
+    pub updatable: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

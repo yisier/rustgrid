@@ -24,6 +24,74 @@ fn routine_selection(
     Some((pane.connection_index, pane.database_index, name, kind))
 }
 
+/// The remembered-layout page key for an object category.
+fn view_page_for_category(category: Category) -> &'static str {
+    match category {
+        Category::Tables => VIEW_PAGE_TABLES,
+        Category::Views => VIEW_PAGE_VIEWS,
+        Category::Functions => VIEW_PAGE_FUNCTIONS,
+        Category::Queries => VIEW_PAGE_QUERIES,
+        Category::Backups => VIEW_PAGE_BACKUPS,
+    }
+}
+
+/// The Functions 详细列表's 名 / 函数类型 / 决定性 column widths.
+const ROUTINE_NAME_WIDTH: f32 = 300.0;
+const ROUTINE_KIND_WIDTH: f32 = 110.0;
+const ROUTINE_DETERMINISTIC_WIDTH: f32 = 90.0;
+/// The Views 详细列表's 可以更新 column width.
+const VIEW_UPDATABLE_WIDTH: f32 = 120.0;
+/// The Tables 详细列表's overview column widths (the name column fills the rest).
+const TABLE_AUTO_INCREMENT_WIDTH: f32 = 140.0;
+const TABLE_DATA_LENGTH_WIDTH: f32 = 120.0;
+const TABLE_ENGINE_WIDTH: f32 = 100.0;
+const TABLE_ROWS_WIDTH: f32 = 90.0;
+
+/// A padded list message (loading/failed/empty) coloured by `color`.
+fn object_message(color: u32, text: String) -> AnyElement {
+    div()
+        .p_3()
+        .text_color(rgb(color))
+        .child(text)
+        .into_any_element()
+}
+
+/// The object list's "no objects" placeholder.
+fn object_empty(theme: Theme) -> AnyElement {
+    object_message(theme.text_muted, t!("common.empty").to_string())
+}
+
+/// The per-render snapshot the object list draws from: the remembered layout, the loaded
+/// tables/routines, the search text, the current multi-selection and the rename editor.
+struct ObjectRenderData {
+    mode: ViewMode,
+    tables: Option<Loadable<Vec<rustgrid_core::TableInfo>>>,
+    table_statuses: Option<Vec<(String, rustgrid_core::TableStatus)>>,
+    routines: Option<Loadable<Vec<RoutineInfo>>>,
+    search: String,
+    selected: std::collections::HashSet<String>,
+    rename: Option<RenameRow>,
+}
+
+/// Wrap an object row/tile so it publishes its window-space rectangle for the marquee.
+fn object_row_with_rect(
+    app: WeakEntity<AppView>,
+    row: impl IntoElement + 'static,
+    key: String,
+) -> AnyElement {
+    div()
+        .on_children_prepainted(move |bounds, _window, cx| {
+            let Some(rect) = bounds.first().copied() else {
+                return;
+            };
+            let _ = app.update(cx, |app, _| {
+                app.note_row_rect(MarqueeTarget::Objects, key.clone(), rect)
+            });
+        })
+        .child(row)
+        .into_any_element()
+}
+
 impl AppView {
     pub(super) fn render_object_toolbar(
         &self,
@@ -176,22 +244,13 @@ impl AppView {
                         }),
                     )),
             )
-            .child(self.render_object_search(cx))
+            .child(self.render_object_view_controls(category, cx))
     }
 
     /// The object toolbar shown for the `Queries` category, including when no database is open.
     pub(super) fn render_query_object_toolbar(&self, cx: &mut Context<'_, Self>) -> Div {
         let theme = self.theme;
         let delete_enabled = self.query_selected_in_scope(cx);
-        // The 详细列表 / 平铺网格 switch sits between the actions and the search box; the shared
-        // `ui` control remembers the choice per page.
-        let weak = cx.weak_entity();
-        let on_select = Rc::new(
-            move |mode: ViewMode, _event: &ClickEvent, _window: &mut Window, cx: &mut App| {
-                let _ = weak.update(cx, |app, cx| app.set_view_mode(VIEW_PAGE_QUERIES, mode, cx));
-            },
-        );
-        let view_mode = self.view_mode(VIEW_PAGE_QUERIES);
         div()
             .flex()
             .flex_row()
@@ -236,8 +295,7 @@ impl AppView {
                         cx.listener(|this, _event, _window, cx| this.refresh_query_files(cx)),
                     )),
             )
-            .child(ui::view_mode_toggle(theme, view_mode, on_select))
-            .child(self.render_object_search(cx))
+            .child(self.render_object_view_controls(Category::Queries, cx))
     }
 
     /// The toolbar for the Functions object list (Navicat's 设计函数 / 新建函数 / 删除函数 /
@@ -364,7 +422,7 @@ impl AppView {
                         }),
                     )),
             )
-            .child(self.render_object_search(cx))
+            .child(self.render_object_view_controls(Category::Functions, cx))
     }
 
     /// The toolbar for the Views object list (Navicat's 打开视图 / 设计视图 / 新建视图 /
@@ -495,6 +553,31 @@ impl AppView {
                         }),
                     )),
             )
+            .child(self.render_object_view_controls(Category::Views, cx))
+    }
+
+    /// The 详细列表 / 平铺网格 switch plus the search box, shared by the object toolbars. The
+    /// switch sits to the left of, and adjacent to, the search box.
+    pub(super) fn render_object_view_controls(
+        &self,
+        category: Category,
+        cx: &mut Context<'_, Self>,
+    ) -> Div {
+        let theme = self.theme;
+        let page = view_page_for_category(category);
+        let weak = cx.weak_entity();
+        let on_select = Rc::new(
+            move |mode: ViewMode, _event: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                let _ = weak.update(cx, |app, cx| app.set_view_mode(page, mode, cx));
+            },
+        );
+        let view_mode = self.view_mode(page);
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .child(ui::view_mode_toggle(theme, view_mode, on_select))
             .child(self.render_object_search(cx))
     }
 
@@ -630,8 +713,8 @@ impl ObjectPane {
             category,
             selected: None,
             selected_routine: None,
-            scroll: ScrollHandle::new(),
-            hscroll_grab: None,
+            grid: ColumnGrid::default(),
+            visible_keys: Vec::new(),
             focus: cx.focus_handle(),
             theme,
         }
@@ -644,86 +727,55 @@ impl ObjectPane {
         }
     }
 
-    fn object_rows_per_column(&self) -> usize {
-        let viewport = f32::from(self.scroll.bounds().size.height);
-        if viewport <= 0.0 {
-            return 30;
-        }
-        let rows = ((viewport - OBJECT_BOTTOM_MARGIN) / OBJECT_ROW_HEIGHT).floor() as usize;
-        rows.max(1)
-    }
-
-    /// Render the list body from an owned snapshot of the database's tables or routines.
-    fn render_body(
-        &self,
-        tables: Option<Loadable<Vec<rustgrid_core::TableInfo>>>,
-        routines: Option<Loadable<Vec<RoutineInfo>>>,
-        search: &str,
-        rename: Option<RenameRow>,
-        cx: &mut Context<'_, Self>,
-    ) -> AnyElement {
+    /// Render the list body from a snapshot of the database's tables or routines.
+    fn render_body(&mut self, data: ObjectRenderData, cx: &mut Context<'_, Self>) -> AnyElement {
+        let ObjectRenderData {
+            mode,
+            tables,
+            table_statuses,
+            routines,
+            search,
+            selected,
+            rename,
+        } = data;
         let theme = self.theme;
-        let empty = || {
-            div()
-                .p_3()
-                .text_color(rgb(theme.text_muted))
-                .child(t!("common.empty").to_string())
-                .into_any_element()
-        };
+        let query = search.trim().to_lowercase();
+        self.visible_keys.clear();
         if self.category == Category::Functions {
             let Some(routines) = routines else {
-                return empty();
+                return object_empty(theme);
             };
             return match routines {
-                Loadable::Idle | Loadable::Loading => div()
-                    .p_3()
-                    .text_color(rgb(theme.text_muted))
-                    .child(t!("common.loading").to_string())
-                    .into_any_element(),
-                Loadable::Failed(error) => div()
-                    .p_3()
-                    .text_color(rgb(theme.danger))
-                    .child(error)
-                    .into_any_element(),
+                Loadable::Idle | Loadable::Loading => {
+                    object_message(theme.text_muted, t!("common.loading").to_string())
+                }
+                Loadable::Failed(error) => object_message(theme.danger, error),
                 Loadable::Loaded(routines) => {
-                    let rows = self.object_rows_per_column();
-                    let query = search.trim().to_lowercase();
-                    let mut columns = div().flex().flex_row().items_start().gap_1().p_1();
-                    let mut column = div().flex().flex_col();
-                    let mut count = 0usize;
-                    for (index, routine) in routines.iter().enumerate() {
-                        if !query.is_empty() && !routine.name.to_lowercase().contains(&query) {
-                            continue;
+                    let items: Vec<&RoutineInfo> = routines
+                        .iter()
+                        .filter(|routine| {
+                            query.is_empty() || routine.name.to_lowercase().contains(&query)
+                        })
+                        .collect();
+                    self.visible_keys
+                        .extend(items.iter().map(|routine| routine.name.clone()));
+                    match mode {
+                        ViewMode::Detail => {
+                            self.render_routine_detail(&items, &selected, theme, cx)
                         }
-                        if count == rows {
-                            columns = columns.child(column);
-                            column = div().flex().flex_col();
-                            count = 0;
-                        }
-                        column = column.child(self.render_routine_item(index, routine, cx));
-                        count += 1;
+                        ViewMode::Grid => self.render_routine_grid(&items, &selected, theme, cx),
                     }
-                    if count > 0 {
-                        columns = columns.child(column);
-                    }
-                    columns.into_any_element()
                 }
             };
         }
         let Some(tables) = tables else {
-            return empty();
+            return object_empty(theme);
         };
         match tables {
-            Loadable::Idle | Loadable::Loading => div()
-                .p_3()
-                .text_color(rgb(theme.text_muted))
-                .child(t!("common.loading").to_string())
-                .into_any_element(),
-            Loadable::Failed(error) => div()
-                .p_3()
-                .text_color(rgb(theme.danger))
-                .child(error)
-                .into_any_element(),
+            Loadable::Idle | Loadable::Loading => {
+                object_message(theme.text_muted, t!("common.loading").to_string())
+            }
+            Loadable::Failed(error) => object_message(theme.danger, error),
             Loadable::Loaded(tables) => {
                 let want_view = match self.category {
                     Category::Tables => Some(false),
@@ -731,112 +783,130 @@ impl ObjectPane {
                     _ => None,
                 };
                 let Some(want_view) = want_view else {
-                    return empty();
+                    return object_empty(theme);
                 };
-                let rows = self.object_rows_per_column();
-                let query = search.trim().to_lowercase();
-                let mut columns = div().flex().flex_row().items_start().gap_1().p_1();
-                let mut column = div().flex().flex_col();
-                let mut count = 0usize;
-                for table in tables.iter().filter(|table| {
-                    matches!(table.kind, rustgrid_core::ObjectKind::View) == want_view
-                        && (query.is_empty() || table.name.to_lowercase().contains(&query))
-                }) {
-                    if count == rows {
-                        columns = columns.child(column);
-                        column = div().flex().flex_col();
-                        count = 0;
+                let items: Vec<&rustgrid_core::TableInfo> = tables
+                    .iter()
+                    .filter(|table| {
+                        matches!(table.kind, rustgrid_core::ObjectKind::View) == want_view
+                            && (query.is_empty() || table.name.to_lowercase().contains(&query))
+                    })
+                    .collect();
+                self.visible_keys
+                    .extend(items.iter().map(|table| table.name.clone()));
+                match mode {
+                    ViewMode::Detail => self.render_table_detail(
+                        &items,
+                        table_statuses.as_deref(),
+                        &selected,
+                        rename.as_ref(),
+                        theme,
+                        cx,
+                    ),
+                    ViewMode::Grid => {
+                        self.render_table_grid(&items, &selected, rename.as_ref(), theme, cx)
                     }
-                    column = column.child(self.render_item(table, rename.as_ref(), cx));
-                    count += 1;
                 }
-                if count > 0 {
-                    columns = columns.child(column);
-                }
-                columns.into_any_element()
             }
         }
     }
 
-    fn render_hscrollbar(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let theme = self.theme;
-        let bounds = self.scroll.bounds();
-        let viewport = f32::from(bounds.size.width);
-        let max = f32::from(self.scroll.max_offset().x);
-        let scroll = -f32::from(self.scroll.offset().x);
-        let (thumb_left, thumb_len) = if max > 0.0 {
-            scrollbar_fractions(viewport, max, scroll)
-        } else {
-            (0.0, 0.0)
+    /// The Tables/Views 详细列表. Tables show Navicat's overview columns (auto-increment, modified,
+    /// data length, engine, rows, comment); views show 名 + 可以更新.
+    fn render_table_detail(
+        &self,
+        tables: &[&rustgrid_core::TableInfo],
+        statuses: Option<&[(String, rustgrid_core::TableStatus)]>,
+        selected: &std::collections::HashSet<String>,
+        rename: Option<&RenameRow>,
+        theme: Theme,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let column = |width: f32, label: String| {
+            div()
+                .w(px(width))
+                .flex_none()
+                .child(ui::detail_header_cell_plain(label, theme))
         };
 
-        ui::hscrollbar_track("object-hscrollbar", theme, thumb_left, thumb_len).on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                this.hscroll_begin(event.position.x, cx);
-            }),
-        )
-    }
-
-    fn hscroll_begin(&mut self, mouse_x: Pixels, cx: &mut Context<'_, Self>) {
-        let bounds = self.scroll.bounds();
-        let viewport = f32::from(bounds.size.width);
-        let max = f32::from(self.scroll.max_offset().x);
-        let (thumb_w, travel) = scrollbar_thumb(viewport, max);
-        if travel <= 0.0 {
-            return;
+        let mut header = ui::detail_header_row(theme).child(div().flex_1().min_w(px(0.0)).child(
+            ui::detail_header_cell_plain(t!("common.name").to_string(), theme),
+        ));
+        match self.category {
+            Category::Views => {
+                header = header.child(column(
+                    VIEW_UPDATABLE_WIDTH,
+                    t!("view.field.updatable").to_string(),
+                ));
+            }
+            Category::Tables => {
+                header = header
+                    .child(column(
+                        TABLE_AUTO_INCREMENT_WIDTH,
+                        t!("table.col.auto_increment").to_string(),
+                    ))
+                    .child(column(
+                        ui::DETAIL_MODIFIED_WIDTH,
+                        t!("table.col.modified").to_string(),
+                    ))
+                    .child(column(
+                        TABLE_DATA_LENGTH_WIDTH,
+                        t!("table.col.data_length").to_string(),
+                    ))
+                    .child(column(
+                        TABLE_ENGINE_WIDTH,
+                        t!("table.col.engine").to_string(),
+                    ))
+                    .child(column(TABLE_ROWS_WIDTH, t!("table.col.rows").to_string()))
+                    .child(column(
+                        ui::DETAIL_COMMENT_WIDTH,
+                        t!("table.col.comment").to_string(),
+                    ));
+            }
+            _ => {}
         }
-        let scroll = -f32::from(self.scroll.offset().x);
-        let thumb_x = (scroll / max) * travel;
-        let relative = f32::from(mouse_x) - f32::from(bounds.left());
-        let grab = if relative >= thumb_x && relative <= thumb_x + thumb_w {
-            relative - thumb_x
-        } else {
-            thumb_w / 2.0
-        };
-        self.hscroll_grab = Some(grab);
-        self.hscroll_set(relative, grab, cx);
-    }
 
-    fn hscroll_drag(&mut self, event: &MouseMoveEvent, cx: &mut Context<'_, Self>) {
-        let Some(grab) = self.hscroll_grab else {
-            return;
-        };
-        if event.pressed_button != Some(MouseButton::Left) {
-            self.hscroll_grab = None;
-            cx.notify();
-            return;
+        let mut body = ui::detail_body();
+        if tables.is_empty() {
+            body = body.child(
+                div()
+                    .p_3()
+                    .text_color(rgb(theme.text_muted))
+                    .child(t!("common.empty").to_string()),
+            );
         }
-        let relative = f32::from(event.position.x) - f32::from(self.scroll.bounds().left());
-        self.hscroll_set(relative, grab, cx);
-    }
-
-    fn hscroll_set(&self, relative: f32, grab: f32, cx: &mut Context<'_, Self>) {
-        let viewport = f32::from(self.scroll.bounds().size.width);
-        let max = f32::from(self.scroll.max_offset().x);
-        let (_, travel) = scrollbar_thumb(viewport, max);
-        if travel <= 0.0 {
-            return;
+        for table in tables {
+            let key = table.name.clone();
+            let status = statuses.and_then(|list| {
+                list.iter()
+                    .find(|(name, _)| name == &table.name)
+                    .map(|(_, status)| status)
+            });
+            let row = self.table_row(table, status, selected.contains(&key), rename, theme, cx);
+            body = body.child(object_row_with_rect(self.app.clone(), row, key));
         }
-        let thumb_x = (relative - grab).clamp(0.0, travel);
-        let scroll = thumb_x / travel * max;
-        let y = self.scroll.offset().y;
-        self.scroll.set_offset(Point::new(px(-scroll), y));
-        cx.notify();
+        ui::detail_card(theme)
+            .child(header)
+            .child(body)
+            .into_any_element()
     }
 
-    fn render_item(
+    /// One table/view row of the 详细列表.
+    fn table_row(
         &self,
         table: &rustgrid_core::TableInfo,
+        status: Option<&rustgrid_core::TableStatus>,
+        selected: bool,
         rename: Option<&RenameRow>,
+        theme: Theme,
         cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
-        let theme = self.theme;
+    ) -> impl IntoElement + use<> {
         let is_view = matches!(table.kind, rustgrid_core::ObjectKind::View);
-        let selected = self.selected.as_deref() == Some(table.name.as_str());
         let connection_index = self.connection_index;
         let database_index = self.database_index;
         let name = table.name.clone();
+        let label_name = name.clone();
+        let hit_key = name.clone();
         let open_name = name.clone();
         let menu_name = name.clone();
         let menu_app = self.app.clone();
@@ -852,75 +922,25 @@ impl ObjectPane {
             Some(row) => div()
                 .flex_1()
                 .min_w(px(0.0))
-                .h(px(OBJECT_ROW_HEIGHT - 2.0))
+                .h(px(22.0))
                 .child(row.input.clone())
                 .into_any_element(),
             None => div()
+                .min_w(px(0.0))
                 .overflow_hidden()
                 .whitespace_nowrap()
-                .child(name)
+                .child(label_name)
                 .into_any_element(),
         };
-
-        div()
-            .id(SharedString::from(format!(
-                "obj-{connection_index}-{database_index}-{}",
-                table.name
-            )))
+        let name_cell = div()
             .flex()
             .flex_row()
             .items_center()
-            .gap_1()
-            .w(px(220.0))
-            .h(px(OBJECT_ROW_HEIGHT))
-            .px_1()
-            .rounded_sm()
-            .cursor_pointer()
-            .when(selected, move |style| {
-                style
-                    .bg(rgb(theme.tree_selected_bg))
-                    .text_color(rgb(theme.tree_selected_text))
-            })
-            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-            .on_click(cx.listener(move |this, event, window, cx| {
-                if editing_here {
-                    return;
-                }
-                let double_click =
-                    matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2);
-                this.commit_pending_rename(cx);
-                window.focus(&this.focus, cx);
-                this.select_object(open_name.clone(), cx);
-                if double_click {
-                    this.open_selected_object(cx);
-                }
-            }))
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    if editing_here {
-                        return;
-                    }
-                    this.commit_pending_rename(cx);
-                    window.focus(&this.focus, cx);
-                    this.selected = Some(menu_name.clone());
-                    let _ = menu_app.update(cx, |app, cx| {
-                        app.context_menu = Some(ContextMenu {
-                            target: ContextTarget::Table {
-                                connection_index,
-                                database_index,
-                                name: menu_name.clone(),
-                                is_view,
-                                pane: RowPane::Objects,
-                            },
-                            position: event.position,
-                        });
-                        cx.notify();
-                    });
-                    cx.notify();
-                }),
-            )
-            .child(tree_icon(
+            .gap_2()
+            .flex_1()
+            .min_w(px(0.0))
+            .overflow_hidden()
+            .child(ui::leading_icon_badge(
                 if is_view {
                     "icons/views.svg"
                 } else {
@@ -931,109 +951,559 @@ impl ObjectPane {
                 } else {
                     theme.icon_table
                 },
+                22.0,
             ))
-            .child(label)
+            .child(label);
+        ui::detail_row(
+            SharedString::from(format!("obj-{connection_index}-{database_index}-{name}")),
+            selected,
+            theme,
+        )
+        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+            if editing_here {
+                return;
+            }
+            let double_click =
+                matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2);
+            this.commit_pending_rename(cx);
+            window.focus(&this.focus, cx);
+            this.hit_object(&hit_key, event.modifiers(), cx);
+            if double_click {
+                this.open_object_named(open_name.clone(), cx);
+            }
+        }))
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                if editing_here {
+                    return;
+                }
+                this.commit_pending_rename(cx);
+                window.focus(&this.focus, cx);
+                this.ensure_object_selected(&menu_name, cx);
+                let _ = menu_app.update(cx, |app, cx| {
+                    app.context_menu = Some(ContextMenu {
+                        target: ContextTarget::Table {
+                            connection_index,
+                            database_index,
+                            name: menu_name.clone(),
+                            is_view,
+                            pane: RowPane::Objects,
+                        },
+                        position: event.position,
+                    });
+                    cx.notify();
+                });
+                cx.notify();
+            }),
+        )
+        .child(name_cell)
+        .when(self.category == Category::Views, |row| {
+            row.child(
+                div()
+                    .w(px(VIEW_UPDATABLE_WIDTH))
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .text_color(rgb(theme.text_muted))
+                    .child(if table.updatable {
+                        t!("common.yes").to_string()
+                    } else {
+                        t!("common.no").to_string()
+                    }),
+            )
+        })
+        .when(self.category == Category::Tables, |row| {
+            let (auto_increment, modified, data_length, engine, rows, comment) = match status {
+                Some(status) => (
+                    status
+                        .auto_increment
+                        .map(|value| value.to_string())
+                        .unwrap_or_default(),
+                    status.updated.clone().unwrap_or_default(),
+                    status.data_length.map(human_size).unwrap_or_default(),
+                    status.engine.clone().unwrap_or_default(),
+                    status
+                        .rows
+                        .map(|value| value.to_string())
+                        .unwrap_or_default(),
+                    single_line(&status.comment.clone().unwrap_or_default()),
+                ),
+                None => (
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                ),
+            };
+            let cell = |width: f32, text: String| {
+                div()
+                    .w(px(width))
+                    .flex_none()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_color(rgb(theme.text_muted))
+                    .child(text)
+            };
+            row.child(cell(TABLE_AUTO_INCREMENT_WIDTH, auto_increment))
+                .child(cell(ui::DETAIL_MODIFIED_WIDTH, modified))
+                .child(cell(TABLE_DATA_LENGTH_WIDTH, data_length))
+                .child(cell(TABLE_ENGINE_WIDTH, engine))
+                .child(cell(TABLE_ROWS_WIDTH, rows))
+                .child(cell(ui::DETAIL_COMMENT_WIDTH, comment))
+        })
     }
 
-    /// One routine row of the Functions object list.
-    fn render_routine_item(
+    /// The Tables/Views 平铺网格: the column-major icon+name tiles.
+    fn render_table_grid(
         &self,
-        index: usize,
-        routine: &RoutineInfo,
+        tables: &[&rustgrid_core::TableInfo],
+        selected: &std::collections::HashSet<String>,
+        rename: Option<&RenameRow>,
+        theme: Theme,
         cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
-        let theme = self.theme;
-        let selected = self.selected.as_deref() == Some(routine.name.as_str())
-            && self.selected_routine == Some(routine.kind);
+    ) -> AnyElement {
+        if tables.is_empty() {
+            return object_empty(theme);
+        }
+        let width = ui::grid_item_width(
+            tables
+                .iter()
+                .map(|table| ui::approx_text_width(&table.name))
+                .fold(0.0, f32::max),
+        );
+        let rows = self.grid.rows_per_column();
+        let mut columns = ui::grid_columns();
+        let mut column = ui::grid_column();
+        let mut count = 0usize;
+        for table in tables {
+            if count == rows {
+                columns = columns.child(column);
+                column = ui::grid_column();
+                count = 0;
+            }
+            let key = table.name.clone();
+            let tile = self.table_tile(table, selected.contains(&key), rename, theme, width, cx);
+            column = column.child(object_row_with_rect(self.app.clone(), tile, key));
+            count += 1;
+        }
+        if count > 0 {
+            columns = columns.child(column);
+        }
+        self.render_grid(columns, theme, cx)
+    }
+
+    /// One table/view tile of the 平铺网格.
+    #[allow(clippy::too_many_arguments)]
+    fn table_tile(
+        &self,
+        table: &rustgrid_core::TableInfo,
+        selected: bool,
+        rename: Option<&RenameRow>,
+        theme: Theme,
+        width: f32,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement + use<> {
+        let is_view = matches!(table.kind, rustgrid_core::ObjectKind::View);
         let connection_index = self.connection_index;
         let database_index = self.database_index;
-        let name = routine.name.clone();
-        let kind = routine.kind;
+        let name = table.name.clone();
+        let label_name = name.clone();
+        let hit_key = name.clone();
         let open_name = name.clone();
         let menu_name = name.clone();
         let menu_app = self.app.clone();
-
-        div()
-            .id(SharedString::from(format!(
-                "obj-routine-{connection_index}-{database_index}-{index}"
-            )))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_1()
-            .w(px(220.0))
-            .h(px(OBJECT_ROW_HEIGHT))
-            .px_1()
-            .rounded_sm()
-            .cursor_pointer()
-            .when(selected, move |style| {
-                style
-                    .bg(rgb(theme.tree_selected_bg))
-                    .text_color(rgb(theme.tree_selected_text))
-            })
-            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-            .on_click(cx.listener(move |this, event, window, cx| {
-                window.focus(&this.focus, cx);
-                this.select_routine(open_name.clone(), kind, cx);
-                let double_click =
-                    matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2);
-                if double_click && let Some(app) = this.app.upgrade() {
-                    app.update(cx, |app, cx| {
-                        let Some(database) = app.database_name(connection_index, database_index)
-                        else {
-                            return;
-                        };
-                        app.open_routine_by_name(
-                            connection_index,
-                            database,
-                            open_name.clone(),
-                            kind,
-                            cx,
-                        );
-                    });
+        let rename = rename.filter(|row| {
+            row.connection_index == connection_index
+                && row.database_index == database_index
+                && row.old_name == table.name
+        });
+        let editing_here = rename.is_some();
+        let label: AnyElement = match rename {
+            Some(row) => div()
+                .flex_1()
+                .min_w(px(0.0))
+                .h(px(22.0))
+                .child(row.input.clone())
+                .into_any_element(),
+            None => div()
+                .flex_1()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_color(rgb(theme.text))
+                .child(label_name)
+                .into_any_element(),
+        };
+        ui::grid_item_sized(
+            SharedString::from(format!(
+                "obj-tile-{connection_index}-{database_index}-{name}"
+            )),
+            selected,
+            theme,
+            width,
+        )
+        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+            if editing_here {
+                return;
+            }
+            let double_click =
+                matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2);
+            this.commit_pending_rename(cx);
+            window.focus(&this.focus, cx);
+            this.hit_object(&hit_key, event.modifiers(), cx);
+            if double_click {
+                this.open_object_named(open_name.clone(), cx);
+            }
+        }))
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                if editing_here {
+                    return;
                 }
-            }))
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    window.focus(&this.focus, cx);
-                    this.selected = Some(menu_name.clone());
-                    this.selected_routine = Some(kind);
-                    let _ = menu_app.update(cx, |app, cx| {
-                        app.context_menu = Some(ContextMenu {
-                            target: ContextTarget::Routine {
-                                connection_index,
-                                database_index,
-                                name: menu_name.clone(),
-                                kind,
-                            },
-                            position: event.position,
-                        });
-                        cx.notify();
+                this.commit_pending_rename(cx);
+                window.focus(&this.focus, cx);
+                this.ensure_object_selected(&menu_name, cx);
+                let _ = menu_app.update(cx, |app, cx| {
+                    app.context_menu = Some(ContextMenu {
+                        target: ContextTarget::Table {
+                            connection_index,
+                            database_index,
+                            name: menu_name.clone(),
+                            is_view,
+                            pane: RowPane::Objects,
+                        },
+                        position: event.position,
                     });
                     cx.notify();
-                }),
-            )
-            .child(tree_icon(
-                routine_icon(kind),
-                routine_icon_color(kind, theme),
-            ))
-            .child(div().overflow_hidden().whitespace_nowrap().child(name))
+                });
+                cx.notify();
+            }),
+        )
+        .child(ui::leading_icon_badge(
+            if is_view {
+                "icons/views.svg"
+            } else {
+                "icons/tables.svg"
+            },
+            if is_view {
+                theme.icon_view
+            } else {
+                theme.icon_table
+            },
+            16.0,
+        ))
+        .child(label)
     }
 
-    /// Select one routine in the Functions list.
-    fn select_routine(&mut self, name: String, kind: RoutineKind, cx: &mut Context<'_, Self>) {
-        self.selected = Some(name.clone());
-        self.selected_routine = Some(kind);
+    /// The Functions 详细列表: an icon plus the routine name.
+    fn render_routine_detail(
+        &self,
+        routines: &[&RoutineInfo],
+        selected: &std::collections::HashSet<String>,
+        theme: Theme,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let header =
+            ui::detail_header_row(theme)
+                .child(div().w(px(ROUTINE_NAME_WIDTH)).flex_none().child(
+                    ui::detail_header_cell_plain(t!("common.name").to_string(), theme),
+                ))
+                .child(div().w(px(ui::DETAIL_MODIFIED_WIDTH)).flex_none().child(
+                    ui::detail_header_cell_plain(t!("routine.col.modified").to_string(), theme),
+                ))
+                .child(div().w(px(ROUTINE_KIND_WIDTH)).flex_none().child(
+                    ui::detail_header_cell_plain(t!("routine.col.kind").to_string(), theme),
+                ))
+                .child(div().w(px(ROUTINE_DETERMINISTIC_WIDTH)).flex_none().child(
+                    ui::detail_header_cell_plain(
+                        t!("routine.col.deterministic").to_string(),
+                        theme,
+                    ),
+                ))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .child(ui::detail_header_cell_plain(
+                            t!("routine.field.comment").to_string(),
+                            theme,
+                        )),
+                );
+        let mut body = ui::detail_body();
+        if routines.is_empty() {
+            body = body.child(
+                div()
+                    .p_3()
+                    .text_color(rgb(theme.text_muted))
+                    .child(t!("common.empty").to_string()),
+            );
+        }
+        for routine in routines {
+            let key = routine.name.clone();
+            let row = self.routine_row(routine, selected.contains(&key), theme, cx);
+            body = body.child(object_row_with_rect(self.app.clone(), row, key));
+        }
+        ui::detail_card(theme)
+            .child(header)
+            .child(body)
+            .into_any_element()
+    }
+
+    /// One routine row of the Functions 详细列表.
+    fn routine_row(
+        &self,
+        routine: &RoutineInfo,
+        selected: bool,
+        theme: Theme,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement + use<> {
         let connection_index = self.connection_index;
         let database_index = self.database_index;
-        if let Some(app) = self.app.upgrade() {
-            app.update(cx, |app, _| {
-                app.set_info_routine(connection_index, database_index, name.clone(), kind);
-            });
+        let name = routine.name.clone();
+        let label_name = name.clone();
+        let hit_key = name.clone();
+        let open_name = name.clone();
+        let menu_name = name.clone();
+        let kind = routine.kind;
+        let menu_app = self.app.clone();
+        ui::detail_row(
+            SharedString::from(format!(
+                "obj-routine-{connection_index}-{database_index}-{name}"
+            )),
+            selected,
+            theme,
+        )
+        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+            let double_click =
+                matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2);
+            window.focus(&this.focus, cx);
+            this.hit_object(&hit_key, event.modifiers(), cx);
+            if double_click {
+                this.open_routine_named(open_name.clone(), kind, cx);
+            }
+        }))
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                window.focus(&this.focus, cx);
+                this.ensure_object_selected(&menu_name, cx);
+                let _ = menu_app.update(cx, |app, cx| {
+                    app.context_menu = Some(ContextMenu {
+                        target: ContextTarget::Routine {
+                            connection_index,
+                            database_index,
+                            name: menu_name.clone(),
+                            kind,
+                        },
+                        position: event.position,
+                    });
+                    cx.notify();
+                });
+                cx.notify();
+            }),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .w(px(ROUTINE_NAME_WIDTH))
+                .flex_none()
+                .overflow_hidden()
+                .child(ui::leading_icon_badge(
+                    routine_icon(kind),
+                    routine_icon_color(kind, theme),
+                    22.0,
+                ))
+                .child(
+                    div()
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .child(label_name),
+                ),
+        )
+        .child(
+            div()
+                .w(px(ui::DETAIL_MODIFIED_WIDTH))
+                .flex_none()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_color(rgb(theme.text_muted))
+                .child(routine.modified.clone().unwrap_or_default()),
+        )
+        .child(
+            div()
+                .w(px(ROUTINE_KIND_WIDTH))
+                .flex_none()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_color(rgb(theme.text_muted))
+                .child(kind.sql_name()),
+        )
+        .child(
+            div()
+                .w(px(ROUTINE_DETERMINISTIC_WIDTH))
+                .flex_none()
+                .whitespace_nowrap()
+                .text_color(rgb(theme.text_muted))
+                .child(if routine.deterministic {
+                    t!("common.yes").to_string()
+                } else {
+                    t!("common.no").to_string()
+                }),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_color(rgb(theme.text_muted))
+                .child(single_line(&routine.comment)),
+        )
+    }
+
+    /// The Functions 平铺网格: the column-major routine tiles.
+    fn render_routine_grid(
+        &self,
+        routines: &[&RoutineInfo],
+        selected: &std::collections::HashSet<String>,
+        theme: Theme,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        if routines.is_empty() {
+            return object_empty(theme);
         }
-        self.notify_app(cx);
-        cx.notify();
+        let width = ui::grid_item_width(
+            routines
+                .iter()
+                .map(|routine| ui::approx_text_width(&routine.name))
+                .fold(0.0, f32::max),
+        );
+        let rows = self.grid.rows_per_column();
+        let mut columns = ui::grid_columns();
+        let mut column = ui::grid_column();
+        let mut count = 0usize;
+        for routine in routines {
+            if count == rows {
+                columns = columns.child(column);
+                column = ui::grid_column();
+                count = 0;
+            }
+            let key = routine.name.clone();
+            let tile = self.routine_tile(routine, selected.contains(&key), theme, width, cx);
+            column = column.child(object_row_with_rect(self.app.clone(), tile, key));
+            count += 1;
+        }
+        if count > 0 {
+            columns = columns.child(column);
+        }
+        self.render_grid(columns, theme, cx)
+    }
+
+    /// One routine tile of the Functions 平铺网格.
+    fn routine_tile(
+        &self,
+        routine: &RoutineInfo,
+        selected: bool,
+        theme: Theme,
+        width: f32,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement + use<> {
+        let connection_index = self.connection_index;
+        let database_index = self.database_index;
+        let name = routine.name.clone();
+        let label_name = name.clone();
+        let hit_key = name.clone();
+        let open_name = name.clone();
+        let menu_name = name.clone();
+        let kind = routine.kind;
+        let menu_app = self.app.clone();
+        ui::grid_item_sized(
+            SharedString::from(format!(
+                "obj-routine-tile-{connection_index}-{database_index}-{name}"
+            )),
+            selected,
+            theme,
+            width,
+        )
+        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+            let double_click =
+                matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2);
+            window.focus(&this.focus, cx);
+            this.hit_object(&hit_key, event.modifiers(), cx);
+            if double_click {
+                this.open_routine_named(open_name.clone(), kind, cx);
+            }
+        }))
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                window.focus(&this.focus, cx);
+                this.ensure_object_selected(&menu_name, cx);
+                let _ = menu_app.update(cx, |app, cx| {
+                    app.context_menu = Some(ContextMenu {
+                        target: ContextTarget::Routine {
+                            connection_index,
+                            database_index,
+                            name: menu_name.clone(),
+                            kind,
+                        },
+                        position: event.position,
+                    });
+                    cx.notify();
+                });
+                cx.notify();
+            }),
+        )
+        .child(ui::leading_icon_badge(
+            routine_icon(kind),
+            routine_icon_color(kind, theme),
+            16.0,
+        ))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_color(rgb(theme.text))
+                .child(label_name),
+        )
+    }
+
+    /// Wrap a 平铺网格's columns in the shared horizontal scroller plus its scrollbar.
+    fn render_grid(&self, columns: Div, theme: Theme, cx: &mut Context<'_, Self>) -> AnyElement {
+        let mut grid = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .min_w(px(0.0))
+            .overflow_hidden();
+        grid = grid.child(self.grid.scroller("object-grid-scroll").child(columns));
+        if self.grid.overflows() {
+            grid = grid.child(
+                self.grid
+                    .scrollbar("object-grid-hscrollbar", theme)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                            // The scrollbar must not also start a marquee.
+                            cx.stop_propagation();
+                            if this.grid.begin(event.position.x) {
+                                cx.notify();
+                            }
+                        }),
+                    ),
+            );
+        }
+        grid.into_any_element()
     }
 
     /// Commit an open in-place rename (e.g. before the click moves selection elsewhere).
@@ -1093,23 +1563,96 @@ impl ObjectPane {
         self.focus.clone()
     }
 
-    fn select_object(&mut self, name: String, cx: &mut Context<'_, Self>) {
-        self.selected = Some(name.clone());
-        let connection_index = self.connection_index;
-        let database_index = self.database_index;
+    /// Apply one row click to the object list's multi-selection (plain click replaces, Ctrl
+    /// toggles, Shift extends from the anchor).
+    fn hit_object(&mut self, key: &str, modifiers: Modifiers, cx: &mut Context<'_, Self>) {
+        let visible = self.visible_keys.clone();
+        let mode = selection_mode(modifiers);
         if let Some(app) = self.app.upgrade() {
             app.update(cx, |app, _| {
-                app.set_info_table(connection_index, database_index, name);
+                app.hit_object_selection(&visible, key, mode, modifiers.shift);
             });
         }
+        self.sync_single_from_app(cx);
         self.notify_app(cx);
         cx.notify();
     }
 
-    fn open_selected_object(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(name) = self.selected.clone() else {
+    /// Replace the object selection with one row (used by the right-click handler).
+    fn set_object_selection_one(&mut self, key: &str, cx: &mut Context<'_, Self>) {
+        if let Some(app) = self.app.upgrade() {
+            app.update(cx, |app, _| {
+                app.objects_selection.select_one(key.to_string());
+            });
+        }
+        self.sync_single_from_app(cx);
+        self.notify_app(cx);
+        cx.notify();
+    }
+
+    /// Keep the right-clicked row selected: a click on a row that is already part of the
+    /// multi-selection keeps it, otherwise the selection is replaced by that row.
+    fn ensure_object_selected(&mut self, key: &str, cx: &mut Context<'_, Self>) {
+        let contains = self
+            .app
+            .upgrade()
+            .is_some_and(|app| app.read(cx).objects_selection.contains(key));
+        if !contains {
+            self.set_object_selection_one(key, cx);
+        }
+    }
+
+    /// Sync the pane's single-selection mirror (`selected` / `selected_routine`) and the info pane
+    /// with `AppView`'s multi-selection.
+    pub(super) fn sync_single_from_app(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(app) = self.app.upgrade() else {
             return;
         };
+        let (single, kind) = {
+            let app_ref = app.read(cx);
+            let single = app_ref.objects_selection.single().map(str::to_string);
+            let kind = if self.category == Category::Functions {
+                single.as_deref().and_then(|name| {
+                    let database = app_ref.connections.get(self.connection_index).and_then(
+                        |node| match &node.databases {
+                            Loadable::Loaded(databases) => databases.get(self.database_index),
+                            _ => None,
+                        },
+                    )?;
+                    match &database.routines {
+                        Loadable::Loaded(routines) => routines
+                            .iter()
+                            .find(|routine| routine.name == name)
+                            .map(|routine| routine.kind),
+                        _ => None,
+                    }
+                })
+            } else {
+                None
+            };
+            (single, kind)
+        };
+        let changed = self.selected != single || self.selected_routine != kind;
+        self.selected = single.clone();
+        self.selected_routine = kind;
+        if changed {
+            let connection_index = self.connection_index;
+            let database_index = self.database_index;
+            app.update(cx, |app, _| match (single, kind) {
+                (Some(name), Some(kind)) => {
+                    app.set_info_routine(connection_index, database_index, name, kind);
+                }
+                (Some(name), None) => {
+                    app.set_info_table(connection_index, database_index, name);
+                }
+                (None, _) => app.clear_info_selection(),
+            });
+        }
+        cx.notify();
+    }
+
+    /// Open a table or view (used by the double-click handler).
+    fn open_object_named(&mut self, name: String, cx: &mut Context<'_, Self>) {
         let connection_index = self.connection_index;
         let database_index = self.database_index;
         let is_view = self.category == Category::Views;
@@ -1122,11 +1665,35 @@ impl ObjectPane {
             });
         }
     }
+
+    /// Open a stored routine (used by the double-click handler).
+    fn open_routine_named(&mut self, name: String, kind: RoutineKind, cx: &mut Context<'_, Self>) {
+        let connection_index = self.connection_index;
+        let database_index = self.database_index;
+        if let Some(app) = self.app.upgrade() {
+            app.update(cx, |app, cx| {
+                let Some(database) = app.database_name(connection_index, database_index) else {
+                    return;
+                };
+                app.open_routine_by_name(connection_index, database, name, kind, cx);
+            });
+        }
+    }
 }
 
 impl Render for ObjectPane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let (search, tables, routines, rename) = {
+        // Snapshot the rubber band from the rectangles published last frame, then clear them so
+        // rows that disappeared stop matching the marquee.
+        let marquee = self
+            .app
+            .upgrade()
+            .and_then(|app| app.read(cx).marquee_rect_for(MarqueeTarget::Objects));
+        if let Some(app) = self.app.upgrade() {
+            app.update(cx, |app, _| app.clear_row_rects(MarqueeTarget::Objects));
+        }
+
+        let (search, tables, table_statuses, routines, rename, mode, selected) = {
             let Some(app) = self.app.upgrade() else {
                 return div().into_any_element();
             };
@@ -1144,35 +1711,46 @@ impl Render for ObjectPane {
                 Loadable::Failed(error) => Loadable::Failed(error.clone()),
                 Loadable::Loaded(items) => Loadable::Loaded(items.clone()),
             });
+            let table_statuses = database.and_then(|database| match &database.table_statuses {
+                Loadable::Loaded(items) => Some(items.clone()),
+                _ => None,
+            });
             let routines = database.map(|database| match &database.routines {
                 Loadable::Idle => Loadable::Idle,
                 Loadable::Loading => Loadable::Loading,
                 Loadable::Failed(error) => Loadable::Failed(error.clone()),
                 Loadable::Loaded(items) => Loadable::Loaded(items.clone()),
             });
+            let mode = app.view_mode(view_page_for_category(self.category));
+            let selected: std::collections::HashSet<String> =
+                app.objects_selection.items().into_iter().collect();
             (
                 app.object_search.clone(),
                 tables,
+                table_statuses,
                 routines,
                 app.rename_row(RowPane::Objects),
+                mode,
+                selected,
             )
         };
 
-        let body = self.render_body(tables, routines, &search, rename, cx);
-
-        let scroller = div()
-            .id("object-scroll")
-            .flex()
-            .flex_col()
-            .items_start()
-            .flex_1()
-            .min_w(px(0.0))
-            .overflow_x_scroll()
-            .track_scroll(&self.scroll)
-            .child(body);
+        let body = self.render_body(
+            ObjectRenderData {
+                mode,
+                tables,
+                table_statuses,
+                routines,
+                search,
+                selected,
+                rename,
+            },
+            cx,
+        );
 
         let mut container = div()
             .id("object-list")
+            .relative()
             .flex()
             .flex_col()
             .flex_1()
@@ -1185,32 +1763,53 @@ impl Render for ObjectPane {
             }))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _event: &MouseDownEvent, window, cx| {
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
                     // Clicking the list background takes focus so F2 works. While the rename
                     // editor is open the input owns the keyboard; its blur subscription commits.
-                    if !this
+                    if this
                         .app
                         .upgrade()
                         .is_some_and(|app| app.read(cx).rename_edit.is_some())
                     {
-                        window.focus(&this.focus, cx);
+                        return;
+                    }
+                    window.focus(&this.focus, cx);
+                    if let Some(app) = this.app.upgrade() {
+                        app.update(cx, |app, cx| {
+                            app.begin_marquee(
+                                MarqueeTarget::Objects,
+                                event.position,
+                                event.modifiers,
+                                cx,
+                            );
+                        });
                     }
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
-                this.hscroll_drag(event, cx);
+                if this.grid.drag(event) {
+                    cx.notify();
+                }
+                if let Some(app) = this.app.upgrade() {
+                    app.update(cx, |app, cx| {
+                        app.drag_marquee(MarqueeTarget::Objects, event, cx);
+                    });
+                }
             }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
-                    if this.hscroll_grab.take().is_some() {
+                    if this.grid.end() {
                         cx.notify();
+                    }
+                    if let Some(app) = this.app.upgrade() {
+                        app.update(cx, |app, cx| app.end_marquee(cx));
                     }
                 }),
             )
-            .child(scroller);
-        if self.scroll.max_offset().x > px(0.0) {
-            container = container.child(self.render_hscrollbar(cx));
+            .child(body);
+        if let Some(rect) = marquee {
+            container = container.child(rect);
         }
         container.into_any_element()
     }

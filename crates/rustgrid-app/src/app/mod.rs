@@ -27,6 +27,7 @@ use rustgrid_core::{
 use rustgrid_export::ExportFormat;
 
 use crate::form::{ConnectionForm, FORM_FIELDS, FormField};
+use crate::list_select::{ListSelection, MarqueeDrag, SelectMode, rects_intersect, selection_mode};
 use crate::runtime::Runtime;
 use crate::session::{
     Category, CategoryExpansion, CellRange, CellSelection, ConnectionNode, ConnectionStatus,
@@ -59,6 +60,9 @@ gpui::actions!(backup, [CopyBackupFile, PasteBackupFile, RenameBackupFile]);
 // Saved-query file-list actions, mirroring the backup list's F2 / Ctrl+C / Ctrl+V handling.
 gpui::actions!(queryfile, [CopyQueryFile, PasteQueryFile, RenameQueryFile]);
 
+// Users-list actions: F2 renames the selected account in place.
+gpui::actions!(userlist, [RenameUserItem]);
+
 /// Key context applied to the cell that owns the in-place editor.
 const GRID_CELL_CONTEXT: &str = "GridCell";
 
@@ -70,6 +74,24 @@ const QUERY_LIST_CONTEXT: &str = "QueryList";
 
 /// The stable settings key for the Queries tab's remembered list layout.
 pub(super) const VIEW_PAGE_QUERIES: &str = "queries";
+
+/// The stable settings key for the Users tab's remembered list layout.
+pub(super) const VIEW_PAGE_USERS: &str = "users";
+
+/// The stable settings key for the Backup tab's remembered list layout.
+pub(super) const VIEW_PAGE_BACKUPS: &str = "backups";
+
+/// The stable settings key for the Tables object list's remembered layout.
+pub(super) const VIEW_PAGE_TABLES: &str = "tables";
+
+/// The stable settings key for the Views object list's remembered layout.
+pub(super) const VIEW_PAGE_VIEWS: &str = "views";
+
+/// The stable settings key for the Functions object list's remembered layout.
+pub(super) const VIEW_PAGE_FUNCTIONS: &str = "functions";
+
+/// Key context applied to the Users list, so F2 reaches its in-place rename.
+pub(super) const USER_LIST_CONTEXT: &str = "UserList";
 
 /// The six text inputs of the connection form, created when the form opens. Order follows
 /// [`FORM_FIELDS`] so `FormField as usize` indexes the array.
@@ -598,6 +620,29 @@ enum RowPane {
     Tree,
 }
 
+/// Which flat list a marquee drag (or its row rectangles) belongs to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum MarqueeTarget {
+    Users,
+    Backups,
+    Objects,
+}
+
+/// The in-place "rename account" editor of the Users list. `new_name` mirrors the input's text so
+/// the commit never reads the entity back during its own change callback. Only the username part is
+/// editable; the host is kept.
+// The Users 详细列表 does not draw the editor yet, so `key`/`input` are unused for now; they are
+// kept so the rename flow stays intact when the row rendering gains the editor.
+#[allow(dead_code)]
+struct UserRenameEdit {
+    /// The selection key (`user@host`) of the row being renamed.
+    key: String,
+    user: String,
+    host: String,
+    new_name: String,
+    input: Entity<TextInput>,
+}
+
 /// The "rename table" in-place editor. `new_name` mirrors the input's text so `submit_rename`
 /// never reads the entity back during its own change callback. `AppView` owns the state (both
 /// panes render `input` in the row named by [`RowPane`]) so the two lists share one commit path.
@@ -836,8 +881,10 @@ struct ObjectPane {
     selected: Option<String>,
     /// The kind of the selected routine, when `category` is [`Category::Functions`].
     selected_routine: Option<RoutineKind>,
-    scroll: ScrollHandle,
-    hscroll_grab: Option<f32>,
+    /// The column-major 平铺网格's horizontal scroll state.
+    grid: ColumnGrid,
+    /// The visible row keys of the last render, in display order (Shift-extend / marquee base).
+    visible_keys: Vec<String>,
     /// Focus target for the list, so F2 reaches [`AppView::begin_rename_table`].
     focus: FocusHandle,
     theme: Theme,
@@ -1106,8 +1153,6 @@ const MAIN_TABS: [(MainTab, &str, &str); 6] = [
 
 const PANEL_WIDTH: f32 = 620.0;
 const FIELD_LABEL_WIDTH: f32 = 96.0;
-const OBJECT_ROW_HEIGHT: f32 = 20.0;
-const OBJECT_BOTTOM_MARGIN: f32 = 20.0;
 /// Default and clamp widths of the drag-resizable side panes.
 pub(super) const SIDEBAR_DEFAULT_WIDTH: f32 = 260.0;
 pub(super) const SIDEBAR_MIN_WIDTH: f32 = 150.0;
@@ -1184,6 +1229,13 @@ pub struct AppView {
     backup_rename_focus_pending: bool,
     /// Focus target for the backup list, so F2 / Ctrl+C / Ctrl+V reach it.
     backup_focus: FocusHandle,
+    /// Keeps the Backup list's scroll position across re-renders.
+    backup_scroll: ScrollHandle,
+    /// The Backup list's 平铺网格 scroll state.
+    backup_grid: ColumnGrid,
+    /// The Backup-list search text and its shared field.
+    backup_search: String,
+    backup_search_input: Entity<TextInput>,
     /// The open "save query" dialog, if any.
     save_query_dialog: Option<SaveQueryDialog>,
     query_name_input: Option<Entity<TextInput>>,
@@ -1305,6 +1357,28 @@ pub struct AppView {
     /// The Users-list search text.
     user_search: String,
     user_search_input: Entity<TextInput>,
+    /// The Users list's multi-selection (Explorer-style).
+    users_selection: ListSelection,
+    /// The Users list's row rectangles in window space, keyed by selection key, for the marquee.
+    users_row_rects: std::collections::HashMap<String, Bounds<Pixels>>,
+    /// The Users list's focus target, so F2 reaches the in-place rename.
+    users_focus: FocusHandle,
+    /// The Users list's 平铺网格 scroll state.
+    users_grid: ColumnGrid,
+    /// The in-place "rename account" editor, drawn in the row it started from.
+    user_rename: Option<UserRenameEdit>,
+    user_rename_blur: Option<Subscription>,
+    user_rename_focus_pending: bool,
+    /// The Backup list's multi-selection (Explorer-style).
+    backups_selection: ListSelection,
+    /// The Backup list's row rectangles in window space, for the marquee.
+    backups_row_rects: std::collections::HashMap<String, Bounds<Pixels>>,
+    /// The table/view object list's multi-selection (Explorer-style).
+    objects_selection: ListSelection,
+    /// The object list's row rectangles in window space, for the marquee.
+    objects_row_rects: std::collections::HashMap<String, Bounds<Pixels>>,
+    /// The in-progress rubber-band drag over one of the flat lists, if any.
+    marquee: Option<(MarqueeTarget, MarqueeDrag)>,
     /// The routine editor's find bar field.
     routine_find_input: Entity<TextInput>,
     /// The account highlighted in the Users list, as an index into `users`.
@@ -1375,6 +1449,7 @@ mod grid_toolbar;
 mod grid_view;
 mod import;
 mod info_pane;
+mod list_ops;
 mod objects;
 mod options;
 mod privilege_manager;
@@ -1448,6 +1523,7 @@ impl AppView {
             KeyBinding::new("cmd-c", CopyQueryFile, Some(QUERY_LIST_CONTEXT)),
             KeyBinding::new("ctrl-v", PasteQueryFile, Some(QUERY_LIST_CONTEXT)),
             KeyBinding::new("cmd-v", PasteQueryFile, Some(QUERY_LIST_CONTEXT)),
+            KeyBinding::new("f2", RenameUserItem, Some(USER_LIST_CONTEXT)),
         ]);
         let app = cx.weak_entity();
         let app_entity = cx.entity();
@@ -1496,6 +1572,31 @@ impl AppView {
             backup_rename_blur: None,
             backup_rename_focus_pending: false,
             backup_focus: cx.focus_handle(),
+            backup_scroll: ScrollHandle::new(),
+            backup_grid: ColumnGrid::default(),
+            backup_search: String::new(),
+            backup_search_input: {
+                let weak = app.clone();
+                cx.new(move |cx| {
+                    TextInput::new(
+                        Theme::dark(),
+                        "",
+                        TextInputOptions {
+                            placeholder: t!("backup.search").to_string().into(),
+                            icon: Some("icons/search.svg"),
+                            clearable: true,
+                            ..Default::default()
+                        },
+                        cx,
+                    )
+                    .on_change(Rc::new(move |text, _window, cx| {
+                        let _ = weak.update(cx, |app, cx| {
+                            app.backup_search = text.to_string();
+                            cx.notify();
+                        });
+                    }))
+                })
+            },
             save_query_dialog: None,
             query_name_input: None,
             create_table_dialog: None,
@@ -1662,6 +1763,18 @@ impl AppView {
             },
             selected_user: None,
             users_scroll: ScrollHandle::new(),
+            users_selection: ListSelection::default(),
+            users_row_rects: std::collections::HashMap::new(),
+            users_focus: cx.focus_handle(),
+            users_grid: ColumnGrid::default(),
+            user_rename: None,
+            user_rename_blur: None,
+            user_rename_focus_pending: false,
+            backups_selection: ListSelection::default(),
+            backups_row_rects: std::collections::HashMap::new(),
+            objects_selection: ListSelection::default(),
+            objects_row_rects: std::collections::HashMap::new(),
+            marquee: None,
             info_user: Loadable::Idle,
             create_user_dialog: None,
             create_user_user: None,
@@ -1966,6 +2079,8 @@ impl AppView {
         self.object_search_input
             .update(cx, |input, cx| input.set_theme(theme, cx));
         self.user_search_input
+            .update(cx, |input, cx| input.set_theme(theme, cx));
+        self.backup_search_input
             .update(cx, |input, cx| input.set_theme(theme, cx));
         self.routine_find_input
             .update(cx, |input, cx| input.set_theme(theme, cx));
@@ -2460,6 +2575,14 @@ impl Render for AppView {
             self.backup_rename_focus_pending = false;
         }
 
+        if self.user_rename_focus_pending {
+            if let Some(edit) = self.user_rename.as_ref() {
+                let handle = edit.input.read(cx).focus_handle();
+                window.focus(&handle, cx);
+            }
+            self.user_rename_focus_pending = false;
+        }
+
         if self.query_rename_focus_pending {
             if let Some(edit) = self.query_rename.as_ref() {
                 let handle = edit.input.read(cx).focus_handle();
@@ -2634,6 +2757,12 @@ pub(super) fn human_size(bytes: u64) -> String {
 pub(super) fn format_file_time(time: std::time::SystemTime) -> String {
     let time: chrono::DateTime<chrono::Local> = time.into();
     time.format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+/// Collapse free text (routine/table comments, which may contain newlines) into one line for a
+/// single-line list cell.
+pub(super) fn single_line(text: &str) -> String {
+    text.replace(['\r', '\n', '\t'], " ").trim().to_string()
 }
 
 fn tree_icon(path: &'static str, color: u32) -> Svg {

@@ -330,6 +330,7 @@ impl AppView {
                                             DatabaseNode {
                                                 name: database.name,
                                                 tables: existing.tables,
+                                                table_statuses: existing.table_statuses,
                                                 routines: existing.routines,
                                                 opened: existing.opened,
                                                 expanded: existing.expanded,
@@ -339,6 +340,7 @@ impl AppView {
                                             DatabaseNode {
                                                 name: database.name,
                                                 tables: Loadable::Idle,
+                                                table_statuses: Loadable::Idle,
                                                 routines: Loadable::Idle,
                                                 opened: false,
                                                 expanded: false,
@@ -460,6 +462,8 @@ impl AppView {
         self.rename_blur = None;
         self.saved_query_selected = None;
         self.clear_info_selection();
+        self.objects_selection.clear();
+        self.objects_row_rects.clear();
         self.object_pane =
             Some(cx.new(|cx| {
                 ObjectPane::new(app, connection_index, database_index, category, theme, cx)
@@ -578,12 +582,22 @@ impl AppView {
             && let Some(database) = databases.get_mut(database_index)
         {
             database.tables = Loadable::Loading;
+            database.table_statuses = Loadable::Loading;
         }
 
         let runtime = self.runtime.clone();
         cx.spawn(async move |this, cx| {
             let result = match runtime
-                .spawn(async move { connection.list_tables(&database_name).await })
+                .spawn(async move {
+                    let tables = connection.list_tables(&database_name).await?;
+                    // One extra query for the Tables 详细列表's overview columns; a driver without
+                    // support returns an empty list rather than failing the whole load.
+                    let statuses = connection
+                        .table_statuses(&database_name)
+                        .await
+                        .unwrap_or_default();
+                    Ok((tables, statuses))
+                })
                 .await
             {
                 Ok(inner) => inner,
@@ -595,10 +609,16 @@ impl AppView {
                     && let Loadable::Loaded(databases) = &mut node.databases
                     && let Some(database) = databases.get_mut(database_index)
                 {
-                    database.tables = match result {
-                        Ok(tables) => Loadable::Loaded(tables),
-                        Err(error) => Loadable::Failed(error.to_string()),
-                    };
+                    match result {
+                        Ok((tables, statuses)) => {
+                            database.tables = Loadable::Loaded(tables);
+                            database.table_statuses = Loadable::Loaded(statuses);
+                        }
+                        Err(error) => {
+                            database.tables = Loadable::Failed(error.to_string());
+                            database.table_statuses = Loadable::Failed(error.to_string());
+                        }
+                    }
                 }
                 view.completion_generation = view.completion_generation.wrapping_add(1);
                 view.notify_object_pane(cx);

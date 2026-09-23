@@ -4,7 +4,7 @@ use std::sync::Arc;
 use rustgrid_core::{
     CellValue, ColumnInfo, Connection, ConnectionProfile, FilterCondition, FilterConjunction,
     FilterNode, FilterOperator, QueryResult, RoutineDetails, RoutineInfo, RoutineKind, SortColumn,
-    TableInfo, ViewDetails,
+    TableInfo, TableStatus, ViewDetails,
 };
 
 #[derive(Default)]
@@ -35,6 +35,8 @@ pub struct ConnectionNode {
 pub struct DatabaseNode {
     pub name: String,
     pub tables: Loadable<Vec<TableInfo>>,
+    /// The database's `SHOW TABLE STATUS`-style table overviews, for the Tables 详细列表.
+    pub table_statuses: Loadable<Vec<(String, TableStatus)>>,
     /// The database's stored routines (functions and procedures), loaded lazily when the
     /// Functions tab or the connection tree's Functions category needs them.
     pub routines: Loadable<Vec<RoutineInfo>>,

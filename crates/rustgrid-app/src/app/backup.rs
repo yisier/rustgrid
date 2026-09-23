@@ -152,10 +152,15 @@ impl AppView {
         let Some((connection_id, database)) = self.backup_scope_names(cx) else {
             return Vec::new();
         };
+        let needle = self.backup_search.trim().to_lowercase();
         self.backup_files
             .iter()
             .enumerate()
-            .filter(|(_, file)| file.connection_id == connection_id && file.database == database)
+            .filter(|(_, file)| {
+                file.connection_id == connection_id
+                    && file.database == database
+                    && (needle.is_empty() || file.name.to_lowercase().contains(&needle))
+            })
             .map(|(index, _)| index)
             .collect()
     }
@@ -165,14 +170,71 @@ impl AppView {
         let Some((connection_id, database)) = self.backup_scope_names(cx) else {
             return Vec::new();
         };
+        let needle = self.backup_search.trim().to_lowercase();
         self.backup_configs
             .iter()
             .enumerate()
             .filter(|(_, config)| {
-                config.connection_id == connection_id && config.database == database
+                config.connection_id == connection_id
+                    && config.database == database
+                    && (needle.is_empty() || config.name.to_lowercase().contains(&needle))
             })
             .map(|(index, _)| index)
             .collect()
+    }
+
+    /// One backup row hit (click) under the click's modifier mode.
+    pub(super) fn hit_backup(
+        &mut self,
+        key: &str,
+        _click_count: usize,
+        modifiers: Modifiers,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.backup_rename.is_some() {
+            return;
+        }
+        let visible: Vec<String> = self.backup_visible_keys(cx).into_iter().collect();
+        if modifiers.shift {
+            self.backups_selection.extend_to(&visible, key);
+        } else {
+            self.backups_selection
+                .hit(&visible, key, selection_mode(modifiers));
+        }
+        self.sync_backup_selected();
+        cx.notify();
+    }
+
+    /// The visible backup entries' selection keys, in list order.
+    fn backup_visible_keys(&self, cx: &App) -> Vec<String> {
+        let mut keys = Vec::new();
+        for index in self.visible_backup_files(cx) {
+            keys.push(backup_file_key(&self.backup_files[index].name));
+        }
+        for index in self.visible_backup_configs(cx) {
+            keys.push(backup_config_key(&self.backup_configs[index].name));
+        }
+        keys
+    }
+
+    /// Keep the single-selection mirror (`backup_selected`) in step with the multi-selection.
+    fn sync_backup_selected(&mut self) {
+        self.backup_selected = match self.backups_selection.single() {
+            Some(key) => match backup_entry_from_key(key) {
+                Some(BackupEntry::File(_)) => self
+                    .backup_files
+                    .iter()
+                    .position(|file| backup_file_key(&file.name) == key)
+                    .map(BackupSelection::File),
+                Some(BackupEntry::Config(_)) => self
+                    .backup_configs
+                    .iter()
+                    .position(|config| backup_config_key(&config.name) == key)
+                    .map(BackupSelection::Config),
+                None => None,
+            },
+            None => None,
+        };
     }
 
     // ----- Rendering --------------------------------------------------------------------------
@@ -286,13 +348,21 @@ impl AppView {
     fn render_backup_toolbar(&self, cx: &mut Context<'_, Self>) -> Div {
         let theme = self.theme;
         let in_scope = self.backup_scope(cx).is_some();
-        let has_file = in_scope && matches!(self.backup_selected, Some(BackupSelection::File(_)));
-        let has_selection = in_scope && self.backup_selected.is_some();
+        let has_file = in_scope && self.backup_single_selection().is_some_and(|s| s.is_file());
+        let has_selection = in_scope && !self.backups_selection.is_empty();
         let can_create = in_scope;
+        let weak = cx.weak_entity();
+        let on_select = Rc::new(
+            move |mode: ViewMode, _event: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                let _ = weak.update(cx, |app, cx| app.set_view_mode(VIEW_PAGE_BACKUPS, mode, cx));
+            },
+        );
+        let view_mode = self.view_mode(VIEW_PAGE_BACKUPS);
         div()
             .flex()
             .flex_row()
             .items_center()
+            .justify_between()
             .gap_2()
             .px_2()
             .py_1()
@@ -300,74 +370,68 @@ impl AppView {
             .bg(rgb(theme.toolbar_bg))
             .border_b_1()
             .border_color(rgb(theme.border))
-            .child(self.toolbar_item(
-                "backup-restore",
-                "icons/import.svg",
-                t!("backup.restore").to_string(),
-                has_file,
-                cx.listener(|this, _event, _window, cx| this.restore_selected_backup(cx)),
-            ))
-            .child(toolbar_separator(theme))
-            .child(self.toolbar_item(
-                "backup-new",
-                "icons/backups.svg",
-                t!("backup.new").to_string(),
-                can_create,
-                cx.listener(|this, _event, _window, cx| this.open_new_backup(cx)),
-            ))
-            .child(toolbar_separator(theme))
-            .child(self.toolbar_item(
-                "backup-delete",
-                "icons/delete_table.svg",
-                t!("backup.delete").to_string(),
-                has_selection,
-                cx.listener(|this, _event, _window, cx| this.confirm_delete_backup(cx)),
-            ))
-            .child(toolbar_separator(theme))
-            .child(self.toolbar_item(
-                "backup-extract",
-                "icons/export.svg",
-                t!("backup.extract_sql").to_string(),
-                has_file,
-                cx.listener(|this, _event, _window, cx| this.extract_selected_backup(cx)),
-            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .child(self.toolbar_item(
+                        "backup-restore",
+                        "icons/import.svg",
+                        t!("backup.restore").to_string(),
+                        has_file,
+                        cx.listener(|this, _event, _window, cx| this.restore_selected_backup(cx)),
+                    ))
+                    .child(toolbar_separator(theme))
+                    .child(self.toolbar_item(
+                        "backup-new",
+                        "icons/backups.svg",
+                        t!("backup.new").to_string(),
+                        can_create,
+                        cx.listener(|this, _event, _window, cx| this.open_new_backup(cx)),
+                    ))
+                    .child(toolbar_separator(theme))
+                    .child(self.toolbar_item(
+                        "backup-delete",
+                        "icons/delete_table.svg",
+                        t!("backup.delete").to_string(),
+                        has_selection,
+                        cx.listener(|this, _event, _window, cx| this.confirm_delete_backup(cx)),
+                    ))
+                    .child(toolbar_separator(theme))
+                    .child(self.toolbar_item(
+                        "backup-extract",
+                        "icons/export.svg",
+                        t!("backup.extract_sql").to_string(),
+                        has_file,
+                        cx.listener(|this, _event, _window, cx| this.extract_selected_backup(cx)),
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(ui::view_mode_toggle(theme, view_mode, on_select))
+                    .child(
+                        div()
+                            .w(px(220.0))
+                            .h(px(24.0))
+                            .child(self.backup_search_input.clone()),
+                    ),
+            )
+    }
+
+    /// The single selected backup entry, or `None` when zero or several are selected.
+    fn backup_single_selection(&self) -> Option<BackupEntry> {
+        self.backups_selection
+            .single()
+            .and_then(backup_entry_from_key)
     }
 
     fn render_backup_list(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
-        let mut list = div()
-            .id("backup-list")
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_w(px(0.0))
-            .min_h(px(0.0))
-            .overflow_y_scroll()
-            .track_focus(&self.backup_focus)
-            .key_context(BACKUP_LIST_CONTEXT)
-            .on_action(cx.listener(|this, _: &RenameBackupFile, window, cx| {
-                if let Some(BackupSelection::File(index)) = this.backup_selected {
-                    this.begin_rename_backup(index, window, cx);
-                }
-            }))
-            .on_action(cx.listener(|this, _: &CopyBackupFile, _window, cx| {
-                if let Some(BackupSelection::File(index)) = this.backup_selected {
-                    this.copy_backup_file(index);
-                    cx.notify();
-                }
-            }))
-            .on_action(cx.listener(|this, _: &PasteBackupFile, _window, cx| {
-                this.paste_backup(cx);
-            }))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _event: &MouseDownEvent, window, cx| {
-                    if this.backup_rename.is_none() {
-                        window.focus(&this.backup_focus, cx);
-                    }
-                }),
-            )
-            .py_1();
 
         // Backups only belong to an opened (and selected) database, so without one the list is
         // empty and every toolbar action is disabled.
@@ -383,80 +447,429 @@ impl AppView {
                 .into_any_element();
         }
 
+        let body: AnyElement = match self.view_mode(VIEW_PAGE_BACKUPS) {
+            ViewMode::Detail => self.render_backup_detail(cx),
+            ViewMode::Grid => self.render_backup_tiles(cx),
+        };
+
+        let mut list = div()
+            .id("backup-list")
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w(px(0.0))
+            .min_h(px(0.0))
+            .overflow_hidden()
+            .track_focus(&self.backup_focus)
+            .key_context(BACKUP_LIST_CONTEXT)
+            .on_action(cx.listener(|this, _: &RenameBackupFile, window, cx| {
+                if let Some(BackupEntry::File(index)) = this.backup_single_selection() {
+                    this.begin_rename_backup(index, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &CopyBackupFile, _window, cx| {
+                if let Some(BackupEntry::File(index)) = this.backup_single_selection() {
+                    this.copy_backup_file(index);
+                    cx.notify();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &PasteBackupFile, _window, cx| {
+                this.paste_backup(cx);
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    if this.backup_rename.is_some() {
+                        return;
+                    }
+                    window.focus(&this.backup_focus, cx);
+                    this.begin_marquee(MarqueeTarget::Backups, event.position, event.modifiers, cx);
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                this.drag_marquee(MarqueeTarget::Backups, event, cx);
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                    this.end_marquee(cx);
+                }),
+            )
+            .child(
+                div()
+                    .id("backup-scroll")
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .overflow_y_scroll()
+                    .track_scroll(&self.backup_scroll)
+                    .child(body),
+            );
+        if let Some(rect) = self.marquee_rect_for(MarqueeTarget::Backups) {
+            list = list.child(rect);
+        }
+        list.into_any_element()
+    }
+
+    /// The Backup 详细列表: 名称 / 修改日期 / 文件大小 / 备注.
+    fn render_backup_detail(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let header = ui::detail_header_row(theme)
+            .child(div().w(px(ui::DETAIL_NAME_WIDTH)).flex_none().child(
+                ui::detail_header_cell_plain(t!("common.name").to_string(), theme),
+            ))
+            .child(div().w(px(ui::DETAIL_MODIFIED_WIDTH)).flex_none().child(
+                ui::detail_header_cell_plain(t!("backup.field.modified").to_string(), theme),
+            ))
+            .child(div().w(px(ui::DETAIL_SIZE_WIDTH)).flex_none().child(
+                ui::detail_header_cell_plain(t!("backup.field.size").to_string(), theme),
+            ))
+            .child(div().w(px(ui::DETAIL_COMMENT_WIDTH)).flex_none().child(
+                ui::detail_header_cell_plain(t!("backup.field.comment").to_string(), theme),
+            ));
+
+        let mut body = ui::detail_body();
         let mut has_any = false;
         for index in self.visible_backup_files(cx) {
             has_any = true;
             let file = &self.backup_files[index];
-            let selected = self.backup_selected == Some(BackupSelection::File(index));
+            let key = backup_file_key(&file.name);
+            let selected = self.backups_selection.contains(&key);
             let rename = self
                 .backup_rename
                 .as_ref()
                 .filter(|edit| edit.index == index)
                 .map(|edit| edit.input.clone());
-            list = list.child(backup_row(
+            let name: AnyElement = match rename {
+                Some(input) => div()
+                    .w(px(ui::DETAIL_NAME_WIDTH))
+                    .flex_none()
+                    .h(px(22.0))
+                    .child(input)
+                    .into_any_element(),
+                None => div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .w(px(ui::DETAIL_NAME_WIDTH))
+                    .flex_none()
+                    .overflow_hidden()
+                    .text_color(rgb(theme.text))
+                    .child(ui::leading_icon_badge(
+                        "icons/backups.svg",
+                        theme.icon_backups,
+                        22.0,
+                    ))
+                    .child(
+                        div()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .child(file.name.clone()),
+                    )
+                    .into_any_element(),
+            };
+            let modified = file
+                .modified
+                .map(format_file_time)
+                .unwrap_or_else(|| "--".to_string());
+            let muted = theme.text_muted;
+            let click_key = key.clone();
+            let menu_key = key.clone();
+            let row = ui::detail_row(
                 SharedString::from(format!("backup-file-{index}")),
-                "icons/backups.svg",
-                theme.icon_backups,
-                file.name.clone(),
                 selected,
-                rename,
                 theme,
-                cx.listener(move |this, event, _window, cx| {
-                    this.backup_selected = Some(BackupSelection::File(index));
-                    if matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2) {
-                        this.open_restore_backup(index, cx);
-                    }
-                    cx.notify();
-                }),
+            )
+            .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
+                this.hit_backup(&click_key, event.click_count(), event.modifiers(), cx);
+                if event.click_count() >= 2
+                    && let Some(BackupEntry::File(index)) = this.backup_single_selection()
+                {
+                    this.open_restore_backup(index, cx);
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                    this.backup_selected = Some(BackupSelection::File(index));
+                    if !this.backups_selection.contains(&menu_key) {
+                        this.backups_selection.select_one(menu_key.clone());
+                        this.backup_selected = Some(BackupSelection::File(index));
+                    }
                     this.context_menu = Some(ContextMenu {
                         target: ContextTarget::BackupFile { index },
                         position: event.position,
                     });
                     cx.notify();
                 }),
+            )
+            .child(name)
+            .child(
+                div()
+                    .w(px(ui::DETAIL_MODIFIED_WIDTH))
+                    .flex_none()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_color(rgb(muted))
+                    .child(modified),
+            )
+            .child(
+                div()
+                    .w(px(ui::DETAIL_SIZE_WIDTH))
+                    .flex_none()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_color(rgb(muted))
+                    .child(format_size_only(file.size)),
+            )
+            .child(
+                div()
+                    .w(px(ui::DETAIL_COMMENT_WIDTH))
+                    .flex_none()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_color(rgb(muted))
+                    .child(single_line(&file.manifest.comment)),
+            );
+            body = body.child(backup_row_with_rect(
+                cx.weak_entity(),
+                row,
+                MarqueeTarget::Backups,
+                key.clone(),
             ));
         }
         for index in self.visible_backup_configs(cx) {
             has_any = true;
             let config = &self.backup_configs[index];
-            let selected = self.backup_selected == Some(BackupSelection::Config(index));
-            list = list.child(backup_row(
+            let key = backup_config_key(&config.name);
+            let selected = self.backups_selection.contains(&key);
+            let click_key = key.clone();
+            let menu_key = key.clone();
+            let row = ui::detail_row(
                 SharedString::from(format!("backup-config-{index}")),
-                "icons/save.svg",
-                theme.icon_queries,
-                config.name.clone(),
                 selected,
-                None,
                 theme,
-                cx.listener(move |this, event, _window, cx| {
-                    this.backup_selected = Some(BackupSelection::Config(index));
-                    if matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2) {
-                        this.open_backup_config(index, cx);
-                    }
-                    cx.notify();
-                }),
+            )
+            .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
+                this.hit_backup(&click_key, event.click_count(), event.modifiers(), cx);
+                if event.click_count() >= 2 {
+                    this.open_backup_config(index, cx);
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                    this.backup_selected = Some(BackupSelection::Config(index));
+                    if !this.backups_selection.contains(&menu_key) {
+                        this.backups_selection.select_one(menu_key.clone());
+                        this.backup_selected = Some(BackupSelection::Config(index));
+                    }
                     this.context_menu = Some(ContextMenu {
                         target: ContextTarget::BackupConfig { index },
                         position: event.position,
                     });
                     cx.notify();
                 }),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .w(px(ui::DETAIL_NAME_WIDTH))
+                    .flex_none()
+                    .overflow_hidden()
+                    .text_color(rgb(theme.text))
+                    .child(ui::leading_icon_badge(
+                        "icons/save.svg",
+                        theme.icon_queries,
+                        22.0,
+                    ))
+                    .child(
+                        div()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .child(config.name.clone()),
+                    ),
+            )
+            .child(
+                div()
+                    .w(px(ui::DETAIL_MODIFIED_WIDTH))
+                    .flex_none()
+                    .text_color(rgb(theme.text_muted))
+                    .child(""),
+            )
+            .child(
+                div()
+                    .w(px(ui::DETAIL_SIZE_WIDTH))
+                    .flex_none()
+                    .text_color(rgb(theme.text_muted))
+                    .child(""),
+            )
+            .child(
+                div()
+                    .w(px(ui::DETAIL_COMMENT_WIDTH))
+                    .flex_none()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_color(rgb(theme.text_muted))
+                    .child(saved_config_counts(config)),
+            );
+            body = body.child(backup_row_with_rect(
+                cx.weak_entity(),
+                row,
+                MarqueeTarget::Backups,
+                key.clone(),
             ));
         }
 
         if !has_any {
-            list = list.child(
+            body = body.child(
                 div()
                     .p_3()
                     .text_color(rgb(theme.text_muted))
                     .child(t!("backup.empty").to_string()),
             );
         }
-        list.into_any_element()
+        ui::detail_card(theme)
+            .child(header)
+            .child(body)
+            .into_any_element()
+    }
+
+    /// The Backup 平铺网格: the backup files and saved profiles in a column-major grid.
+    fn render_backup_tiles(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let mut entries: Vec<(String, String, &'static str, u32, BackupEntry)> = Vec::new();
+        for index in self.visible_backup_files(cx) {
+            let file = &self.backup_files[index];
+            entries.push((
+                backup_file_key(&file.name),
+                file.name.clone(),
+                "icons/backups.svg",
+                theme.icon_backups,
+                BackupEntry::File(index),
+            ));
+        }
+        for index in self.visible_backup_configs(cx) {
+            let config = &self.backup_configs[index];
+            entries.push((
+                backup_config_key(&config.name),
+                config.name.clone(),
+                "icons/save.svg",
+                theme.icon_queries,
+                BackupEntry::Config(index),
+            ));
+        }
+        if entries.is_empty() {
+            return div()
+                .p_3()
+                .text_color(rgb(theme.text_muted))
+                .child(t!("backup.empty").to_string())
+                .into_any_element();
+        }
+        let width = ui::grid_item_width(
+            entries
+                .iter()
+                .map(|(_, name, _, _, _)| ui::approx_text_width(name))
+                .fold(0.0, f32::max),
+        );
+        let rows = self.backup_grid.rows_per_column();
+        let mut columns = ui::grid_columns();
+        let mut column = ui::grid_column();
+        let mut count = 0usize;
+        for (key, name, icon, color, entry) in entries {
+            if count == rows {
+                columns = columns.child(column);
+                column = ui::grid_column();
+                count = 0;
+            }
+            let selected = self.backups_selection.contains(&key);
+            let click_key = key.clone();
+            let menu_key = key.clone();
+            let tile = ui::grid_item_sized(
+                SharedString::from(format!("backup-tile-{key}")),
+                selected,
+                theme,
+                width,
+            )
+            .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
+                this.hit_backup(&click_key, event.click_count(), event.modifiers(), cx);
+                if event.click_count() >= 2 {
+                    match entry {
+                        BackupEntry::File(index) => this.open_restore_backup(index, cx),
+                        BackupEntry::Config(index) => this.open_backup_config(index, cx),
+                    }
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    if !this.backups_selection.contains(&menu_key) {
+                        this.backups_selection.select_one(menu_key.clone());
+                        this.sync_backup_selected();
+                    }
+                    this.context_menu = Some(ContextMenu {
+                        target: match entry {
+                            BackupEntry::File(index) => ContextTarget::BackupFile { index },
+                            BackupEntry::Config(index) => ContextTarget::BackupConfig { index },
+                        },
+                        position: event.position,
+                    });
+                    cx.notify();
+                }),
+            )
+            .child(ui::leading_icon_badge(icon, color, 16.0))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_color(rgb(theme.text))
+                    .child(name),
+            );
+            column = column.child(backup_row_with_rect(
+                cx.weak_entity(),
+                tile,
+                MarqueeTarget::Backups,
+                key.clone(),
+            ));
+            count += 1;
+        }
+        if count > 0 {
+            columns = columns.child(column);
+        }
+
+        let mut grid = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .min_w(px(0.0))
+            .overflow_hidden();
+        grid = grid.child(
+            self.backup_grid
+                .scroller("backup-grid-scroll")
+                .child(columns),
+        );
+        if self.backup_grid.overflows() {
+            grid = grid.child(
+                self.backup_grid
+                    .scrollbar("backup-grid-hscrollbar", theme)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                            if this.backup_grid.begin(event.position.x) {
+                                cx.notify();
+                            }
+                        }),
+                    ),
+            );
+        }
+        grid.into_any_element()
     }
 
     // ----- Actions ----------------------------------------------------------------------------
@@ -2509,53 +2922,55 @@ fn read_only_field(
 }
 
 /// One list row of the backup list: an icon and the file's name. When `rename` is set the row
-/// draws the in-place editor instead of its title.
-#[allow(clippy::too_many_arguments)]
-fn backup_row(
-    id: SharedString,
-    icon: &'static str,
-    icon_color: u32,
-    title: String,
-    selected: bool,
-    rename: Option<Entity<TextInput>>,
-    theme: Theme,
-    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    on_right_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    let title_element: AnyElement = match rename {
-        Some(input) => div()
-            .flex_1()
-            .min_w(px(0.0))
-            .h(px(20.0))
-            .child(input)
-            .into_any_element(),
-        None => div()
-            .text_size(px(12.0))
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .child(title)
-            .into_any_element(),
-    };
+/// One backup-list entry, parsed from its selection key (`file:<name>` / `config:<name>`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum BackupEntry {
+    File(usize),
+    Config(usize),
+}
+
+impl BackupEntry {
+    pub(super) fn is_file(self) -> bool {
+        matches!(self, BackupEntry::File(_))
+    }
+}
+
+/// The selection key of a backup file row.
+fn backup_file_key(name: &str) -> String {
+    format!("file:{name}")
+}
+
+/// The selection key of a saved backup configuration row.
+fn backup_config_key(name: &str) -> String {
+    format!("config:{name}")
+}
+
+/// The kind of a backup selection key, if it is well formed.
+fn backup_entry_from_key(key: &str) -> Option<BackupEntry> {
+    let (kind, _) = key.split_once(':')?;
+    match kind {
+        "file" => Some(BackupEntry::File(0)),
+        "config" => Some(BackupEntry::Config(0)),
+        _ => None,
+    }
+}
+
+/// Wrap a row element so it publishes its window-space rectangle for the marquee.
+fn backup_row_with_rect(
+    app: WeakEntity<AppView>,
+    row: impl IntoElement + 'static,
+    target: MarqueeTarget,
+    key: String,
+) -> AnyElement {
     div()
-        .id(id)
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_1()
-        .w_full()
-        .h(px(24.0))
-        .px_2()
-        .cursor_pointer()
-        .when(selected, move |style| {
-            style
-                .bg(rgb(theme.tree_selected_bg))
-                .text_color(rgb(theme.tree_selected_text))
+        .on_children_prepainted(move |bounds, _window, cx| {
+            let Some(rect) = bounds.first().copied() else {
+                return;
+            };
+            let _ = app.update(cx, |app, _| app.note_row_rect(target, key.clone(), rect));
         })
-        .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-        .on_click(on_click)
-        .on_mouse_down(MouseButton::Right, on_right_click)
-        .child(tree_icon(icon, icon_color))
-        .child(div().flex_1().min_w(px(0.0)).child(title_element))
+        .child(row)
+        .into_any_element()
 }
 
 /// The shared object-selection tree of the New Backup and Restore dialogs.
@@ -2944,16 +3359,23 @@ fn format_system_time(time: std::time::SystemTime) -> String {
 }
 
 fn format_size(bytes: u64) -> String {
-    let (value, unit) = if bytes >= 1024 * 1024 * 1024 {
-        (bytes as f64 / (1024.0 * 1024.0 * 1024.0), "GB")
-    } else if bytes >= 1024 * 1024 {
-        (bytes as f64 / (1024.0 * 1024.0), "MB")
-    } else if bytes >= 1024 {
-        (bytes as f64 / 1024.0, "KB")
-    } else {
+    if bytes < 1024 {
         return format!("{bytes} B ({bytes})");
-    };
-    format!("{value:.2} {unit} ({})", format_thousands(bytes))
+    }
+    format!("{} ({})", format_size_only(bytes), format_thousands(bytes))
+}
+
+/// A compact human-readable size such as `6.01 MB`, without the exact byte count.
+fn format_size_only(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{:.2} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    } else if bytes >= 1024 * 1024 {
+        format!("{:.2} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.2} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 fn format_thousands(value: u64) -> String {

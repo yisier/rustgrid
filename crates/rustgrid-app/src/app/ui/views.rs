@@ -15,19 +15,30 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, ClickEvent, Div, FontWeight, IntoElement, MouseButton, MouseMoveEvent, Pixels, Point,
-    ScrollHandle, SharedString, Stateful, Window, div, prelude::*, px, rgb, rgba, svg,
+    App, Bounds, ClickEvent, Div, FontWeight, IntoElement, MouseButton, MouseMoveEvent, Pixels,
+    Point, ScrollHandle, SharedString, Stateful, Window, div, prelude::*, px, rgb, rgba, svg,
 };
 
 use super::{hscrollbar_track, scrollbar_fractions, scrollbar_thumb};
 use crate::theme::Theme;
 
-/// The height of one item row of a 平铺网格 column.
-pub(crate) const GRID_ROW_HEIGHT: f32 = 26.0;
-/// The width of one item of a 平铺网格 column.
+/// The height of one item row of a 平铺网格 column. This is the single shared row metric: every
+/// page's 平铺网格 uses it so the layouts look identical.
+pub(crate) const GRID_ROW_HEIGHT: f32 = 20.0;
+/// The default and minimum width of one item of a 平铺网格 column. Lists whose names are longer
+/// widen their tiles (up to [`GRID_ITEM_MAX_WIDTH`]) so the names are shown in full.
 pub(crate) const GRID_ITEM_WIDTH: f32 = 220.0;
+/// The widest a 平铺网格 item grows to fit its longest name.
+pub(crate) const GRID_ITEM_MAX_WIDTH: f32 = 620.0;
 /// The bottom margin a column leaves before it decides it has no room for another row.
 pub(crate) const GRID_BOTTOM_MARGIN: f32 = 16.0;
+
+/// Shared column widths of the app's 详细列表 pages. They match Navicat's compact layout: the
+/// columns are left-packed at modest fixed widths instead of stretching to fill a wide window.
+pub(crate) const DETAIL_NAME_WIDTH: f32 = 280.0;
+pub(crate) const DETAIL_MODIFIED_WIDTH: f32 = 150.0;
+pub(crate) const DETAIL_SIZE_WIDTH: f32 = 90.0;
+pub(crate) const DETAIL_COMMENT_WIDTH: f32 = 200.0;
 
 /// The callback type of [`view_mode_toggle`], shared by every caller.
 pub(crate) type ViewModeHandler = Rc<dyn Fn(ViewMode, &ClickEvent, &mut Window, &mut App)>;
@@ -36,9 +47,9 @@ pub(crate) type ViewModeHandler = Rc<dyn Fn(ViewMode, &ClickEvent, &mut Window, 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum ViewMode {
     /// 详细列表: a sortable table with named columns.
-    #[default]
     Detail,
-    /// 平铺网格: a Navicat-style column-major grid.
+    /// 平铺网格: a Navicat-style column-major grid. The default for every page.
+    #[default]
     Grid,
 }
 
@@ -54,11 +65,11 @@ impl ViewMode {
         }
     }
 
-    /// Parse a persisted id, defaulting to 详细列表.
+    /// Parse a persisted id, defaulting to 平铺网格.
     pub fn from_id(value: &str) -> Self {
         match value {
-            "grid" => ViewMode::Grid,
-            _ => ViewMode::Detail,
+            "detail" => ViewMode::Detail,
+            _ => ViewMode::Grid,
         }
     }
 
@@ -101,14 +112,16 @@ pub(crate) fn view_mode_toggle(
         let active = mode == current;
         let callback = on_select.clone();
         let icon_color = if active { theme.text } else { theme.text_muted };
+        let label = t!(mode.label_key()).to_string();
         group = group.child(
             div()
                 .id(SharedString::from(format!("view-mode-{}", mode.id())))
                 .flex()
                 .flex_row()
                 .items_center()
+                .justify_center()
                 .gap_1()
-                .px_2()
+                .w(px(26.0))
                 .h(px(22.0))
                 .flex_none()
                 .rounded(px(5.0))
@@ -127,6 +140,10 @@ pub(crate) fn view_mode_toggle(
                         .text_color(rgb(theme.text_muted))
                         .hover(move |style| style.text_color(rgb(theme.text)))
                 })
+                .tooltip({
+                    let label = label.clone();
+                    move |_, cx| cx.new(|_| ModeTooltip(label.clone())).into()
+                })
                 .on_click(move |event, window, cx| callback(mode, event, window, cx))
                 .child(
                     svg()
@@ -135,11 +152,29 @@ pub(crate) fn view_mode_toggle(
                         .h(px(14.0))
                         .flex_none()
                         .text_color(rgb(icon_color)),
-                )
-                .child(t!(mode.label_key()).to_string()),
+                ),
         );
     }
     group
+}
+
+/// The hover tooltip of one 详细列表 / 平铺网格 icon segment.
+struct ModeTooltip(String);
+
+impl Render for ModeTooltip {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let theme = gpui_kit::component::Theme::global(cx);
+        div()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(theme.popover)
+            .border_1()
+            .border_color(theme.border)
+            .text_size(px(12.0))
+            .text_color(theme.popover_foreground)
+            .child(self.0.clone())
+    }
 }
 
 /// The full-bleed container of a 详细列表 (its header plus scrolling body). It fills its pane edge
@@ -155,12 +190,14 @@ pub(crate) fn detail_card(theme: Theme) -> Div {
         .bg(rgb(theme.editor_bg))
 }
 
-/// The sticky header strip of a 详细列表.
+/// The sticky header strip of a 详细列表. It shares [`detail_row`]'s `gap_3` so the header cells
+/// line up exactly with the data cells.
 pub(crate) fn detail_header_row(theme: Theme) -> Div {
     div()
         .flex()
         .flex_row()
         .items_center()
+        .gap_3()
         .w_full()
         .h(px(34.0))
         .px_3()
@@ -220,6 +257,19 @@ pub(crate) fn detail_header_cell(
         )
 }
 
+/// A non-sortable header cell of a 详细列表 (used by columns the page does not sort by).
+pub(crate) fn detail_header_cell_plain(label: String, theme: Theme) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .h_full()
+        .whitespace_nowrap()
+        .text_size(px(12.0))
+        .text_color(rgb(theme.text_muted))
+        .child(label)
+}
+
 /// The base styling of one 详细列表 row. The caller adds its column cells and the click handlers.
 pub(crate) fn detail_row(
     id: impl Into<SharedString>,
@@ -249,31 +299,53 @@ pub(crate) fn grid_columns() -> Div {
     div().flex().flex_row().items_start().gap_1().p_1()
 }
 
-/// One vertical column of a 平铺网格.
+/// One vertical column of a 平铺网格. Items stack with no vertical gap so the shared row height is
+/// the only spacing — every page's grid therefore has the same density.
 pub(crate) fn grid_column() -> Div {
-    div().flex().flex_col().gap_0p5()
+    div().flex().flex_col()
 }
 
-/// The base styling of one item of a 平铺网格 column. The caller adds the icon and label.
-pub(crate) fn grid_item(
+/// The base styling of one item of a 平铺网格 column, at an explicit width. The caller adds the
+/// icon and label.
+pub(crate) fn grid_item_sized(
     id: impl Into<SharedString>,
     selected: bool,
     theme: Theme,
+    width: f32,
 ) -> Stateful<Div> {
     div()
         .id(id.into())
         .flex()
         .flex_row()
         .items_center()
-        .gap_2()
-        .w(px(GRID_ITEM_WIDTH))
+        .gap_1()
+        .w(px(width))
         .h(px(GRID_ROW_HEIGHT))
-        .px_2()
+        .px_1()
         .flex_none()
-        .rounded(px(5.0))
+        .rounded_sm()
         .cursor_pointer()
         .when(selected, move |style| style.bg(rgb(theme.brand_muted)))
         .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+}
+
+/// An approximate rendered width of `text` at the 12px UI font (CJK counts double).
+pub(crate) fn approx_text_width(text: &str) -> f32 {
+    text.chars()
+        .map(|character| {
+            if (character as u32) >= 0x1100 {
+                12.0
+            } else {
+                7.0
+            }
+        })
+        .sum()
+}
+
+/// The tile width for a 平铺网格 whose longest name is `longest` pixels wide: the default/minimum
+/// plus the leading icon and padding, capped at [`GRID_ITEM_MAX_WIDTH`].
+pub(crate) fn grid_item_width(longest: f32) -> f32 {
+    (longest + 30.0).clamp(GRID_ITEM_WIDTH, GRID_ITEM_MAX_WIDTH)
 }
 
 /// The horizontal scroll state of a 平铺网格: the column-major list scrolls sideways, so it needs
@@ -288,11 +360,16 @@ pub(crate) struct ColumnGrid {
 impl ColumnGrid {
     /// How many item rows fit in one column at the current viewport height.
     pub(crate) fn rows_per_column(&self) -> usize {
+        self.rows_per_column_with(GRID_ROW_HEIGHT)
+    }
+
+    /// How many item rows of `row_height` fit in one column at the current viewport height.
+    pub(crate) fn rows_per_column_with(&self, row_height: f32) -> usize {
         let viewport = f32::from(self.scroll.bounds().size.height);
         if viewport <= 0.0 {
             return 30;
         }
-        let rows = ((viewport - GRID_BOTTOM_MARGIN) / GRID_ROW_HEIGHT).floor() as usize;
+        let rows = ((viewport - GRID_BOTTOM_MARGIN) / row_height).floor() as usize;
         rows.max(1)
     }
 
@@ -418,4 +495,35 @@ pub(crate) fn tag_chip(label: String, theme: Theme) -> impl IntoElement {
         .text_color(rgb(theme.text_muted))
         .text_size(px(10.0))
         .child(label)
+}
+
+/// The translucent rubber-band rectangle drawn while a list marquee-selects. `origin` and `current`
+/// are window-space points; the rectangle is clamped to `bounds` so it never spills over the pane.
+pub(crate) fn marquee_rect(
+    origin: Point<Pixels>,
+    current: Point<Pixels>,
+    bounds: Bounds<Pixels>,
+    theme: Theme,
+) -> Option<impl IntoElement> {
+    let left = origin.x.min(current.x).max(bounds.left());
+    let top = origin.y.min(current.y).max(bounds.top());
+    let right = origin.x.max(current.x).min(bounds.right());
+    let bottom = origin.y.max(current.y).min(bounds.bottom());
+    let width = right - left;
+    let height = bottom - top;
+    if width <= px(0.0) || height <= px(0.0) {
+        return None;
+    }
+    Some(
+        div()
+            .absolute()
+            .left(left - bounds.left())
+            .top(top - bounds.top())
+            .w(width)
+            .h(height)
+            .rounded(px(2.0))
+            .bg(rgba((theme.brand << 8) | 0x22))
+            .border_1()
+            .border_color(rgb(theme.brand)),
+    )
 }

@@ -21,7 +21,7 @@ use crate::connection::map_query_error;
 /// limits and the TLS columns are the ones the 常规/高级 tabs edit.
 const ACCOUNT_QUERY: &str = "SELECT User, Host, plugin, authentication_string, password_expired, \
      password_lifetime, account_locked, max_questions, max_updates, max_connections, \
-     max_user_connections, ssl_type, ssl_cipher, x509_issuer, x509_subject \
+     max_user_connections, ssl_type, ssl_cipher, x509_issuer, x509_subject, super_priv \
      FROM mysql.user";
 
 /// Every account on the server, ordered by user then host.
@@ -69,6 +69,26 @@ pub(crate) async fn user_details(pool: &MySqlPool, user: &str, host: &str) -> Re
 /// Drop one account.
 pub(crate) async fn drop_user(pool: &MySqlPool, user: &str, host: &str) -> Result<()> {
     let sql = format!("DROP USER {}", quote_account(user, host));
+    sqlx::raw_sql(AssertSqlSafe(sql))
+        .execute(pool)
+        .await
+        .map_err(map_query_error)?;
+    Ok(())
+}
+
+/// Rename one account, keeping its grants (`RENAME USER` rewrites the ACL rows in place).
+pub(crate) async fn rename_user(
+    pool: &MySqlPool,
+    user: &str,
+    host: &str,
+    new_user: &str,
+    new_host: &str,
+) -> Result<()> {
+    let sql = format!(
+        "RENAME USER {} TO {}",
+        quote_account(user, host),
+        quote_account(new_user, new_host)
+    );
     sqlx::raw_sql(AssertSqlSafe(sql))
         .execute(pool)
         .await
@@ -134,6 +154,7 @@ fn read_account(row: &MySqlRow) -> UserAccount {
         ssl_cipher: text(row, "ssl_cipher"),
         x509_issuer: text(row, "x509_issuer"),
         x509_subject: text(row, "x509_subject"),
+        is_super_user: flag(row, "super_priv"),
     }
 }
 

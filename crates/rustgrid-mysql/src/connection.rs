@@ -137,10 +137,12 @@ impl Connection for MysqlConnection {
 
     async fn list_tables(&self, database: &str) -> Result<Vec<TableInfo>> {
         let rows = sqlx::query(
-            "SELECT table_name, table_type \
-             FROM information_schema.tables \
-             WHERE table_schema = ? \
-             ORDER BY table_name",
+            "SELECT t.table_name, t.table_type, v.is_updatable \
+             FROM information_schema.tables AS t \
+             LEFT JOIN information_schema.views AS v \
+               ON v.table_schema = t.table_schema AND v.table_name = t.table_name \
+             WHERE t.table_schema = ? \
+             ORDER BY t.table_name",
         )
         .bind(database)
         .fetch_all(&self.pool)
@@ -151,12 +153,17 @@ impl Connection for MysqlConnection {
         for row in rows {
             let name: String = row.try_get(0).map_err(map_query_error)?;
             let table_type: String = row.try_get(1).map_err(map_query_error)?;
+            let updatable: Option<String> = row.try_get(2).unwrap_or(None);
             let kind = if table_type.eq_ignore_ascii_case("VIEW") {
                 ObjectKind::View
             } else {
                 ObjectKind::Table
             };
-            tables.push(TableInfo { name, kind });
+            tables.push(TableInfo {
+                name,
+                kind,
+                updatable: updatable.is_some_and(|value| value.eq_ignore_ascii_case("YES")),
+            });
         }
         Ok(tables)
     }
@@ -578,6 +585,44 @@ impl Connection for MysqlConnection {
             create_options: value("Create_options").and_then(text_value),
             comment: value("Comment").and_then(text_value),
         })
+    }
+
+    async fn table_statuses(&self, database: &str) -> Result<Vec<(String, TableStatus)>> {
+        let rows = sqlx::query(
+            "SELECT table_name, engine, table_rows, auto_increment, update_time, data_length, \
+                    table_comment \
+             FROM information_schema.tables \
+             WHERE table_schema = ? AND table_type <> 'VIEW' \
+             ORDER BY table_name",
+        )
+        .bind(database)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_query_error)?;
+
+        let mut statuses = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let name: String = row.try_get(0).map_err(map_query_error)?;
+            let engine: Option<String> = row.try_get(1).unwrap_or(None);
+            let updated = row
+                .try_get::<Option<chrono::NaiveDateTime>, _>(4)
+                .ok()
+                .flatten()
+                .map(|value| value.format("%Y-%m-%d %H:%M:%S").to_string());
+            statuses.push((
+                name,
+                TableStatus {
+                    engine,
+                    rows: optional_u64(row, 2),
+                    auto_increment: optional_u64(row, 3),
+                    updated,
+                    data_length: optional_u64(row, 5),
+                    comment: row.try_get(6).unwrap_or(None),
+                    ..TableStatus::default()
+                },
+            ));
+        }
+        Ok(statuses)
     }
 
     async fn character_sets(&self) -> Result<Vec<String>> {
@@ -1054,6 +1099,16 @@ impl Connection for MysqlConnection {
 
     async fn drop_user(&self, user: &str, host: &str) -> Result<()> {
         crate::user::drop_user(&self.pool, user, host).await
+    }
+
+    async fn rename_user(
+        &self,
+        user: &str,
+        host: &str,
+        new_user: &str,
+        new_host: &str,
+    ) -> Result<()> {
+        crate::user::rename_user(&self.pool, user, host, new_user, new_host).await
     }
 
     fn authentication_plugins(&self) -> Vec<&'static str> {

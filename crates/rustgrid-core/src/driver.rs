@@ -105,6 +105,12 @@ pub trait Connection: Send + Sync {
     /// an equivalent should return [`TableStatus::default`].
     async fn table_status(&self, database: &str, table: &str) -> Result<TableStatus>;
 
+    /// A `SHOW TABLE STATUS`-style overview of every table in a database, keyed by name, for the
+    /// object list's 详细列表. Engines without an equivalent return an empty list.
+    async fn table_statuses(&self, _database: &str) -> Result<Vec<(String, TableStatus)>> {
+        Ok(Vec::new())
+    }
+
     async fn character_sets(&self) -> Result<Vec<String>>;
 
     async fn collations(&self) -> Result<Vec<String>>;
@@ -238,6 +244,19 @@ pub trait Connection: Send + Sync {
 
     /// Drop an account.
     async fn drop_user(&self, _user: &str, _host: &str) -> Result<()> {
+        Err(Error::Query(
+            "user management is not supported by this driver".to_string(),
+        ))
+    }
+
+    /// Rename an account (`RENAME USER 'user'@'host' TO 'new_user'@'new_host'`), keeping its grants.
+    async fn rename_user(
+        &self,
+        _user: &str,
+        _host: &str,
+        _new_user: &str,
+        _new_host: &str,
+    ) -> Result<()> {
         Err(Error::Query(
             "user management is not supported by this driver".to_string(),
         ))

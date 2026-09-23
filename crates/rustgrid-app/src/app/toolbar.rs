@@ -229,6 +229,9 @@ impl AppView {
                 cx.notify();
             });
         }
+        // The previous category's multi-selection keys do not apply to the new one.
+        self.objects_selection.clear();
+        self.objects_row_rects.clear();
         if category == Category::Functions
             && let Some(pane) = self.object_pane.as_ref()
         {

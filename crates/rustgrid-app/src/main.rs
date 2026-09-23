@@ -8,6 +8,7 @@ rust_i18n::i18n!("locales", fallback = "en");
 mod app;
 mod assets;
 mod form;
+mod list_select;
 mod runtime;
 mod session;
 mod sql;
