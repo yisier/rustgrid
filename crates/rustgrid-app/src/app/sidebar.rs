@@ -18,6 +18,8 @@ struct TreeConnection {
     status: TreeStatus,
     expanded: bool,
     databases: Loadable<Vec<TreeDatabase>>,
+    /// Saved queries belonging to this connection, across all its databases.
+    saved_queries: Vec<TreeSavedQuery>,
 }
 
 struct TreeDatabase {
@@ -33,6 +35,16 @@ struct TreeDatabase {
 struct TreeTable {
     name: String,
     is_view: bool,
+}
+
+/// One saved-query leaf shown under a database's Queries category in the connection tree.
+struct TreeSavedQuery {
+    /// The database folder the query belongs to, matching a `TreeDatabase`'s name.
+    database: String,
+    /// The query's display name.
+    name: String,
+    /// The index into `AppView::query_files`, used to open it.
+    index: usize,
 }
 
 fn snapshot_connections(app: &AppView) -> Vec<TreeConnection> {
@@ -106,6 +118,17 @@ fn snapshot_connections(app: &AppView) -> Vec<TreeConnection> {
                 status,
                 expanded: node.expanded,
                 databases,
+                saved_queries: app
+                    .query_files
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, file)| file.connection_id == node.profile.id)
+                    .map(|(index, file)| TreeSavedQuery {
+                        database: file.database.clone(),
+                        name: file.name.clone(),
+                        index,
+                    })
+                    .collect(),
             }
         })
         .collect()
@@ -271,9 +294,9 @@ impl TreePane {
                     .child(connection.name.clone()),
             );
 
-        let body = div().flex().flex_col().child(row);
+        let body = div().flex().flex_col().w_full().child(row);
 
-        let mut sub = div().flex().flex_col();
+        let mut sub = div().flex().flex_col().w_full();
 
         if connection.expanded {
             match &connection.databases {
@@ -290,7 +313,12 @@ impl TreePane {
                 }
                 Loadable::Loaded(databases) => {
                     for database in databases {
-                        sub = sub.child(self.render_database(index, database, cx));
+                        sub = sub.child(self.render_database(
+                            index,
+                            database,
+                            &connection.saved_queries,
+                            cx,
+                        ));
                     }
                 }
             }
@@ -303,6 +331,7 @@ impl TreePane {
         &self,
         connection_index: usize,
         database: &TreeDatabase,
+        saved_queries: &[TreeSavedQuery],
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let theme = self.theme;
@@ -403,7 +432,7 @@ impl TreePane {
                     .child(database.name.clone()),
             );
 
-        let mut sub = div().flex().flex_col();
+        let mut sub = div().flex().flex_col().w_full();
 
         if database.expanded {
             match &database.tables {
@@ -425,6 +454,7 @@ impl TreePane {
                             database_index,
                             category,
                             database,
+                            saved_queries,
                             cx,
                         ));
                     }
@@ -432,7 +462,7 @@ impl TreePane {
             }
         }
 
-        div().flex().flex_col().child(row).child(sub)
+        div().flex().flex_col().w_full().child(row).child(sub)
     }
 
     fn render_category(
@@ -441,6 +471,7 @@ impl TreePane {
         database_index: usize,
         category: Category,
         database: &TreeDatabase,
+        saved_queries: &[TreeSavedQuery],
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let theme = self.theme;
@@ -489,7 +520,7 @@ impl TreePane {
             .child(tree_icon(category.icon_path(), icon_color))
             .child(div().child(label));
 
-        let mut sub = div().flex().flex_col();
+        let mut sub = div().flex().flex_col().w_full();
 
         if expanded {
             match category {
@@ -537,17 +568,24 @@ impl TreePane {
                         }
                     }
                 },
-                _ => {
-                    sub = sub.child(tree_message(
-                        t!("common.empty").to_string(),
-                        52.0,
-                        theme.text_muted,
-                    ));
+                Category::Queries => {
+                    for query in saved_queries
+                        .iter()
+                        .filter(|query| query.database == database.name)
+                    {
+                        sub = sub.child(self.render_saved_query(
+                            connection_index,
+                            database_index,
+                            query,
+                            cx,
+                        ));
+                    }
                 }
+                _ => {}
             }
         }
 
-        div().flex().flex_col().child(row).child(sub)
+        div().flex().flex_col().w_full().child(row).child(sub)
     }
 
     /// One stored routine leaf under the connection tree's Functions category.
@@ -713,7 +751,7 @@ impl TreePane {
                     .text_color(rgb(theme.tree_selected_text))
             })
             .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-            .on_click(cx.listener(move |this, _event, window, cx| {
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 if editing_here {
                     return;
                 }
@@ -726,15 +764,24 @@ impl TreePane {
                 ));
                 window.focus(&this.focus, cx);
                 this.selected = Some(click_id.clone());
+                let double_click =
+                    matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2);
                 let _ = app.update(cx, |app, cx| {
-                    app.select_table(
-                        connection_index,
-                        database_name.clone(),
-                        table_name.clone(),
-                        is_view,
-                        cx,
-                    );
+                    if double_click {
+                        app.select_table(
+                            connection_index,
+                            database_name.clone(),
+                            table_name.clone(),
+                            is_view,
+                            cx,
+                        );
+                    } else {
+                        // A single click only selects the table (and updates the info pane);
+                        // opening its data grid takes a double-click, like Navicat.
+                        app.set_info_table(connection_index, database_index, table_name.clone());
+                    }
                 });
+                cx.notify();
             }))
             .on_mouse_down(
                 MouseButton::Right,
@@ -773,12 +820,75 @@ impl TreePane {
                     "icons/tables.svg"
                 },
                 if is_view {
-                    theme.icon_view
+                    theme.icon_views
                 } else {
-                    theme.icon_table
+                    theme.icon_tables
                 },
             ))
             .child(label)
+    }
+
+    /// One saved-query leaf under the connection tree's Queries category. A single click selects
+    /// it (and scopes the Queries main tab to its database); a double-click opens it.
+    fn render_saved_query(
+        &self,
+        connection_index: usize,
+        database_index: usize,
+        query: &TreeSavedQuery,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
+        let theme = self.theme;
+        let query_id = format!("qry-{connection_index}-{database_index}-{}", query.index);
+        let selected = self.selected.as_deref() == Some(query_id.as_str());
+        let name = query.name.clone();
+        let click_id = query_id.clone();
+        let app = self.app.clone();
+        let file_index = query.index;
+
+        div()
+            .id(SharedString::from(query_id))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .w_full()
+            .h(px(22.0))
+            .pl(px(54.0))
+            .pr_2()
+            .rounded_sm()
+            .cursor_pointer()
+            .when(selected, move |style| {
+                style
+                    .bg(rgb(theme.tree_selected_bg))
+                    .text_color(rgb(theme.tree_selected_text))
+            })
+            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                this.commit_pending_rename(cx);
+                this.selected_table = None;
+                window.focus(&this.focus, cx);
+                this.selected = Some(click_id.clone());
+                let double_click =
+                    matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2);
+                let _ = app.update(cx, |app, cx| {
+                    if double_click {
+                        app.open_saved_query(file_index, cx);
+                    } else {
+                        cx.notify();
+                    }
+                });
+                cx.notify();
+            }))
+            .child(chevron_spacer())
+            .child(tree_icon("icons/queries.svg", theme.icon_queries))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .child(name),
+            )
     }
 }
 
@@ -798,10 +908,11 @@ impl Render for TreePane {
         self.theme = theme;
         self.rename_row = rename;
 
-        let mut list = div().flex().flex_col();
+        let mut list = div().flex().flex_col().w_full();
         if connections.is_empty() {
             list = list.child(
                 div()
+                    .w_full()
                     .p_2()
                     .text_color(rgb(theme.text_muted))
                     .child(t!("sidebar.no_connections").to_string()),
@@ -815,6 +926,7 @@ impl Render for TreePane {
             .id("sidebar-scroll")
             .flex()
             .flex_col()
+            .w_full()
             .flex_1()
             .min_h(px(0.0))
             .py_1()

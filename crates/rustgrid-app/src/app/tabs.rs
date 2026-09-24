@@ -39,19 +39,9 @@ impl AppView {
         } else if self.main_tab == MainTab::Backups {
             self.render_backups(cx).into_any_element()
         } else if self.main_tab == MainTab::Functions && self.object_pane.is_none() {
-            div()
-                .flex_1()
-                .p_3()
-                .text_color(rgb(theme.text_muted))
-                .child(t!("routine.open_database").to_string())
-                .into_any_element()
+            div().flex_1().into_any_element()
         } else if self.main_tab == MainTab::Views && self.object_pane.is_none() {
-            div()
-                .flex_1()
-                .p_3()
-                .text_color(rgb(theme.text_muted))
-                .child(t!("view.open_database").to_string())
-                .into_any_element()
+            div().flex_1().into_any_element()
         } else if let Some(pane) = self.object_pane.clone() {
             div()
                 .flex()

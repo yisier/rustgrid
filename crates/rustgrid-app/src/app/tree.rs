@@ -8,6 +8,27 @@ impl AppView {
         }
     }
 
+    /// The connection-tree index of an active connection, matched by identity. Lets a grid that
+    /// only holds the shared `Connection` handle find its tree row (and database index).
+    pub(super) fn connection_index_of(&self, connection: &Arc<dyn Connection>) -> Option<usize> {
+        self.connections.iter().position(|node| match &node.status {
+            ConnectionStatus::Connected(active) => Arc::ptr_eq(active, connection),
+            _ => false,
+        })
+    }
+
+    /// Resolve a grid's `(connection, database name)` back to the tree's indices, so per-table
+    /// actions (import/export) can reuse the connection-tree-scoped wizards.
+    pub(super) fn table_scope(
+        &self,
+        connection: &Arc<dyn Connection>,
+        database: &str,
+    ) -> Option<(usize, usize)> {
+        let connection_index = self.connection_index_of(connection)?;
+        let database_index = self.database_index_by_name(connection_index, database)?;
+        Some((connection_index, database_index))
+    }
+
     pub(super) fn toggle_expand(&mut self, index: usize) {
         if let Some(node) = self.connections.get_mut(index)
             && matches!(&node.status, ConnectionStatus::Connected(_))

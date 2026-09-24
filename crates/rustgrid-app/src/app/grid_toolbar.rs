@@ -35,26 +35,6 @@ impl GridView {
             .border_b_1()
             .border_color(rgb(theme.border))
             .child(self.grid_tool_button(
-                "grid-begin",
-                "icons/transaction.svg",
-                t!("grid.begin_transaction").to_string(),
-                theme.text,
-                true,
-                false,
-                true,
-                |_, _, _| {},
-            ))
-            .child(self.grid_tool_button(
-                "grid-text",
-                "icons/text.svg",
-                t!("grid.text").to_string(),
-                theme.text,
-                true,
-                false,
-                true,
-                |_, _, _| {},
-            ))
-            .child(self.grid_tool_button(
                 "grid-filter",
                 "icons/filter.svg",
                 t!("grid.filter").to_string(),
@@ -79,21 +59,67 @@ impl GridView {
                 "icons/import.svg",
                 t!("grid.import").to_string(),
                 theme.icon_views,
-                true,
+                self.state.sql.is_none(),
                 false,
                 false,
-                |_, _, _| {},
+                cx.listener(|this, _event, _window, cx| this.open_grid_import(cx)),
             ))
             .child(self.grid_tool_button(
                 "grid-export",
                 "icons/export.svg",
                 t!("grid.export").to_string(),
                 theme.icon_views,
-                true,
+                self.state.sql.is_none(),
                 false,
                 false,
-                |_, _, _| {},
+                cx.listener(|this, _event, _window, cx| this.open_grid_export(cx)),
             ))
+    }
+
+    /// Open the Import Wizard scoped to this grid's database, defaulting a single source table to
+    /// the table the grid is showing. Table grids only (SQL result grids have no import target).
+    fn open_grid_import(&mut self, cx: &mut Context<'_, Self>) {
+        if self.state.sql.is_some() {
+            return;
+        }
+        let connection = self.state.connection.clone();
+        let database = self.state.database.clone();
+        let table = self.state.table.clone();
+        let Some(app) = self.app.upgrade() else {
+            return;
+        };
+        app.update(cx, |app, cx| {
+            let Some((connection_index, database_index)) = app.table_scope(&connection, &database)
+            else {
+                return;
+            };
+            app.open_import_wizard(connection_index, database_index, Some(table.clone()), cx);
+        });
+    }
+
+    /// Open the Export Wizard with this grid's table pre-selected. Table grids only.
+    fn open_grid_export(&mut self, cx: &mut Context<'_, Self>) {
+        if self.state.sql.is_some() {
+            return;
+        }
+        let connection = self.state.connection.clone();
+        let database = self.state.database.clone();
+        let table = self.state.table.clone();
+        let Some(app) = self.app.upgrade() else {
+            return;
+        };
+        app.update(cx, |app, cx| {
+            let Some((connection_index, database_index)) = app.table_scope(&connection, &database)
+            else {
+                return;
+            };
+            app.open_export_wizard(
+                connection_index,
+                database_index,
+                std::slice::from_ref(&table),
+                cx,
+            );
+        });
     }
 
     #[allow(clippy::too_many_arguments)]

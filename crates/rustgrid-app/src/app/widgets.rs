@@ -297,6 +297,7 @@ impl AppView {
                 let truncate_name = name.clone();
                 let rename_name = name.clone();
                 let export_name = name.clone();
+                let import_target = name.clone();
 
                 items = items.child(
                     self.context_item(
@@ -342,7 +343,12 @@ impl AppView {
                             t!("object.export_wizard").to_string(),
                             cx.listener(move |this, _event, _window, cx| {
                                 this.context_menu = None;
-                                this.open_export_wizard(ci, di, &view_export_name, cx);
+                                this.open_export_wizard(
+                                    ci,
+                                    di,
+                                    std::slice::from_ref(&view_export_name),
+                                    cx,
+                                );
                             }),
                         ))
                         .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
@@ -376,7 +382,12 @@ impl AppView {
                             t!("object.export_wizard").to_string(),
                             cx.listener(move |this, _event, _window, cx| {
                                 this.context_menu = None;
-                                this.open_export_wizard(ci, di, &export_name, cx);
+                                this.open_export_wizard(
+                                    ci,
+                                    di,
+                                    std::slice::from_ref(&export_name),
+                                    cx,
+                                );
                             }),
                         ))
                         .child(self.context_item(
@@ -384,7 +395,7 @@ impl AppView {
                             t!("object.import_wizard").to_string(),
                             cx.listener(move |this, _event, _window, cx| {
                                 this.context_menu = None;
-                                this.open_import_wizard(ci, di, cx);
+                                this.open_import_wizard(ci, di, Some(import_target.clone()), cx);
                             }),
                         ))
                         .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))

@@ -25,13 +25,14 @@ const EXPORT_PAGE_SIZE: u64 = 5_000;
 impl AppView {
     // ----- Opening -----------------------------------------------------------------------------
 
-    /// Open the export wizard for `table` of an open database. Every table of the database is
-    /// listed on P2 with `table` pre-selected.
+    /// Open the export wizard for an open database. Every object of the database is listed on P2
+    /// with `preselected` (the caller's selection) ticked; the first preselected table is the one
+    /// P3 opens on.
     pub(super) fn open_export_wizard(
         &mut self,
         connection_index: usize,
         database_index: usize,
-        table: &str,
+        preselected: &[String],
         cx: &mut Context<'_, Self>,
     ) {
         if self.export_wizard.is_some() {
@@ -46,12 +47,14 @@ impl AppView {
         }
         let output_dir = default_export_dir();
         let format = ExportFormat::Xlsx;
+        let preset: std::collections::HashSet<&str> =
+            preselected.iter().map(String::as_str).collect();
         let tables: Vec<ExportTablePlan> = tables
             .into_iter()
             .map(|name| {
-                let selected = name == table;
-                // Only the initially selected table has an output path; the rest are filled in when
-                // the user ticks them, so an unticked row never shows a stale directory.
+                let selected = preset.contains(name.as_str());
+                // Only the initially selected tables have an output path; the rest are filled in
+                // when the user ticks them, so an unticked row never shows a stale directory.
                 let path = if selected {
                     default_output_path(&output_dir, &name, format)
                 } else {
@@ -64,6 +67,8 @@ impl AppView {
                 }
             })
             .collect();
+        // P3 opens on the first ticked table, or the first row when nothing was preselected.
+        let field_table = tables.iter().position(|table| table.selected).unwrap_or(0);
 
         let weak = cx.weak_entity();
         let dir_input = make_export_dir_input(self.theme, output_dir.clone(), &weak, cx);
@@ -75,7 +80,7 @@ impl AppView {
             output_dir,
             tables,
             fields: BTreeMap::new(),
-            field_table: 0,
+            field_table,
             field_combo: None,
             dir_input: Some(dir_input),
             include_header: true,

@@ -593,6 +593,9 @@ struct ImportWizard {
     file_input: Option<Entity<TextInput>>,
     /// One row per worksheet in the file.
     sheets: Vec<ImportSheetPlan>,
+    /// When the wizard was opened from a table grid, the destination table a single source table
+    /// should default to (instead of the source name).
+    target_table: Option<String>,
     /// The database's table names at load time, so a typed target can auto-toggle "create".
     existing_tables: Vec<String>,
     /// Loaded source/destination data per sheet, keyed by sheet name.
@@ -2865,6 +2868,7 @@ pub(super) fn routine_icon_color(kind: RoutineKind, theme: Theme) -> u32 {
 
 fn tree_message(text: String, indent: f32, color: u32) -> impl IntoElement {
     div()
+        .w_full()
         .pl(px(indent))
         .pr_2()
         .py_0p5()

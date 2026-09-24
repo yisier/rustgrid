@@ -13,6 +13,16 @@ fn object_selection(pane: &Entity<ObjectPane>, cx: &App) -> Option<(usize, usize
     })
 }
 
+/// The object pane's database coordinates (even with no selection) plus its view flag.
+fn object_scope(pane: &Entity<ObjectPane>, cx: &App) -> (usize, usize, bool) {
+    let pane = pane.read(cx);
+    (
+        pane.connection_index,
+        pane.database_index,
+        pane.category == Category::Views,
+    )
+}
+
 /// The Functions pane's selection plus its database coordinates and routine kind.
 fn routine_selection(
     pane: &Entity<ObjectPane>,
@@ -42,11 +52,6 @@ fn object_message(color: u32, text: String) -> AnyElement {
         .text_color(rgb(color))
         .child(text)
         .into_any_element()
-}
-
-/// The object list's "no objects" placeholder.
-fn object_empty(theme: Theme) -> AnyElement {
-    object_message(theme.text_muted, t!("common.empty").to_string())
 }
 
 /// The per-render snapshot the object list draws from: the remembered layout, the loaded
@@ -97,7 +102,11 @@ impl AppView {
         }
         let design_enabled = category == Category::Tables && open_enabled;
         let new_enabled = category == Category::Tables;
-        let export_enabled = category == Category::Tables && open_enabled;
+        // Export works off the multi-selection: enabled when at least one row is selected, even if
+        // more than one (`pane.selected` is the single-selection mirror and is `None` for a
+        // multi-row selection).
+        let export_enabled =
+            category == Category::Tables && (open_enabled || !self.objects_selection.is_empty());
         let import_enabled = category == Category::Tables
             && self
                 .database_name(connection_index, database_index)
@@ -200,7 +209,7 @@ impl AppView {
                                 let pane = pane_for_import.read(cx);
                                 (pane.connection_index, pane.database_index)
                             };
-                            this.open_import_wizard(connection_index, database_index, cx);
+                            this.open_import_wizard(connection_index, database_index, None, cx);
                         }),
                     ))
                     .child(toolbar_separator(theme))
@@ -210,15 +219,22 @@ impl AppView {
                         t!("object.export_wizard").to_string(),
                         export_enabled,
                         cx.listener(move |this, _event, _window, cx| {
-                            let Some((connection_index, database_index, name, is_view)) =
-                                object_selection(&pane_for_export, cx)
-                            else {
-                                return;
-                            };
+                            let (connection_index, database_index, is_view) =
+                                object_scope(&pane_for_export, cx);
                             if is_view {
                                 return;
                             }
-                            this.open_export_wizard(connection_index, database_index, &name, cx);
+                            let names = this.objects_selection.items();
+                            let names = if names.is_empty() {
+                                let Some((_, _, name, _)) = object_selection(&pane_for_export, cx)
+                                else {
+                                    return;
+                                };
+                                vec![name]
+                            } else {
+                                names
+                            };
+                            this.open_export_wizard(connection_index, database_index, &names, cx);
                         }),
                     )),
             )
@@ -415,6 +431,8 @@ impl AppView {
             let pane = pane.read(cx);
             pane.selected.is_some()
         };
+        // Export works off the multi-selection, so it stays enabled for more than one selected row.
+        let export_enabled = has_selection || !self.objects_selection.is_empty();
         let has_database = {
             let pane = pane.read(cx);
             self.database_name(pane.connection_index, pane.database_index)
@@ -520,14 +538,21 @@ impl AppView {
                         "view-export",
                         "icons/export.svg",
                         t!("object.export_wizard").to_string(),
-                        has_selection,
+                        export_enabled,
                         cx.listener(move |this, _event, _window, cx| {
-                            let Some((connection_index, database_index, name, _)) =
-                                object_selection(&pane_for_export, cx)
-                            else {
-                                return;
+                            let (connection_index, database_index, _) =
+                                object_scope(&pane_for_export, cx);
+                            let names = this.objects_selection.items();
+                            let names = if names.is_empty() {
+                                let Some((_, _, name, _)) = object_selection(&pane_for_export, cx)
+                                else {
+                                    return;
+                                };
+                                vec![name]
+                            } else {
+                                names
                             };
-                            this.open_export_wizard(connection_index, database_index, &name, cx);
+                            this.open_export_wizard(connection_index, database_index, &names, cx);
                         }),
                     )),
             )
@@ -724,7 +749,7 @@ impl ObjectPane {
         self.visible_keys.clear();
         if self.category == Category::Functions {
             let Some(routines) = routines else {
-                return object_empty(theme);
+                return div().into_any_element();
             };
             return match routines {
                 Loadable::Idle | Loadable::Loading => {
@@ -750,7 +775,7 @@ impl ObjectPane {
             };
         }
         let Some(tables) = tables else {
-            return object_empty(theme);
+            return div().into_any_element();
         };
         match tables {
             Loadable::Idle | Loadable::Loading => {
@@ -764,7 +789,7 @@ impl ObjectPane {
                     _ => None,
                 };
                 let Some(want_view) = want_view else {
-                    return object_empty(theme);
+                    return div().into_any_element();
                 };
                 let items: Vec<&rustgrid_core::TableInfo> = tables
                     .iter()
@@ -928,14 +953,6 @@ impl ObjectPane {
             ui::detail_content_width(&widths),
             header,
         );
-        if tables.is_empty() {
-            list = list.child(
-                div()
-                    .p_3()
-                    .text_color(rgb(theme.text_muted))
-                    .child(t!("common.empty").to_string()),
-            );
-        }
         for table in tables {
             let key = table.name.clone();
             let status = statuses.and_then(|list| {
@@ -1139,9 +1156,6 @@ impl ObjectPane {
         theme: Theme,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
-        if tables.is_empty() {
-            return object_empty(theme);
-        }
         let width = ui::grid_item_width(
             tables
                 .iter()
@@ -1350,14 +1364,6 @@ impl ObjectPane {
             ui::detail_content_width(&widths),
             header,
         );
-        if routines.is_empty() {
-            list = list.child(
-                div()
-                    .p_3()
-                    .text_color(rgb(theme.text_muted))
-                    .child(t!("common.empty").to_string()),
-            );
-        }
         for routine in routines {
             let key = routine.name.clone();
             let row = self.routine_row(routine, selected.contains(&key), &widths, theme, cx);
@@ -1499,9 +1505,6 @@ impl ObjectPane {
         theme: Theme,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
-        if routines.is_empty() {
-            return object_empty(theme);
-        }
         let width = ui::grid_item_width(
             routines
                 .iter()

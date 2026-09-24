@@ -282,9 +282,6 @@ impl AppView {
                 .flex_col()
                 .flex_1()
                 .min_h(px(0.0))
-                .p_3()
-                .text_color(rgb(theme.text_muted))
-                .child(t!("query.open_database").to_string())
                 .into_any_element();
         }
 
@@ -385,9 +382,6 @@ impl AppView {
             ui::detail_content_width(&widths),
             header,
         );
-        if visible.is_empty() {
-            list = list.child(query_empty_state(theme));
-        }
         for &index in visible {
             list = list.child(self.query_detail_row(index, &widths, theme, cx));
         }
@@ -493,15 +487,6 @@ impl AppView {
         theme: Theme,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
-        if visible.is_empty() {
-            return div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_h(px(0.0))
-                .child(query_empty_state(theme))
-                .into_any_element();
-        }
         let width = ui::grid_item_width(
             visible
                 .iter()
@@ -652,13 +637,4 @@ fn query_modified_text(file: &QueryFileInfo) -> String {
     file.modified
         .map(format_file_time)
         .unwrap_or_else(|| "--".to_string())
-}
-
-/// The muted message shown when a query layout has no rows.
-fn query_empty_state(theme: Theme) -> AnyElement {
-    div()
-        .p_3()
-        .text_color(rgb(theme.text_muted))
-        .child(t!("common.empty").to_string())
-        .into_any_element()
 }

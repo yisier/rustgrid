@@ -431,6 +431,40 @@ impl AppView {
             .child(div().text_size(px(11.0)).child(label))
     }
 
+    /// The `(connection_index, database_index)` implied by the connection tree's current
+    /// selection, if it points at a database row or one of its children. Falls back to the open
+    /// object pane's coordinates so the tree still follows the main tabs when the selection is a
+    /// connection row.
+    fn tree_selection_scope(&self, cx: &App) -> Option<(usize, usize)> {
+        if let Some(pair) = self
+            .tree_pane
+            .read(cx)
+            .selected
+            .as_deref()
+            .and_then(parse_scope_id)
+        {
+            return Some(pair);
+        }
+        self.object_pane.as_ref().map(|pane| {
+            let pane = pane.read(cx);
+            (pane.connection_index, pane.database_index)
+        })
+    }
+
+    /// Move the connection tree's cursor onto `category`'s node under the currently selected
+    /// database, so switching main tabs also moves the tree highlight.
+    fn select_tree_category(&mut self, category: Category, cx: &mut Context<'_, Self>) {
+        let Some((connection_index, database_index)) = self.tree_selection_scope(cx) else {
+            return;
+        };
+        let id = format!("cat-{connection_index}-{database_index}-{}", category.id());
+        self.tree_pane.update(cx, |pane, cx| {
+            pane.selected = Some(id);
+            pane.selected_table = None;
+            cx.notify();
+        });
+    }
+
     pub(super) fn select_main_tab(&mut self, tab: MainTab, cx: &mut Context<'_, Self>) {
         self.main_tab = tab;
         if tab == MainTab::Users {
@@ -444,6 +478,7 @@ impl AppView {
             return;
         }
         if tab == MainTab::Backups {
+            self.select_tree_category(Category::Backups, cx);
             self.refresh_backups(cx);
             self.active_grid = None;
             self.active_query = None;
@@ -488,11 +523,24 @@ impl AppView {
         self.active_design = None;
         self.saved_query_selected = None;
         self.query_selection.clear();
+        self.select_tree_category(category, cx);
         if tab == MainTab::Queries {
             self.refresh_query_files(cx);
         }
         cx.notify();
     }
+}
+
+/// Parse a connection-tree selection id (`db-` / `tbl-` / `cat-` / `qry-`) into its
+/// `(connection_index, database_index)` pair.
+fn parse_scope_id(id: &str) -> Option<(usize, usize)> {
+    let rest = ["db-", "tbl-", "cat-", "qry-"]
+        .into_iter()
+        .find_map(|prefix| id.strip_prefix(prefix))?;
+    let mut parts = rest.splitn(3, '-');
+    let connection_index = parts.next()?.parse().ok()?;
+    let database_index = parts.next()?.parse().ok()?;
+    Some((connection_index, database_index))
 }
 
 /// The icon for a theme setting, shared by the titlebar button and the dropdown rows.

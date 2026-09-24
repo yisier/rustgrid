@@ -32,11 +32,13 @@ const IMPORT_BATCH_ROWS: usize = 500;
 impl AppView {
     // ----- Opening -----------------------------------------------------------------------------
 
-    /// Open the import wizard for an open database.
+    /// Open the import wizard for an open database. When `target_table` is set (the wizard was
+    /// launched from a table grid), a single source table defaults to that destination table.
     pub(super) fn open_import_wizard(
         &mut self,
         connection_index: usize,
         database_index: usize,
+        target_table: Option<String>,
         cx: &mut Context<'_, Self>,
     ) {
         if self.import_wizard.is_some() {
@@ -56,6 +58,7 @@ impl AppView {
             file: String::new(),
             file_input: Some(file_input),
             sheets: Vec::new(),
+            target_table,
             existing_tables: Vec::new(),
             fields: BTreeMap::new(),
             mapping_sheet: 0,
@@ -425,15 +428,22 @@ impl AppView {
         }
         let theme = self.theme;
         let weak = cx.weak_entity();
-        let existing = self
+        let (existing, target_table) = self
             .import_wizard
             .as_ref()
-            .map(|wizard| wizard.existing_tables.clone())
+            .map(|wizard| (wizard.existing_tables.clone(), wizard.target_table.clone()))
             .unwrap_or_default();
         let mut sheets = Vec::with_capacity(names.len());
+        let single_source = names.len() == 1;
         for name in names {
             let (target, create) = match find_existing(&existing, &name) {
                 Some(table) => (table.to_string(), false),
+                // A wizard opened from a table grid imports into that table when the file holds a
+                // single source table; a multi-table source keeps its own names.
+                None if single_source => match target_table.as_deref() {
+                    Some(table) => (table.to_string(), false),
+                    None => (name.clone(), true),
+                },
                 None => (name.clone(), true),
             };
             let input = make_import_target_input(theme, target.clone(), sheets.len(), &weak, cx);

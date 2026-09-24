@@ -431,8 +431,6 @@ impl AppView {
     }
 
     fn render_backup_list(&self, cx: &mut Context<'_, Self>) -> AnyElement {
-        let theme = self.theme;
-
         // Backups only belong to an opened (and selected) database, so without one the list is
         // empty and every toolbar action is disabled.
         if self.backup_scope(cx).is_none() {
@@ -441,9 +439,6 @@ impl AppView {
                 .flex_col()
                 .flex_1()
                 .min_h(px(0.0))
-                .p_3()
-                .text_color(rgb(theme.text_muted))
-                .child(t!("backup.open_database").to_string())
                 .into_any_element();
         }
 
@@ -599,9 +594,7 @@ impl AppView {
             ui::detail_content_width(&widths),
             header,
         );
-        let mut has_any = false;
         for index in self.visible_backup_files(cx) {
-            has_any = true;
             let file = &self.backup_files[index];
             let key = backup_file_key(&file.name);
             let selected = self.backups_selection.contains(&key);
@@ -711,7 +704,6 @@ impl AppView {
             ));
         }
         for index in self.visible_backup_configs(cx) {
-            has_any = true;
             let config = &self.backup_configs[index];
             let key = backup_config_key(&config.name);
             let selected = self.backups_selection.contains(&key);
@@ -793,15 +785,6 @@ impl AppView {
                 key.clone(),
             ));
         }
-
-        if !has_any {
-            list = list.child(
-                div()
-                    .p_3()
-                    .text_color(rgb(theme.text_muted))
-                    .child(t!("backup.empty").to_string()),
-            );
-        }
         list.render(theme)
     }
 
@@ -831,9 +814,10 @@ impl AppView {
         }
         if entries.is_empty() {
             return div()
-                .p_3()
-                .text_color(rgb(theme.text_muted))
-                .child(t!("backup.empty").to_string())
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h(px(0.0))
                 .into_any_element();
         }
         let width = ui::grid_item_width(
@@ -3221,14 +3205,6 @@ fn render_object_picker(
                 .text_size(px(12.0))
                 .text_color(rgb(theme.text_muted))
                 .child(t!("common.loading").to_string()),
-        );
-    } else if objects.is_empty() {
-        list = list.child(
-            div()
-                .p_3()
-                .text_size(px(12.0))
-                .text_color(rgb(theme.text_muted))
-                .child(t!("common.empty").to_string()),
         );
     } else {
         for (kind_index, kind) in BackupObjectKind::ALL.into_iter().enumerate() {

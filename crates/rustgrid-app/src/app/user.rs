@@ -220,9 +220,6 @@ impl AppView {
             Loadable::Failed(error) => {
                 tree_message(error.clone(), 8.0, theme.danger).into_any_element()
             }
-            Loadable::Loaded(users) if users.is_empty() => {
-                tree_message(t!("user.empty").to_string(), 8.0, theme.text_muted).into_any_element()
-            }
             Loadable::Loaded(_) => {
                 let keys: Vec<String> = visible.iter().map(|(_, key, _)| key.clone()).collect();
                 match self.view_mode(VIEW_PAGE_USERS) {
@@ -469,13 +466,6 @@ impl AppView {
         theme: Theme,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
-        if visible.is_empty() {
-            return div()
-                .p_3()
-                .text_color(rgb(theme.text_muted))
-                .child(t!("common.empty").to_string())
-                .into_any_element();
-        }
         let width = ui::grid_item_width(
             visible
                 .iter()
