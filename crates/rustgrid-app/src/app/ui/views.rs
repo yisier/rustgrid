@@ -17,16 +17,16 @@
 //! horizontal scroll and the drag state; pages chunk their items into [`grid_column`]s using
 //! [`ColumnGrid::rows_per_column`].
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, CursorStyle, Div, FontWeight, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, Pixels, Point, ScrollHandle, SharedString, Stateful, Window,
-    div, prelude::*, px, rgb, rgba, svg,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollHandle, SharedString,
+    Stateful, Window, canvas, div, prelude::*, px, rgb, rgba, svg,
 };
-use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 
-use super::{hscrollbar_track, scrollbar_fractions, scrollbar_thumb};
+use super::{hscrollbar_track, scrollbar_fractions, scrollbar_thumb, vscrollbar_track};
 use crate::theme::Theme;
 
 /// The height of one item row of a 平铺网格 column. This is the single shared row metric: every
@@ -39,6 +39,12 @@ pub(crate) const GRID_ITEM_WIDTH: f32 = 220.0;
 pub(crate) const GRID_ITEM_MAX_WIDTH: f32 = 620.0;
 /// The bottom margin a column leaves before it decides it has no room for another row.
 pub(crate) const GRID_BOTTOM_MARGIN: f32 = 16.0;
+
+/// The height of a 详细列表's sticky header strip, shared by [`detail_header_row`] and the
+/// vertical scrollbar, which starts below it.
+pub(crate) const DETAIL_HEADER_HEIGHT: f32 = 34.0;
+/// The thickness of the app-drawn scrollbars, matching [`hscrollbar_track`] / [`vscrollbar_track`].
+pub(crate) const DETAIL_SCROLLBAR_THICKNESS: f32 = 14.0;
 
 /// The callback type of [`view_mode_toggle`], shared by every caller.
 pub(crate) type ViewModeHandler = Rc<dyn Fn(ViewMode, &ClickEvent, &mut Window, &mut App)>;
@@ -54,8 +60,8 @@ pub(crate) enum ViewMode {
 }
 
 impl ViewMode {
-    /// Every mode, in the order the switch presents them.
-    pub const ALL: [ViewMode; 2] = [ViewMode::Detail, ViewMode::Grid];
+    /// Every mode, in the order the switch presents them (平铺网格 first, then 详细列表).
+    pub const ALL: [ViewMode; 2] = [ViewMode::Grid, ViewMode::Detail];
 
     /// The stable id persisted in settings.
     pub fn id(self) -> &'static str {
@@ -281,9 +287,10 @@ impl DetailColumns {
     }
 }
 
-/// One 详细列表 header column: a fixed-width, relatively positioned cell with a right-edge drag
-/// handle straddling the `gap_3` gutter. `content` is the header cell; `on_resize_start` begins the
-/// drag (the page routes it to [`DetailColumns::begin_resize`]).
+/// One 详细列表 header column: a fixed-width, relatively positioned cell with a visible separator
+/// and a right-edge drag handle straddling the `gap_3` gutter. The separator is what tells the user
+/// where the draggable boundary is. `content` is the header cell; `on_resize_start` begins the drag
+/// (the page routes it to [`DetailColumns::begin_resize`]).
 pub(crate) fn detail_header_column(
     handle_id: impl Into<SharedString>,
     width: f32,
@@ -299,9 +306,19 @@ pub(crate) fn detail_header_column(
         .bottom(px(0.0))
         .right(px(-3.0))
         .w(px(6.0))
+        .flex()
+        .justify_center()
         .cursor(CursorStyle::ResizeColumn)
-        .when(active, move |handle| handle.bg(rgb(theme.primary)))
-        .on_mouse_down(MouseButton::Left, on_resize_start);
+        .hover(move |handle| handle.bg(rgba((theme.primary << 8) | 0x26)))
+        .when(active, move |handle| {
+            handle.bg(rgba((theme.primary << 8) | 0x33))
+        })
+        .on_mouse_down(MouseButton::Left, on_resize_start)
+        .child(div().w(px(1.0)).h_full().bg(rgb(if active {
+            theme.primary
+        } else {
+            theme.button_default_border
+        })));
     div()
         .relative()
         .flex()
@@ -314,14 +331,45 @@ pub(crate) fn detail_header_column(
         .child(handle)
 }
 
+/// The persistent scroll state of one 详细列表: the two scroll handles (rows scroll vertically,
+/// the header and rows together scroll horizontally), the active scrollbar-thumb drags, and the
+/// last measured overflow state of each axis. Pages own one and hand it to [`DetailList`]; because
+/// the drag flags and overflow flags live here rather than in the transient [`DetailList`], a thumb
+/// drag and the scrollbar visibility survive the per-render rebuild.
+#[derive(Default)]
+pub(crate) struct DetailScroll {
+    /// The horizontal scroll of the header + rows, tracked on the outer viewport.
+    hscroll: ScrollHandle,
+    /// The vertical scroll of the rows only, tracked on the rows viewport.
+    vscroll: ScrollHandle,
+    /// The active horizontal-thumb grab offset, if dragging.
+    h_grab: Rc<Cell<Option<f32>>>,
+    /// The active vertical-thumb grab offset, if dragging.
+    v_grab: Rc<Cell<Option<f32>>>,
+    /// Whether the last measurement found horizontal overflow. Written by the frame's measurement
+    /// canvas (after layout) and read on the next render to decide whether a track is drawn.
+    h_overflow: Rc<Cell<bool>>,
+    /// Whether the last measurement found vertical overflow.
+    v_overflow: Rc<Cell<bool>>,
+}
+
 /// The scrolling frame of a 详细列表: a sticky header and the rows, scrolled horizontally together,
 /// with the rows additionally scrolling vertically. gpui paints no scrollbars for `overflow_*`, so
-/// the frame overlays the kit's [`Scrollbar`] on both axes and keeps them visible. The two handles
-/// are owned by the page so the scroll position survives re-renders.
+/// the frame draws its own tracks as flex siblings (like the table grid) — the vertical one always
+/// sits at the visible right edge — and the scroll areas use native `overflow_*_scroll` so a
+/// trackpad pans both axes. A track is only drawn when its axis actually overflows; because the
+/// scroll extents are known only after layout, a small measurement canvas records the overflow
+/// state after each layout and requests one more frame when it changes. The handles, grab flags and
+/// overflow flags are owned by the page's [`DetailScroll`], so the scroll position and any drag
+/// survive re-renders.
 pub(crate) struct DetailList {
     id: &'static str,
     hscroll: ScrollHandle,
     vscroll: ScrollHandle,
+    h_grab: Rc<Cell<Option<f32>>>,
+    v_grab: Rc<Cell<Option<f32>>>,
+    h_overflow: Rc<Cell<bool>>,
+    v_overflow: Rc<Cell<bool>>,
     content_width: f32,
     header: Div,
     rows: Div,
@@ -332,15 +380,18 @@ impl DetailList {
     /// header is the [`detail_header_row`] the page built.
     pub(crate) fn new(
         id: &'static str,
-        hscroll: &ScrollHandle,
-        vscroll: &ScrollHandle,
+        scroll: &DetailScroll,
         content_width: f32,
         header: Div,
     ) -> Self {
         Self {
             id,
-            hscroll: hscroll.clone(),
-            vscroll: vscroll.clone(),
+            hscroll: scroll.hscroll.clone(),
+            vscroll: scroll.vscroll.clone(),
+            h_grab: scroll.h_grab.clone(),
+            v_grab: scroll.v_grab.clone(),
+            h_overflow: scroll.h_overflow.clone(),
+            v_overflow: scroll.v_overflow.clone(),
             content_width,
             header,
             rows: div().flex().flex_col().min_w(px(content_width)),
@@ -361,10 +412,94 @@ impl DetailList {
             id,
             hscroll,
             vscroll,
+            h_grab,
+            v_grab,
+            h_overflow,
+            v_overflow,
             content_width,
             header,
             rows,
         } = self;
+
+        // Read the overflow state measured after the previous layout, and refresh it once the
+        // current layout has run (see the measurement canvas below).
+        let show_h = h_overflow.get();
+        let show_v = v_overflow.get();
+        let measure_h = hscroll.clone();
+        let measure_v = vscroll.clone();
+        let h_flag = h_overflow.clone();
+        let v_flag = v_overflow.clone();
+        let measure = canvas(
+            |_bounds, _window: &mut Window, _cx: &mut App| {},
+            move |_bounds, _state, window: &mut Window, _cx: &mut App| {
+                // Painted after the scroll areas (it is the frame's last child), so the tracked
+                // handles already carry this frame's measured extents.
+                let h = measure_h.max_offset().x > px(0.0);
+                let v = measure_v.max_offset().y > px(0.0);
+                if h_flag.get() != h {
+                    h_flag.set(h);
+                    window.request_animation_frame();
+                }
+                if v_flag.get() != v {
+                    v_flag.set(v);
+                    window.request_animation_frame();
+                }
+            },
+        );
+
+        let h_begin = {
+            let hscroll = hscroll.clone();
+            let h_grab = h_grab.clone();
+            move |event: &MouseDownEvent, window: &mut Window, cx: &mut App| {
+                cx.stop_propagation();
+                begin_h_thumb_drag(&hscroll, &h_grab, event.position.x);
+                window.refresh();
+            }
+        };
+        let v_begin = {
+            let vscroll = vscroll.clone();
+            let v_grab = v_grab.clone();
+            move |event: &MouseDownEvent, window: &mut Window, cx: &mut App| {
+                cx.stop_propagation();
+                begin_v_thumb_drag(&vscroll, &v_grab, event.position.y);
+                window.refresh();
+            }
+        };
+        let move_scroll = hscroll.clone();
+        let move_vscroll = vscroll.clone();
+        let move_h_grab = h_grab.clone();
+        let move_v_grab = v_grab.clone();
+        let on_move = move |event: &MouseMoveEvent, window: &mut Window, _cx: &mut App| {
+            let mut changed = drag_h_thumb(&move_scroll, &move_h_grab, event.position.x);
+            changed |= drag_v_thumb(&move_vscroll, &move_v_grab, event.position.y);
+            if changed {
+                window.refresh();
+            }
+        };
+        let up_h_grab = h_grab.clone();
+        let up_v_grab = v_grab.clone();
+        let on_up = move |_event: &MouseUpEvent, window: &mut Window, _cx: &mut App| {
+            if up_h_grab.take().is_some() | up_v_grab.take().is_some() {
+                window.refresh();
+            }
+        };
+
+        let h_track: AnyElement = if show_h {
+            hscrollbar_element(id, &hscroll, theme, h_begin)
+        } else {
+            // Reserve the same height as a real scrollbar so the vertical track's viewport stays
+            // constant whether or not the columns overflow, like the table grid.
+            div()
+                .flex_none()
+                .h(px(DETAIL_SCROLLBAR_THICKNESS))
+                .into_any_element()
+        };
+        let v_track: AnyElement = if show_v {
+            vscrollbar_element(id, &vscroll, theme, v_begin)
+        } else {
+            div().into_any_element()
+        };
+
         div()
             .relative()
             .flex()
@@ -374,50 +509,204 @@ impl DetailList {
             .min_w(px(0.0))
             .overflow_hidden()
             .bg(rgb(theme.editor_bg))
+            .on_mouse_move(on_move)
+            .on_mouse_up(MouseButton::Left, on_up)
             .child(
                 div()
-                    .id(SharedString::from(format!("{id}-hscroll")))
                     .flex()
-                    .flex_col()
+                    .flex_row()
                     .flex_1()
                     .min_h(px(0.0))
                     .min_w(px(0.0))
-                    .overflow_hidden()
-                    .track_scroll(&hscroll)
                     .child(
                         div()
                             .flex()
                             .flex_col()
-                            .h_full()
-                            .w_full()
-                            .min_w(px(content_width))
-                            .child(header)
+                            .flex_1()
+                            .min_h(px(0.0))
+                            .min_w(px(0.0))
                             .child(
                                 div()
-                                    .id(SharedString::from(format!("{id}-vscroll")))
+                                    .id(SharedString::from(format!("{id}-hscroll")))
                                     .flex()
                                     .flex_col()
                                     .flex_1()
                                     .min_h(px(0.0))
-                                    .min_w(px(content_width))
-                                    .overflow_y_scroll()
-                                    .track_scroll(&vscroll)
-                                    .child(rows),
-                            ),
-                    ),
+                                    .min_w(px(0.0))
+                                    .overflow_x_scroll()
+                                    .restrict_scroll_to_axis()
+                                    .track_scroll(&hscroll)
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .h_full()
+                                            .w_full()
+                                            .min_w(px(content_width))
+                                            .child(header)
+                                            .child(
+                                                div()
+                                                    .id(SharedString::from(format!("{id}-vscroll")))
+                                                    .flex()
+                                                    .flex_col()
+                                                    .flex_1()
+                                                    .min_h(px(0.0))
+                                                    .min_w(px(content_width))
+                                                    .overflow_y_scroll()
+                                                    .restrict_scroll_to_axis()
+                                                    .track_scroll(&vscroll)
+                                                    .child(rows),
+                                            ),
+                                    ),
+                            )
+                            .child(h_track),
+                    )
+                    .child(v_track),
             )
-            .child(
-                Scrollbar::horizontal(&hscroll)
-                    .id(SharedString::from(format!("{id}-hscrollbar")))
-                    .mode(ScrollbarMode::Always),
-            )
-            .child(
-                Scrollbar::vertical(&vscroll)
-                    .id(SharedString::from(format!("{id}-vscrollbar")))
-                    .mode(ScrollbarMode::Always),
-            )
+            .child(measure.absolute().inset_0())
             .into_any_element()
     }
+}
+
+/// The horizontal scrollbar of a 详细列表, drawn only when the columns overflow. `on_mouse_down`
+/// begins the thumb drag.
+fn hscrollbar_element(
+    id: &'static str,
+    hscroll: &ScrollHandle,
+    theme: Theme,
+    on_mouse_down: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let viewport = f32::from(hscroll.bounds().size.width);
+    let max = f32::from(hscroll.max_offset().x);
+    let scroll = -f32::from(hscroll.offset().x);
+    let (thumb_left, thumb_len) = scrollbar_fractions(viewport, max, scroll);
+    hscrollbar_track(
+        SharedString::from(format!("{id}-hscrollbar")),
+        theme,
+        thumb_left,
+        thumb_len,
+    )
+    .on_mouse_down(MouseButton::Left, on_mouse_down)
+    .into_any_element()
+}
+
+/// The vertical scrollbar of a 详细列表, spanning the rows below the header and above the
+/// horizontal bar, drawn only when the rows overflow. `on_mouse_down` begins the thumb drag.
+fn vscrollbar_element(
+    id: &'static str,
+    vscroll: &ScrollHandle,
+    theme: Theme,
+    on_mouse_down: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let viewport = f32::from(vscroll.bounds().size.height);
+    let max = f32::from(vscroll.max_offset().y);
+    let scroll = -f32::from(vscroll.offset().y);
+    let (thumb_top, thumb_len) = scrollbar_fractions(viewport, max, scroll);
+    div()
+        .flex_none()
+        .h_full()
+        .pt(px(DETAIL_HEADER_HEIGHT))
+        .pb(px(DETAIL_SCROLLBAR_THICKNESS))
+        .child(
+            vscrollbar_track(
+                SharedString::from(format!("{id}-vscrollbar")),
+                theme,
+                thumb_top,
+                thumb_len,
+            )
+            .on_mouse_down(MouseButton::Left, on_mouse_down),
+        )
+        .into_any_element()
+}
+
+/// Capture the horizontal thumb at `mouse_x` and jump the view there.
+fn begin_h_thumb_drag(scroll: &ScrollHandle, grab: &Cell<Option<f32>>, mouse_x: Pixels) {
+    let bounds = scroll.bounds();
+    let viewport = f32::from(bounds.size.width);
+    let max = f32::from(scroll.max_offset().x);
+    let (thumb_len, travel) = scrollbar_thumb(viewport, max);
+    if travel <= 0.0 {
+        return;
+    }
+    let offset = -f32::from(scroll.offset().x);
+    let thumb_start = (offset / max) * travel;
+    let relative = f32::from(mouse_x) - f32::from(bounds.left());
+    let grabbed = if relative >= thumb_start && relative <= thumb_start + thumb_len {
+        relative - thumb_start
+    } else {
+        thumb_len / 2.0
+    };
+    grab.set(Some(grabbed));
+    set_h_thumb(scroll, relative, grabbed);
+}
+
+/// Continue a horizontal thumb drag. Returns whether a drag was active.
+fn drag_h_thumb(scroll: &ScrollHandle, grab: &Cell<Option<f32>>, mouse_x: Pixels) -> bool {
+    let Some(grabbed) = grab.get() else {
+        return false;
+    };
+    let relative = f32::from(mouse_x) - f32::from(scroll.bounds().left());
+    set_h_thumb(scroll, relative, grabbed);
+    true
+}
+
+/// Move the horizontal view so the grabbed point of the thumb sits under `relative`.
+fn set_h_thumb(scroll: &ScrollHandle, relative: f32, grabbed: f32) {
+    let viewport = f32::from(scroll.bounds().size.width);
+    let max = f32::from(scroll.max_offset().x);
+    let (_, travel) = scrollbar_thumb(viewport, max);
+    if travel <= 0.0 {
+        return;
+    }
+    let thumb_x = (relative - grabbed).clamp(0.0, travel);
+    let offset = thumb_x / travel * max;
+    let y = scroll.offset().y;
+    scroll.set_offset(Point::new(px(-offset), y));
+}
+
+/// Capture the vertical thumb at `mouse_y` and jump the view there.
+fn begin_v_thumb_drag(scroll: &ScrollHandle, grab: &Cell<Option<f32>>, mouse_y: Pixels) {
+    let bounds = scroll.bounds();
+    let viewport = f32::from(bounds.size.height);
+    let max = f32::from(scroll.max_offset().y);
+    let (thumb_len, travel) = scrollbar_thumb(viewport, max);
+    if travel <= 0.0 {
+        return;
+    }
+    let offset = -f32::from(scroll.offset().y);
+    let thumb_start = (offset / max) * travel;
+    let relative = f32::from(mouse_y) - f32::from(bounds.top());
+    let grabbed = if relative >= thumb_start && relative <= thumb_start + thumb_len {
+        relative - thumb_start
+    } else {
+        thumb_len / 2.0
+    };
+    grab.set(Some(grabbed));
+    set_v_thumb(scroll, relative, grabbed);
+}
+
+/// Continue a vertical thumb drag. Returns whether a drag was active.
+fn drag_v_thumb(scroll: &ScrollHandle, grab: &Cell<Option<f32>>, mouse_y: Pixels) -> bool {
+    let Some(grabbed) = grab.get() else {
+        return false;
+    };
+    let relative = f32::from(mouse_y) - f32::from(scroll.bounds().top());
+    set_v_thumb(scroll, relative, grabbed);
+    true
+}
+
+/// Move the vertical view so the grabbed point of the thumb sits under `relative`.
+fn set_v_thumb(scroll: &ScrollHandle, relative: f32, grabbed: f32) {
+    let viewport = f32::from(scroll.bounds().size.height);
+    let max = f32::from(scroll.max_offset().y);
+    let (_, travel) = scrollbar_thumb(viewport, max);
+    if travel <= 0.0 {
+        return;
+    }
+    let thumb_y = (relative - grabbed).clamp(0.0, travel);
+    let offset = thumb_y / travel * max;
+    let x = scroll.offset().x;
+    scroll.set_offset(Point::new(x, px(-offset)));
 }
 
 /// The sticky header strip of a 详细列表. It shares [`detail_row`]'s `gap_3` so the header cells
@@ -429,7 +718,7 @@ pub(crate) fn detail_header_row(theme: Theme) -> Div {
         .items_center()
         .gap_3()
         .w_full()
-        .h(px(34.0))
+        .h(px(DETAIL_HEADER_HEIGHT))
         .px_3()
         .flex_none()
         .bg(rgb(theme.header_bg))
@@ -509,6 +798,63 @@ pub(crate) fn detail_row(
         .cursor_pointer()
         .when(selected, move |style| style.bg(rgb(theme.brand_muted)))
         .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+}
+
+/// The maximum number of characters a 详细列表 cell displays before it is shortened with an
+/// ellipsis. The full value is shown in a hover tooltip when it is cut.
+pub(crate) const DETAIL_CELL_MAX_CHARS: usize = 50;
+
+/// One 详细列表 cell's text: clipped to its column, shortened to [`DETAIL_CELL_MAX_CHARS`]
+/// characters with a trailing ellipsis when it is longer, and showing the full value in a hover
+/// tooltip in that case. `id` must be unique across the page.
+pub(crate) fn detail_cell_text(
+    id: impl Into<SharedString>,
+    text: impl Into<String>,
+) -> Stateful<Div> {
+    let full = text.into();
+    match shorten_detail_text(&full) {
+        Some(short) => div()
+            .id(id.into())
+            .min_w(px(0.0))
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .child(short)
+            .tooltip(move |_, cx| cx.new(|_| DetailTextTooltip(full.clone())).into()),
+        None => div()
+            .id(id.into())
+            .min_w(px(0.0))
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .child(full),
+    }
+}
+
+/// `Some(shortened)` when `text` is longer than [`DETAIL_CELL_MAX_CHARS`] characters, else `None`.
+/// Counted in characters, not bytes, so CJK text is not split mid-character.
+fn shorten_detail_text(text: &str) -> Option<String> {
+    let mut chars = text.chars();
+    let head: String = chars.by_ref().take(DETAIL_CELL_MAX_CHARS).collect();
+    chars.next().is_some().then(|| format!("{head}…"))
+}
+
+/// The hover tooltip showing a 详细列表 cell's full value when it was shortened.
+struct DetailTextTooltip(String);
+
+impl Render for DetailTextTooltip {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let theme = gpui_kit::component::Theme::global(cx);
+        div()
+            .max_w(px(420.0))
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(theme.popover)
+            .border_1()
+            .border_color(theme.border)
+            .text_size(px(12.0))
+            .text_color(theme.popover_foreground)
+            .child(self.0.clone())
+    }
 }
 
 /// The row of columns of a 平铺网格. Add one [`grid_column`] per column and let the caller put the

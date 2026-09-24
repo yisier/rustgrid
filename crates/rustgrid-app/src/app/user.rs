@@ -241,16 +241,9 @@ impl AppView {
             .min_h(px(0.0))
             .overflow_hidden()
             .track_focus(&self.users_focus)
-            .key_context(USER_LIST_CONTEXT)
-            .on_action(cx.listener(|this, _: &RenameUserItem, window, cx| {
-                this.begin_rename_user(window, cx);
-            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    if this.user_rename.is_some() {
-                        return;
-                    }
                     window.focus(&this.users_focus, cx);
                     this.begin_marquee(MarqueeTarget::Users, event.position, event.modifiers, cx);
                 }),
@@ -363,8 +356,7 @@ impl AppView {
 
         let mut list = ui::DetailList::new(
             "users-detail",
-            &self.users_hscroll,
-            &self.users_scroll,
+            &self.users_detail_scroll,
             ui::detail_content_width(&widths),
             header,
         );
@@ -379,99 +371,92 @@ impl AppView {
                     .text_color(rgb(theme.text_muted))
                     .child(text)
             };
-            list = list.child(
-                ui::detail_row(
-                    SharedString::from(format!("user-row-{index}")),
-                    selected,
-                    theme,
-                )
-                .on_click(cx.listener({
+            let row = ui::detail_row(
+                SharedString::from(format!("user-row-{index}")),
+                selected,
+                theme,
+            )
+            .on_click(cx.listener({
+                let key = key.clone();
+                move |this, event: &ClickEvent, _window, cx| {
+                    this.hit_user(&key, event.click_count(), event.modifiers(), cx);
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener({
                     let key = key.clone();
-                    move |this, event: &ClickEvent, _window, cx| {
-                        this.hit_user(&key, event.click_count(), event.modifiers(), cx);
-                    }
-                }))
-                .on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener({
-                        let key = key.clone();
-                        move |this, event: &MouseDownEvent, _window, cx| {
-                            if !this.users_selection.contains(&key) {
-                                this.set_user_selection_one(&key);
-                            }
-                            cx.notify();
-                            let _ = event;
+                    move |this, event: &MouseDownEvent, _window, cx| {
+                        if !this.users_selection.contains(&key) {
+                            this.set_user_selection_one(&key);
                         }
+                        cx.notify();
+                        let _ = event;
+                    }
+                }),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .w(px(widths[0]))
+                    .flex_none()
+                    .overflow_hidden()
+                    .text_color(rgb(theme.text))
+                    .child(ui::leading_icon_badge(
+                        "icons/user.svg",
+                        theme.icon_users,
+                        22.0,
+                    ))
+                    .child(ui::detail_cell_text(
+                        SharedString::from(format!("user-cell-{index}-0")),
+                        label,
+                    )),
+            )
+            .child(
+                div()
+                    .w(px(widths[1]))
+                    .flex_none()
+                    .child(value(account.max_questions.to_string())),
+            )
+            .child(
+                div()
+                    .w(px(widths[2]))
+                    .flex_none()
+                    .child(value(account.max_updates.to_string())),
+            )
+            .child(
+                div()
+                    .w(px(widths[3]))
+                    .flex_none()
+                    .child(value(account.max_connections.to_string())),
+            )
+            .child(
+                div()
+                    .w(px(widths[4]))
+                    .flex_none()
+                    .child(value(account.max_user_connections.to_string())),
+            )
+            .child(
+                div()
+                    .w(px(widths[5]))
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .text_align(gpui::TextAlign::Left)
+                    .child(if is_super {
+                        t!("common.yes").to_string()
+                    } else {
+                        t!("common.no").to_string()
                     }),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_2()
-                        .w(px(widths[0]))
-                        .flex_none()
-                        .overflow_hidden()
-                        .text_color(rgb(theme.text))
-                        .child(ui::leading_icon_badge(
-                            "icons/user.svg",
-                            theme.icon_users,
-                            22.0,
-                        ))
-                        .child(
-                            match self.user_rename.as_ref().filter(|edit| edit.key == *key) {
-                                Some(edit) => div()
-                                    .flex_1()
-                                    .min_w(px(0.0))
-                                    .h(px(20.0))
-                                    .child(edit.input.clone())
-                                    .into_any_element(),
-                                None => div()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .child(label)
-                                    .into_any_element(),
-                            },
-                        ),
-                )
-                .child(
-                    div()
-                        .w(px(widths[1]))
-                        .flex_none()
-                        .child(value(account.max_questions.to_string())),
-                )
-                .child(
-                    div()
-                        .w(px(widths[2]))
-                        .flex_none()
-                        .child(value(account.max_updates.to_string())),
-                )
-                .child(
-                    div()
-                        .w(px(widths[3]))
-                        .flex_none()
-                        .child(value(account.max_connections.to_string())),
-                )
-                .child(
-                    div()
-                        .w(px(widths[4]))
-                        .flex_none()
-                        .child(value(account.max_user_connections.to_string())),
-                )
-                .child(
-                    div()
-                        .w(px(widths[5]))
-                        .flex_none()
-                        .whitespace_nowrap()
-                        .text_align(gpui::TextAlign::Left)
-                        .child(if is_super {
-                            t!("common.yes").to_string()
-                        } else {
-                            t!("common.no").to_string()
-                        }),
-                ),
             );
+            list = list.child(list_ops::row_with_rect(
+                cx.weak_entity(),
+                row,
+                MarqueeTarget::Users,
+                key.clone(),
+            ));
         }
         list.render(theme)
     }
@@ -546,20 +531,13 @@ impl AppView {
                     .text_color(rgb(theme.text))
                     .child(account.label()),
             );
-            let rect_key = key.clone();
-            let rect_app = cx.weak_entity();
-            let tile = div()
-                .on_children_prepainted(move |bounds, _window, cx| {
-                    let Some(rect) = bounds.first().copied() else {
-                        return;
-                    };
-                    let _ = rect_app.update(cx, |app, _| {
-                        app.note_row_rect(MarqueeTarget::Users, rect_key.clone(), rect);
-                    });
-                })
-                .child(tile);
             let _ = visible_index;
-            column = column.child(tile);
+            column = column.child(list_ops::row_with_rect(
+                cx.weak_entity(),
+                tile,
+                MarqueeTarget::Users,
+                key.clone(),
+            ));
             count += 1;
         }
         let _ = keys;
@@ -616,9 +594,6 @@ impl AppView {
         modifiers: Modifiers,
         cx: &mut Context<'_, Self>,
     ) {
-        if self.user_rename.is_some() {
-            return;
-        }
         let visible = self.user_visible_keys();
         let mode = selection_mode(modifiers);
         let mode = if click_count >= 2 && mode == SelectMode::Replace {
@@ -643,150 +618,6 @@ impl AppView {
         self.users_selection.select_one(key.to_string());
         self.selected_user = self.user_index_by_key(key);
         self.info_loaded_for = None;
-    }
-
-    /// Start the in-place rename for the selected account (F2).
-    pub(super) fn begin_rename_user(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        self.begin_rename_user_by_key(None, window, cx);
-    }
-
-    /// Start the in-place rename for one account row, or the selected one when `key` is `None`.
-    pub(super) fn begin_rename_user_by_key(
-        &mut self,
-        key: Option<String>,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        if self.user_rename.is_some() {
-            return;
-        }
-        let key = key.or_else(|| self.users_selection.single().map(str::to_string));
-        let Some(key) = key else {
-            return;
-        };
-        let Some(index) = self.user_index_by_key(&key) else {
-            return;
-        };
-        let account = match &self.users {
-            Loadable::Loaded(users) => users.get(index).cloned(),
-            _ => None,
-        };
-        let Some(account) = account else {
-            return;
-        };
-        let theme = self.theme;
-        let weak = cx.weak_entity();
-        let change = weak.clone();
-        let submit = weak.clone();
-        let cancel = weak.clone();
-        let initial = account.user.clone();
-        let input = cx.new(move |cx| {
-            TextInput::new(
-                theme,
-                initial,
-                TextInputOptions {
-                    bare: true,
-                    text_size: Some(12.0),
-                    ..Default::default()
-                },
-                cx,
-            )
-            .on_change(Rc::new(move |text, _window, cx| {
-                let _ = change.update(cx, |app, cx| {
-                    if let Some(edit) = app.user_rename.as_mut() {
-                        edit.new_name = text.to_string();
-                    }
-                    cx.notify();
-                });
-            }))
-            .on_submit(Rc::new(move |window, cx| {
-                let _ = submit.update(cx, |app, cx| {
-                    let focus = app.users_focus.clone();
-                    app.submit_user_rename(cx);
-                    window.focus(&focus, cx);
-                });
-            }))
-            .on_cancel(Rc::new(move |window, cx| {
-                let _ = cancel.update(cx, |app, cx| {
-                    let focus = app.users_focus.clone();
-                    app.user_rename = None;
-                    app.user_rename_blur = None;
-                    window.focus(&focus, cx);
-                    cx.notify();
-                });
-            }))
-        });
-        let focus = input.read(cx).focus_handle();
-        self.user_rename = Some(UserRenameEdit {
-            key: key.clone(),
-            user: account.user,
-            host: account.host,
-            new_name: key,
-            input,
-        });
-        self.user_rename_blur = Some(cx.on_blur(&focus, window, |app, _window, cx| {
-            if app.user_rename.is_some() {
-                app.submit_user_rename(cx);
-            }
-        }));
-        self.user_rename_focus_pending = true;
-        window.focus(&focus, cx);
-        cx.notify();
-    }
-
-    /// Commit the in-place account rename: drop an empty/unchanged name, otherwise rename.
-    pub(super) fn submit_user_rename(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(edit) = self.user_rename.take() else {
-            return;
-        };
-        self.user_rename_blur = None;
-        let new_name = edit.new_name.trim().trim_end_matches('@').to_string();
-        let new_name = new_name.split('@').next().unwrap_or("").to_string();
-        if new_name.is_empty() || new_name == edit.user {
-            cx.notify();
-            return;
-        }
-        self.rename_user(edit.user, edit.host, new_name, cx);
-        cx.notify();
-    }
-
-    /// Rename a server account (`RENAME USER old TO new`), reloading the list.
-    pub(super) fn rename_user(
-        &mut self,
-        user: String,
-        host: String,
-        new_name: String,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let Some(connection_index) = self.users_connection else {
-            return;
-        };
-        let Some(connection) = self.connection_arc(connection_index) else {
-            return;
-        };
-        let runtime = self.runtime.clone();
-        cx.spawn(async move |this, cx| {
-            let target_host = host.clone();
-            let result = runtime
-                .spawn(async move {
-                    connection
-                        .rename_user(&user, &host, &new_name, &target_host)
-                        .await
-                })
-                .await;
-            let _ = this.update(cx, |app, cx| match result {
-                Ok(Ok(())) => app.refresh_users(cx),
-                Ok(Err(error)) => {
-                    app.error_dialog = Some(error.to_string());
-                    cx.notify();
-                }
-                Err(error) => {
-                    app.error_dialog = Some(error.to_string());
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
     }
 
     /// Open the selected account in the account window.

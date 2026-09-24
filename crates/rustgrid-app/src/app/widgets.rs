@@ -783,7 +783,7 @@ impl AppView {
                         t!("query.delete_query").to_string(),
                         cx.listener(move |this, _event, _window, cx| {
                             this.context_menu = None;
-                            this.saved_query_selected = Some(index);
+                            this.select_query_one(index);
                             this.confirm_delete_saved_query(index, cx);
                         }),
                     ))
@@ -830,6 +830,64 @@ impl AppView {
                         cx.listener(move |this, _event, _window, cx| {
                             this.context_menu = None;
                             this.open_query_info(index, cx);
+                        }),
+                    ));
+            }
+            ContextTarget::BackupList => {
+                items = items
+                    .child(self.context_item(
+                        "backuplist-ctx-new",
+                        t!("backup.new").to_string(),
+                        cx.listener(|this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.open_new_backup(cx);
+                        }),
+                    ))
+                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(self.context_item(
+                        "backuplist-ctx-reveal",
+                        t!("backup.reveal").to_string(),
+                        cx.listener(|this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.reveal_backup_folder(cx);
+                        }),
+                    ))
+                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(self.context_item(
+                        "backuplist-ctx-refresh",
+                        t!("connection.refresh").to_string(),
+                        cx.listener(|this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.refresh_selected_backup(cx);
+                        }),
+                    ));
+            }
+            ContextTarget::QueryList => {
+                items = items
+                    .child(self.context_item(
+                        "querylist-ctx-new",
+                        t!("main.new_query").to_string(),
+                        cx.listener(|this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.open_new_query(cx);
+                        }),
+                    ))
+                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(self.context_item(
+                        "querylist-ctx-reveal",
+                        t!("backup.reveal").to_string(),
+                        cx.listener(|this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.reveal_query_folder(cx);
+                        }),
+                    ))
+                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(self.context_item(
+                        "querylist-ctx-refresh",
+                        t!("connection.refresh").to_string(),
+                        cx.listener(|this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.refresh_selected_query(cx);
                         }),
                     ));
             }

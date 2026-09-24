@@ -13,6 +13,7 @@ impl AppView {
         match target {
             MarqueeTarget::Users => &self.users_selection,
             MarqueeTarget::Backups => &self.backups_selection,
+            MarqueeTarget::Queries => &self.query_selection,
             MarqueeTarget::Objects => &self.objects_selection,
         }
     }
@@ -22,6 +23,7 @@ impl AppView {
         match target {
             MarqueeTarget::Users => &mut self.users_selection,
             MarqueeTarget::Backups => &mut self.backups_selection,
+            MarqueeTarget::Queries => &mut self.query_selection,
             MarqueeTarget::Objects => &mut self.objects_selection,
         }
     }
@@ -34,6 +36,7 @@ impl AppView {
         match target {
             MarqueeTarget::Users => &self.users_row_rects,
             MarqueeTarget::Backups => &self.backups_row_rects,
+            MarqueeTarget::Queries => &self.query_row_rects,
             MarqueeTarget::Objects => &self.objects_row_rects,
         }
     }
@@ -60,6 +63,7 @@ impl AppView {
         match target {
             MarqueeTarget::Users => &mut self.users_row_rects,
             MarqueeTarget::Backups => &mut self.backups_row_rects,
+            MarqueeTarget::Queries => &mut self.query_row_rects,
             MarqueeTarget::Objects => &mut self.objects_row_rects,
         }
     }
@@ -77,11 +81,9 @@ impl AppView {
         // A fresh (non-additive) drag clears the selection immediately, like Explorer.
         if mode == SelectMode::Replace {
             self.marquee_selection_mut(target).clear();
-            // The object list's single-selection mirror lives on its child pane, so push the
-            // cleared state to it (the pane draws the toolbar's enabled state).
-            if target == MarqueeTarget::Objects {
-                self.on_selection_changed(MarqueeTarget::Objects, cx);
-            }
+            // Push the cleared state to any single-selection mirror the page keeps (the object
+            // list's lives on its child pane; the query list's is `saved_query_selected`).
+            self.on_selection_changed(target, cx);
         }
         self.marquee = Some((target, MarqueeDrag::new(position, mode, base)));
         cx.notify();
@@ -186,6 +188,9 @@ impl AppView {
                 .and_then(|key| self.user_index_by_key(key));
             self.info_loaded_for = None;
         }
+        if target == MarqueeTarget::Queries {
+            self.sync_query_selected();
+        }
         if target == MarqueeTarget::Objects {
             // The object list's single-selection mirror lives on its child pane, so push the new
             // selection there. Deferred: this can run from inside a pane listener/update.
@@ -224,4 +229,23 @@ pub(super) fn selection_mode(modifiers: Modifiers) -> SelectMode {
     } else {
         SelectMode::Replace
     }
+}
+
+/// Wrap a list row/tile so it publishes its window-space rectangle for the marquee. Every
+/// marquee-capable list (Users, Backup, Queries, Tables/Views/Functions) uses this same wrapper.
+pub(super) fn row_with_rect(
+    app: WeakEntity<AppView>,
+    row: impl IntoElement + 'static,
+    target: MarqueeTarget,
+    key: String,
+) -> AnyElement {
+    div()
+        .on_children_prepainted(move |bounds, _window, cx| {
+            let Some(rect) = bounds.first().copied() else {
+                return;
+            };
+            let _ = app.update(cx, |app, _| app.note_row_rect(target, key.clone(), rect));
+        })
+        .child(row)
+        .into_any_element()
 }

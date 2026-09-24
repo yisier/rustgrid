@@ -67,17 +67,7 @@ fn object_row_with_rect(
     row: impl IntoElement + 'static,
     key: String,
 ) -> AnyElement {
-    div()
-        .on_children_prepainted(move |bounds, _window, cx| {
-            let Some(rect) = bounds.first().copied() else {
-                return;
-            };
-            let _ = app.update(cx, |app, _| {
-                app.note_row_rect(MarqueeTarget::Objects, key.clone(), rect)
-            });
-        })
-        .child(row)
-        .into_any_element()
+    super::list_ops::row_with_rect(app, row, MarqueeTarget::Objects, key)
 }
 
 impl AppView {
@@ -702,8 +692,7 @@ impl ObjectPane {
             selected: None,
             selected_routine: None,
             grid: ColumnGrid::default(),
-            detail_hscroll: ScrollHandle::new(),
-            detail_vscroll: ScrollHandle::new(),
+            detail_scroll: DetailScroll::default(),
             table_columns: Rc::new(RefCell::new(DetailColumns::default())),
             routine_columns: Rc::new(RefCell::new(DetailColumns::default())),
             visible_keys: Vec::new(),
@@ -935,8 +924,7 @@ impl ObjectPane {
 
         let mut list = ui::DetailList::new(
             "object-detail",
-            &self.detail_hscroll,
-            &self.detail_vscroll,
+            &self.detail_scroll,
             ui::detail_content_width(&widths),
             header,
         );
@@ -989,6 +977,7 @@ impl ObjectPane {
         let hit_key = name.clone();
         let open_name = name.clone();
         let menu_name = name.clone();
+        let cell_key = name.clone();
         let menu_app = self.app.clone();
         // The row being renamed draws the in-place editor instead of its label. Its own label is
         // skipped so a bare (transparent) editor never ghosts the old name behind the caret.
@@ -1007,9 +996,12 @@ impl ObjectPane {
                 .into_any_element(),
             None => div()
                 .min_w(px(0.0))
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .child(label_name)
+                .child(ui::detail_cell_text(
+                    SharedString::from(format!(
+                        "obj-name-{connection_index}-{database_index}-{name}"
+                    )),
+                    label_name,
+                ))
                 .into_any_element(),
         };
         let name_cell = div()
@@ -1117,21 +1109,24 @@ impl ObjectPane {
                     String::new(),
                 ),
             };
-            let cell = |width: f32, text: String| {
+            let cell = |column: usize, width: f32, text: String| {
                 div()
                     .w(px(width))
                     .flex_none()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
                     .text_color(rgb(theme.text_muted))
-                    .child(text)
+                    .child(ui::detail_cell_text(
+                        SharedString::from(format!(
+                            "obj-cell-{connection_index}-{database_index}-{cell_key}-{column}"
+                        )),
+                        text,
+                    ))
             };
-            row.child(cell(widths[1], auto_increment))
-                .child(cell(widths[2], modified))
-                .child(cell(widths[3], data_length))
-                .child(cell(widths[4], engine))
-                .child(cell(widths[5], rows))
-                .child(cell(widths[6], comment))
+            row.child(cell(1, widths[1], auto_increment))
+                .child(cell(2, widths[2], modified))
+                .child(cell(3, widths[3], data_length))
+                .child(cell(4, widths[4], engine))
+                .child(cell(5, widths[5], rows))
+                .child(cell(6, widths[6], comment))
         })
     }
 
@@ -1351,8 +1346,7 @@ impl ObjectPane {
         }
         let mut list = ui::DetailList::new(
             "routine-detail",
-            &self.detail_hscroll,
-            &self.detail_vscroll,
+            &self.detail_scroll,
             ui::detail_content_width(&widths),
             header,
         );
@@ -1440,31 +1434,36 @@ impl ObjectPane {
                     routine_icon_color(kind, theme),
                     22.0,
                 ))
-                .child(
-                    div()
-                        .min_w(px(0.0))
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .child(label_name),
-                ),
+                .child(ui::detail_cell_text(
+                    SharedString::from(format!(
+                        "routine-cell-{connection_index}-{database_index}-{name}-0"
+                    )),
+                    label_name,
+                )),
         )
         .child(
             div()
                 .w(px(widths[1]))
                 .flex_none()
-                .overflow_hidden()
-                .whitespace_nowrap()
                 .text_color(rgb(theme.text_muted))
-                .child(routine.modified.clone().unwrap_or_default()),
+                .child(ui::detail_cell_text(
+                    SharedString::from(format!(
+                        "routine-cell-{connection_index}-{database_index}-{name}-1"
+                    )),
+                    routine.modified.clone().unwrap_or_default(),
+                )),
         )
         .child(
             div()
                 .w(px(widths[2]))
                 .flex_none()
-                .overflow_hidden()
-                .whitespace_nowrap()
                 .text_color(rgb(theme.text_muted))
-                .child(kind.sql_name()),
+                .child(ui::detail_cell_text(
+                    SharedString::from(format!(
+                        "routine-cell-{connection_index}-{database_index}-{name}-2"
+                    )),
+                    kind.sql_name(),
+                )),
         )
         .child(
             div()
@@ -1482,10 +1481,13 @@ impl ObjectPane {
             div()
                 .w(px(widths[4]))
                 .flex_none()
-                .overflow_hidden()
-                .whitespace_nowrap()
                 .text_color(rgb(theme.text_muted))
-                .child(single_line(&routine.comment)),
+                .child(ui::detail_cell_text(
+                    SharedString::from(format!(
+                        "routine-cell-{connection_index}-{database_index}-{name}-4"
+                    )),
+                    single_line(&routine.comment),
+                )),
         )
     }
 

@@ -90,6 +90,23 @@ impl ListSelection {
         self.items.insert(item.into());
     }
 
+    /// Keep only the selected items for which `keep` returns true, e.g. after a rescan dropped
+    /// some rows. The anchor is dropped when its item is no longer selected.
+    pub fn retain(&mut self, mut keep: impl FnMut(&str) -> bool) {
+        let kept: BTreeSet<String> = self
+            .items
+            .iter()
+            .filter(|item| keep(item))
+            .cloned()
+            .collect();
+        self.items = kept;
+        if let Some(anchor) = self.anchor.as_ref()
+            && !self.items.contains(anchor)
+        {
+            self.anchor = None;
+        }
+    }
+
     /// Toggle one item in or out of the selection.
     pub fn toggle(&mut self, item: &str) {
         if !self.items.remove(item) {

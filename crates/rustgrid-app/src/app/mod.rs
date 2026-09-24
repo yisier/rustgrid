@@ -42,9 +42,9 @@ use crate::theme::Theme;
 use gpui_kit::component::calendar::{CalendarEvent, CalendarState};
 
 use ui::{
-    ButtonKind, ColumnGrid, ComboBox, ComboOption, DetailColumns, TextInput, TextInputOptions,
-    ViewMode, checkbox_box, form_tab, main_separator, scrollbar_fractions, scrollbar_thumb,
-    toolbar_separator,
+    ButtonKind, ColumnGrid, ComboBox, ComboOption, DetailColumns, DetailScroll, TextInput,
+    TextInputOptions, ViewMode, checkbox_box, form_tab, main_separator, scrollbar_fractions,
+    scrollbar_thumb, toolbar_separator,
 };
 
 // Cell-navigation actions for the in-place grid editor. gpui-kit's `Root` binds `tab`/`shift-tab`
@@ -59,9 +59,6 @@ gpui::actions!(backup, [CopyBackupFile, PasteBackupFile, RenameBackupFile]);
 
 // Saved-query file-list actions, mirroring the backup list's F2 / Ctrl+C / Ctrl+V handling.
 gpui::actions!(queryfile, [CopyQueryFile, PasteQueryFile, RenameQueryFile]);
-
-// Users-list actions: F2 renames the selected account in place.
-gpui::actions!(userlist, [RenameUserItem]);
 
 /// Key context applied to the cell that owns the in-place editor.
 const GRID_CELL_CONTEXT: &str = "GridCell";
@@ -89,9 +86,6 @@ pub(super) const VIEW_PAGE_VIEWS: &str = "views";
 
 /// The stable settings key for the Functions object list's remembered layout.
 pub(super) const VIEW_PAGE_FUNCTIONS: &str = "functions";
-
-/// Key context applied to the Users list, so F2 reaches its in-place rename.
-pub(super) const USER_LIST_CONTEXT: &str = "UserList";
 
 /// The six text inputs of the connection form, created when the form opens. Order follows
 /// [`FORM_FIELDS`] so `FormField as usize` indexes the array.
@@ -625,22 +619,8 @@ enum RowPane {
 pub(super) enum MarqueeTarget {
     Users,
     Backups,
+    Queries,
     Objects,
-}
-
-/// The in-place "rename account" editor of the Users list. `new_name` mirrors the input's text so
-/// the commit never reads the entity back during its own change callback. Only the username part is
-/// editable; the host is kept.
-// The Users 详细列表 does not draw the editor yet, so `key`/`input` are unused for now; they are
-// kept so the rename flow stays intact when the row rendering gains the editor.
-#[allow(dead_code)]
-struct UserRenameEdit {
-    /// The selection key (`user@host`) of the row being renamed.
-    key: String,
-    user: String,
-    host: String,
-    new_name: String,
-    input: Entity<TextInput>,
 }
 
 /// The "rename table" in-place editor. `new_name` mirrors the input's text so `submit_rename`
@@ -817,6 +797,10 @@ enum ContextTarget {
     QueryFile {
         index: usize,
     },
+    /// The blank area of the Backup main tab's list.
+    BackupList,
+    /// The blank area of the Queries main tab's list.
+    QueryList,
     QueryEditor,
 }
 
@@ -885,8 +869,7 @@ struct ObjectPane {
     grid: ColumnGrid,
     /// The 详细列表's scroll state: rows scroll vertically, the header and rows together scroll
     /// horizontally.
-    detail_hscroll: ScrollHandle,
-    detail_vscroll: ScrollHandle,
+    detail_scroll: DetailScroll,
     /// The Tables 详细列表's content-fitted / user-resized column widths.
     table_columns: Rc<RefCell<DetailColumns>>,
     /// The Functions 详细列表's content-fitted / user-resized column widths.
@@ -1202,8 +1185,13 @@ pub struct AppView {
     next_query_id: u64,
     /// Saved queries, as individual `.sql` files under the config dir's `queries/` tree.
     query_files: Vec<QueryFileInfo>,
-    /// The saved query highlighted in the Queries list, indexed into `query_files`.
+    /// The saved query highlighted in the Queries list, indexed into `query_files`. This is the
+    /// single-selection mirror of `query_selection`.
     saved_query_selected: Option<usize>,
+    /// The Queries list's Explorer-style multi-selection (plain click / Ctrl / Shift / marquee).
+    query_selection: ListSelection,
+    /// The Queries list's row rectangles in window space, for the marquee.
+    query_row_rects: std::collections::HashMap<String, Bounds<Pixels>>,
     /// The in-app copied query file, for Ctrl+C / Ctrl+V.
     query_clipboard: Option<QueryClipboard>,
     /// The in-place rename editor for a query file, if any.
@@ -1237,10 +1225,9 @@ pub struct AppView {
     backup_rename_focus_pending: bool,
     /// Focus target for the backup list, so F2 / Ctrl+C / Ctrl+V reach it.
     backup_focus: FocusHandle,
-    /// Keeps the Backup list's scroll position across re-renders.
-    backup_scroll: ScrollHandle,
-    /// The Backup 详细列表's horizontal scroll state (the header scrolls with the rows).
-    backup_hscroll: ScrollHandle,
+    /// Keeps the Backup list's scroll position across re-renders, plus the 详细列表's horizontal
+    /// scroll (the header scrolls with the rows) and its scrollbar-thumb drags.
+    backup_detail_scroll: DetailScroll,
     /// The Backup 详细列表's content-fitted / user-resized column widths.
     backup_columns: Rc<RefCell<DetailColumns>>,
     /// The Backup list's 平铺网格 scroll state.
@@ -1270,9 +1257,9 @@ pub struct AppView {
     query_editor_text: RefCell<String>,
     query_editor_measured: bool,
     query_result_scroll: UniformListScrollHandle,
-    /// The saved-query 详细列表's scroll state (vertical rows, horizontal header + rows).
-    query_detail_hscroll: ScrollHandle,
-    query_detail_vscroll: ScrollHandle,
+    /// The saved-query 详细列表's scroll state (vertical rows, horizontal header + rows) and its
+    /// scrollbar-thumb drags.
+    query_detail_scroll: DetailScroll,
     /// The saved-query 详细列表's content-fitted / user-resized column widths.
     query_detail_columns: Rc<RefCell<DetailColumns>>,
     query_connection_combo: Option<Entity<ComboBox>>,
@@ -1378,14 +1365,10 @@ pub struct AppView {
     users_selection: ListSelection,
     /// The Users list's row rectangles in window space, keyed by selection key, for the marquee.
     users_row_rects: std::collections::HashMap<String, Bounds<Pixels>>,
-    /// The Users list's focus target, so F2 reaches the in-place rename.
+    /// The Users list's focus target.
     users_focus: FocusHandle,
     /// The Users list's 平铺网格 scroll state.
     users_grid: ColumnGrid,
-    /// The in-place "rename account" editor, drawn in the row it started from.
-    user_rename: Option<UserRenameEdit>,
-    user_rename_blur: Option<Subscription>,
-    user_rename_focus_pending: bool,
     /// The Backup list's multi-selection (Explorer-style).
     backups_selection: ListSelection,
     /// The Backup list's row rectangles in window space, for the marquee.
@@ -1400,10 +1383,9 @@ pub struct AppView {
     routine_find_input: Entity<TextInput>,
     /// The account highlighted in the Users list, as an index into `users`.
     selected_user: Option<usize>,
-    /// Keeps the Users list's scroll position across re-renders.
-    users_scroll: ScrollHandle,
-    /// The Users 详细列表's horizontal scroll state (the header scrolls with the rows).
-    users_hscroll: ScrollHandle,
+    /// Keeps the Users list's scroll position across re-renders, plus the 详细列表's horizontal
+    /// scroll (the header scrolls with the rows) and its scrollbar-thumb drags.
+    users_detail_scroll: DetailScroll,
     /// The Users 详细列表's content-fitted / user-resized column widths.
     users_columns: Rc<RefCell<DetailColumns>>,
     /// The selected account's details, for the info pane.
@@ -1544,7 +1526,6 @@ impl AppView {
             KeyBinding::new("cmd-c", CopyQueryFile, Some(QUERY_LIST_CONTEXT)),
             KeyBinding::new("ctrl-v", PasteQueryFile, Some(QUERY_LIST_CONTEXT)),
             KeyBinding::new("cmd-v", PasteQueryFile, Some(QUERY_LIST_CONTEXT)),
-            KeyBinding::new("f2", RenameUserItem, Some(USER_LIST_CONTEXT)),
         ]);
         let app = cx.weak_entity();
         let app_entity = cx.entity();
@@ -1574,6 +1555,8 @@ impl AppView {
             next_query_id: 0,
             query_files,
             saved_query_selected: None,
+            query_selection: ListSelection::default(),
+            query_row_rects: std::collections::HashMap::new(),
             query_clipboard: None,
             query_rename: None,
             query_rename_blur: None,
@@ -1593,8 +1576,7 @@ impl AppView {
             backup_rename_blur: None,
             backup_rename_focus_pending: false,
             backup_focus: cx.focus_handle(),
-            backup_scroll: ScrollHandle::new(),
-            backup_hscroll: ScrollHandle::new(),
+            backup_detail_scroll: DetailScroll::default(),
             backup_columns: Rc::new(RefCell::new(DetailColumns::default())),
             backup_grid: ColumnGrid::default(),
             backup_search: String::new(),
@@ -1636,8 +1618,7 @@ impl AppView {
             query_editor_text: RefCell::new(String::new()),
             query_editor_measured: false,
             query_result_scroll: UniformListScrollHandle::new(),
-            query_detail_hscroll: ScrollHandle::new(),
-            query_detail_vscroll: ScrollHandle::new(),
+            query_detail_scroll: DetailScroll::default(),
             query_detail_columns: Rc::new(RefCell::new(DetailColumns::default())),
             query_connection_combo: None,
             query_database_combo: None,
@@ -1788,16 +1769,12 @@ impl AppView {
                 })
             },
             selected_user: None,
-            users_scroll: ScrollHandle::new(),
-            users_hscroll: ScrollHandle::new(),
+            users_detail_scroll: DetailScroll::default(),
             users_columns: Rc::new(RefCell::new(DetailColumns::default())),
             users_selection: ListSelection::default(),
             users_row_rects: std::collections::HashMap::new(),
             users_focus: cx.focus_handle(),
             users_grid: ColumnGrid::default(),
-            user_rename: None,
-            user_rename_blur: None,
-            user_rename_focus_pending: false,
             backups_selection: ListSelection::default(),
             backups_row_rects: std::collections::HashMap::new(),
             objects_selection: ListSelection::default(),
@@ -2601,14 +2578,6 @@ impl Render for AppView {
                 window.focus(&handle, cx);
             }
             self.backup_rename_focus_pending = false;
-        }
-
-        if self.user_rename_focus_pending {
-            if let Some(edit) = self.user_rename.as_ref() {
-                let handle = edit.input.read(cx).focus_handle();
-                window.focus(&handle, cx);
-            }
-            self.user_rename_focus_pending = false;
         }
 
         if self.query_rename_focus_pending {

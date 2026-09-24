@@ -1176,10 +1176,13 @@ impl AppView {
             }
         };
         self.refresh_query_files(cx);
-        self.saved_query_selected = self
+        if let Some(index) = self
             .query_files
             .iter()
-            .position(|file| file.path == saved_path);
+            .position(|file| file.path == saved_path)
+        {
+            self.select_query_one(index);
+        }
 
         if let Some(tab) = self.queries.get_mut(tab_index) {
             tab.name = Some(name);
@@ -1224,8 +1227,16 @@ impl AppView {
     /// Rescan the query directory tree for `.sql` files.
     pub(super) fn refresh_query_files(&mut self, cx: &mut Context<'_, Self>) {
         self.query_files = scan_query_files(&self.config);
+        self.prune_query_selection();
         self.clamp_query_selection();
         cx.notify();
+    }
+
+    /// Drop selected keys whose file no longer exists (e.g. after a rescan).
+    fn prune_query_selection(&mut self) {
+        let keys: std::collections::HashSet<String> =
+            self.query_files.iter().map(query_file_key).collect();
+        self.query_selection.retain(|key| keys.contains(key));
     }
 
     fn clamp_query_selection(&mut self) {
@@ -1233,7 +1244,56 @@ impl AppView {
             && index >= self.query_files.len()
         {
             self.saved_query_selected = None;
+            self.query_selection.clear();
         }
+    }
+
+    /// The visible query entries' selection keys, in the list's current (sorted) order.
+    fn query_visible_keys(&self, cx: &App) -> Vec<String> {
+        self.sorted_visible_query_files(cx, &self.object_search)
+            .into_iter()
+            .filter_map(|index| self.query_files.get(index))
+            .map(query_file_key)
+            .collect()
+    }
+
+    /// Keep the single-selection mirror (`saved_query_selected`) in step with the multi-selection.
+    pub(super) fn sync_query_selected(&mut self) {
+        self.saved_query_selected = self.query_selection.single().and_then(|key| {
+            self.query_files
+                .iter()
+                .position(|file| query_file_key(file) == key)
+        });
+    }
+
+    /// Replace the query selection with one file (used by right-click and programmatic selects).
+    pub(super) fn select_query_one(&mut self, index: usize) {
+        if let Some(file) = self.query_files.get(index) {
+            self.query_selection.select_one(query_file_key(file));
+        }
+        self.saved_query_selected = Some(index);
+    }
+
+    /// Apply one query row hit (click) under the click's modifier mode.
+    pub(super) fn hit_query(
+        &mut self,
+        key: &str,
+        _click_count: usize,
+        modifiers: Modifiers,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.query_rename.is_some() {
+            return;
+        }
+        let visible = self.query_visible_keys(cx);
+        if modifiers.shift {
+            self.query_selection.extend_to(&visible, key);
+        } else {
+            self.query_selection
+                .hit(&visible, key, selection_mode(modifiers));
+        }
+        self.sync_query_selected();
+        cx.notify();
     }
 
     /// The database the Queries tab is scoped to, taken from the connection tree's selection.
@@ -1418,6 +1478,7 @@ impl AppView {
             self.error_dialog = Some(error.to_string());
         }
         self.saved_query_selected = None;
+        self.query_selection.clear();
         self.refresh_query_files(cx);
     }
 
@@ -1463,8 +1524,9 @@ impl AppView {
         match std::fs::copy(&clipboard.path, &dest) {
             Ok(_) => {
                 self.refresh_query_files(cx);
-                self.saved_query_selected =
-                    self.query_files.iter().position(|file| file.path == dest);
+                if let Some(index) = self.query_files.iter().position(|file| file.path == dest) {
+                    self.select_query_one(index);
+                }
             }
             Err(error) => self.error_dialog = Some(error.to_string()),
         }
@@ -1485,7 +1547,7 @@ impl AppView {
             return;
         };
         let old_name = file.name.clone();
-        self.saved_query_selected = Some(index);
+        self.select_query_one(index);
         let theme = self.theme;
         let weak = cx.weak_entity();
         let change = weak.clone();
@@ -1574,10 +1636,13 @@ impl AppView {
         match std::fs::rename(&old_path, &new_path) {
             Ok(()) => {
                 self.refresh_query_files(cx);
-                self.saved_query_selected = self
+                if let Some(index) = self
                     .query_files
                     .iter()
-                    .position(|file| file.path == new_path);
+                    .position(|file| file.path == new_path)
+                {
+                    self.select_query_one(index);
+                }
             }
             Err(error) => self.error_dialog = Some(error.to_string()),
         }
@@ -1591,9 +1656,25 @@ impl AppView {
         }
     }
 
+    /// Reveal the current scope's saved-query folder in the OS file manager.
+    pub(super) fn reveal_query_folder(&mut self, cx: &mut Context<'_, Self>) {
+        let Some((connection_id, database)) = self.query_scope(cx) else {
+            return;
+        };
+        let dir = self
+            .config
+            .query_file_path(&connection_id, &database, "")
+            .parent()
+            .map(|parent| parent.to_path_buf())
+            .unwrap_or_else(|| self.config.queries_dir());
+        let _ = std::fs::create_dir_all(&dir);
+        reveal_in_file_manager(&dir);
+        cx.notify();
+    }
+
     /// Open the object-info pane for a query file.
     pub(super) fn open_query_info(&mut self, index: usize, cx: &mut Context<'_, Self>) {
-        self.saved_query_selected = Some(index);
+        self.select_query_one(index);
         self.set_info_open(true, cx);
         cx.notify();
     }
@@ -1660,4 +1741,9 @@ pub(super) fn scan_query_files(config: &ConfigStore) -> Vec<QueryFileInfo> {
     }
     files.sort_by_key(|file| file.name.to_lowercase());
     files
+}
+
+/// The selection key of a saved-query row: its file path, unique across scopes.
+pub(super) fn query_file_key(file: &QueryFileInfo) -> String {
+    format!("q:{}", file.path.display())
 }

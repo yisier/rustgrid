@@ -1,3 +1,4 @@
+use super::query::query_file_key;
 use super::*;
 
 impl AppView {
@@ -210,8 +211,9 @@ impl AppView {
     /// 详细列表 / 平铺网格 layouts.
     pub(super) fn render_saved_queries(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
-        let container = div()
+        let mut container = div()
             .id("saved-query-list")
+            .relative()
             .flex()
             .flex_col()
             .flex_1()
@@ -236,10 +238,22 @@ impl AppView {
             }))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _event: &MouseDownEvent, window, cx| {
-                    if this.query_rename.is_none() {
-                        window.focus(&this.query_list_focus, cx);
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    if this.query_rename.is_some() {
+                        return;
                     }
+                    window.focus(&this.query_list_focus, cx);
+                    this.begin_marquee(MarqueeTarget::Queries, event.position, event.modifiers, cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                    this.context_menu = Some(ContextMenu {
+                        target: ContextTarget::QueryList,
+                        position: event.position,
+                    });
+                    cx.notify();
                 }),
             )
             // The 平铺 grid draws its own horizontal scrollbar; these keep its drag alive anywhere
@@ -249,6 +263,7 @@ impl AppView {
                     cx.notify();
                 }
                 this.query_grid_drag(event, cx);
+                this.drag_marquee(MarqueeTarget::Queries, event, cx);
             }))
             .on_mouse_up(
                 MouseButton::Left,
@@ -257,6 +272,7 @@ impl AppView {
                         cx.notify();
                     }
                     this.query_grid_end(cx);
+                    this.end_marquee(cx);
                 }),
             );
 
@@ -277,7 +293,11 @@ impl AppView {
             ViewMode::Detail => self.render_query_detail(&visible, theme, cx),
             ViewMode::Grid => self.render_query_tiles(&visible, theme, cx),
         };
-        container.child(body).into_any_element()
+        container = container.child(body);
+        if let Some(rect) = self.marquee_rect_for(MarqueeTarget::Queries) {
+            container = container.child(rect);
+        }
+        container.into_any_element()
     }
 
     /// The content-fitted widths of the Queries 详细列表 columns (名称 / 修改日期 / 文件大小).
@@ -361,8 +381,7 @@ impl AppView {
 
         let mut list = ui::DetailList::new(
             "query-detail",
-            &self.query_detail_hscroll,
-            &self.query_detail_vscroll,
+            &self.query_detail_scroll,
             ui::detail_content_width(&widths),
             header,
         );
@@ -382,9 +401,10 @@ impl AppView {
         widths: &[f32],
         theme: Theme,
         cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
         let file = &self.query_files[index];
-        let selected = self.saved_query_selected == Some(index);
+        let key = query_file_key(file);
+        let selected = self.query_selection.contains(&key);
         let name: AnyElement = match self.query_rename_input(index) {
             Some(input) => div()
                 .w(px(widths[0]))
@@ -406,22 +426,22 @@ impl AppView {
                     theme.icon_queries,
                     22.0,
                 ))
-                .child(
-                    div()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .child(file.name.clone()),
-                )
+                .child(ui::detail_cell_text(
+                    SharedString::from(format!("query-cell-{index}-0")),
+                    file.name.clone(),
+                ))
                 .child(ui::tag_chip(QUERY_TAG.to_string(), theme))
                 .into_any_element(),
         };
-        ui::detail_row(
+        let click_key = key.clone();
+        let menu_key = key.clone();
+        let row = ui::detail_row(
             SharedString::from(format!("query-file-{index}")),
             selected,
             theme,
         )
-        .on_click(cx.listener(move |this, event, _window, cx| {
-            this.saved_query_selected = Some(index);
+        .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
+            this.hit_query(&click_key, event.click_count(), event.modifiers(), cx);
             if matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2) {
                 this.open_saved_query(index, cx);
             }
@@ -430,7 +450,10 @@ impl AppView {
         .on_mouse_down(
             MouseButton::Right,
             cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                this.saved_query_selected = Some(index);
+                cx.stop_propagation();
+                if !this.query_selection.contains(&menu_key) {
+                    this.select_query_one(index);
+                }
                 this.context_menu = Some(ContextMenu {
                     target: ContextTarget::QueryFile { index },
                     position: event.position,
@@ -443,20 +466,23 @@ impl AppView {
             div()
                 .w(px(widths[1]))
                 .flex_none()
-                .overflow_hidden()
-                .whitespace_nowrap()
                 .text_color(rgb(theme.text_muted))
-                .child(query_modified_text(file)),
+                .child(ui::detail_cell_text(
+                    SharedString::from(format!("query-cell-{index}-1")),
+                    query_modified_text(file),
+                )),
         )
         .child(
             div()
                 .w(px(widths[2]))
                 .flex_none()
-                .overflow_hidden()
-                .whitespace_nowrap()
                 .text_color(rgb(theme.text_muted))
-                .child(human_size(file.size)),
-        )
+                .child(ui::detail_cell_text(
+                    SharedString::from(format!("query-cell-{index}-2")),
+                    human_size(file.size),
+                )),
+        );
+        list_ops::row_with_rect(cx.weak_entity(), row, MarqueeTarget::Queries, key)
     }
 
     /// The Queries 平铺网格: the in-scope saved queries in a column-major grid (items fill a column
@@ -530,9 +556,10 @@ impl AppView {
         theme: Theme,
         width: f32,
         cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
         let file = &self.query_files[index];
-        let selected = self.saved_query_selected == Some(index);
+        let key = query_file_key(file);
+        let selected = self.query_selection.contains(&key);
         let title: AnyElement = match self.query_rename_input(index) {
             Some(input) => div()
                 .flex_1()
@@ -549,14 +576,16 @@ impl AppView {
                 .child(file.name.clone())
                 .into_any_element(),
         };
-        ui::grid_item_sized(
+        let click_key = key.clone();
+        let menu_key = key.clone();
+        let item = ui::grid_item_sized(
             SharedString::from(format!("query-tile-{index}")),
             selected,
             theme,
             width,
         )
-        .on_click(cx.listener(move |this, event, _window, cx| {
-            this.saved_query_selected = Some(index);
+        .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
+            this.hit_query(&click_key, event.click_count(), event.modifiers(), cx);
             if matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2) {
                 this.open_saved_query(index, cx);
             }
@@ -565,7 +594,10 @@ impl AppView {
         .on_mouse_down(
             MouseButton::Right,
             cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                this.saved_query_selected = Some(index);
+                cx.stop_propagation();
+                if !this.query_selection.contains(&menu_key) {
+                    this.select_query_one(index);
+                }
                 this.context_menu = Some(ContextMenu {
                     target: ContextTarget::QueryFile { index },
                     position: event.position,
@@ -578,7 +610,8 @@ impl AppView {
             theme.icon_queries,
             16.0,
         ))
-        .child(title)
+        .child(title);
+        list_ops::row_with_rect(cx.weak_entity(), item, MarqueeTarget::Queries, key)
     }
 
     /// Start dragging the 平铺 grid's horizontal scrollbar.

@@ -487,6 +487,16 @@ impl AppView {
                     this.begin_marquee(MarqueeTarget::Backups, event.position, event.modifiers, cx);
                 }),
             )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                    this.context_menu = Some(ContextMenu {
+                        target: ContextTarget::BackupList,
+                        position: event.position,
+                    });
+                    cx.notify();
+                }),
+            )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
                 if this.backup_columns.borrow_mut().drag_resize(event) {
                     cx.notify();
@@ -585,8 +595,7 @@ impl AppView {
 
         let mut list = ui::DetailList::new(
             "backup-detail",
-            &self.backup_hscroll,
-            &self.backup_scroll,
+            &self.backup_detail_scroll,
             ui::detail_content_width(&widths),
             header,
         );
@@ -622,12 +631,10 @@ impl AppView {
                         theme.icon_backups,
                         22.0,
                     ))
-                    .child(
-                        div()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .child(file.name.clone()),
-                    )
+                    .child(ui::detail_cell_text(
+                        SharedString::from(format!("backup-file-cell-{index}-0")),
+                        file.name.clone(),
+                    ))
                     .into_any_element(),
             };
             let modified = file
@@ -653,6 +660,7 @@ impl AppView {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
                     if !this.backups_selection.contains(&menu_key) {
                         this.backups_selection.select_one(menu_key.clone());
                         this.backup_selected = Some(BackupSelection::File(index));
@@ -669,28 +677,31 @@ impl AppView {
                 div()
                     .w(px(widths[1]))
                     .flex_none()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
                     .text_color(rgb(muted))
-                    .child(modified),
+                    .child(ui::detail_cell_text(
+                        SharedString::from(format!("backup-file-cell-{index}-1")),
+                        modified,
+                    )),
             )
             .child(
                 div()
                     .w(px(widths[2]))
                     .flex_none()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
                     .text_color(rgb(muted))
-                    .child(format_size_only(file.size)),
+                    .child(ui::detail_cell_text(
+                        SharedString::from(format!("backup-file-cell-{index}-2")),
+                        format_size_only(file.size),
+                    )),
             )
             .child(
                 div()
                     .w(px(widths[3]))
                     .flex_none()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
                     .text_color(rgb(muted))
-                    .child(single_line(&file.manifest.comment)),
+                    .child(ui::detail_cell_text(
+                        SharedString::from(format!("backup-file-cell-{index}-3")),
+                        single_line(&file.manifest.comment),
+                    )),
             );
             list = list.child(backup_row_with_rect(
                 cx.weak_entity(),
@@ -720,6 +731,7 @@ impl AppView {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
                     if !this.backups_selection.contains(&menu_key) {
                         this.backups_selection.select_one(menu_key.clone());
                         this.backup_selected = Some(BackupSelection::Config(index));
@@ -746,12 +758,10 @@ impl AppView {
                         theme.icon_queries,
                         22.0,
                     ))
-                    .child(
-                        div()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .child(config.name.clone()),
-                    ),
+                    .child(ui::detail_cell_text(
+                        SharedString::from(format!("backup-config-cell-{index}-0")),
+                        config.name.clone(),
+                    )),
             )
             .child(
                 div()
@@ -863,6 +873,7 @@ impl AppView {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
                     if !this.backups_selection.contains(&menu_key) {
                         this.backups_selection.select_one(menu_key.clone());
                         this.sync_backup_selected();
@@ -1109,6 +1120,27 @@ impl AppView {
         if let Some(file) = self.backup_files.get(index) {
             reveal_in_file_manager(&file.path);
         }
+    }
+
+    /// Reveal the current scope's backup folder in the OS file manager.
+    pub(super) fn reveal_backup_folder(&mut self, cx: &mut Context<'_, Self>) {
+        let Some((connection_index, database_index)) = self.backup_scope(cx) else {
+            return;
+        };
+        let Some(connection_id) = self
+            .connections
+            .get(connection_index)
+            .map(|node| node.profile.id.clone())
+        else {
+            return;
+        };
+        let Some(database) = self.database_name(connection_index, database_index) else {
+            return;
+        };
+        let dir = self.backup_dir(&connection_id, &database);
+        let _ = std::fs::create_dir_all(&dir);
+        reveal_in_file_manager(&dir);
+        cx.notify();
     }
 
     /// Open the object-info pane for a backup file.
@@ -3018,15 +3050,7 @@ fn backup_row_with_rect(
     target: MarqueeTarget,
     key: String,
 ) -> AnyElement {
-    div()
-        .on_children_prepainted(move |bounds, _window, cx| {
-            let Some(rect) = bounds.first().copied() else {
-                return;
-            };
-            let _ = app.update(cx, |app, _| app.note_row_rect(target, key.clone(), rect));
-        })
-        .child(row)
-        .into_any_element()
+    super::list_ops::row_with_rect(app, row, target, key)
 }
 
 /// The shared object-selection tree of the New Backup and Restore dialogs.

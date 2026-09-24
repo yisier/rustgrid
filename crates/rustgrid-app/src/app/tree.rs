@@ -461,6 +461,7 @@ impl AppView {
         self.rename_edit = None;
         self.rename_blur = None;
         self.saved_query_selected = None;
+        self.query_selection.clear();
         self.clear_info_selection();
         self.objects_selection.clear();
         self.objects_row_rects.clear();
@@ -485,6 +486,7 @@ impl AppView {
             self.active_query = None;
             self.active_design = None;
             self.saved_query_selected = None;
+            self.query_selection.clear();
             self.main_tab = MainTab::Backups;
             self.refresh_backups(cx);
             cx.notify();
