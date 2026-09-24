@@ -20,6 +20,7 @@ fn config() -> ConnectionConfig {
         password,
         database,
         options: BTreeMap::new(),
+        settings: Default::default(),
     }
 }
 

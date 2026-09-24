@@ -43,7 +43,7 @@ fn main() {
     );
     let runtime = Arc::new(Runtime::new());
 
-    let settings = config.load_settings().unwrap_or_default();
+    let settings = app::load_startup_settings(&config);
     rust_i18n::set_locale(settings.language.locale());
 
     gpui_kit::application().with_assets(Assets).run(move |cx| {

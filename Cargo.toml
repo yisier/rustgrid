@@ -38,6 +38,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "mysql", "tls-rustls-ring", "chrono"] }
 rust-i18n = "4"
 directories = "6"
+sys-locale = "0.3"
 gpui = { package = "gpui-pre", version = "0.3" }
 gpui-kit = "0.6"
 sqlparser = "0.62"
@@ -49,6 +50,7 @@ dtparse = "2"
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 chacha20poly1305 = "0.11"
 base64 = "0.22"
+russh = { version = "0.63", default-features = false, features = ["ring", "rsa"] }
 sha1 = "0.10"
 zstd = "0.13"
 raw-window-handle = "0.6"

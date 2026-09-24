@@ -22,9 +22,7 @@ pub(super) fn centered_margin_top(window: &Window, dialog_height: f32) -> Pixels
 impl AppView {
     /// Reconciles AppView dialog state with the `Root`-owned dialog stack. Called every render.
     pub(super) fn sync_dialog(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        let desired = if self.form.is_some() {
-            Some(DialogKind::ConnectionForm)
-        } else if self.db_dialog.is_some() {
+        let desired = if self.db_dialog.is_some() {
             Some(DialogKind::DbDialog)
         } else if self.create_table_dialog.is_some() {
             Some(DialogKind::CreateTable)
@@ -36,8 +34,6 @@ impl AppView {
             Some(DialogKind::Error)
         } else if self.delete_confirm.is_some() {
             Some(DialogKind::Confirm)
-        } else if self.options_open {
-            Some(DialogKind::Options)
         } else {
             None
         };
@@ -51,177 +47,14 @@ impl AppView {
         window.close_all_dialogs(cx);
 
         match desired {
-            Some(DialogKind::ConnectionForm) => self.open_connection_form_dialog(window, cx),
             Some(DialogKind::DbDialog) => self.open_db_dialog(window, cx),
             Some(DialogKind::CreateTable) => self.open_create_table_modal(window, cx),
             Some(DialogKind::Password) => self.open_password_prompt(window, cx),
             Some(DialogKind::SaveQuery) => self.open_save_query_dialog(window, cx),
             Some(DialogKind::Error) => self.open_error_dialog(window, cx),
             Some(DialogKind::Confirm) => self.open_confirm_dialog(window, cx),
-            Some(DialogKind::Options) => self.open_options_dialog(window, cx),
             None => {}
         }
-    }
-
-    fn open_connection_form_dialog(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        let app = cx.entity();
-        window.open_dialog(cx, move |dialog, _window, cx| {
-            let (heading, footer) = app.update(cx, |app, cx| {
-                (app.form_heading(), app.form_footer(cx).into_any_element())
-            });
-            let on_close = app.downgrade();
-            let content_app = app.clone();
-            dialog
-                .title(heading)
-                .w(px(PANEL_WIDTH))
-                .content(move |content, window, cx| {
-                    let body = content_app
-                        .update(cx, |app, cx| app.form_body(window, cx).into_any_element());
-                    content.child(body)
-                })
-                .footer(footer)
-                .on_close(move |_, _, cx| {
-                    let _ = on_close.update(cx, |app, cx| {
-                        app.form = None;
-                        app.form_inputs = None;
-                        app.context_menu = None;
-                        cx.notify();
-                    });
-                })
-        });
-    }
-
-    /// The connection form's titlebar text: `Name - New Connection` / `Name - Edit Connection`.
-    fn form_heading(&self) -> String {
-        let title = if self.editing.is_some() {
-            t!("form.edit_title")
-        } else {
-            t!("form.title")
-        };
-        let name = self
-            .form
-            .as_ref()
-            .map(|form| form.name.trim().to_string())
-            .unwrap_or_default();
-        let name = if name.is_empty() {
-            t!("app.title").to_string()
-        } else {
-            name
-        };
-        format!("{name} - {title}")
-    }
-
-    /// The connection form body: the tab strip and the general page.
-    fn form_body(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let theme = self.theme;
-
-        let tabs = div()
-            .flex()
-            .flex_row()
-            .w_full()
-            .gap_0p5()
-            .px_2()
-            .pt_2()
-            .bg(rgb(theme.dialog_face))
-            .child(form_tab(t!("form.tab.general").to_string(), true, theme))
-            .child(form_tab(t!("form.tab.advanced").to_string(), false, theme))
-            .child(form_tab(t!("form.tab.database").to_string(), false, theme))
-            .child(form_tab("SSL".to_string(), false, theme))
-            .child(form_tab("SSH".to_string(), false, theme))
-            .child(form_tab("HTTP".to_string(), false, theme));
-
-        let general = div()
-            .flex()
-            .flex_col()
-            .h(px(430.0))
-            .mx_2()
-            .mb_2()
-            .border_1()
-            .border_color(rgb(theme.border))
-            .bg(rgb(theme.dialog_bg))
-            .child(match self.form.as_ref() {
-                Some(form) => self.render_general_tab(form, window, cx).into_any_element(),
-                None => div().into_any_element(),
-            });
-
-        div().flex().flex_col().w_full().child(tabs).child(general)
-    }
-
-    /// The connection form footer: test-connection and status on the left, OK/Cancel on the right.
-    fn form_footer(&mut self, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let theme = self.theme;
-
-        let mut test = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .flex_1()
-            .min_w(px(0.0))
-            .gap_2()
-            .child(self.dialog_button(
-                "form-test",
-                t!("form.test_connection").to_string(),
-                false,
-                cx.listener(|this, _event, _window, cx| this.test_form(cx)),
-            ));
-
-        match &self.test_status {
-            TestStatus::Idle => {}
-            TestStatus::Testing => {
-                test = test.child(
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(rgb(theme.text_muted))
-                        .child(t!("form.testing").to_string()),
-                );
-            }
-            TestStatus::Success => {
-                test = test.child(
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(rgb(theme.icon_connection))
-                        .child(t!("form.test_success").to_string()),
-                );
-            }
-            TestStatus::Failed(_) => {}
-        }
-
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .w_full()
-            .h(px(46.0))
-            .child(test)
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .flex_none()
-                    .gap_2()
-                    .child(self.dialog_button(
-                        "form-save",
-                        t!("form.ok").to_string(),
-                        true,
-                        cx.listener(|this, _event, _window, cx| {
-                            if !matches!(this.test_status, TestStatus::Testing) {
-                                this.save_form(cx);
-                            }
-                        }),
-                    ))
-                    .child(self.dialog_button(
-                        "form-cancel",
-                        t!("form.cancel").to_string(),
-                        false,
-                        cx.listener(|this, _event, _window, cx| {
-                            this.form = None;
-                            this.context_menu = None;
-                            cx.notify();
-                        }),
-                    )),
-            )
     }
 
     fn open_error_dialog(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {

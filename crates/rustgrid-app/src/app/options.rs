@@ -1,5 +1,10 @@
+//! The Options window (设置): a separate OS window, opened from the titlebar's settings button.
+//!
+//! It has a single 常规 page holding just the language selector — the theme is chosen from the
+//! titlebar dropdown, so it is not repeated here. Like the Export/Import/User windows, `AppView`
+//! owns the state and this module renders it; `AppView::sync_dialog` is not involved.
+
 use super::*;
-use gpui_kit::component::WindowExt;
 
 fn language_label(setting: LanguageSetting) -> String {
     match setting {
@@ -24,17 +29,105 @@ fn language_from_locale(locale: &str) -> LanguageSetting {
     }
 }
 
+/// The root view of the Options OS window. It re-renders whenever `AppView` changes.
+pub(super) struct OptionsWindow {
+    app: WeakEntity<AppView>,
+    _subscription: Subscription,
+}
+
+impl OptionsWindow {
+    pub(super) fn new(
+        app: WeakEntity<AppView>,
+        app_entity: &Entity<AppView>,
+        cx: &mut Context<'_, Self>,
+    ) -> Self {
+        let subscription = cx.observe(app_entity, |_, _, cx| cx.notify());
+        Self {
+            app,
+            _subscription: subscription,
+        }
+    }
+}
+
+impl Render for OptionsWindow {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let Some(app) = self.app.upgrade() else {
+            return div().into_any_element();
+        };
+        app.update(cx, |app, cx| app.options_window_contents(cx))
+    }
+}
+
 impl AppView {
+    /// Open the Options window, or raise it if it is already open.
     pub(super) fn open_options(&mut self, cx: &mut Context<'_, Self>) {
-        self.options_open = true;
-        self.options_theme = self.theme_setting;
+        if self.options_window.is_some() {
+            self.focus_options_window(cx);
+            return;
+        }
         self.options_language = self.language;
         self.ensure_language_combo(cx);
-        cx.notify();
+        let weak = cx.weak_entity();
+        let app_entity = cx.entity();
+        let focus = self.options_focus.clone();
+        let title = t!("options.title").to_string();
+        cx.defer(move |cx: &mut App| {
+            let Some(app) = weak.upgrade() else {
+                return;
+            };
+            let bounds = Bounds::centered(None, size(px(560.0), px(420.0)), cx);
+            let view_weak = weak.clone();
+            let opened = cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some(title.clone().into()),
+                        appears_transparent: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                move |window, cx| {
+                    #[cfg(target_os = "windows")]
+                    crate::win_resize::install(window);
+                    // `open_window` does not raise what it opens, so the window can otherwise
+                    // appear behind the main window.
+                    window.activate_window();
+                    let view = cx.new(|cx| OptionsWindow::new(view_weak.clone(), &app_entity, cx));
+                    let root = cx.new(|cx| gpui_kit::component::Root::new(view, window, cx));
+                    // Focus the window root so ESC reaches its handler before any control is
+                    // focused.
+                    window.focus(&focus, cx);
+                    root
+                },
+            );
+            match opened {
+                Ok(handle) => app.update(cx, |app, cx| {
+                    app.options_window = Some(handle);
+                    cx.notify();
+                }),
+                Err(error) => app.update(cx, |app, cx| {
+                    app.error_dialog = Some(error.to_string());
+                    cx.notify();
+                }),
+            }
+        });
     }
 
-    pub(super) fn close_options(&mut self, cx: &mut Context<'_, Self>) {
-        self.options_open = false;
+    /// Raise the already-open Options window.
+    fn focus_options_window(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(handle) = self.options_window {
+            let _ = handle.update(cx, |_, window, _| {
+                window.activate_window();
+                window.refresh();
+            });
+        }
+    }
+
+    /// Close the Options window (called from its footer/ESC, where the window is at hand).
+    pub(super) fn close_options(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.options_window = None;
+        window.remove_window();
         cx.notify();
     }
 
@@ -68,12 +161,10 @@ impl AppView {
         });
     }
 
-    fn apply_options(&mut self, cx: &mut Context<'_, Self>) {
-        let theme = self.options_theme;
+    fn apply_options(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let language = self.options_language;
-        self.set_theme(theme, cx);
         self.set_language(language, cx);
-        self.close_options(cx);
+        self.close_options(window, cx);
     }
 
     fn options_category_row(
@@ -111,29 +202,6 @@ impl AppView {
             .child(label)
     }
 
-    fn theme_option(
-        &self,
-        id: &'static str,
-        setting: ThemeSetting,
-        label: String,
-        cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
-        let kind = if self.options_theme == setting {
-            ButtonKind::Selected
-        } else {
-            ButtonKind::Normal
-        };
-        self.win_button(
-            id,
-            label,
-            kind,
-            cx.listener(move |this, _event, _window, cx| {
-                this.options_theme = setting;
-                cx.notify();
-            }),
-        )
-    }
-
     fn language_combo(&self, _cx: &mut Context<'_, Self>) -> AnyElement {
         match self.language_combo.clone() {
             Some(combo) => combo.into_any_element(),
@@ -141,35 +209,64 @@ impl AppView {
         }
     }
 
-    /// Opens the options dialog as a `Root`-managed modal.
-    pub(super) fn open_options_dialog(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        let app = cx.entity();
-        window.open_dialog(cx, move |dialog, _window, cx| {
-            let footer = app.update(cx, |app, cx| {
-                app.options_dialog_footer(cx).into_any_element()
-            });
-            let on_close = app.downgrade();
-            let content_app = app.clone();
-            dialog
-                .title(t!("options.title").to_string())
-                .w(px(640.0))
-                .content(move |content, _window, cx| {
-                    let body = content_app
-                        .update(cx, |app, cx| app.options_dialog_body(cx).into_any_element());
-                    content.child(body)
-                })
-                .footer(footer)
-                .on_close(move |_, _, cx| {
-                    let _ = on_close.update(cx, |app, cx| app.close_options(cx));
-                })
-        });
-    }
-
-    /// The options dialog body: the category nav plus the general page.
-    fn options_dialog_body(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    /// The Options window's contents: a titlebar, the 常规 page and the footer.
+    pub(super) fn options_window_contents(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
 
-        let nav = div()
+        div()
+            .relative()
+            .flex()
+            .flex_col()
+            .size_full()
+            .bg(rgb(theme.dialog_face))
+            .text_color(rgb(theme.text))
+            .track_focus(&self.options_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" {
+                    this.close_options(window, cx);
+                }
+            }))
+            .child(export::child_window_titlebar(
+                t!("options.title").to_string(),
+                theme,
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .w_full()
+                    .child(self.options_nav())
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .h_full()
+                            .p_4()
+                            .child(self.options_body(cx)),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .w_full()
+                    .px_4()
+                    .py_4()
+                    .bg(rgb(theme.dialog_bg))
+                    .border_t_1()
+                    .border_color(rgb(theme.border))
+                    .child(self.options_footer(cx)),
+            )
+            .into_any_element()
+    }
+
+    /// The left navigation. Only 常规 remains.
+    fn options_nav(&self) -> impl IntoElement {
+        let theme = self.theme;
+        div()
             .flex()
             .flex_col()
             .w(px(150.0))
@@ -184,61 +281,14 @@ impl AppView {
                 true,
                 true,
             ))
-            .child(self.options_category_row(
-                "options-tab",
-                t!("options.tab").to_string(),
-                false,
-                false,
-            ))
-            .child(self.options_category_row(
-                "options-query",
-                t!("options.query").to_string(),
-                false,
-                false,
-            ))
-            .child(self.options_category_row(
-                "options-editor",
-                t!("options.editor").to_string(),
-                false,
-                false,
-            ))
-            .child(self.options_category_row(
-                "options-record",
-                t!("options.record").to_string(),
-                false,
-                false,
-            ))
-            .child(self.options_category_row(
-                "options-file-location",
-                t!("options.file_location").to_string(),
-                false,
-                false,
-            ))
-            .child(self.options_category_row(
-                "options-proxy",
-                t!("options.proxy").to_string(),
-                false,
-                false,
-            ))
-            .child(self.options_category_row(
-                "options-environment",
-                t!("options.environment").to_string(),
-                false,
-                false,
-            ))
-            .child(self.options_category_row(
-                "options-advanced",
-                t!("options.advanced").to_string(),
-                false,
-                false,
-            ));
+    }
 
-        let content = div()
+    /// The 常规 page: just the language selector.
+    fn options_body(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        div()
             .flex()
             .flex_col()
-            .flex_1()
             .gap_3()
-            .p_4()
             .child(
                 div()
                     .text_size(px(12.5))
@@ -255,54 +305,14 @@ impl AppView {
                             .w(px(80.0))
                             .flex_none()
                             .text_size(px(12.0))
-                            .child(t!("options.theme").to_string()),
-                    )
-                    .child(self.theme_option(
-                        "options-theme-light",
-                        ThemeSetting::Light,
-                        t!("theme.light").to_string(),
-                        cx,
-                    ))
-                    .child(self.theme_option(
-                        "options-theme-dark",
-                        ThemeSetting::Dark,
-                        t!("theme.dark").to_string(),
-                        cx,
-                    ))
-                    .child(self.theme_option(
-                        "options-theme-system",
-                        ThemeSetting::System,
-                        t!("theme.system").to_string(),
-                        cx,
-                    )),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_3()
-                    .child(
-                        div()
-                            .w(px(80.0))
-                            .flex_none()
-                            .text_size(px(12.0))
                             .child(t!("options.language").to_string()),
                     )
                     .child(self.language_combo(cx)),
             )
-            .child(div().flex_1());
-
-        div()
-            .flex()
-            .flex_row()
-            .h(px(400.0))
-            .child(nav)
-            .child(content)
     }
 
-    /// The options dialog footer: reset-to-default on the left, OK/Cancel on the right.
-    fn options_dialog_footer(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    /// The footer: reset-to-default on the left, OK/Cancel on the right.
+    fn options_footer(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
         div()
             .flex()
@@ -310,14 +320,12 @@ impl AppView {
             .items_center()
             .justify_between()
             .w_full()
-            .h(px(48.0))
             .child(self.dialog_button(
                 "options-default",
                 t!("options.default").to_string(),
                 false,
                 cx.listener(|this, _event, _window, cx| {
-                    this.options_theme = ThemeSetting::System;
-                    this.options_language = LanguageSetting::En;
+                    this.options_language = detect_system_language();
                     cx.notify();
                 }),
             ))
@@ -331,13 +339,13 @@ impl AppView {
                         "options-ok",
                         t!("form.ok").to_string(),
                         true,
-                        cx.listener(|this, _event, _window, cx| this.apply_options(cx)),
+                        cx.listener(|this, _event, window, cx| this.apply_options(window, cx)),
                     ))
                     .child(self.dialog_button(
                         "options-cancel",
                         t!("form.cancel").to_string(),
                         false,
-                        cx.listener(|this, _event, _window, cx| this.close_options(cx)),
+                        cx.listener(|this, _event, window, cx| this.close_options(window, cx)),
                     )),
             )
             .text_color(rgb(theme.text))

@@ -27,6 +27,7 @@ fn config() -> ConnectionConfig {
             password: Some(password),
             database: None,
             options: BTreeMap::new(),
+            settings: Default::default(),
         };
     }
 
@@ -44,6 +45,7 @@ fn config() -> ConnectionConfig {
         password: secrets.get(&profile.id).cloned(),
         database: None,
         options: BTreeMap::new(),
+        settings: Default::default(),
     }
 }
 

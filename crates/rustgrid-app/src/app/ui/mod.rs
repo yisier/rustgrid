@@ -6,12 +6,12 @@
 //! `AGENTS.md` under "UI conventions".
 
 use gpui::{
-    App, BoxShadow, ClickEvent, Div, FontWeight, IntoElement, Point, SharedString, Stateful,
-    Window, div, prelude::*, px, relative, rgb, rgba, svg,
+    App, BoxShadow, ClickEvent, Div, IntoElement, Point, SharedString, Stateful, Window, div,
+    prelude::*, px, relative, rgb, rgba, svg,
 };
 
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::{Disableable, Selectable, Sizable, Size};
+use gpui_kit::component::{Disableable, Sizable, Size};
 
 use crate::theme::Theme;
 
@@ -37,7 +37,6 @@ pub(super) enum ButtonKind {
     Normal,
     Default,
     Danger,
-    Selected,
     /// A push button that is rendered but cannot be clicked (e.g. Save with nothing selected).
     Disabled,
 }
@@ -83,7 +82,6 @@ fn sized_button(
         ButtonKind::Normal => Button::new(id.into()).outline(),
         ButtonKind::Default => Button::new(id.into()).primary(),
         ButtonKind::Danger => Button::new(id.into()).danger(),
-        ButtonKind::Selected => Button::new(id.into()).secondary().selected(true),
         ButtonKind::Disabled => Button::new(id.into()).outline().disabled(true),
     };
     button
@@ -242,36 +240,6 @@ pub(super) fn segmented_toggle(
         );
     }
     toggle
-}
-
-/// A dialog tab: active merges with the page, inactive is a raised button face.
-pub(super) fn form_tab(label: String, active: bool, theme: Theme) -> impl IntoElement {
-    div()
-        .flex()
-        .items_center()
-        .justify_center()
-        .px_4()
-        .h(px(24.0))
-        .text_size(px(12.0))
-        .when(active, move |style| {
-            style
-                .bg(rgb(theme.dialog_bg))
-                .border_t_1()
-                .border_l_1()
-                .border_r_1()
-                .border_color(rgb(theme.border))
-                .text_color(rgb(theme.text))
-                .font_weight(FontWeight::SEMIBOLD)
-                .mb(px(-1.0))
-        })
-        .when(!active, move |style| {
-            style
-                .bg(rgb(theme.button_bg))
-                .border_1()
-                .border_color(rgb(theme.border))
-                .text_color(rgb(theme.text_muted))
-        })
-        .child(label)
 }
 
 fn separator(theme: Theme, height: f32) -> impl IntoElement {

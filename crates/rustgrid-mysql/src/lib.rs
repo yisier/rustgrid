@@ -1,6 +1,7 @@
 mod connection;
 mod driver;
 mod routine;
+mod tunnel;
 mod user;
 mod view;
 

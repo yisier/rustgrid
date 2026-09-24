@@ -1,91 +1,6 @@
 use super::*;
 
 impl AppView {
-    pub(super) fn render_general_tab(
-        &self,
-        form: &ConnectionForm,
-        window: &Window,
-        cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
-        let theme = self.theme;
-        let _ = window;
-
-        let mut content = div()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .px_4()
-            .py_3()
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_center()
-                    .gap_3()
-                    .pb_2()
-                    .child(self.header_endpoint(
-                        "logo.png",
-                        t!("form.header_source").to_string(),
-                        true,
-                        theme,
-                    ))
-                    .child(
-                        div()
-                            .w(px(150.0))
-                            .border_t_1()
-                            .border_color(rgb(theme.border)),
-                    )
-                    .child(self.header_endpoint(
-                        "icons/database.svg",
-                        t!("form.header_target").to_string(),
-                        false,
-                        theme,
-                    )),
-            )
-            .child(self.render_form_field(FormField::Name, format!("{}:", t!("form.name"))))
-            .child(self.render_form_field(FormField::Host, format!("{}:", t!("form.host"))))
-            .child(self.render_form_field(FormField::Port, format!("{}:", t!("form.port"))))
-            .child(self.render_form_field(FormField::Username, format!("{}:", t!("form.username"))))
-            .child(self.render_form_field(FormField::Password, format!("{}:", t!("form.password"))))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .child(div().w(px(FIELD_LABEL_WIDTH)).flex_none())
-                    .child(
-                        div()
-                            .id("form-save-password")
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_1()
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                if let Some(form) = this.form.as_mut() {
-                                    form.save_password = !form.save_password;
-                                }
-                                cx.notify();
-                            }))
-                            .child(checkbox_box(form.save_password, theme))
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .child(t!("form.save_password").to_string()),
-                            ),
-                    ),
-            );
-
-        if let TestStatus::Failed(error) = &self.test_status {
-            content =
-                content.child(self.render_selectable_text("form-error", error, theme.danger, cx));
-        }
-
-        content
-    }
-
     pub(super) fn render_selectable_text(
         &self,
         id: &'static str,
@@ -131,42 +46,6 @@ impl AppView {
             .child(styled)
     }
 
-    pub(super) fn header_endpoint(
-        &self,
-        path: &'static str,
-        label: String,
-        is_image: bool,
-        theme: Theme,
-    ) -> AnyElement {
-        let icon: AnyElement = if is_image {
-            img(ImageSource::Resource(Resource::Embedded(path.into())))
-                .w(px(34.0))
-                .h(px(34.0))
-                .into_any_element()
-        } else {
-            svg()
-                .path(path)
-                .w(px(28.0))
-                .h(px(28.0))
-                .text_color(rgb(theme.text))
-                .into_any_element()
-        };
-
-        div()
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap_1()
-            .child(div().h(px(34.0)).flex().items_center().child(icon))
-            .child(
-                div()
-                    .text_size(px(12.0))
-                    .text_color(rgb(theme.text))
-                    .child(label),
-            )
-            .into_any_element()
-    }
-
     pub(super) fn dialog_button(
         &self,
         id: &'static str,
@@ -196,30 +75,6 @@ impl AppView {
         on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> impl IntoElement {
         ui::toolbar_item(id, icon, label, enabled, self.theme, on_click)
-    }
-
-    pub(super) fn render_form_field(&self, field: FormField, label: String) -> impl IntoElement {
-        let width = match field {
-            FormField::Name | FormField::Host => 360.0,
-            FormField::Port => 80.0,
-            FormField::Username | FormField::Password | FormField::Database => 300.0,
-        };
-        let input = self
-            .form_inputs
-            .as_ref()
-            .map(|inputs| inputs.get(field).clone());
-
-        let mut row = div().flex().flex_row().items_center().gap_2().child(
-            div()
-                .w(px(FIELD_LABEL_WIDTH))
-                .flex_none()
-                .text_size(px(12.0))
-                .child(label),
-        );
-        if let Some(input) = input {
-            row = row.child(div().w(px(width)).h(px(24.0)).child(input));
-        }
-        row
     }
 
     pub(super) fn render_context_menu(

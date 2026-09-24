@@ -1,6 +1,7 @@
 pub mod driver;
 pub mod error;
 pub mod model;
+pub mod options;
 pub mod registry;
 pub mod routine;
 pub mod user;
@@ -15,6 +16,7 @@ pub use model::{
     RowInsert, RowUpdate, SavedBackup, SavedBackupSelection, SavedQuery, SortColumn, TableInfo,
     TableOptions, TablePage, TableSchema, TableStatus, TriggerDef,
 };
+pub use options::{ConnectionOptions, TlsMode, TlsOptions, TunnelAuth, TunnelKind, TunnelLayer};
 pub use registry::{DriverRegistry, DriverSource};
 pub use routine::{RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind};
 pub use user::{

@@ -56,6 +56,11 @@ impl AssetSource for Assets {
             "icons/next.svg" => Some(include_bytes!("../assets/icons/next.svg")),
             "icons/last.svg" => Some(include_bytes!("../assets/icons/last.svg")),
             "icons/gear.svg" => Some(include_bytes!("../assets/icons/gear.svg")),
+            "icons/github.svg" => Some(include_bytes!("../assets/icons/github.svg")),
+            "icons/sun.svg" => Some(include_bytes!("../assets/icons/sun.svg")),
+            "icons/moon.svg" => Some(include_bytes!("../assets/icons/moon.svg")),
+            "icons/monitor.svg" => Some(include_bytes!("../assets/icons/monitor.svg")),
+            "icons/folder.svg" => Some(include_bytes!("../assets/icons/folder.svg")),
             "icons/search.svg" => Some(include_bytes!("../assets/icons/search.svg")),
             "icons/row_marker.svg" => Some(include_bytes!("../assets/icons/row_marker.svg")),
             "icons/save.svg" => Some(include_bytes!("../assets/icons/save.svg")),
@@ -65,6 +70,9 @@ impl AssetSource for Assets {
             "icons/panel-left.svg" => Some(include_bytes!("../assets/icons/panel-left.svg")),
             "icons/panel-right.svg" => Some(include_bytes!("../assets/icons/panel-right.svg")),
             "icons/run.svg" => Some(include_bytes!("../assets/icons/run.svg")),
+            "icons/activity.svg" => Some(include_bytes!("../assets/icons/activity.svg")),
+            "icons/lock.svg" => Some(include_bytes!("../assets/icons/lock.svg")),
+            "icons/zap.svg" => Some(include_bytes!("../assets/icons/zap.svg")),
             _ => None,
         };
         match bytes {

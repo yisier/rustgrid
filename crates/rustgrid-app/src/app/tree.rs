@@ -83,7 +83,12 @@ impl AppView {
         );
     }
 
-    fn show_form(&mut self, form: ConnectionForm, window: &mut Window, cx: &mut Context<'_, Self>) {
+    fn show_form(
+        &mut self,
+        form: ConnectionForm,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         let weak = cx.weak_entity();
         let theme = self.theme;
         let inputs = FormInputs {
@@ -118,11 +123,14 @@ impl AppView {
             ],
         };
         let name_focus = inputs.get(FormField::Name).read(cx).focus_handle();
+        self.form_initial = Some(form.clone());
         self.form_inputs = Some(inputs);
         self.form = Some(form);
         self.test_status = TestStatus::Idle;
         self.context_menu = None;
-        window.focus(&name_focus, cx);
+        self.rebuild_form_extra_inputs(cx);
+        self.rebuild_tunnel_inputs(cx);
+        self.open_connection_window(name_focus, cx);
         cx.notify();
     }
 
@@ -218,6 +226,7 @@ impl AppView {
                 password,
                 database: profile.database.clone(),
                 options: profile.options.clone(),
+                settings: profile.settings.clone(),
             };
 
             let result = match runtime
@@ -315,12 +324,19 @@ impl AppView {
                         Loadable::Loaded(databases) => databases,
                         _ => Vec::new(),
                     };
+                    // A connection may be limited to a subset of its databases; an empty list means
+                    // every database is shown.
+                    let visible = node.profile.settings.visible_databases.clone();
                     node.databases = match result {
                         Ok(databases) => {
                             let mut previous = previous;
                             Loadable::Loaded(
                                 databases
                                     .into_iter()
+                                    .filter(|database| {
+                                        visible.is_empty()
+                                            || visible.iter().any(|name| name == &database.name)
+                                    })
                                     .map(|database| {
                                         if let Some(position) = previous
                                             .iter()

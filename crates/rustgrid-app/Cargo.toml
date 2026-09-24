@@ -30,6 +30,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 rfd.workspace = true
 directories.workspace = true
+sys-locale.workspace = true
 
 [build-dependencies]
 embed-resource.workspace = true

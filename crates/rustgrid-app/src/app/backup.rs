@@ -2309,6 +2309,8 @@ impl AppView {
             self.create_user_dialog = None;
             self.object_privileges = None;
             self.object_privileges_window = None;
+            self.options_window = None;
+            self.connection_window = None;
             cx.quit();
             return;
         }
@@ -2359,6 +2361,25 @@ impl AppView {
             .is_some_and(|handle| handle.window_id() == id)
         {
             self.close_privilege_manager(cx);
+        }
+        if self
+            .options_window
+            .as_ref()
+            .is_some_and(|handle| handle.window_id() == id)
+        {
+            // The user closed the Options window from the OS chrome.
+            self.options_window = None;
+            cx.notify();
+        }
+        if self
+            .connection_window
+            .as_ref()
+            .is_some_and(|handle| handle.window_id() == id)
+        {
+            // The user closed the connection window from the OS chrome.
+            self.connection_window = None;
+            self.clear_form_state();
+            cx.notify();
         }
     }
 

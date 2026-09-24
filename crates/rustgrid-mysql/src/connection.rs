@@ -16,11 +16,16 @@ use sqlx::{
 
 pub struct MysqlConnection {
     pub(crate) pool: MySqlPool,
+    /// The tunnel forwarding this connection, kept alive for as long as the connection is.
+    _tunnel: Option<crate::tunnel::Tunnel>,
 }
 
 impl MysqlConnection {
-    pub fn new(pool: MySqlPool) -> Self {
-        Self { pool }
+    pub fn new(pool: MySqlPool, tunnel: Option<crate::tunnel::Tunnel>) -> Self {
+        Self {
+            pool,
+            _tunnel: tunnel,
+        }
     }
 
     async fn scalar_u64(&self, sql: String, binds: &[String]) -> Result<u64> {

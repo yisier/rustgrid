@@ -12,6 +12,8 @@ impl AppView {
         if let Some(form) = self.form.as_mut() {
             form.set_value(field, text.to_string());
         }
+        // Editing a flagged field clears its "required" marker.
+        self.form_errors.remove(&field);
         cx.notify();
     }
 
@@ -32,7 +34,44 @@ impl AppView {
         Some(inputs.get(target).read(cx).focus_handle())
     }
 
+    /// Validate the required fields before 测试连接 / 保存并连接. Returns `true` when the form is
+    /// invalid: the empty fields are flagged inline and the page holding the first error is shown so
+    /// the markers are visible.
+    fn validate_form(&mut self, cx: &mut Context<'_, Self>) -> bool {
+        let missing = self
+            .form
+            .as_ref()
+            .map(|form| form.missing_required())
+            .unwrap_or_default();
+        let tunnel_missing = self
+            .form
+            .as_ref()
+            .map(missing_tunnel_fields)
+            .unwrap_or_default();
+        if missing.is_empty() && tunnel_missing.is_empty() {
+            self.form_errors.clear();
+            self.form_tunnel_errors.clear();
+            return false;
+        }
+        self.test_status = TestStatus::Idle;
+        let general_first = !missing.is_empty();
+        self.form_errors = missing.into_iter().collect();
+        self.form_tunnel_errors = tunnel_missing;
+        if let Some(form) = self.form.as_mut() {
+            form.tab = if general_first {
+                FormTab::General
+            } else {
+                FormTab::Tunnel
+            };
+        }
+        cx.notify();
+        true
+    }
+
     pub(super) fn save_form(&mut self, cx: &mut Context<'_, Self>) {
+        if self.validate_form(cx) {
+            return;
+        }
         let (profile, password, password_saved) = {
             let Some(form) = self.form.as_ref() else {
                 return;
@@ -64,9 +103,7 @@ impl AppView {
                 node.password = password;
                 node.password_saved = password_saved;
             }
-            self.form = None;
-            self.form_inputs = None;
-            self.test_status = TestStatus::Idle;
+            self.close_connection_window(cx);
 
             let profiles: Vec<_> = self
                 .connections
@@ -104,6 +141,7 @@ impl AppView {
                 password: password.clone(),
                 database: profile.database.clone(),
                 options: profile.options.clone(),
+                settings: profile.settings.clone(),
             };
 
             let result = match runtime
@@ -134,9 +172,7 @@ impl AppView {
                     let _ = view.config.save_profiles(&profiles);
                     view.persist_secrets();
 
-                    view.form = None;
-                    view.form_inputs = None;
-                    view.test_status = TestStatus::Idle;
+                    view.close_connection_window(cx);
                     view.load_databases(index, cx);
                 }
                 Err(error) => {
@@ -148,6 +184,9 @@ impl AppView {
     }
 
     pub(super) fn test_form(&mut self, cx: &mut Context<'_, Self>) {
+        if self.validate_form(cx) {
+            return;
+        }
         let Some(form) = self.form.as_ref() else {
             return;
         };
@@ -180,6 +219,7 @@ impl AppView {
                 password,
                 database: profile.database.clone(),
                 options: profile.options.clone(),
+                settings: profile.settings.clone(),
             };
 
             let status = match runtime
@@ -225,4 +265,23 @@ impl AppView {
         self.connect(index, cx);
         cx.notify();
     }
+}
+
+/// The required fields of the active tunnel layer that are empty. The window edits a single layer
+/// (the first), so only that one is validated.
+fn missing_tunnel_fields(form: &ConnectionForm) -> BTreeSet<connection_form::TunnelField> {
+    let mut missing = BTreeSet::new();
+    let Some(layer) = form.settings.tunnel.first() else {
+        return missing;
+    };
+    if layer.host.trim().is_empty() {
+        missing.insert(connection_form::TunnelField::Host);
+    }
+    if layer.kind == TunnelKind::Ssh
+        && layer.auth == TunnelAuth::KeyFile
+        && layer.key_path.trim().is_empty()
+    {
+        missing.insert(connection_form::TunnelField::KeyPath);
+    }
+    missing
 }

@@ -8,7 +8,7 @@ use directories::ProjectDirs;
 use rustgrid_core::{ConnectionProfile, SavedBackup, SavedQuery};
 use serde::{Deserialize, Serialize};
 
-const CURRENT_VERSION: u32 = 1;
+const CURRENT_VERSION: u32 = 2;
 const PROFILES_FILE: &str = "connections.json";
 const SETTINGS_VERSION: u32 = 4;
 const SETTINGS_FILE: &str = "settings.json";

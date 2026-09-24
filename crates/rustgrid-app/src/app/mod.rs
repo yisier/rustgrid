@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,15 +18,16 @@ use gpui::{
 };
 use rustgrid_config::{AppSettings, ConfigStore, LanguageSetting, ThemeSetting};
 use rustgrid_core::{
-    BackupObjectKind, CellValue, Connection, ConnectionConfig, DriverRegistry, Error,
+    BackupObjectKind, CellValue, Connection, ConnectionConfig, DriverId, DriverRegistry, Error,
     FilterCondition, FilterConjunction, FilterGroup, FilterNode, FilterOperator, ObjectGrant,
     ObjectPrivilegeRow, PageRequest, Privilege, QueryResult, RoutineDetails, RoutineEdit,
-    RoutineInfo, RoutineKind, RowInsert, RowUpdate, SavedBackup, SavedQuery, TableStatus,
-    UserAccount, UserDetails, UserEdit, UserEditSection, ViewEdit,
+    RoutineInfo, RoutineKind, RowInsert, RowUpdate, SavedBackup, SavedQuery, TableStatus, TlsMode,
+    TunnelAuth, TunnelKind, TunnelLayer, UserAccount, UserDetails, UserEdit, UserEditSection,
+    ViewEdit,
 };
 use rustgrid_export::ExportFormat;
 
-use crate::form::{ConnectionForm, FORM_FIELDS, FormField};
+use crate::form::{ConnectionForm, FORM_FIELDS, FormField, FormTab};
 use crate::list_select::{ListSelection, MarqueeDrag, SelectMode, rects_intersect, selection_mode};
 use crate::runtime::Runtime;
 use crate::session::{
@@ -43,8 +44,8 @@ use gpui_kit::component::calendar::{CalendarEvent, CalendarState};
 
 use ui::{
     ButtonKind, ColumnGrid, ComboBox, ComboOption, DetailColumns, DetailScroll, TextInput,
-    TextInputOptions, ViewMode, checkbox_box, form_tab, main_separator, scrollbar_fractions,
-    scrollbar_thumb, toolbar_separator,
+    TextInputOptions, ViewMode, checkbox_box, main_separator, scrollbar_fractions, scrollbar_thumb,
+    toolbar_separator,
 };
 
 // Cell-navigation actions for the in-place grid editor. gpui-kit's `Root` binds `tab`/`shift-tab`
@@ -119,7 +120,9 @@ fn make_form_input(
             value,
             TextInputOptions {
                 masked,
-                placeholder: SharedString::default(),
+                placeholder: form_field_placeholder(field).into(),
+                size: Some(gpui_kit::component::Size::Medium),
+                text_size: Some(13.0),
                 accepts: None,
                 ..Default::default()
             },
@@ -139,6 +142,16 @@ fn make_form_input(
             });
         }))
     })
+}
+
+/// The placeholder of one connection-form field.
+fn form_field_placeholder(field: FormField) -> String {
+    match field {
+        FormField::Name => t!("form.alias_placeholder").to_string(),
+        FormField::Password => t!("form.password_placeholder").to_string(),
+        FormField::Database => t!("form.database_placeholder").to_string(),
+        FormField::Host | FormField::Port | FormField::Username => String::new(),
+    }
 }
 
 struct PasswordPrompt {
@@ -1113,14 +1126,12 @@ enum TableOperation {
 /// floating panels by `AppView` so the rest of the app stays usable while they are open.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DialogKind {
-    ConnectionForm,
     DbDialog,
     CreateTable,
     Password,
     SaveQuery,
     Error,
     Confirm,
-    Options,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1142,8 +1153,6 @@ const MAIN_TABS: [(MainTab, &str, &str); 6] = [
     (MainTab::Backups, "icons/backups.svg", "main.backups"),
 ];
 
-const PANEL_WIDTH: f32 = 620.0;
-const FIELD_LABEL_WIDTH: f32 = 96.0;
 /// Default and clamp widths of the drag-resizable side panes.
 pub(super) const SIDEBAR_DEFAULT_WIDTH: f32 = 260.0;
 pub(super) const SIDEBAR_MIN_WIDTH: f32 = 150.0;
@@ -1278,8 +1287,13 @@ pub struct AppView {
     test_status: TestStatus,
     context_menu: Option<ContextMenu>,
     tab_menu: Option<TabMenu>,
-    tools_menu_open: bool,
-    menu_popup_anchor: Rc<RefCell<Point<Pixels>>>,
+    /// Whether the titlebar theme dropdown is open, and where its button sits (so the popup can be
+    /// anchored under it).
+    theme_menu_open: bool,
+    theme_menu_anchor: Rc<RefCell<Point<Pixels>>>,
+    /// Whether the New Connection engine dropdown is open, and where its button sits.
+    connect_menu_open: bool,
+    connect_menu_anchor: Rc<RefCell<Point<Pixels>>>,
     object_pane: Option<Entity<ObjectPane>>,
     tab_bar: Entity<TabBar>,
     tree_pane: Entity<TreePane>,
@@ -1295,6 +1309,28 @@ pub struct AppView {
     db_sql_cursor: usize,
     db_sql_selecting: bool,
     form_inputs: Option<FormInputs>,
+    /// The required general-page fields that were empty the last time 测试连接 / 保存并连接 ran, so
+    /// the form can flag them inline. Cleared as soon as the user edits the offending field.
+    form_errors: BTreeSet<FormField>,
+    /// The tunnel-layer fields flagged as required by the same validation pass.
+    form_tunnel_errors: BTreeSet<connection_form::TunnelField>,
+    /// The TLS / advanced text inputs of the connection window, keyed by field.
+    form_extra_inputs: BTreeMap<connection_form::FormExtra, Entity<TextInput>>,
+    /// The per-layer text inputs of the tunnel/proxy chain, parallel to `form.settings.tunnel`.
+    form_tunnel_inputs: Vec<connection_form::TunnelInputs>,
+    /// The connection window's custom select (TLS mode): whether its menu is open and where its
+    /// trigger sits.
+    form_select_open: bool,
+    form_select_anchor: Rc<RefCell<Point<Pixels>>>,
+    /// The tunnel page's SSH auth-method select: whether its menu is open and where its trigger sits.
+    form_tunnel_select_open: bool,
+    form_tunnel_select_anchor: Rc<RefCell<Point<Pixels>>>,
+    /// The form as it was when the window opened, so 重置 can restore it.
+    form_initial: Option<ConnectionForm>,
+    /// The OS window hosting the New/Edit Connection form, if open.
+    connection_window: Option<WindowHandle<gpui_kit::component::Root>>,
+    /// Focus target for the connection window, so ESC works before any field is focused.
+    form_focus: FocusHandle,
     caret_visible: bool,
     caret_blink_running: bool,
     password_prompt: Option<PasswordPrompt>,
@@ -1317,10 +1353,12 @@ pub struct AppView {
     /// nothing changed instead of updating every input on every frame.
     synced_input_theme: Option<Theme>,
     language: LanguageSetting,
-    options_open: bool,
-    options_theme: ThemeSetting,
     options_language: LanguageSetting,
     language_combo: Option<Entity<ComboBox>>,
+    /// The OS window hosting the Options dialog, if open.
+    options_window: Option<WindowHandle<gpui_kit::component::Root>>,
+    /// Focus target for the Options window, so ESC works before any control is focused.
+    options_focus: FocusHandle,
     /// Last data revision handed to the cached `TreePane` / `TabBar`, so they re-render only when
     /// what they read from `AppView` actually changed (they are embedded with `.cached`, which
     /// otherwise freezes them until they are explicitly notified).
@@ -1435,6 +1473,7 @@ pub struct AppView {
 }
 
 mod backup;
+mod connection_form;
 mod database;
 mod db_dialog;
 mod design;
@@ -1477,6 +1516,26 @@ pub use shell::AppShell;
 
 use info_pane::{InfoPane, SidebarHost};
 
+/// The language to start in on a first launch: a Chinese system locale maps to `zh-CN`, every
+/// other locale to English.
+fn detect_system_language() -> LanguageSetting {
+    match sys_locale::get_locale() {
+        Some(locale) if locale.to_ascii_lowercase().starts_with("zh") => LanguageSetting::ZhCn,
+        _ => LanguageSetting::En,
+    }
+}
+
+/// Load the persisted settings, applying the OS language on a first launch (before `settings.json`
+/// exists) and persisting it. Later launches keep whatever the user last chose.
+pub(crate) fn load_startup_settings(config: &ConfigStore) -> AppSettings {
+    let mut settings = config.load_settings().unwrap_or_default();
+    if !config.settings_path().exists() {
+        settings.language = detect_system_language();
+        let _ = config.save_settings(&settings);
+    }
+    settings
+}
+
 impl AppView {
     pub fn new(
         registry: Arc<DriverRegistry>,
@@ -1504,7 +1563,7 @@ impl AppView {
             })
             .collect();
 
-        let settings = config.load_settings().unwrap_or_default();
+        let settings = load_startup_settings(&config);
         let theme_setting = settings.theme;
         let language = settings.language;
         let _ = config.migrate_legacy_queries();
@@ -1633,8 +1692,10 @@ impl AppView {
             test_status: TestStatus::Idle,
             context_menu: None,
             tab_menu: None,
-            tools_menu_open: false,
-            menu_popup_anchor: Rc::new(RefCell::new(Point::default())),
+            theme_menu_open: false,
+            theme_menu_anchor: Rc::new(RefCell::new(Point::default())),
+            connect_menu_open: false,
+            connect_menu_anchor: Rc::new(RefCell::new(Point::default())),
             object_pane: None,
             tab_bar: cx.new(|_| TabBar::new(app.clone())),
             tree_pane,
@@ -1650,6 +1711,17 @@ impl AppView {
             db_sql_cursor: 0,
             db_sql_selecting: false,
             form_inputs: None,
+            form_errors: BTreeSet::new(),
+            form_tunnel_errors: BTreeSet::new(),
+            form_extra_inputs: BTreeMap::new(),
+            form_tunnel_inputs: Vec::new(),
+            form_select_open: false,
+            form_select_anchor: Rc::new(RefCell::new(Point::default())),
+            form_tunnel_select_open: false,
+            form_tunnel_select_anchor: Rc::new(RefCell::new(Point::default())),
+            form_initial: None,
+            connection_window: None,
+            form_focus: cx.focus_handle(),
             caret_visible: true,
             caret_blink_running: false,
             password_prompt: None,
@@ -1691,10 +1763,10 @@ impl AppView {
             theme: Theme::dark(),
             synced_input_theme: None,
             language,
-            options_open: false,
-            options_theme: theme_setting,
             options_language: language,
             language_combo: None,
+            options_window: None,
+            options_focus: cx.focus_handle(),
             tree_revision: 0,
             tab_revision: 0,
             sidebar_host,
@@ -2650,14 +2722,17 @@ impl Render for AppView {
                     pane.update(cx, |pane, cx| pane.end_drag(cx));
                 }),
             )
-            .child(render_titlebar(theme))
-            .child(self.render_menu_bar(cx))
+            .child(self.render_titlebar(cx))
             .child(self.render_main_toolbar(cx))
             .child(body)
             .child(self.render_status_bar(cx));
 
-        if self.tools_menu_open {
-            root = root.child(self.render_tools_menu(cx));
+        if self.theme_menu_open {
+            root = root.child(self.render_theme_menu(cx));
+        }
+
+        if self.connect_menu_open {
+            root = root.child(self.render_connect_menu(cx));
         }
 
         if let Some(menu) = self.context_menu.as_ref() {
@@ -2797,83 +2872,19 @@ fn tree_message(text: String, indent: f32, color: u32) -> impl IntoElement {
         .child(text)
 }
 
-fn render_titlebar(theme: Theme) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .w_full()
-        .h(px(32.0))
-        .flex_none()
-        .bg(rgb(theme.titlebar_bg))
-        .border_b_1()
-        .border_color(rgb(theme.border))
-        .child(
-            div()
-                .id("titlebar-drag")
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .flex_1()
-                .h_full()
-                .px_3()
-                .text_size(px(12.5))
-                .window_control_area(WindowControlArea::Drag)
-                .child(
-                    img(ImageSource::Resource(Resource::Embedded("logo.png".into())))
-                        .w(px(18.0))
-                        .h(px(18.0))
-                        .flex_none(),
-                )
-                .child(t!("app.title").to_string()),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .h_full()
-                .child(titlebar_button(
-                    "titlebar-min",
-                    "—",
-                    theme,
-                    |window, _cx| {
-                        window.minimize_window();
-                    },
-                ))
-                .child(titlebar_button(
-                    "titlebar-max",
-                    "□",
-                    theme,
-                    |window, _cx| {
-                        toggle_maximize(window);
-                    },
-                ))
-                .child(titlebar_button(
-                    "titlebar-close",
-                    "✕",
-                    theme,
-                    |window, _cx| {
-                        window.remove_window();
-                    },
-                )),
-        )
-}
-
 /// Toggle the window between maximized and restored.
 ///
 /// gpui's `Window::zoom_window()` only maximizes on Windows (it calls `SW_MAXIMIZE`, a no-op when
 /// the window is already maximized), so a second click on the maximize button did nothing. Use the
 /// Windows helper, which calls `SW_RESTORE`, there; other platforms' `zoom()` already toggles.
-fn toggle_maximize(window: &mut Window) {
+pub(super) fn toggle_maximize(window: &mut Window) {
     #[cfg(target_os = "windows")]
     crate::win_resize::toggle_maximize(window);
     #[cfg(not(target_os = "windows"))]
     window.zoom_window();
 }
 
-fn titlebar_button(
+pub(super) fn titlebar_button(
     id: &'static str,
     label: &str,
     theme: Theme,

@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::options::ConnectionOptions;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DriverId(pub String);
 
@@ -39,6 +41,9 @@ pub struct ConnectionProfile {
     pub database: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub options: BTreeMap<String, String>,
+    /// Engine-agnostic connection settings (TLS, tunnel, timeouts, ...).
+    #[serde(default, skip_serializing_if = "ConnectionOptions::is_default")]
+    pub settings: ConnectionOptions,
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +55,7 @@ pub struct ConnectionConfig {
     pub password: Option<String>,
     pub database: Option<String>,
     pub options: BTreeMap<String, String>,
+    pub settings: ConnectionOptions,
 }
 
 /// A named SQL query saved by the user. Queries are filed under a connection (by profile id, so
