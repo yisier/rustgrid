@@ -59,6 +59,18 @@ pub trait Connection: Send + Sync {
     /// cannot be prepared still execute.
     async fn execute_query(&self, database: Option<&str>, sql: &str) -> Result<QueryResult>;
 
+    /// Run an arbitrary SQL script, returning one [`QueryResult`] per statement that produced a
+    /// result set (in order). A script with a single statement yields one entry; a `SELECT` with
+    /// zero rows still yields an entry so the grid can show its columns. The default
+    /// implementation runs the whole string as one statement.
+    async fn execute_query_many(
+        &self,
+        database: Option<&str>,
+        sql: &str,
+    ) -> Result<Vec<QueryResult>> {
+        Ok(vec![self.execute_query(database, sql).await?])
+    }
+
     /// Create a database. `charset`/`collation` are omitted when `None`, letting the engine pick
     /// its defaults.
     async fn create_database(

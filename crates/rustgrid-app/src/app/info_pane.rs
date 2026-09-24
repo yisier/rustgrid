@@ -43,18 +43,6 @@ impl InfoTarget {
     }
 }
 
-/// A 5px drag handle. The pane that owns it attaches the mouse-down handler and tracks the drag.
-fn resize_divider(id: &'static str, theme: Theme) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex_none()
-        .w(px(PANE_DIVIDER_WIDTH))
-        .h_full()
-        .cursor(CursorStyle::ResizeLeftRight)
-        .bg(rgb(theme.border))
-        .hover(move |style| style.bg(rgb(theme.primary)))
-}
-
 // ----- Left sidebar ---------------------------------------------------------------------------
 
 /// The connection-tree pane: the cached tree plus a drag handle on its right edge.
@@ -136,7 +124,7 @@ impl Render for SidebarHost {
                     }))),
             )
             .child(
-                resize_divider("pane-divider-sidebar", theme)
+                ui::pane_resize_divider("pane-divider-sidebar", theme)
                     .on_mouse_down(MouseButton::Left, start),
             )
             .into_any_element()
@@ -218,7 +206,8 @@ impl Render for InfoPane {
             .h_full()
             .flex_none()
             .child(
-                resize_divider("pane-divider-info", theme).on_mouse_down(MouseButton::Left, start),
+                ui::pane_resize_divider("pane-divider-info", theme)
+                    .on_mouse_down(MouseButton::Left, start),
             )
             .child(
                 div()

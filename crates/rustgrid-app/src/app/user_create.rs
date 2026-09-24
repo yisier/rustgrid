@@ -29,6 +29,12 @@ const CREATE_LIMIT_WIDTH: f32 = 120.0;
 const CREATE_NAV_WIDTH: f32 = 150.0;
 /// Width of the SQL preview's monospace box.
 const CREATE_PREVIEW_HEIGHT: f32 = 260.0;
+/// Default width of the 权限 section's database list (the drag-resizable left pane).
+const CREATE_DB_LIST_DEFAULT_WIDTH: f32 = 270.0;
+/// Narrowest the 权限 database list can be dragged.
+const CREATE_DB_LIST_MIN_WIDTH: f32 = 180.0;
+/// Widest the 权限 database list can be dragged.
+const CREATE_DB_LIST_MAX_WIDTH: f32 = 480.0;
 
 /// The 密码过期策略 choice, mapped to [`UserAccount::password_lifetime`].
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -478,6 +484,10 @@ pub(super) struct UserCreateDialog {
     /// The 权限 database filter text.
     pub(super) database_search: String,
     pub(super) db_scroll: ScrollHandle,
+    /// The drag-resizable width of the 权限 database list.
+    pub(super) db_list_width: f32,
+    /// `(pointer x, width)` captured when the list's divider drag started.
+    pub(super) db_list_drag: Option<(f32, f32)>,
     pub(super) table_scroll: ScrollHandle,
     /// Lazily-loaded tables per database (the 指定具体表 picker).
     pub(super) tables: BTreeMap<String, Vec<String>>,
@@ -541,6 +551,8 @@ impl UserCreateDialog {
             active_database: None,
             database_search: String::new(),
             db_scroll: ScrollHandle::new(),
+            db_list_width: CREATE_DB_LIST_DEFAULT_WIDTH,
+            db_list_drag: None,
             table_scroll: ScrollHandle::new(),
             tables: BTreeMap::new(),
             loading_tables: BTreeSet::new(),
@@ -1514,6 +1526,51 @@ impl AppView {
         }
     }
 
+    /// Begin dragging the 权限 database list's right divider.
+    pub(super) fn begin_create_db_list_drag(
+        &mut self,
+        mouse_x: Pixels,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(dialog) = self.create_user_dialog.as_mut() {
+            dialog.db_list_drag = Some((f32::from(mouse_x), dialog.db_list_width));
+        }
+        cx.notify();
+    }
+
+    /// Continue the 权限 database list drag. The root window routes every mouse move here so the
+    /// drag survives the pointer leaving the divider.
+    pub(super) fn drag_create_db_list(
+        &mut self,
+        event: &MouseMoveEvent,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(dialog) = self.create_user_dialog.as_mut() else {
+            return;
+        };
+        let Some((start_x, start_width)) = dialog.db_list_drag else {
+            return;
+        };
+        if event.pressed_button != Some(MouseButton::Left) {
+            dialog.db_list_drag = None;
+            cx.notify();
+            return;
+        }
+        let delta = f32::from(event.position.x) - start_x;
+        dialog.db_list_width =
+            (start_width + delta).clamp(CREATE_DB_LIST_MIN_WIDTH, CREATE_DB_LIST_MAX_WIDTH);
+        cx.notify();
+    }
+
+    /// End the 权限 database list drag.
+    pub(super) fn end_create_db_list_drag(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(dialog) = self.create_user_dialog.as_mut()
+            && dialog.db_list_drag.take().is_some()
+        {
+            cx.notify();
+        }
+    }
+
     /// Grant or revoke one database.
     pub(super) fn toggle_create_database(&mut self, index: usize, cx: &mut Context<'_, Self>) {
         if let Some(dialog) = self.create_user_dialog.as_mut()
@@ -2298,6 +2355,17 @@ impl AppView {
                 // window never lingers blank.
                 this.create_user_close(window, cx);
             }))
+            // The 权限 divider sits between two panes, so the pointer leaves it while dragging.
+            // These root-level handlers keep that drag alive anywhere in the window.
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                this.drag_create_db_list(event, cx);
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                    this.end_create_db_list_drag(cx);
+                }),
+            )
             .child(export::child_window_titlebar(title, theme))
             .child(
                 div()
@@ -2830,7 +2898,9 @@ impl AppView {
     }
 
     /// 权限: a database list on the left and the selected database's privilege detail on the right.
+    /// The divider between them is drag-resizable.
     fn render_create_grants(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
         let Some(dialog) = self.create_user_dialog.as_ref() else {
             return div().into_any_element();
         };
@@ -2851,7 +2921,25 @@ impl AppView {
             .w_full()
             .flex_1()
             .min_h(px(0.0))
-            .child(self.render_create_database_list(&visible, cx))
+            .child(
+                // The list and its right-edge divider travel together, so the divider stays flush
+                // against the list however it is resized.
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_none()
+                    .h_full()
+                    .min_h(px(0.0))
+                    .child(self.render_create_database_list(&visible, cx))
+                    .child(
+                        ui::pane_resize_divider("user-create-db-divider", theme).on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                                this.begin_create_db_list_drag(event.position.x, cx)
+                            }),
+                        ),
+                    ),
+            )
             .child(self.render_create_database_detail(cx))
             .into_any_element()
     }
@@ -2991,13 +3079,11 @@ impl AppView {
         div()
             .flex()
             .flex_col()
-            .w(px(270.0))
+            .w(px(dialog.db_list_width))
             .flex_none()
             .h_full()
             .min_h(px(0.0))
             .pr_3()
-            .border_r_1()
-            .border_color(rgb(theme.border))
             .child(header)
             .child(list)
             .into_any_element()

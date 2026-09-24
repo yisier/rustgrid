@@ -138,8 +138,10 @@ impl AppView {
         }
         let active_id = self.active_grid_id(cx);
         let removed = self.queries.remove(index);
-        let mut grid_ids: Vec<u64> = Vec::new();
-        if let Some(id) = removed.grid_id {
+        let mut grid_ids: Vec<u64> = removed.result_grids.iter().flatten().copied().collect();
+        if let Some(id) = removed.grid_id
+            && !grid_ids.contains(&id)
+        {
             grid_ids.push(id);
         }
         if let Some(id) = removed.view.as_ref().and_then(|view| view.explain_grid_id) {
@@ -439,33 +441,19 @@ impl AppView {
             .and_then(|connection_index| self.connections.get(connection_index))
             .map(|node| node.profile.name.clone())
             .unwrap_or_default();
-        let inferred = sql::infer_single_table(&original);
         let Some(connection) = tab.connection_index.and_then(|i| self.connection_arc(i)) else {
-            let old = self.queries.get(index).and_then(|tab| tab.grid_id);
-            if let Some(old) = old
-                && let Some(position) = self
-                    .grids
-                    .iter()
-                    .position(|grid| grid.read(cx).state.id == old)
-            {
-                self.grids.remove(position);
-            }
-            if let Some(tab) = self.queries.get_mut(index) {
-                tab.running = false;
-                tab.grid_id = None;
-                tab.result = Loadable::Failed(t!("query.not_connected").to_string());
-            }
-            self.active_grid = None;
+            self.clear_query_results(index, Some(t!("query.not_connected").to_string()), cx);
             cx.notify();
             return;
         };
 
         if let Some(tab) = self.queries.get_mut(index) {
             tab.running = true;
-            tab.result = Loadable::Loading;
+            tab.result_error = None;
+            tab.last_sql = executable.clone();
+            tab.last_elapsed = None;
         }
         self.query_completion = None;
-        self.query_result_scroll = UniformListScrollHandle::new();
         cx.notify();
 
         let runtime = self.runtime.clone();
@@ -477,7 +465,7 @@ impl AppView {
             let result = match runtime
                 .spawn(async move {
                     query_connection
-                        .execute_query(query_database.as_deref(), &query_sql)
+                        .execute_query_many(query_database.as_deref(), &query_sql)
                         .await
                 })
                 .await
@@ -487,153 +475,258 @@ impl AppView {
             };
             let elapsed = started.elapsed();
 
-            let (result, grid_database, grid_table, editable) = match result {
-                Ok(mut query_result) => {
-                    let mut editable = false;
-                    if query_result.has_result_set
-                        && let Some((schema, table)) = inferred.clone()
-                    {
-                        let target_database =
-                            schema.or_else(|| database.clone()).unwrap_or_default();
-                        let column_connection = connection.clone();
-                        let column_database = target_database.clone();
-                        let columns = match runtime
-                            .spawn(async move {
-                                column_connection.columns(&column_database, &table).await
-                            })
-                            .await
+            // Resolve each result set's editability from its own statement, so a multi-statement
+            // script still gets an editable grid per single-table `SELECT`.
+            let plans = match result {
+                Ok(results) => {
+                    let mut plans = Vec::with_capacity(results.len());
+                    for mut result in results {
+                        let mut editable = false;
+                        let mut grid_database = database.clone().unwrap_or_default();
+                        let mut grid_table = String::new();
+                        if result.has_result_set
+                            && let Some((schema, table)) =
+                                sql::infer_single_table(&result.statement)
                         {
-                            Ok(inner) => inner.ok(),
-                            Err(_) => None,
-                        };
-                        if let Some(columns) = columns {
-                            for column in query_result.columns.iter_mut() {
-                                if let Some(found) = columns
-                                    .iter()
-                                    .find(|candidate| candidate.name == column.name)
-                                {
-                                    column.primary_key = found.primary_key;
-                                    column.data_type = found.data_type.clone();
+                            let target_database =
+                                schema.or_else(|| database.clone()).unwrap_or_default();
+                            let column_connection = connection.clone();
+                            let column_database = target_database.clone();
+                            let column_table = table.clone();
+                            let columns = match runtime
+                                .spawn(async move {
+                                    column_connection
+                                        .columns(&column_database, &column_table)
+                                        .await
+                                })
+                                .await
+                            {
+                                Ok(inner) => inner.ok(),
+                                Err(_) => None,
+                            };
+                            if let Some(columns) = columns {
+                                for column in result.columns.iter_mut() {
+                                    if let Some(found) = columns
+                                        .iter()
+                                        .find(|candidate| candidate.name == column.name)
+                                    {
+                                        column.primary_key = found.primary_key;
+                                        column.data_type = found.data_type.clone();
+                                    }
                                 }
                             }
+                            editable = true;
+                            grid_database = target_database;
+                            grid_table = table;
                         }
-                        editable = true;
+                        plans.push(QueryResultPlan {
+                            result,
+                            editable,
+                            database: grid_database,
+                            table: grid_table,
+                        });
                     }
-                    let grid_database = inferred
-                        .as_ref()
-                        .and_then(|(schema, _)| schema.clone())
-                        .or_else(|| database.clone())
-                        .unwrap_or_default();
-                    let grid_table = inferred
-                        .as_ref()
-                        .map(|(_, table)| table.clone())
-                        .unwrap_or_default();
-                    (Ok(query_result), grid_database, grid_table, editable)
+                    Ok(plans)
                 }
-                Err(error) => (Err(error), String::new(), String::new(), false),
+                Err(error) => Err(error),
             };
 
             let _ = this.update(cx, |view, cx| {
-                view.apply_query_result(
-                    index,
-                    connection_name,
-                    grid_database,
-                    grid_table,
-                    executable,
-                    editable,
-                    elapsed,
-                    result,
-                    cx,
-                );
+                view.apply_query_results(index, connection_name, executable, elapsed, plans, cx);
             });
         })
         .detach();
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn apply_query_result(
+    /// Drop a tab's result grids and reset its result state, recording `error` for the 信息 tab.
+    fn clear_query_results(
+        &mut self,
+        index: usize,
+        error: Option<String>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let ids: Vec<u64> = self
+            .queries
+            .get(index)
+            .map(|tab| tab.result_grids.iter().flatten().copied().collect())
+            .unwrap_or_default();
+        for id in ids {
+            if let Some(position) = self
+                .grids
+                .iter()
+                .position(|grid| grid.read(cx).state.id == id)
+            {
+                self.grids.remove(position);
+            }
+        }
+        if let Some(tab) = self.queries.get_mut(index) {
+            tab.running = false;
+            tab.results.clear();
+            tab.result_grids.clear();
+            tab.active_result = 0;
+            tab.grid_id = None;
+            tab.result_error = error;
+        }
+        self.active_grid = None;
+        cx.notify();
+    }
+
+    /// Switch the bottom result panel to `tab` (`0` is 信息, `1..=n` the `n`-th result set).
+    pub(super) fn select_query_result(&mut self, tab: usize, cx: &mut Context<'_, Self>) {
+        let Some(query) = self.active_query else {
+            return;
+        };
+        let Some(state) = self.queries.get_mut(query) else {
+            return;
+        };
+        let grid_count = state
+            .result_grids
+            .iter()
+            .filter(|grid| grid.is_some())
+            .count();
+        if tab > grid_count {
+            return;
+        }
+        state.active_result = tab;
+        let grid_id = if tab == 0 {
+            None
+        } else {
+            state
+                .result_grids
+                .iter()
+                .filter_map(|grid| *grid)
+                .nth(tab - 1)
+        };
+        state.grid_id = grid_id;
+        self.active_grid = grid_id.and_then(|id| {
+            self.grids
+                .iter()
+                .position(|grid| grid.read(cx).state.id == id)
+        });
+        cx.notify();
+    }
+
+    /// Install the result sets of a query run: one grid per result set, plus the per-entry state
+    /// that drives the bottom result tabs and the 信息 panel.
+    pub(super) fn apply_query_results(
         &mut self,
         index: usize,
         connection_name: String,
-        database: String,
-        table: String,
         sql: String,
-        editable: bool,
         elapsed: std::time::Duration,
-        result: Result<QueryResult, Error>,
+        result: Result<Vec<QueryResultPlan>, Error>,
         cx: &mut Context<'_, Self>,
     ) {
         let active_id = self.active_grid_id(cx);
 
-        if let Some(old) = self.queries.get(index).and_then(|tab| tab.grid_id)
-            && let Some(position) = self
+        // Drop the previous run's grids for this tab.
+        let old_ids: Vec<u64> = self
+            .queries
+            .get(index)
+            .map(|tab| tab.result_grids.iter().flatten().copied().collect())
+            .unwrap_or_default();
+        for id in old_ids {
+            if let Some(position) = self
                 .grids
                 .iter()
-                .position(|grid| grid.read(cx).state.id == old)
-        {
-            self.grids.remove(position);
+                .position(|grid| grid.read(cx).state.id == id)
+            {
+                self.grids.remove(position);
+            }
         }
 
         match result {
-            Ok(query_result) if query_result.has_result_set => {
-                let Some(tab) = self.queries.get(index) else {
-                    return;
-                };
-                let Some(connection) = tab.connection_index.and_then(|i| self.connection_arc(i))
+            Ok(plans) => {
+                let Some(connection) = self
+                    .queries
+                    .get(index)
+                    .and_then(|tab| tab.connection_index)
+                    .and_then(|i| self.connection_arc(i))
                 else {
                     return;
                 };
-                let columns = query_result.columns;
-                let rows = query_result.rows;
-                let total = rows.len() as u64;
-                let column_widths = compute_column_widths(&columns, &rows);
-                let id = self.next_grid_id;
-                self.next_grid_id += 1;
-                let state = GridState {
-                    id,
-                    connection,
-                    connection_name,
-                    database,
-                    table,
-                    is_view: false,
-                    page_index: 0,
-                    page_size: total.max(1),
-                    loading: false,
-                    error: None,
-                    columns,
-                    rows: Arc::new(rows),
-                    column_widths,
-                    manual_column_widths: false,
-                    total_rows: Some(total),
-                    selection: None,
-                    edits: BTreeMap::new(),
-                    undo: Vec::new(),
-                    sql: Some(sql),
-                    show_toolbar: false,
-                    show_footer: true,
-                    editable,
-                    sort_rules: Vec::new(),
-                    sort_open: false,
-                    sort_draft: Vec::new(),
-                    sort_selected: None,
-                    filters: Vec::new(),
-                    filter_open: false,
-                    filter_draft: Vec::new(),
-                    elapsed: Some(elapsed),
-                };
-                let app = cx.weak_entity();
-                let runtime = self.runtime.clone();
-                let theme = self.theme;
-                let entity = cx.new(|cx| GridView::new(state, app, runtime, theme, cx));
-                self.grids.push(entity);
-                let grid_index = self.grids.len() - 1;
+                let mut result_grids: Vec<Option<u64>> = Vec::with_capacity(plans.len());
+                let mut results: Vec<QueryResultSummary> = Vec::with_capacity(plans.len());
+                for plan in plans {
+                    let QueryResultPlan {
+                        result,
+                        editable,
+                        database,
+                        table,
+                    } = plan;
+                    let summary = QueryResultSummary {
+                        has_result_set: result.has_result_set,
+                        row_count: result.rows.len(),
+                        rows_affected: result.rows_affected,
+                    };
+                    if result.has_result_set {
+                        let id = self.next_grid_id;
+                        self.next_grid_id += 1;
+                        let total = result.rows.len() as u64;
+                        let column_widths = compute_column_widths(&result.columns, &result.rows);
+                        let state = GridState {
+                            id,
+                            connection: connection.clone(),
+                            connection_name: connection_name.clone(),
+                            database,
+                            table,
+                            is_view: false,
+                            page_index: 0,
+                            page_size: total.max(1),
+                            loading: false,
+                            error: None,
+                            columns: result.columns,
+                            rows: Arc::new(result.rows),
+                            column_widths,
+                            manual_column_widths: false,
+                            total_rows: Some(total),
+                            selection: None,
+                            edits: BTreeMap::new(),
+                            undo: Vec::new(),
+                            sql: Some(result.statement.clone()),
+                            show_toolbar: false,
+                            show_footer: true,
+                            editable,
+                            sort_rules: Vec::new(),
+                            sort_open: false,
+                            sort_draft: Vec::new(),
+                            sort_selected: None,
+                            filters: Vec::new(),
+                            filter_open: false,
+                            filter_draft: Vec::new(),
+                            elapsed: Some(elapsed),
+                        };
+                        let app = cx.weak_entity();
+                        let runtime = self.runtime.clone();
+                        let theme = self.theme;
+                        let entity = cx.new(|cx| GridView::new(state, app, runtime, theme, cx));
+                        self.grids.push(entity);
+                        result_grids.push(Some(id));
+                    } else {
+                        result_grids.push(None);
+                    }
+                    results.push(summary);
+                }
+                // The 信息 tab is 0; the first result set (if any) is selected by default.
+                let has_grid = result_grids.iter().any(|grid| grid.is_some());
+                let active_result = if has_grid { 1 } else { 0 };
+                let active_grid_id = result_grids.iter().find_map(|grid| *grid);
                 if let Some(tab) = self.queries.get_mut(index) {
                     tab.running = false;
-                    tab.grid_id = Some(id);
-                    tab.result = Loadable::Idle;
+                    tab.result_error = None;
+                    tab.results = results;
+                    tab.result_grids = result_grids;
+                    tab.active_result = active_result;
+                    tab.grid_id = active_grid_id;
+                    tab.last_sql = sql;
+                    tab.last_elapsed = Some(elapsed);
                 }
                 if self.active_query == Some(index) {
-                    self.active_grid = Some(grid_index);
+                    self.active_grid = active_grid_id.and_then(|id| {
+                        self.grids
+                            .iter()
+                            .position(|grid| grid.read(cx).state.id == id)
+                    });
                 } else {
                     self.active_grid = active_id.and_then(|id| {
                         self.grids
@@ -642,23 +735,16 @@ impl AppView {
                     });
                 }
             }
-            Ok(query_result) => {
-                if let Some(tab) = self.queries.get_mut(index) {
-                    tab.running = false;
-                    tab.grid_id = None;
-                    tab.result = Loadable::Loaded(query_result);
-                }
-                self.active_grid = active_id.and_then(|id| {
-                    self.grids
-                        .iter()
-                        .position(|grid| grid.read(cx).state.id == id)
-                });
-            }
             Err(error) => {
                 if let Some(tab) = self.queries.get_mut(index) {
                     tab.running = false;
+                    tab.results.clear();
+                    tab.result_grids.clear();
+                    tab.active_result = 0;
                     tab.grid_id = None;
-                    tab.result = Loadable::Failed(error.to_string());
+                    tab.result_error = Some(error.to_string());
+                    tab.last_sql = sql;
+                    tab.last_elapsed = Some(elapsed);
                 }
                 self.active_grid = active_id.and_then(|id| {
                     self.grids

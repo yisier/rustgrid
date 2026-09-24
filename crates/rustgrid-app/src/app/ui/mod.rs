@@ -6,8 +6,8 @@
 //! `AGENTS.md` under "UI conventions".
 
 use gpui::{
-    App, BoxShadow, ClickEvent, Div, IntoElement, Point, SharedString, Stateful, Window, div,
-    prelude::*, px, relative, rgb, rgba, svg,
+    App, BoxShadow, ClickEvent, CursorStyle, Div, IntoElement, Point, SharedString, Stateful,
+    Window, div, prelude::*, px, relative, rgb, rgba, svg,
 };
 
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -254,6 +254,20 @@ fn separator(theme: Theme, height: f32) -> impl IntoElement {
 /// A thin 16px separator between toolbar items.
 pub(super) fn toolbar_separator(theme: Theme) -> impl IntoElement {
     separator(theme, 16.0)
+}
+
+/// A 5px pane resize divider: the shared splitter handle between two side-by-side panes. The
+/// pane/window that owns the boundary attaches the mouse-down handler; the enclosing window then
+/// routes mouse move/up back to that owner, so the drag survives the pointer leaving the divider.
+pub(super) fn pane_resize_divider(id: impl Into<SharedString>, theme: Theme) -> Stateful<Div> {
+    div()
+        .id(id.into())
+        .flex_none()
+        .w(px(super::PANE_DIVIDER_WIDTH))
+        .h_full()
+        .cursor(CursorStyle::ResizeLeftRight)
+        .bg(rgb(theme.border))
+        .hover(move |style| style.bg(rgb(theme.primary)))
 }
 
 /// A taller 36px separator between main toolbar groups.

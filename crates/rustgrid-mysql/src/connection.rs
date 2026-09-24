@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+use futures_util::TryStreamExt;
 use rustgrid_core::{
     BackupObjectKind, CellValue, ColumnDef, ColumnInfo, Connection, DatabaseInfo, DriverId, Error,
     FilterCondition, FilterConjunction, FilterNode, FilterOperator, ForeignKeyDef, IndexDef,
@@ -10,8 +11,8 @@ use rustgrid_core::{
 };
 use sqlx::mysql::{MySqlColumn, MySqlRow};
 use sqlx::{
-    AssertSqlSafe, Column, Executor, MySqlConnection, MySqlPool, Row, SqlSafeStr, Statement,
-    ValueRef,
+    AssertSqlSafe, Column, Either, Executor, MySqlConnection, MySqlPool, Row, SqlSafeStr,
+    Statement, ValueRef,
 };
 
 pub struct MysqlConnection {
@@ -396,55 +397,83 @@ impl Connection for MysqlConnection {
         let mut connection = self.pool.acquire().await.map_err(map_query_error)?;
 
         if let Some(database) = database {
-            let use_sql = format!("USE {}", quote_identifier(database));
-            sqlx::raw_sql(sqlx::AssertSqlSafe(use_sql))
-                .execute(&mut *connection)
-                .await
-                .map_err(map_query_error)?;
+            use_database(&mut connection, database).await?;
         }
 
-        if returns_result_set(sql) {
-            let rows = sqlx::raw_sql(sqlx::AssertSqlSafe(sql.to_string()))
-                .fetch_all(&mut *connection)
-                .await
-                .map_err(map_query_error)?;
+        execute_one(&mut connection, sql).await
+    }
 
-            let columns = match rows.first() {
-                Some(first) => columns_from_row(first),
-                None => describe_columns(&mut connection, sql)
-                    .await
-                    .unwrap_or_default(),
-            };
+    async fn execute_query_many(
+        &self,
+        database: Option<&str>,
+        sql: &str,
+    ) -> Result<Vec<QueryResult>> {
+        let mut connection = self.pool.acquire().await.map_err(map_query_error)?;
 
-            let mut decoded = Vec::with_capacity(rows.len());
-            for row in &rows {
-                let mut values = Vec::with_capacity(columns.len());
-                for index in 0..columns.len() {
-                    values.push(decode_cell(row, index));
+        if let Some(database) = database {
+            use_database(&mut connection, database).await?;
+        }
+
+        // MySQL's protocol reports `SERVER_MORE_RESULTS_EXISTS` after each statement, which sqlx
+        // surfaces through `fetch_many` as an `Either::Left` boundary between result sets. That is
+        // what lets one script return several result sets without us having to split it (the server
+        // still parses compound statements like `CREATE PROCEDURE ... BEGIN ...; ... END` itself).
+        let mut stream =
+            sqlx::raw_sql(sqlx::AssertSqlSafe(sql.to_string())).fetch_many(&mut *connection);
+        let mut results: Vec<QueryResult> = Vec::new();
+        let mut columns: Vec<ColumnInfo> = Vec::new();
+        let mut rows: Vec<Vec<CellValue>> = Vec::new();
+        while let Some(item) = stream.try_next().await.map_err(map_query_error)? {
+            match item {
+                Either::Left(done) => {
+                    let has_result_set = !columns.is_empty() || !rows.is_empty();
+                    results.push(QueryResult {
+                        statement: String::new(),
+                        columns: std::mem::take(&mut columns),
+                        rows: std::mem::take(&mut rows),
+                        rows_affected: done.rows_affected(),
+                        has_result_set,
+                        last_insert_id: Some(done.last_insert_id()).filter(|id| *id != 0),
+                    });
                 }
-                decoded.push(values);
+                Either::Right(row) => {
+                    if columns.is_empty() && rows.is_empty() {
+                        columns = columns_from_row(&row);
+                    }
+                    let mut values = Vec::with_capacity(columns.len());
+                    for index in 0..columns.len() {
+                        values.push(decode_cell(&row, index));
+                    }
+                    rows.push(values);
+                }
             }
-
-            Ok(QueryResult {
-                columns,
-                rows: decoded,
-                rows_affected: 0,
-                has_result_set: true,
-                last_insert_id: None,
-            })
-        } else {
-            let result = sqlx::raw_sql(sqlx::AssertSqlSafe(sql.to_string()))
-                .execute(&mut *connection)
-                .await
-                .map_err(map_query_error)?;
-            Ok(QueryResult {
-                columns: Vec::new(),
-                rows: Vec::new(),
-                rows_affected: result.rows_affected(),
-                has_result_set: false,
-                last_insert_id: Some(result.last_insert_id()).filter(|id| *id != 0),
-            })
         }
+        drop(stream);
+
+        // Pair each result set with its originating statement when the counts line up, so a grid
+        // can reload just its own statement. A zero-row `SELECT` yields no rows for sqlx to expose
+        // its columns, so describe it (the `returns_result_set` keyword decides which sets need it).
+        let statements = split_statements(sql);
+        if results.len() == statements.len() {
+            for (result, statement) in results.iter_mut().zip(statements.iter()) {
+                result.statement = statement.clone();
+                if !result.has_result_set
+                    && returns_result_set(statement)
+                    && let Ok(described) = describe_columns(&mut connection, statement).await
+                {
+                    result.columns = described;
+                    result.has_result_set = true;
+                }
+            }
+        } else {
+            // A `CALL` (one statement, several result sets) cannot be split per set; keep the whole
+            // script as the source so a refresh re-runs the procedure.
+            for result in results.iter_mut() {
+                result.statement = sql.to_string();
+            }
+        }
+
+        Ok(results)
     }
 
     async fn create_database(
@@ -2119,6 +2148,165 @@ fn returns_result_set(sql: &str) -> bool {
     )
 }
 
+/// Select `database` on an already-acquired connection so the following the text-protocol
+/// statement runs in its context.
+async fn use_database(connection: &mut MySqlConnection, database: &str) -> Result<()> {
+    let use_sql = format!("USE {}", quote_identifier(database));
+    sqlx::raw_sql(sqlx::AssertSqlSafe(use_sql))
+        .execute(&mut *connection)
+        .await
+        .map_err(map_query_error)?;
+    Ok(())
+}
+
+/// Run one statement (the caller has already selected the database) and decode its single result.
+async fn execute_one(connection: &mut MySqlConnection, sql: &str) -> Result<QueryResult> {
+    if returns_result_set(sql) {
+        let rows = sqlx::raw_sql(sqlx::AssertSqlSafe(sql.to_string()))
+            .fetch_all(&mut *connection)
+            .await
+            .map_err(map_query_error)?;
+
+        let columns = match rows.first() {
+            Some(first) => columns_from_row(first),
+            None => describe_columns(connection, sql).await.unwrap_or_default(),
+        };
+
+        let mut decoded = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let mut values = Vec::with_capacity(columns.len());
+            for index in 0..columns.len() {
+                values.push(decode_cell(row, index));
+            }
+            decoded.push(values);
+        }
+
+        Ok(QueryResult {
+            statement: sql.to_string(),
+            columns,
+            rows: decoded,
+            rows_affected: 0,
+            has_result_set: true,
+            last_insert_id: None,
+        })
+    } else {
+        let result = sqlx::raw_sql(sqlx::AssertSqlSafe(sql.to_string()))
+            .execute(&mut *connection)
+            .await
+            .map_err(map_query_error)?;
+        Ok(QueryResult {
+            statement: sql.to_string(),
+            columns: Vec::new(),
+            rows: Vec::new(),
+            rows_affected: result.rows_affected(),
+            has_result_set: false,
+            last_insert_id: Some(result.last_insert_id()).filter(|id| *id != 0),
+        })
+    }
+}
+
+/// Split a SQL script into individual statements on top-level semicolons, respecting string
+/// literals, quoted identifiers and comments. Fragments that carry no executable SQL (empty or
+/// comment-only) are dropped, so the count matches the number of statements MySQL executes.
+///
+/// This is only used to pair result sets with their statement text; execution still hands the whole
+/// script to the server.
+fn split_statements(sql: &str) -> Vec<String> {
+    let bytes = sql.as_bytes();
+    let mut statements = Vec::new();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            quote @ (b'\'' | b'"' | b'`') => {
+                i += 1;
+                while i < bytes.len() {
+                    let byte = bytes[i];
+                    if byte == b'\\' && quote != b'`' {
+                        i += 2;
+                        continue;
+                    }
+                    if byte == quote {
+                        // A doubled quote is an escaped quote, not the end of the literal.
+                        if i + 1 < bytes.len() && bytes[i + 1] == quote {
+                            i += 2;
+                            continue;
+                        }
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            b'-' if bytes.get(i + 1) == Some(&b'-') => {
+                i += 2;
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'#' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i = (i + 2).min(bytes.len());
+            }
+            b';' => {
+                let fragment = sql[start..i].trim();
+                if has_sql_content(fragment) {
+                    statements.push(fragment.to_string());
+                }
+                i += 1;
+                start = i;
+            }
+            _ => i += 1,
+        }
+    }
+    let fragment = sql[start..].trim();
+    if has_sql_content(fragment) {
+        statements.push(fragment.to_string());
+    }
+    statements
+}
+
+/// Whether a SQL fragment contains anything besides whitespace and comments.
+fn has_sql_content(fragment: &str) -> bool {
+    let bytes = fragment.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            byte if byte.is_ascii_whitespace() => i += 1,
+            b'-' if bytes.get(i + 1) == Some(&b'-') => {
+                i += 2;
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'#' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i = (i + 2).min(bytes.len());
+            }
+            _ => return true,
+        }
+    }
+    false
+}
+
 fn decode_cell(row: &MySqlRow, index: usize) -> CellValue {
     let is_null = row
         .try_get_raw(index)
@@ -2170,6 +2358,7 @@ fn decode_cell(row: &MySqlRow, index: usize) -> CellValue {
 mod tests {
     use super::{
         column_sql, filter_clause, format_default, order_clause, returns_result_set, schema_sql,
+        split_statements,
     };
     use rustgrid_core::{
         ColumnDef, FilterCondition, FilterConjunction, FilterGroup, FilterNode, FilterOperator,
@@ -2432,5 +2621,37 @@ mod tests {
         assert!(!returns_result_set("DELETE FROM t"));
         assert!(!returns_result_set("CREATE TABLE t (a INT)"));
         assert!(!returns_result_set("USE db"));
+    }
+
+    #[test]
+    fn splits_statements_on_top_level_semicolons() {
+        assert_eq!(
+            split_statements("SELECT 1; SELECT 2"),
+            vec!["SELECT 1", "SELECT 2"]
+        );
+        // A trailing semicolon and surrounding whitespace do not add an empty statement.
+        assert_eq!(split_statements("  SELECT 1 ; \n"), vec!["SELECT 1"]);
+        // Semicolons inside string literals, quoted identifiers and comments are not boundaries.
+        assert_eq!(
+            split_statements("SELECT ';'; SELECT `a;b`"),
+            vec!["SELECT ';'", "SELECT `a;b`"]
+        );
+        assert_eq!(
+            split_statements("SELECT 1 -- a; b\n; SELECT 2"),
+            vec!["SELECT 1 -- a; b", "SELECT 2"]
+        );
+        assert_eq!(
+            split_statements("SELECT 'it''s'; SELECT \"x;y\""),
+            vec!["SELECT 'it''s'", "SELECT \"x;y\""]
+        );
+        // Comment-only fragments are dropped.
+        assert_eq!(
+            split_statements("-- just a comment\n"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            split_statements("SELECT 1; -- trailing\n"),
+            vec!["SELECT 1"]
+        );
     }
 }

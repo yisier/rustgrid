@@ -393,7 +393,12 @@ impl AppView {
             .items_center()
             .justify_center()
             .gap_1()
-            .w(px(62.0))
+            // A minimum width keeps the short (mostly 2-character) labels on a common grid, but the
+            // button grows past it for longer localized labels (e.g. "New Connection") so the text
+            // never wraps onto a second line.
+            .min_w(px(62.0))
+            .px_2()
+            .flex_none()
             .h(px(52.0))
             .rounded_sm()
             .cursor_pointer()
@@ -428,7 +433,7 @@ impl AppView {
                         )
                     }),
             )
-            .child(div().text_size(px(11.0)).child(label))
+            .child(div().text_size(px(11.0)).whitespace_nowrap().child(label))
     }
 
     /// The `(connection_index, database_index)` implied by the connection tree's current

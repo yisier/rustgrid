@@ -451,8 +451,21 @@ pub struct QueryTab {
     pub anchor: usize,
     pub selecting: bool,
     pub running: bool,
-    pub result: Loadable<QueryResult>,
-    /// The id of the grid in `AppView::grids` that shows this tab's result, if any.
+    /// One entry per statement the last run executed, in order. A lightweight summary (not the
+    /// rows), so the 信息 tab can report each statement without duplicating the grid's data.
+    pub results: Vec<QueryResultSummary>,
+    /// The grid id in `AppView::grids` for each `results` entry (`None` for a statement that
+    /// produced no result set).
+    pub result_grids: Vec<Option<u64>>,
+    /// The bottom result panel's active tab: `0` is 信息, `1..=n` is the `n`-th result set.
+    pub active_result: usize,
+    /// The last run's error, if it failed.
+    pub result_error: Option<String>,
+    /// The script that was run, shown on the 信息 tab.
+    pub last_sql: String,
+    /// How long the last run took, shown on the 信息 tab.
+    pub last_elapsed: Option<std::time::Duration>,
+    /// The id of the grid in `AppView::grids` that shows this tab's active result set, if any.
     pub grid_id: Option<u64>,
     /// Undo history for the editor: `(sql, caret, anchor)` snapshots before each edit.
     pub undo: Vec<(String, usize, usize)>,
@@ -474,7 +487,12 @@ impl QueryTab {
             anchor: 0,
             selecting: false,
             running: false,
-            result: Loadable::Idle,
+            results: Vec::new(),
+            result_grids: Vec::new(),
+            active_result: 0,
+            result_error: None,
+            last_sql: String::new(),
+            last_elapsed: None,
             grid_id: None,
             undo: Vec::new(),
             routine: None,
@@ -486,6 +504,27 @@ impl QueryTab {
     pub fn selection(&self) -> (usize, usize) {
         (self.anchor.min(self.caret), self.anchor.max(self.caret))
     }
+}
+
+/// A result set from a query run, with the editability and target table resolved from the
+/// statement it came from. Built on the async side (where the catalog lookup happens) and handed to
+/// `AppView::apply_query_results` to create one grid per entry.
+pub struct QueryResultPlan {
+    pub result: QueryResult,
+    pub editable: bool,
+    /// The database the grid's edits should target (the statement's schema, else the query's).
+    pub database: String,
+    /// The single table inferred from the statement, empty when it is not editable.
+    pub table: String,
+}
+
+/// A cheap snapshot of one executed statement, enough for the 信息 tab. Kept separate from
+/// [`QueryResult`] so the rows are not held twice (the grid owns them).
+#[derive(Clone, Copy)]
+pub struct QueryResultSummary {
+    pub has_result_set: bool,
+    pub row_count: usize,
+    pub rows_affected: u64,
 }
 
 /// One undo step: the touched cells and their previous pending edit value

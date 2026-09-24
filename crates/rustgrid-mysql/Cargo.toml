@@ -12,6 +12,7 @@ rustgrid-core.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 sqlx.workspace = true
+futures-util.workspace = true
 russh.workspace = true
 tokio.workspace = true
 base64.workspace = true

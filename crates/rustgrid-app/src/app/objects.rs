@@ -202,7 +202,7 @@ impl AppView {
                     .child(self.toolbar_item(
                         "obj-import",
                         "icons/import.svg",
-                        t!("object.import_wizard").to_string(),
+                        t!("object.import").to_string(),
                         import_enabled,
                         cx.listener(move |this, _event, _window, cx| {
                             let (connection_index, database_index) = {
@@ -216,7 +216,7 @@ impl AppView {
                     .child(self.toolbar_item(
                         "obj-export",
                         "icons/export.svg",
-                        t!("object.export_wizard").to_string(),
+                        t!("object.export").to_string(),
                         export_enabled,
                         cx.listener(move |this, _event, _window, cx| {
                             let (connection_index, database_index, is_view) =
@@ -537,7 +537,7 @@ impl AppView {
                     .child(self.toolbar_item(
                         "view-export",
                         "icons/export.svg",
-                        t!("object.export_wizard").to_string(),
+                        t!("object.export").to_string(),
                         export_enabled,
                         cx.listener(move |this, _event, _window, cx| {
                             let (connection_index, database_index, _) =

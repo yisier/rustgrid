@@ -659,6 +659,9 @@ impl SavedBackup {
 /// The outcome of running an arbitrary SQL statement from the query editor.
 #[derive(Debug, Clone)]
 pub struct QueryResult {
+    /// The statement that produced this result. For a multi-statement script each result carries
+    /// its own statement, so a result grid can reload (and infer an editable table) on its own.
+    pub statement: String,
     /// Columns of the first result set. Empty when the statement produced no rows.
     pub columns: Vec<ColumnInfo>,
     /// Rows of the first result set, in column order. Empty when there was no result set.

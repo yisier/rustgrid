@@ -17,6 +17,10 @@ const PM_ROW_HEIGHT: f32 = 22.0;
 const PM_OBJECT_ROW_HEIGHT: f32 = 22.0;
 /// Width of the left object list.
 const PM_OBJECT_WIDTH: f32 = 240.0;
+/// Left padding of one table row. The database row is `px_2` (8px) + a 16px chevron + a 4px gap
+/// before its icon, i.e. the icon starts at 28px; a table adds one 18px indent step on top so it
+/// nests under its database instead of lining up with it.
+const PM_TABLE_INDENT: f32 = 46.0;
 /// Max height of the account list before it scrolls.
 const PM_LIST_MAX_HEIGHT: f32 = 170.0;
 
@@ -873,7 +877,7 @@ impl PrivilegeManager {
                             .items_center()
                             .gap_1()
                             .h(px(PM_OBJECT_ROW_HEIGHT))
-                            .pl(px(26.0))
+                            .pl(px(PM_TABLE_INDENT))
                             .pr_2()
                             .flex_none()
                             .rounded(px(4.0))

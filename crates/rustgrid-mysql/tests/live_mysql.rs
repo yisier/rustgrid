@@ -77,6 +77,57 @@ async fn live_catalog_and_page() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires a live MySQL server (set RUSTGRID_MYSQL_PASSWORD)"]
+async fn live_multi_statement_returns_every_result_set() {
+    let driver = rustgrid_mysql::MysqlDriver::new();
+    let connection = driver
+        .connect(&config())
+        .await
+        .expect("connect to the live server");
+
+    // Two result sets, a zero-row SELECT (whose columns must still come back) and a session
+    // variable set by an earlier statement in the same script.
+    let results = connection
+        .execute_query_many(
+            None,
+            "SET @rustgrid_probe = 41; \
+             SELECT 1 AS a; \
+             SELECT 2 AS b, 3 AS c; \
+             SELECT @rustgrid_probe + 1 AS d WHERE 1 = 0; \
+             SELECT @rustgrid_probe + 1 AS e",
+        )
+        .await
+        .expect("run a multi-statement script");
+
+    assert_eq!(results.len(), 5, "one result per statement");
+    assert!(!results[0].has_result_set);
+    assert!(results[0].statement.starts_with("SET @rustgrid_probe"));
+
+    assert!(results[1].has_result_set);
+    assert_eq!(results[1].columns.len(), 1);
+    assert_eq!(results[1].columns[0].name, "a");
+    assert_eq!(results[1].rows.len(), 1);
+    assert_eq!(results[1].statement, "SELECT 1 AS a");
+
+    assert!(results[2].has_result_set);
+    assert_eq!(results[2].columns.len(), 2);
+
+    // A zero-row SELECT still exposes its columns (via `describe_columns`).
+    assert!(results[3].has_result_set);
+    assert_eq!(results[3].columns[0].name, "d");
+    assert!(results[3].rows.is_empty());
+
+    // Session state set by the first statement is visible to the last.
+    assert!(results[4].has_result_set);
+    assert!(matches!(
+        results[4].rows.first().and_then(|row| row.first()),
+        Some(rustgrid_core::CellValue::Int(42))
+    ));
+
+    connection.close().await.expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires a live MySQL server"]
 async fn live_auth_failure_maps_to_authentication() {
     let mut config = config();

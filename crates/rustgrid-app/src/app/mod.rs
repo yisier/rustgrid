@@ -32,8 +32,8 @@ use crate::list_select::{ListSelection, MarqueeDrag, SelectMode, rects_intersect
 use crate::runtime::Runtime;
 use crate::session::{
     Category, CategoryExpansion, CellRange, CellSelection, ConnectionNode, ConnectionStatus,
-    DatabaseNode, GridState, Loadable, QueryTab, RoutineTab, RoutineTabState, SortRule,
-    ViewExplainTab, ViewTab, ViewTabState, compute_column_widths,
+    DatabaseNode, GridState, Loadable, QueryResultPlan, QueryResultSummary, QueryTab, RoutineTab,
+    RoutineTabState, SortRule, ViewExplainTab, ViewTab, ViewTabState, compute_column_widths,
 };
 use crate::sql::{self, SqlSpan, SqlToken};
 use crate::theme::Theme;
@@ -1268,7 +1268,6 @@ pub struct AppView {
     query_editor_layout: RefCell<TextLayout>,
     query_editor_text: RefCell<String>,
     query_editor_measured: bool,
-    query_result_scroll: UniformListScrollHandle,
     /// The saved-query 详细列表's scroll state (vertical rows, horizontal header + rows) and its
     /// scrollbar-thumb drags.
     query_detail_scroll: DetailScroll,
@@ -1679,7 +1678,6 @@ impl AppView {
             query_editor_layout: RefCell::new(TextLayout::default()),
             query_editor_text: RefCell::new(String::new()),
             query_editor_measured: false,
-            query_result_scroll: UniformListScrollHandle::new(),
             query_detail_scroll: DetailScroll::default(),
             query_detail_columns: Rc::new(RefCell::new(DetailColumns::default())),
             query_connection_combo: None,

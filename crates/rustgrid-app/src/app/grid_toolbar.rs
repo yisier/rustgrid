@@ -397,6 +397,8 @@ impl GridView {
             .flex_none()
             .min_h(px(46.0))
             .max_h(px(224.0))
+            .px_2()
+            .py_1()
             .overflow_y_scroll();
 
         if self.state.filter_draft.is_empty() {
@@ -427,9 +429,7 @@ impl GridView {
             );
         } else {
             let draft = self.state.filter_draft.clone();
-            for row in self.filter_rows(&draft, &mut Vec::new(), 0, cx) {
-                list = list.child(row);
-            }
+            list = list.child(self.render_filter_children(&draft, &mut Vec::new(), cx));
         }
 
         let footer = div()
@@ -456,47 +456,67 @@ impl GridView {
             .into_any_element()
     }
 
-    /// Flatten the filter tree into rows, depth-first. A group renders its condition rows and then
-    /// its boundary row (`并且/或者` + add/remove group).
-    fn filter_rows(
+    /// Render one level of filter nodes as a column. Siblings are separated by a horizontally
+    /// centred `并且/或者` toggle (bound to the following node's conjunction); a group node is drawn
+    /// as a bordered box around its own children.
+    fn render_filter_children(
         &mut self,
         nodes: &[FilterNode],
         prefix: &mut Vec<usize>,
-        depth: usize,
         cx: &mut Context<'_, Self>,
-    ) -> Vec<AnyElement> {
-        let mut rows = Vec::new();
+    ) -> AnyElement {
+        let mut column = div().flex().flex_col().gap_1().w_full();
         for (index, node) in nodes.iter().enumerate() {
             prefix.push(index);
+            if index > 0 {
+                column = column.child(self.render_filter_conjunction_row(
+                    prefix,
+                    node.conjunction(),
+                    cx,
+                ));
+            }
             match node {
                 FilterNode::Condition(_) => {
-                    rows.push(self.render_filter_condition_row(prefix, node, depth, index == 0, cx))
+                    column = column.child(self.render_filter_condition_row(prefix, node, cx));
                 }
                 FilterNode::Group(group) => {
-                    rows.extend(self.filter_rows(&group.children, prefix, depth + 1, cx));
-                    let next = nodes.get(index + 1).map(|_| {
-                        let mut path = prefix.clone();
-                        if let Some(last) = path.last_mut() {
-                            *last = index + 1;
-                        }
-                        path
-                    });
-                    rows.push(self.render_filter_group_control(prefix, next, depth, cx));
+                    column =
+                        column.child(self.render_filter_group_box(prefix, &group.children, cx));
                 }
             }
             prefix.pop();
         }
-        rows
+        column.into_any_element()
     }
 
-    /// One condition row: `[并且/或者] field op value ... [−][+]`. The first condition of a group
-    /// has no leading conjunction, so it gets a spacer instead of the toggle.
+    /// The centred `并且/或者` row shown between two siblings.
+    fn render_filter_conjunction_row(
+        &self,
+        path: &[usize],
+        conjunction: FilterConjunction,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let theme = self.theme;
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .w_full()
+            .px_2()
+            .h(px(22.0))
+            .flex_none()
+            .child(div().flex_1().h(px(1.0)).bg(rgb(theme.border)))
+            .child(self.filter_conjunction_toggle(path, conjunction, cx))
+            .child(div().flex_1().h(px(1.0)).bg(rgb(theme.border)))
+            .into_any_element()
+    }
+
+    /// One condition row: `field op value ... [−][+]`, with the actions revealed on hover.
     fn render_filter_condition_row(
         &mut self,
         path: &[usize],
         node: &FilterNode,
-        depth: usize,
-        first: bool,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let theme = self.theme;
@@ -505,28 +525,7 @@ impl GridView {
         let FilterNode::Condition(condition) = node else {
             return div().into_any_element();
         };
-        let mut row = div()
-            .id(SharedString::from(format!("filter-row-{key}")))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_1()
-            .px_1()
-            .h(px(26.0))
-            .flex_none()
-            .when(depth > 0, |row| row.pl(px(depth as f32 * 16.0 + 4.0)));
-
-        // The first condition has no leading conjunction, but keeps the gutter as blank space so
-        // its field column stays aligned with the later rows' `并且/或者` toggle.
-        row = row.child(if first {
-            div()
-                .w(px(FILTER_TOGGLE_WIDTH))
-                .flex_none()
-                .into_any_element()
-        } else {
-            self.filter_conjunction_toggle(&path, condition.conjunction, cx)
-                .into_any_element()
-        });
+        let hover_group = SharedString::from(format!("filter-row-hover-{key}"));
 
         let field_options: Vec<ComboOption> = self
             .state
@@ -550,7 +549,18 @@ impl GridView {
             combo.set_selected(operator_index.to_string(), cx);
         });
 
-        row = row
+        let mut row = div()
+            .id(SharedString::from(format!("filter-row-{key}")))
+            .group(hover_group.clone())
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .w_full()
+            .px_2()
+            .py_1()
+            .rounded(px(6.0))
+            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
             .child(field)
             .child(operator)
             .child(self.render_filter_value(&path, 0, cx));
@@ -564,69 +574,69 @@ impl GridView {
                 )
                 .child(self.render_filter_value(&path, 1, cx));
         }
-        row = row
-            .child(self.filter_row_action(&path, FilterAction::Remove, cx))
-            .child(self.filter_row_action(&path, FilterAction::AddCondition, cx));
-
-        row.into_any_element()
-    }
-
-    /// A group's boundary row, rendered after its conditions. The toggle sets the conjunction of
-    /// the next group; `+` inserts a new group after this one and `−` removes this group. The row
-    /// keeps the same left indent as the group's conditions and centres its controls under the
-    /// operator column; the `+`/`−` actions only appear while the row is hovered.
-    fn render_filter_group_control(
-        &mut self,
-        group_path: &[usize],
-        next_path: Option<Vec<usize>>,
-        depth: usize,
-        cx: &mut Context<'_, Self>,
-    ) -> AnyElement {
-        let group_path: Vec<usize> = group_path.to_vec();
-        let key = filter_path_key(&group_path);
-        let hover_group = SharedString::from(format!("filter-group-hover-{key}"));
-
-        let mut controls = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_center()
-            .gap_1()
-            .w(px(FILTER_OPERATOR_WIDTH))
-            .flex_none();
-        if let Some(next_path) = next_path {
-            let conjunction = filter_node(&self.state.filter_draft, &next_path)
-                .map(FilterNode::conjunction)
-                .unwrap_or_default();
-            controls = controls.child(self.filter_conjunction_toggle(&next_path, conjunction, cx));
-        }
-        controls = controls.child(
+        row = row.child(div().flex_1()).child(
             div()
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap_1()
+                .flex_none()
                 .opacity(0.0)
-                .group_hover(hover_group.clone(), |style| style.opacity(1.0))
-                .child(self.filter_row_action(&group_path, FilterAction::AddGroup, cx))
-                .child(self.filter_row_action(&group_path, FilterAction::Remove, cx)),
+                .group_hover(hover_group, |style| style.opacity(1.0))
+                .child(self.filter_row_action(&path, FilterAction::Remove, cx))
+                .child(self.filter_row_action(&path, FilterAction::AddCondition, cx)),
         );
+
+        row.into_any_element()
+    }
+
+    /// A group node: a bordered box around its children, with its own add/remove actions in a
+    /// footer revealed on hover.
+    fn render_filter_group_box(
+        &mut self,
+        path: &[usize],
+        children: &[FilterNode],
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let theme = self.theme;
+        let path: Vec<usize> = path.to_vec();
+        let key = filter_path_key(&path);
+        let hover_group = SharedString::from(format!("filter-group-hover-{key}"));
+        let body = self.render_filter_children(children, &mut path.clone(), cx);
+        let actions = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .flex_none()
+            .opacity(0.0)
+            .group_hover(hover_group.clone(), |style| style.opacity(1.0))
+            .child(self.filter_row_action(&path, FilterAction::AddCondition, cx))
+            .child(self.filter_row_action(&path, FilterAction::AddGroup, cx))
+            .child(self.filter_row_action(&path, FilterAction::Remove, cx));
 
         div()
             .id(SharedString::from(format!("filter-group-{key}")))
             .group(hover_group)
             .flex()
-            .flex_row()
-            .items_center()
+            .flex_col()
             .gap_1()
-            .px_1()
-            .pl(px((depth + 1) as f32 * 16.0 + 4.0))
-            .h(px(24.0))
-            .flex_none()
-            .child(div().w(px(FILTER_TOGGLE_WIDTH)).flex_none())
-            .child(div().w(px(FILTER_FIELD_WIDTH)).flex_none())
-            .child(controls)
-            .child(div().flex_1())
+            .w_full()
+            .p_2()
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(rgb(theme.border))
+            .child(body)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .items_center()
+                    .h(px(18.0))
+                    .flex_none()
+                    .child(actions),
+            )
             .into_any_element()
     }
 
@@ -754,7 +764,7 @@ impl GridView {
                 format!("filter-add-condition-{key}"),
             ),
             FilterAction::AddGroup => (
-                "icons/plus.svg",
+                "icons/folder.svg",
                 theme.icon_backups,
                 format!("filter-add-group-{key}"),
             ),

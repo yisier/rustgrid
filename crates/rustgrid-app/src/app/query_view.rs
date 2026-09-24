@@ -100,7 +100,10 @@ impl AppView {
                 .find(|grid| grid.read(cx).state.id == id)
                 .cloned()
         });
-        let has_result_panel = result_grid.is_some() || !matches!(query.result, Loadable::Idle);
+        let has_result_panel = query.running
+            || query.result_error.is_some()
+            || !query.results.is_empty()
+            || result_grid.is_some();
         let body: AnyElement = if !has_result_panel {
             div()
                 .flex()
@@ -110,10 +113,40 @@ impl AppView {
                 .child(editor)
                 .into_any_element()
         } else {
-            let result_body: AnyElement = match result_grid {
-                Some(grid) => grid.into_any_element(),
-                None => self.render_query_result(query, cx),
+            // `active_result` is 0 for the 信息 tab, 1..=n for the n-th result set.
+            let result_body: AnyElement = if query.running {
+                div()
+                    .flex_1()
+                    .p_2()
+                    .text_color(rgb(theme.text_muted))
+                    .child(t!("query.running").to_string())
+                    .into_any_element()
+            } else if let Some(error) = &query.result_error {
+                div()
+                    .flex_1()
+                    .p_2()
+                    .text_color(rgb(theme.danger))
+                    .child(error.clone())
+                    .into_any_element()
+            } else if query.active_result == 0 {
+                self.render_query_info(query)
+            } else if let Some(grid) = result_grid {
+                grid.into_any_element()
+            } else {
+                div().into_any_element()
             };
+            let mut panel = div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h(px(0.0))
+                .border_t_1()
+                .border_color(rgb(theme.border))
+                .bg(rgb(theme.editor_bg));
+            if !query.results.is_empty() {
+                panel = panel.child(self.render_query_result_tabs(query, cx));
+            }
+            panel = panel.child(result_body);
             div()
                 .flex()
                 .flex_col()
@@ -127,17 +160,7 @@ impl AppView {
                         .min_h(px(0.0))
                         .child(editor),
                 )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .min_h(px(0.0))
-                        .border_t_1()
-                        .border_color(rgb(theme.border))
-                        .bg(rgb(theme.editor_bg))
-                        .child(result_body),
-                )
+                .child(panel)
                 .into_any_element()
         };
 
@@ -148,6 +171,86 @@ impl AppView {
             .child(toolbar)
             .child(controls)
             .child(body)
+            .into_any_element()
+    }
+
+    /// The bottom result tabs: a fixed 信息 tab then one 结果 tag per result set.
+    fn render_query_result_tabs(&self, query: &QueryTab, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let mut bar = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .h(px(26.0))
+            .flex_none()
+            .px_2()
+            .bg(rgb(theme.toolbar_bg))
+            .border_b_1()
+            .border_color(rgb(theme.border))
+            .child(self.query_result_tab(
+                "query-result-info",
+                t!("query.info_tab").to_string(),
+                0,
+                query.active_result == 0,
+                cx,
+            ));
+        let mut result_number = 0usize;
+        for (index, _) in query.results.iter().enumerate() {
+            if query.result_grids.get(index).copied().flatten().is_none() {
+                continue;
+            }
+            result_number += 1;
+            bar = bar.child(self.query_result_tab(
+                SharedString::from(format!("query-result-{index}")),
+                t!("query.result_tab", n = result_number).to_string(),
+                result_number,
+                query.active_result == result_number,
+                cx,
+            ));
+        }
+        bar.into_any_element()
+    }
+
+    /// One bottom result tag. `tab` is the value [`AppView::select_query_result`] selects.
+    fn query_result_tab(
+        &self,
+        id: impl Into<SharedString>,
+        label: String,
+        tab: usize,
+        active: bool,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let theme = self.theme;
+        div()
+            .id(id.into())
+            .flex()
+            .items_center()
+            .justify_center()
+            .h(px(20.0))
+            .px_3()
+            .rounded(px(4.0))
+            .text_size(px(11.5))
+            .cursor_pointer()
+            .when(active, move |style| {
+                style
+                    .bg(rgb(theme.editor_bg))
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .text_color(rgb(theme.text))
+            })
+            .when(!active, move |style| {
+                style
+                    .bg(rgb(theme.button_bg))
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .text_color(rgb(theme.text_muted))
+                    .hover(move |style| style.text_color(rgb(theme.text)))
+            })
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                this.select_query_result(tab, cx);
+            }))
+            .child(label)
             .into_any_element()
     }
 

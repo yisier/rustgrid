@@ -38,9 +38,9 @@ impl AppView {
                 .into_any_element()
         } else if self.main_tab == MainTab::Backups {
             self.render_backups(cx).into_any_element()
-        } else if self.main_tab == MainTab::Functions && self.object_pane.is_none() {
-            div().flex_1().into_any_element()
-        } else if self.main_tab == MainTab::Views && self.object_pane.is_none() {
+        } else if matches!(self.main_tab, MainTab::Functions | MainTab::Views)
+            && self.object_pane.is_none()
+        {
             div().flex_1().into_any_element()
         } else if let Some(pane) = self.object_pane.clone() {
             div()

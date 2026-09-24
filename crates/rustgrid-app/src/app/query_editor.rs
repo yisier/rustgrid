@@ -212,137 +212,72 @@ impl AppView {
         root
     }
 
-    pub(super) fn render_query_result(
-        &self,
-        query: &QueryTab,
-        cx: &mut Context<'_, Self>,
-    ) -> AnyElement {
+    /// The 信息 tab: the executed script and one status line per statement result.
+    pub(super) fn render_query_info(&self, query: &QueryTab) -> AnyElement {
         let theme = self.theme;
-        let _ = cx;
-        match &query.result {
-            Loadable::Idle => div().into_any_element(),
-            Loadable::Loading => div()
-                .flex_1()
-                .p_2()
-                .text_color(rgb(theme.text_muted))
-                .child(t!("query.running").to_string())
-                .into_any_element(),
-            Loadable::Failed(error) => div()
+        if let Some(error) = &query.result_error {
+            return div()
                 .flex_1()
                 .p_2()
                 .text_color(rgb(theme.danger))
                 .child(error.clone())
-                .into_any_element(),
-            Loadable::Loaded(result) => {
-                if !result.has_result_set {
-                    let message = if result.rows_affected > 0 {
-                        t!("query.rows_affected", count = result.rows_affected).to_string()
-                    } else {
-                        t!("query.executed").to_string()
-                    };
-                    div().flex_1().p_2().child(message).into_any_element()
-                } else if result.columns.is_empty() {
-                    div()
-                        .flex_1()
-                        .p_2()
-                        .text_color(rgb(theme.text_muted))
-                        .child(t!("query.empty").to_string())
-                        .into_any_element()
-                } else {
-                    self.render_query_grid(result).into_any_element()
-                }
-            }
+                .into_any_element();
         }
-    }
-
-    pub(super) fn render_query_grid(&self, result: &QueryResult) -> impl IntoElement {
-        let theme = self.theme;
-        let widths = compute_column_widths(&result.columns, &result.rows);
-        let content_width: f32 = widths.iter().sum::<f32>().max(1.0);
-
-        let mut header = div().flex().flex_row().flex_none().bg(rgb(theme.header_bg));
-        for (index, column) in result.columns.iter().enumerate() {
-            let width = widths.get(index).copied().unwrap_or(GRID_COLUMN_WIDTH);
-            header = header.child(
+        let mut body = div().flex().flex_col().gap_2().p_2().w_full();
+        if !query.last_sql.is_empty() {
+            body = body.child(
                 div()
-                    .flex()
-                    .items_center()
-                    .h(px(GRID_ROW_HEIGHT))
-                    .w(px(width))
-                    .flex_none()
-                    .px_2()
-                    .whitespace_nowrap()
-                    .overflow_hidden()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .border_r_1()
-                    .border_color(rgb(theme.border))
-                    .child(column.name.clone()),
+                    .font_family("Consolas")
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme.text))
+                    .child(query.last_sql.clone()),
             );
         }
-
-        let rows = Arc::new(result.rows.clone());
-        let widths = Arc::new(widths);
-        let list = uniform_list(
-            SharedString::from("query-result-rows"),
-            rows.len(),
-            move |range, _window, _cx| {
-                range
-                    .map(|row_index| {
-                        let row = &rows[row_index];
-                        let base_background = if row_index % 2 == 1 {
-                            theme.row_alt_bg
-                        } else {
-                            theme.editor_bg
-                        };
-                        let mut row_element = div()
-                            .flex()
-                            .flex_row()
-                            .bg(rgb(base_background))
-                            .h(px(GRID_ROW_HEIGHT));
-                        for (index, cell) in row.iter().enumerate() {
-                            let width = widths.get(index).copied().unwrap_or(GRID_COLUMN_WIDTH);
-                            row_element = row_element.child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .h(px(GRID_ROW_HEIGHT))
-                                    .w(px(width))
-                                    .flex_none()
-                                    .px_2()
-                                    .whitespace_nowrap()
-                                    .overflow_hidden()
-                                    .child(cell.as_display()),
-                            );
-                        }
-                        row_element
-                    })
-                    .collect::<Vec<_>>()
-            },
-        )
-        .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::FitList)
-        .track_scroll(&self.query_result_scroll)
-        .flex_1()
-        .min_h(px(0.0));
-
-        div().flex().flex_row().flex_1().min_h(px(0.0)).child(
-            div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_w(px(0.0))
-                .min_h(px(0.0))
-                .overflow_hidden()
-                .child(
-                    div()
-                        .relative()
-                        .flex()
-                        .flex_col()
-                        .h_full()
-                        .w(px(content_width))
-                        .child(header)
-                        .child(list),
-                ),
-        )
+        for (index, result) in query.results.iter().enumerate() {
+            let status = if result.has_result_set {
+                t!("query.result_rows", count = result.row_count).to_string()
+            } else if result.rows_affected > 0 {
+                t!("query.rows_affected", count = result.rows_affected).to_string()
+            } else {
+                t!("query.executed").to_string()
+            };
+            body = body.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(11.0))
+                            .text_color(rgb(theme.text_muted))
+                            .child(format!("{} {}", t!("query.statement"), index + 1)),
+                    )
+                    .child(div().text_size(px(11.5)).child(status)),
+            );
+        }
+        if let Some(elapsed) = query.last_elapsed {
+            body = body.child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(format!(
+                        "{}: {:.3}s",
+                        t!("query.elapsed"),
+                        elapsed.as_secs_f64()
+                    )),
+            );
+        }
+        div()
+            .id("query-info")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .overflow_y_scroll()
+            .child(body)
+            .into_any_element()
     }
 
     pub(super) fn query_editor_index_for_position(&self, position: Point<Pixels>) -> Option<usize> {
