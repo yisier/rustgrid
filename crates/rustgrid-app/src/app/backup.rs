@@ -14,8 +14,8 @@ use super::*;
 use rustgrid_backup::BackupManifest;
 use rustgrid_core::{BackupObjectKind, ObjectKind, SavedBackup};
 
-/// Rows in the New Backup dialog's object tree are `20px` tall.
-const BACKUP_OBJECT_ROW_HEIGHT: f32 = 19.0;
+/// Rows in the New Backup dialog's object tree are `26px` tall.
+const BACKUP_OBJECT_ROW_HEIGHT: f32 = 26.0;
 
 impl AppView {
     // ----- List state -------------------------------------------------------------------------
@@ -1486,7 +1486,7 @@ impl AppView {
     }
 
     /// Save the current object selection as a reusable configuration.
-    pub(super) fn save_backup_config(&mut self, cx: &mut Context<'_, Self>) {
+    pub(super) fn save_backup_config(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let Some((name, connection_index, database, objects)) =
             self.new_backup_dialog.as_ref().map(|dialog| {
                 (
@@ -1502,6 +1502,10 @@ impl AppView {
         if name.is_empty() {
             if let Some(dialog) = self.new_backup_dialog.as_mut() {
                 dialog.error = Some(t!("backup.name_required").to_string());
+            }
+            // Put the caret in the name field so the user can fix it right away.
+            if let Some(input) = self.backup_name_input.clone() {
+                input.update(cx, |input, cx| input.focus_state(window, cx));
             }
             cx.notify();
             return;
@@ -2210,16 +2214,29 @@ impl AppView {
         } else {
             return div().into_any_element();
         };
-        div()
+        // The error is shown as a banner above the footer so it is visible on whichever tab is
+        // open (a validation error on the Objects tab would otherwise be hidden by the Log tab).
+        let error = self
+            .new_backup_dialog
+            .as_ref()
+            .and_then(|dialog| dialog.error.clone())
+            .or_else(|| {
+                self.restore_dialog
+                    .as_ref()
+                    .and_then(|dialog| dialog.error.clone())
+            });
+        let mut root = div()
             .flex()
             .flex_col()
             .size_full()
             .bg(rgb(theme.dialog_face))
             .text_color(rgb(theme.text))
             .child(backup_window_titlebar(title, theme))
-            .child(body)
-            .child(footer)
-            .into_any_element()
+            .child(body);
+        if let Some(error) = error {
+            root = root.child(backup_error_banner(error, theme));
+        }
+        root.child(footer).into_any_element()
     }
 
     /// Open the OS window that hosts the Backup/Restore UI. It is a normal top-level window, so it
@@ -2352,14 +2369,33 @@ impl AppView {
             .as_ref()
             .map(|dialog| dialog.tab)
             .unwrap_or(BackupDialogTab::Objects);
+        let connection_name = self
+            .new_backup_dialog
+            .as_ref()
+            .and_then(|dialog| self.connections.get(dialog.connection_index))
+            .map(|node| node.profile.name.clone())
+            .unwrap_or_else(|| "--".to_string());
+        let database_name = self
+            .new_backup_dialog
+            .as_ref()
+            .map(|dialog| dialog.database.clone())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "--".to_string());
+        let header = backup_target_line(
+            t!("backup.target").to_string(),
+            connection_name,
+            database_name,
+            theme,
+        );
         let tabs = div()
             .flex()
             .flex_row()
+            .items_center()
+            .gap_4()
             .w_full()
-            .gap_0p5()
-            .px_2()
-            .pt_2()
-            .bg(rgb(theme.dialog_face))
+            .px_4()
+            .border_b_1()
+            .border_color(rgb(theme.border))
             .child(self.backup_tab_button(
                 "backup-tab-objects",
                 t!("backup.tab.objects").to_string(),
@@ -2419,6 +2455,7 @@ impl AppView {
             .flex_1()
             .min_h(px(0.0))
             .w_full()
+            .child(header)
             .child(tabs)
             .child(content)
             .into_any_element()
@@ -2429,98 +2466,64 @@ impl AppView {
         let Some(dialog) = self.new_backup_dialog.as_ref() else {
             return div().into_any_element();
         };
-        // A backup belongs to the database the Backup tab is scoped to, so the target is fixed:
-        // it is shown, not chosen.
-        let connection_name = self
-            .connections
-            .get(dialog.connection_index)
-            .map(|node| node.profile.name.clone())
-            .unwrap_or_else(|| "--".to_string());
-        let database_name = if dialog.database.is_empty() {
-            "--".to_string()
-        } else {
-            dialog.database.clone()
-        };
-        let header = div()
+        let total = dialog.objects.len();
+        let selected = dialog.objects.iter().filter(|entry| entry.selected).count();
+        let summary = div()
             .flex()
             .flex_row()
             .items_center()
-            .gap_2()
-            .px_2()
-            .py_2()
+            .justify_between()
+            .w_full()
+            .px_4()
+            .pt_2()
+            .pb_1()
             .child(
                 div()
                     .text_size(px(12.0))
                     .text_color(rgb(theme.text_muted))
-                    .child(t!("backup.connection").to_string()),
+                    .child(
+                        t!("backup.selected_count", selected = selected, total = total).to_string(),
+                    ),
             )
-            .child(read_only_field(
-                "icons/connection.svg",
-                theme.icon_connection,
-                connection_name,
-                theme,
-            ))
             .child(
                 div()
-                    .text_size(px(12.0))
-                    .text_color(rgb(theme.text_muted))
-                    .child(t!("backup.database").to_string()),
-            )
-            .child(read_only_field(
-                "icons/database.svg",
-                theme.icon_database,
-                database_name,
-                theme,
-            ));
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .child(backup_link_button(
+                        "backup-select-all",
+                        t!("backup.select_all").to_string(),
+                        theme,
+                        cx.listener(|this, _event, _window, cx| this.backup_set_all(true, cx)),
+                    ))
+                    .child(backup_link_button(
+                        "backup-select-none",
+                        t!("backup.select_none").to_string(),
+                        theme,
+                        cx.listener(|this, _event, _window, cx| this.backup_set_all(false, cx)),
+                    )),
+            );
 
         let picker = render_object_picker(&dialog.objects, dialog.loading, theme, false, cx);
 
-        let buttons = div()
-            .flex()
-            .flex_row()
-            .gap_2()
-            .mx_2()
-            .mb_2()
-            .child(self.dialog_button(
-                "backup-select-all",
-                t!("backup.select_all").to_string(),
-                false,
-                cx.listener(|this, _event, _window, cx| this.backup_set_all(true, cx)),
-            ))
-            .child(self.dialog_button(
-                "backup-select-none",
-                t!("backup.select_none").to_string(),
-                false,
-                cx.listener(|this, _event, _window, cx| this.backup_set_all(false, cx)),
-            ));
-
-        let mut body = div()
+        let body = div()
             .flex()
             .flex_col()
             .flex_1()
             .min_h(px(0.0))
             .w_full()
-            .child(header);
-        body = body.child(picker);
-        if let Some(error) = dialog.error.as_ref() {
-            body = body.child(
-                div()
-                    .px_2()
-                    .pb_1()
-                    .text_size(px(12.0))
-                    .text_color(rgb(theme.danger))
-                    .child(error.clone()),
-            );
-        }
-        body.child(buttons).into_any_element()
+            .child(summary)
+            .child(picker);
+        body.into_any_element()
     }
 
     fn new_backup_dialog_footer(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
         let name_input = match self.backup_name_input.clone() {
             Some(input) => div()
-                .w(px(200.0))
-                .h(px(24.0))
+                .w(px(220.0))
+                .h(px(28.0))
                 .child(input)
                 .into_any_element(),
             None => div().into_any_element(),
@@ -2531,7 +2534,12 @@ impl AppView {
             .items_center()
             .justify_between()
             .w_full()
-            .h(px(46.0))
+            .gap_3()
+            .px_4()
+            .py_3()
+            .border_t_1()
+            .border_color(rgb(theme.border))
+            .bg(rgb(theme.dialog_face))
             .child(
                 div()
                     .flex()
@@ -2542,6 +2550,7 @@ impl AppView {
                     .min_w(px(0.0))
                     .child(
                         div()
+                            .flex_none()
                             .text_size(px(12.0))
                             .text_color(rgb(theme.text_muted))
                             .child(t!("backup.config_name").to_string()),
@@ -2555,11 +2564,12 @@ impl AppView {
                     .items_center()
                     .gap_2()
                     .flex_none()
+                    .child(self.backup_status_indicator(theme))
                     .child(self.dialog_button(
                         "backup-save-config",
                         t!("backup.save").to_string(),
                         false,
-                        cx.listener(|this, _event, _window, cx| this.save_backup_config(cx)),
+                        cx.listener(|this, _event, window, cx| this.save_backup_config(window, cx)),
                     ))
                     .child(self.dialog_button(
                         "backup-run",
@@ -2586,6 +2596,39 @@ impl AppView {
             .into_any_element()
     }
 
+    /// The small status indicator shown left of the footer's action buttons.
+    fn backup_status_indicator(&self, theme: Theme) -> impl IntoElement {
+        let (label, color) = match self.new_backup_dialog.as_ref() {
+            Some(dialog) if dialog.running => (t!("backup.status.running").to_string(), 0x22b14c),
+            Some(dialog) if dialog.error.is_some() => {
+                (t!("backup.status.failed").to_string(), theme.danger)
+            }
+            Some(dialog) if dialog.total > 0 => (t!("backup.status.done").to_string(), 0x22b14c),
+            _ => (t!("backup.status.idle").to_string(), theme.neutral),
+        };
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .flex_none()
+            .pr_2()
+            .child(
+                div()
+                    .w(px(7.0))
+                    .h(px(7.0))
+                    .flex_none()
+                    .rounded(px(9999.0))
+                    .bg(rgb(color)),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(label),
+            )
+    }
+
     fn restore_dialog_body(&mut self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
         let active = self
@@ -2593,14 +2636,34 @@ impl AppView {
             .as_ref()
             .map(|dialog| dialog.tab)
             .unwrap_or(BackupDialogTab::Objects);
+        let connection_name = self
+            .restore_dialog
+            .as_ref()
+            .and_then(|dialog| dialog.connection_index)
+            .and_then(|index| self.connections.get(index))
+            .map(|node| node.profile.name.clone())
+            .unwrap_or_else(|| "--".to_string());
+        let database_name = self
+            .restore_dialog
+            .as_ref()
+            .map(|dialog| dialog.database.clone())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "--".to_string());
+        let header = backup_target_line(
+            t!("backup.restore_to").to_string(),
+            connection_name,
+            database_name,
+            theme,
+        );
         let tabs = div()
             .flex()
             .flex_row()
+            .items_center()
+            .gap_4()
             .w_full()
-            .gap_0p5()
-            .px_2()
-            .pt_2()
-            .bg(rgb(theme.dialog_face))
+            .px_4()
+            .border_b_1()
+            .border_color(rgb(theme.border))
             .child(self.backup_tab_button(
                 "restore-tab-objects",
                 t!("backup.tab.objects").to_string(),
@@ -2660,6 +2723,7 @@ impl AppView {
             .flex_1()
             .min_h(px(0.0))
             .w_full()
+            .child(header)
             .child(tabs)
             .child(content)
             .into_any_element()
@@ -2670,83 +2734,56 @@ impl AppView {
         let Some(dialog) = self.restore_dialog.as_ref() else {
             return div().into_any_element();
         };
-        // A backup belongs to one database, so the restore target is fixed: it is shown, not edited.
-        let connection_name = dialog
-            .connection_index
-            .and_then(|index| self.connections.get(index))
-            .map(|node| node.profile.name.clone())
-            .unwrap_or_else(|| "--".to_string());
-        let database_name = if dialog.database.is_empty() {
-            "--".to_string()
-        } else {
-            dialog.database.clone()
-        };
-        let header = div()
+        let total = dialog.objects.len();
+        let selected = dialog.objects.iter().filter(|entry| entry.selected).count();
+        let summary = div()
             .flex()
             .flex_row()
             .items_center()
-            .gap_2()
-            .px_2()
-            .py_2()
+            .justify_between()
+            .w_full()
+            .px_4()
+            .pt_2()
+            .pb_1()
             .child(
                 div()
                     .text_size(px(12.0))
                     .text_color(rgb(theme.text_muted))
-                    .child(t!("backup.restore_to").to_string()),
+                    .child(
+                        t!("backup.selected_count", selected = selected, total = total).to_string(),
+                    ),
             )
-            .child(read_only_field(
-                "icons/connection.svg",
-                theme.icon_connection,
-                connection_name,
-                theme,
-            ))
-            .child(read_only_field(
-                "icons/database.svg",
-                theme.icon_database,
-                database_name,
-                theme,
-            ));
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .child(backup_link_button(
+                        "restore-select-all",
+                        t!("backup.select_all").to_string(),
+                        theme,
+                        cx.listener(|this, _event, _window, cx| this.restore_set_all(true, cx)),
+                    ))
+                    .child(backup_link_button(
+                        "restore-select-none",
+                        t!("backup.select_none").to_string(),
+                        theme,
+                        cx.listener(|this, _event, _window, cx| this.restore_set_all(false, cx)),
+                    )),
+            );
 
         let picker = render_object_picker(&dialog.objects, false, theme, true, cx);
 
-        let buttons = div()
-            .flex()
-            .flex_row()
-            .gap_2()
-            .mx_2()
-            .mb_2()
-            .child(self.dialog_button(
-                "restore-select-all",
-                t!("backup.select_all").to_string(),
-                false,
-                cx.listener(|this, _event, _window, cx| this.restore_set_all(true, cx)),
-            ))
-            .child(self.dialog_button(
-                "restore-select-none",
-                t!("backup.select_none").to_string(),
-                false,
-                cx.listener(|this, _event, _window, cx| this.restore_set_all(false, cx)),
-            ));
-
-        let mut body = div()
+        let body = div()
             .flex()
             .flex_col()
             .flex_1()
             .min_h(px(0.0))
             .w_full()
-            .child(header)
+            .child(summary)
             .child(picker);
-        if let Some(error) = dialog.error.as_ref() {
-            body = body.child(
-                div()
-                    .px_2()
-                    .pb_1()
-                    .text_size(px(12.0))
-                    .text_color(rgb(theme.danger))
-                    .child(error.clone()),
-            );
-        }
-        body.child(buttons).into_any_element()
+        body.into_any_element()
     }
 
     fn restore_dialog_footer(&self, cx: &mut Context<'_, Self>) -> AnyElement {
@@ -2809,26 +2846,22 @@ impl AppView {
             .flex()
             .items_center()
             .justify_center()
-            .px_4()
-            .h(px(24.0))
-            .text_size(px(12.0))
+            .h(px(34.0))
+            .px_1()
+            .mb(px(-1.0))
+            .flex_none()
+            .text_size(px(12.5))
             .cursor_pointer()
+            .border_b_2()
             .when(active, move |style| {
                 style
-                    .bg(rgb(theme.dialog_bg))
-                    .border_t_1()
-                    .border_l_1()
-                    .border_r_1()
-                    .border_color(rgb(theme.border))
+                    .border_color(rgb(theme.primary))
                     .text_color(rgb(theme.text))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .mb(px(-1.0))
+                    .font_weight(FontWeight::MEDIUM)
             })
             .when(!active, move |style| {
                 style
-                    .bg(rgb(theme.button_bg))
-                    .border_1()
-                    .border_color(rgb(theme.border))
+                    .border_color(rgba(0x00000000))
                     .text_color(rgb(theme.text_muted))
                     .hover(move |style| style.text_color(rgb(theme.text)))
             })
@@ -2956,18 +2989,149 @@ fn make_backup_name_input(
     cx: &mut Context<'_, AppView>,
 ) -> Entity<TextInput> {
     let change = app.clone();
+    let placeholder: SharedString = t!("backup.config_name_placeholder").to_string().into();
     cx.new(move |cx| {
-        TextInput::new(theme, initial, TextInputOptions::default(), cx).on_change(Rc::new(
-            move |text, _window, cx| {
-                let _ = change.update(cx, |app, cx| {
-                    if let Some(dialog) = app.new_backup_dialog.as_mut() {
-                        dialog.config_name = text.to_string();
-                    }
-                    cx.notify();
-                });
+        TextInput::new(
+            theme,
+            initial,
+            TextInputOptions {
+                placeholder,
+                ..Default::default()
             },
-        ))
+            cx,
+        )
+        .on_change(Rc::new(move |text, _window, cx| {
+            let _ = change.update(cx, |app, cx| {
+                if let Some(dialog) = app.new_backup_dialog.as_mut() {
+                    dialog.config_name = text.to_string();
+                }
+                cx.notify();
+            });
+        }))
     })
+}
+
+/// The dialog's target line: a small muted label plus the fixed connection and database, shown
+/// above the tabs.
+fn backup_target_line(
+    label: String,
+    connection_name: String,
+    database_name: String,
+    theme: Theme,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .w_full()
+        .px_4()
+        .pt_3()
+        .pb_2()
+        .child(
+            div()
+                .flex_none()
+                .text_size(px(12.0))
+                .text_color(rgb(theme.text_muted))
+                .child(label),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .child(tree_icon("icons/connection.svg", theme.icon_connection))
+                .child(
+                    div()
+                        .text_size(px(12.5))
+                        .text_color(rgb(theme.text))
+                        .child(connection_name),
+                ),
+        )
+        .child(
+            div()
+                .flex_none()
+                .text_size(px(12.5))
+                .text_color(rgb(theme.text_muted))
+                .child("·"),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .child(tree_icon("icons/database.svg", theme.icon_database))
+                .child(
+                    div()
+                        .text_size(px(12.5))
+                        .text_color(rgb(theme.text))
+                        .child(database_name),
+                ),
+        )
+}
+
+/// A red alert banner shown above the dialog footer while an error is set, so the reason is
+/// visible on whichever tab is open (a validation error would otherwise hide on the Log tab).
+fn backup_error_banner(error: String, theme: Theme) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .mx_4()
+        .mb_2()
+        .px_3()
+        .py_2()
+        .flex_none()
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(rgb(theme.danger))
+        .bg(rgba((theme.danger << 8) | 0x14))
+        .child(
+            svg()
+                .path("icons/warning.svg")
+                .w(px(14.0))
+                .h(px(14.0))
+                .flex_none()
+                .text_color(rgb(theme.danger)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .text_size(px(12.0))
+                .text_color(rgb(theme.danger))
+                .child(error),
+        )
+}
+
+/// A muted text-link style action, used for the picker's inline 全选 / 取消全选.
+fn backup_link_button(
+    id: &'static str,
+    label: String,
+    theme: Theme,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .h(px(20.0))
+        .px_1()
+        .flex_none()
+        .rounded_sm()
+        .text_size(px(12.0))
+        .text_color(rgb(theme.text_muted))
+        .cursor_pointer()
+        .hover(move |style| {
+            style
+                .text_color(rgb(theme.text))
+                .bg(rgb(theme.tree_hover_bg))
+        })
+        .on_click(on_click)
+        .child(label)
 }
 
 /// Apply a saved configuration's selection to a freshly loaded object list.
@@ -2977,39 +3141,6 @@ fn apply_saved_selection(dialog: &mut NewBackupDialog, saved: &SavedBackup) {
     }
 }
 
-/// A read-only, field-like display of a fixed value, used by the restore dialog's target (a backup
-/// can only be restored to the database it belongs to, so the target is shown, not chosen).
-fn read_only_field(
-    icon: &'static str,
-    icon_color: u32,
-    value: String,
-    theme: Theme,
-) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_1()
-        .w(px(200.0))
-        .h(px(24.0))
-        .px_2()
-        .flex_none()
-        .border_1()
-        .border_color(rgb(theme.border))
-        .bg(rgb(theme.input_bg))
-        .child(tree_icon(icon, icon_color))
-        .child(
-            div()
-                .flex_1()
-                .min_w(px(0.0))
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_size(px(12.0))
-                .child(value),
-        )
-}
-
-/// One list row of the backup list: an icon and the file's name. When `rename` is set the row
 /// One backup-list entry, parsed from its selection key (`file:<name>` / `config:<name>`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum BackupEntry {
@@ -3061,18 +3192,20 @@ fn render_object_picker(
     restore: bool,
     cx: &mut Context<'_, AppView>,
 ) -> AnyElement {
-    let mut list = div().flex().flex_col().gap_0p5().p_2();
+    let mut list = div().flex().flex_col().py_1();
     if loading {
         list = list.child(
             div()
-                .p_2()
+                .p_3()
+                .text_size(px(12.0))
                 .text_color(rgb(theme.text_muted))
                 .child(t!("common.loading").to_string()),
         );
     } else if objects.is_empty() {
         list = list.child(
             div()
-                .p_2()
+                .p_3()
+                .text_size(px(12.0))
                 .text_color(rgb(theme.text_muted))
                 .child(t!("common.empty").to_string()),
         );
@@ -3095,9 +3228,13 @@ fn render_object_picker(
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_1()
-                    .h(px(BACKUP_OBJECT_ROW_HEIGHT))
+                    .gap_2()
+                    .h(px(28.0))
+                    .px_2()
+                    .mx_1()
+                    .rounded_sm()
                     .cursor_pointer()
+                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
                     .on_click(cx.listener(move |this, _event, _window, cx| {
                         if restore {
                             this.restore_toggle_kind(kind, cx);
@@ -3113,6 +3250,8 @@ fn render_object_picker(
                     .child(
                         div()
                             .text_size(px(12.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(theme.text))
                             .child(format!("{} ({selected}/{total})", t!(kind.label_key()))),
                     ),
             );
@@ -3125,11 +3264,15 @@ fn render_object_picker(
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap_1()
+                        .gap_2()
                         .h(px(BACKUP_OBJECT_ROW_HEIGHT))
-                        .pl(px(22.0))
+                        .pl(px(30.0))
+                        .pr_2()
+                        .mx_1()
+                        .rounded_sm()
                         .cursor_pointer()
                         .when(selected, move |style| style.bg(rgb(theme.tree_hover_bg)))
+                        .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
                         .on_click(cx.listener(move |this, _event, _window, cx| {
                             if restore {
                                 this.restore_toggle_object(index, cx);
@@ -3142,7 +3285,16 @@ fn render_object_picker(
                             backup_object_icon(kind),
                             backup_object_color(kind, theme),
                         ))
-                        .child(div().text_size(px(12.0)).child(name)),
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_size(px(12.0))
+                                .text_color(rgb(theme.text))
+                                .child(name),
+                        ),
                 );
             }
         }
@@ -3161,11 +3313,13 @@ fn render_object_picker(
         .flex_col()
         .flex_1()
         .min_h(px(0.0))
-        .mx_2()
-        .mb_2()
+        .mx_4()
+        .mb_3()
+        .rounded(px(8.0))
         .border_1()
         .border_color(rgb(theme.border))
         .bg(rgb(theme.dialog_bg))
+        .overflow_hidden()
         .child(inner)
         .into_any_element()
 }
@@ -3231,11 +3385,13 @@ fn render_backup_log(
         .flex_col()
         .flex_1()
         .min_h(px(0.0))
-        .mx_2()
-        .mb_2()
+        .mx_4()
+        .mb_3()
+        .rounded(px(8.0))
         .border_1()
         .border_color(rgb(theme.border))
         .bg(rgb(theme.dialog_bg))
+        .overflow_hidden()
         .child(summary)
         .child(
             div()
@@ -3244,7 +3400,8 @@ fn render_backup_log(
                 .flex_col()
                 .flex_1()
                 .min_h(px(0.0))
-                .mx_2()
+                .mx_3()
+                .rounded(px(6.0))
                 .border_1()
                 .border_color(rgb(theme.border))
                 .overflow_y_scroll()
@@ -3254,15 +3411,20 @@ fn render_backup_log(
         .child(
             // Green progress bar (matches Navicat's restore/backup window).
             div()
-                .h(px(12.0))
-                .mx_2()
-                .mt_2()
-                .mb_2()
+                .h(px(6.0))
+                .mx_3()
+                .mt_3()
+                .mb_3()
                 .flex_none()
-                .border_1()
-                .border_color(rgb(theme.border))
+                .rounded(px(9999.0))
                 .bg(rgb(theme.scroll_track))
-                .child(div().h_full().w(gpui::relative(progress)).bg(rgb(0x22b14c))),
+                .child(
+                    div()
+                        .h_full()
+                        .w(gpui::relative(progress))
+                        .rounded(px(9999.0))
+                        .bg(rgb(0x22b14c)),
+                ),
         )
         .into_any_element()
 }
