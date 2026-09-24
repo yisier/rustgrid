@@ -35,8 +35,9 @@ impl AppView {
     }
 
     /// Validate the required fields before 测试连接 / 保存并连接. Returns `true` when the form is
-    /// invalid: the empty fields are flagged inline and the page holding the first error is shown so
-    /// the markers are visible.
+    /// invalid: the empty fields are flagged inline and the page with the error is shown so the
+    /// markers are visible. The current page is validated first — it stays put when it is the one
+    /// holding the error, and only jumps to the first page with one otherwise.
     fn validate_form(&mut self, cx: &mut Context<'_, Self>) -> bool {
         let missing = self
             .form
@@ -54,15 +55,23 @@ impl AppView {
             return false;
         }
         self.test_status = TestStatus::Idle;
-        let general_first = !missing.is_empty();
+        let general_has_error = !missing.is_empty();
+        let tunnel_has_error = !tunnel_missing.is_empty();
         self.form_errors = missing.into_iter().collect();
         self.form_tunnel_errors = tunnel_missing;
+        // Validate the page the user is looking at first: stay on it when it is the one with the
+        // error, and only jump to the first page that has one (常规 before 隧道) when the current
+        // page is fine.
+        let current = self.form.as_ref().map(|form| form.tab).unwrap_or_default();
+        let target = match current {
+            FormTab::General if general_has_error => FormTab::General,
+            FormTab::Tunnel if tunnel_has_error => FormTab::Tunnel,
+            _ if general_has_error => FormTab::General,
+            _ if tunnel_has_error => FormTab::Tunnel,
+            _ => current,
+        };
         if let Some(form) = self.form.as_mut() {
-            form.tab = if general_first {
-                FormTab::General
-            } else {
-                FormTab::Tunnel
-            };
+            form.tab = target;
         }
         cx.notify();
         true
@@ -276,6 +285,9 @@ fn missing_tunnel_fields(form: &ConnectionForm) -> BTreeSet<connection_form::Tun
     };
     if layer.host.trim().is_empty() {
         missing.insert(connection_form::TunnelField::Host);
+    }
+    if layer.port == 0 {
+        missing.insert(connection_form::TunnelField::Port);
     }
     if layer.kind == TunnelKind::Ssh
         && layer.auth == TunnelAuth::KeyFile

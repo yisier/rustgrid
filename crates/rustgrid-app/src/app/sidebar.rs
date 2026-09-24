@@ -1,10 +1,11 @@
 use super::*;
 
-/// The connection status shown by a tree row, reduced to what rendering needs.
+/// The connection status shown by a tree row, reduced to what rendering needs. A failed connection
+/// keeps only its state: the error itself is surfaced in a dialog when it happens.
 enum TreeStatus {
     Connected,
     Connecting,
-    Failed(String),
+    Failed,
     Disconnected,
 }
 
@@ -42,7 +43,7 @@ fn snapshot_connections(app: &AppView) -> Vec<TreeConnection> {
             let status = match &node.status {
                 ConnectionStatus::Connected(_) => TreeStatus::Connected,
                 ConnectionStatus::Connecting => TreeStatus::Connecting,
-                ConnectionStatus::Failed(error) => TreeStatus::Failed(error.clone()),
+                ConnectionStatus::Failed(_) => TreeStatus::Failed,
                 ConnectionStatus::Disconnected => TreeStatus::Disconnected,
             };
             let databases = match &node.databases {
@@ -182,7 +183,7 @@ impl TreePane {
         let icon_color = match &connection.status {
             TreeStatus::Connected => theme.icon_connection,
             TreeStatus::Connecting => theme.warning,
-            TreeStatus::Failed(_) => theme.danger,
+            TreeStatus::Failed => theme.danger,
             TreeStatus::Disconnected => theme.neutral,
         };
         // A theme-independent badge color so the driver glyph keeps its contrast on both the
@@ -190,7 +191,7 @@ impl TreePane {
         let badge = match &connection.status {
             TreeStatus::Connected => 0x2e9e5b,
             TreeStatus::Connecting => 0xb58900,
-            TreeStatus::Failed(_) => 0xd13438,
+            TreeStatus::Failed => 0xd13438,
             TreeStatus::Disconnected => 0x6b6b6b,
         };
 
@@ -273,10 +274,6 @@ impl TreePane {
         let body = div().flex().flex_col().child(row);
 
         let mut sub = div().flex().flex_col();
-
-        if let TreeStatus::Failed(error) = &connection.status {
-            sub = sub.child(tree_message(error.clone(), 26.0, theme.danger));
-        }
 
         if connection.expanded {
             match &connection.databases {

@@ -89,26 +89,44 @@ impl AppView {
         match &menu.target {
             ContextTarget::Connection(index) => {
                 let index = *index;
-                let connected = self
-                    .connections
-                    .get(index)
-                    .map(|node| matches!(&node.status, ConnectionStatus::Connected(_)))
-                    .unwrap_or(false);
-                let connect_label = if connected {
-                    t!("connection.disconnect").to_string()
-                } else {
-                    t!("connection.connect").to_string()
-                };
+                let status = self.connections.get(index).map(|node| &node.status);
+                let connected = matches!(status, Some(ConnectionStatus::Connected(_)));
+                let connecting = matches!(status, Some(ConnectionStatus::Connecting));
+                // A failed or connecting connection has no live session, but it does hold state (its
+                // error message), so it can still be closed to reset it. Only a connected one is
+                // "open"; an untouched one is neither.
+                let closeable = matches!(
+                    status,
+                    Some(ConnectionStatus::Connected(_))
+                        | Some(ConnectionStatus::Connecting)
+                        | Some(ConnectionStatus::Failed(_))
+                );
 
-                items = items
-                    .child(self.context_item(
+                // Show only the action that applies: an open (or opening) connection offers just
+                // 关闭连接, an untouched one just 打开连接, and a failed one both (retry, or reset).
+                if !connected && !connecting {
+                    items = items.child(self.context_item(
                         "ctx-connect",
-                        connect_label,
+                        t!("connection.connect").to_string(),
                         cx.listener(move |this, _event, _window, cx| {
                             this.context_menu = None;
-                            this.toggle_connection(index, cx);
+                            this.connect(index, cx);
                         }),
-                    ))
+                    ));
+                }
+
+                if closeable {
+                    items = items.child(self.context_item(
+                        "ctx-disconnect",
+                        t!("connection.disconnect").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.disconnect(index, cx);
+                        }),
+                    ));
+                }
+
+                items = items
                     .child(self.context_item(
                         "ctx-edit",
                         t!("connection.edit").to_string(),

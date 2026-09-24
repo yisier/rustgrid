@@ -8,20 +8,6 @@ impl AppView {
         }
     }
 
-    pub(super) fn toggle_connection(&mut self, index: usize, cx: &mut Context<'_, Self>) {
-        let state = match self.connections.get(index).map(|node| &node.status) {
-            Some(ConnectionStatus::Connected(_)) => 1,
-            Some(ConnectionStatus::Connecting) => 2,
-            _ => 0,
-        };
-
-        match state {
-            1 => self.disconnect(index, cx),
-            2 => {}
-            _ => self.connect(index, cx),
-        }
-    }
-
     pub(super) fn toggle_expand(&mut self, index: usize) {
         if let Some(node) = self.connections.get_mut(index)
             && matches!(&node.status, ConnectionStatus::Connected(_))
@@ -205,9 +191,11 @@ impl AppView {
             .and_then(|node| node.password.clone());
 
         let Some(driver) = self.registry.get(&profile.driver) else {
+            let message = t!("error.driver_missing").to_string();
             if let Some(node) = self.connections.get_mut(index) {
-                node.status = ConnectionStatus::Failed(t!("error.driver_missing").to_string());
+                node.status = ConnectionStatus::Failed(message.clone());
             }
+            self.error_dialog = Some(message);
             cx.notify();
             return;
         };
@@ -251,7 +239,7 @@ impl AppView {
                         let message = error.to_string();
 
                         if let Some(node) = view.connections.get_mut(index) {
-                            node.status = ConnectionStatus::Failed(message);
+                            node.status = ConnectionStatus::Failed(message.clone());
                         }
 
                         if authentication {
@@ -265,6 +253,10 @@ impl AppView {
                                 save_password: true,
                             });
                             view.password_focus_pending = true;
+                        } else {
+                            // Surface the failure in a dialog rather than dumping the (often long)
+                            // driver message under the tree node; the red icon still marks it.
+                            view.error_dialog = Some(message);
                         }
                     }
                 }

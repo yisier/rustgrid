@@ -93,7 +93,14 @@ impl AppView {
         name_focus: FocusHandle,
         cx: &mut Context<'_, Self>,
     ) {
-        if self.connection_window.is_some() {
+        // Only one connection window exists at a time. If it is already open (possibly behind the
+        // main window), raise it and focus the alias field instead of silently doing nothing.
+        if let Some(handle) = self.connection_window {
+            let _ = handle.update(cx, |_, window, cx| {
+                window.activate_window();
+                window.focus(&name_focus, cx);
+                window.refresh();
+            });
             return;
         }
         let weak = cx.weak_entity();
@@ -155,9 +162,16 @@ impl AppView {
     }
 
     /// Close the connection window (from a footer button or a successful save) and drop its state.
+    ///
+    /// The window is removed on the next effect flush instead of synchronously: removing a window
+    /// fires gpui's window-closed observers, and the app's observer re-enters `AppView`. On the
+    /// save path this runs from inside an `AppView` update, so a synchronous removal would
+    /// double-lease the entity and panic; deferring lets the current update cycle unwind first.
     pub(super) fn close_connection_window(&mut self, cx: &mut Context<'_, Self>) {
         if let Some(handle) = self.connection_window.take() {
-            let _ = handle.update(cx, |_, window, _| window.remove_window());
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |_, window, _| window.remove_window());
+            });
         }
         self.clear_form_state();
         cx.notify();
@@ -992,7 +1006,7 @@ impl AppView {
                     .child(div().w(px(150.0)).flex_none().child(form_field(
                         t!("form.port").to_string(),
                         true,
-                        None,
+                        error_hint(TunnelField::Port),
                         div().w_full().child(inputs.port.clone()),
                         theme,
                     ))),
@@ -1411,7 +1425,7 @@ impl AppView {
             .items_center()
             .justify_between()
             .w_full()
-            .h(px(60.0))
+            .h(px(48.0))
             .px_6()
             .child(ghost_button(
                 "form-reset",
@@ -1669,9 +1683,9 @@ impl AppView {
         match field {
             TunnelField::Host => layer.host = text.to_string(),
             TunnelField::Port => {
-                if let Ok(port) = text.trim().parse() {
-                    layer.port = port;
-                }
+                // An empty or unparseable field clears the port (0), so validation can flag it
+                // instead of silently keeping the previous value.
+                layer.port = text.trim().parse().unwrap_or(0);
             }
             TunnelField::Username => layer.username = text.to_string(),
             TunnelField::Password => layer.password = text.to_string(),
@@ -1918,11 +1932,11 @@ fn ghost_button(
         .id(id)
         .flex()
         .items_center()
-        .h(px(38.0))
+        .h(px(28.0))
         .px_3()
-        .rounded(px(8.0))
+        .rounded(px(6.0))
         .cursor_pointer()
-        .text_size(px(13.0))
+        .text_size(px(12.5))
         .text_color(rgb(theme.text_muted))
         .hover(move |style| {
             style
@@ -1947,22 +1961,22 @@ fn outline_icon_button(
         .flex_row()
         .items_center()
         .gap_2()
-        .h(px(38.0))
-        .px_4()
-        .rounded(px(8.0))
+        .h(px(28.0))
+        .px_3()
+        .rounded(px(6.0))
         .border_1()
         .border_color(rgb(theme.border))
         .bg(rgb(theme.dialog_bg))
         .cursor_pointer()
-        .text_size(px(13.0))
+        .text_size(px(12.5))
         .text_color(rgb(theme.text))
         .hover(move |style| style.bg(rgb(theme.button_hover_bg)))
         .on_click(on_click)
         .child(
             svg()
                 .path(icon_path)
-                .w(px(15.0))
-                .h(px(15.0))
+                .w(px(14.0))
+                .h(px(14.0))
                 .text_color(rgb(theme.text)),
         )
         .child(label)
@@ -1982,20 +1996,20 @@ fn primary_icon_button(
         .flex_row()
         .items_center()
         .gap_2()
-        .h(px(38.0))
-        .px_4()
-        .rounded(px(8.0))
+        .h(px(28.0))
+        .px_3()
+        .rounded(px(6.0))
         .bg(rgb(theme.primary))
         .cursor_pointer()
-        .text_size(px(13.0))
+        .text_size(px(12.5))
         .text_color(rgb(theme.dialog_bg))
         .hover(move |style| style.opacity(0.9))
         .on_click(on_click)
         .child(
             svg()
                 .path(icon_path)
-                .w(px(15.0))
-                .h(px(15.0))
+                .w(px(14.0))
+                .h(px(14.0))
                 .text_color(rgb(theme.dialog_bg)),
         )
         .child(label)

@@ -21,6 +21,9 @@ pub const FORM_FIELDS: [FormField; 6] = [
     FormField::Database,
 ];
 
+/// Default query timeout (seconds) pre-filled on the 高级 page.
+const DEFAULT_QUERY_TIMEOUT: u64 = 30;
+
 /// The four pages of the connection window.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum FormTab {
@@ -78,7 +81,7 @@ impl Default for ConnectionForm {
             // Pre-fill the 高级 page with sensible defaults so a new connection is not blank there.
             settings: ConnectionOptions {
                 connect_timeout: Some(30),
-                query_timeout: Some(0),
+                query_timeout: Some(DEFAULT_QUERY_TIMEOUT),
                 keepalive: Some(60),
                 ..Default::default()
             },
@@ -93,6 +96,12 @@ impl ConnectionForm {
         password: Option<String>,
         password_saved: bool,
     ) -> Self {
+        let mut settings = profile.settings.clone();
+        // `Some(0)` is the old "unset" placeholder for the query timeout (the field maps a typed
+        // `0` back to `None`), so show the current default instead of a bare 0.
+        if settings.query_timeout == Some(0) {
+            settings.query_timeout = Some(DEFAULT_QUERY_TIMEOUT);
+        }
         Self {
             name: profile.name.clone(),
             host: profile.host.clone(),
@@ -101,7 +110,7 @@ impl ConnectionForm {
             password: password.unwrap_or_default(),
             save_password: password_saved,
             database: profile.database.clone().unwrap_or_default(),
-            settings: profile.settings.clone(),
+            settings,
             tab: FormTab::General,
         }
     }
