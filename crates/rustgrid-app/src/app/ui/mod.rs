@@ -6,8 +6,8 @@
 //! `AGENTS.md` under "UI conventions".
 
 use gpui::{
-    App, BoxShadow, ClickEvent, CursorStyle, Div, IntoElement, Point, SharedString, Stateful,
-    Window, div, prelude::*, px, relative, rgb, rgba, svg,
+    App, BoxShadow, ClickEvent, CursorStyle, Div, FontWeight, IntoElement, Point, SharedString,
+    Stateful, Window, div, prelude::*, px, relative, rgb, rgba, svg,
 };
 
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -196,14 +196,61 @@ pub(super) fn icon_button(
         )
 }
 
-/// A two-option segmented toggle in a bordered pill (the filter builder's `并且 | 或者`). The
-/// whole widget is a single click target, so `on_click` toggles between the two options.
+/// The chrome of a `并且/或者` pill rendered by [`segmented_toggle`]. Two presets cover the filter
+/// builder's in-group rail pill and the floating between-groups boundary pill.
+#[derive(Clone, Copy)]
+pub(super) struct TogglePillStyle {
+    pub container_pad: f32,
+    pub button_pad_x: f32,
+    pub button_pad_y: f32,
+    pub container_radius: f32,
+    pub button_radius: f32,
+    pub container_bg: u32,
+    pub container_border: u32,
+    pub shadow: bool,
+    pub text_size: f32,
+}
+
+impl TogglePillStyle {
+    /// The compact in-group rail pill (`bg-slate-100`, tight padding, no shadow).
+    pub(super) fn in_group(theme: Theme) -> Self {
+        Self {
+            container_pad: 2.0,
+            button_pad_x: 7.0,
+            button_pad_y: 2.0,
+            container_radius: 5.0,
+            button_radius: 4.0,
+            container_bg: theme.button_bg,
+            container_border: theme.button_border,
+            shadow: false,
+            text_size: 11.0,
+        }
+    }
+
+    /// The floating between-groups pill (`bg-white`, looser padding, soft shadow).
+    pub(super) fn boundary(theme: Theme) -> Self {
+        Self {
+            container_pad: 2.0,
+            button_pad_x: 8.0,
+            button_pad_y: 2.0,
+            container_radius: 6.0,
+            button_radius: 5.0,
+            container_bg: theme.dialog_bg,
+            container_border: theme.border,
+            shadow: true,
+            text_size: 11.0,
+        }
+    }
+}
+
+/// A two-option segmented toggle (the filter builder's `并且 | 或者`). The whole widget is a single
+/// click target, so `on_click` toggles between the two options.
 pub(super) fn segmented_toggle(
     id: impl Into<SharedString>,
     first: String,
     second: String,
     second_active: bool,
-    width: f32,
+    style: TogglePillStyle,
     theme: Theme,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
@@ -212,24 +259,26 @@ pub(super) fn segmented_toggle(
         .flex()
         .flex_row()
         .items_center()
-        .w(px(width))
-        .h(px(20.0))
+        .p(px(style.container_pad))
         .flex_none()
-        .overflow_hidden()
+        .rounded(px(style.container_radius))
         .border_1()
-        .border_color(rgb(theme.button_border))
-        .bg(rgb(theme.button_bg))
+        .border_color(rgb(style.container_border))
+        .bg(rgb(style.container_bg))
+        .when(style.shadow, |this| this.shadow(soft_shadow()))
         .cursor_pointer()
         .on_click(on_click);
     for (label, active) in [(first, !second_active), (second, second_active)] {
         toggle = toggle.child(
             div()
-                .flex_1()
-                .h_full()
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(px(11.0))
+                .px(px(style.button_pad_x))
+                .py(px(style.button_pad_y))
+                .rounded(px(style.button_radius))
+                .text_size(px(style.text_size))
+                .font_weight(FontWeight::BOLD)
                 .when(active, move |style| {
                     style.bg(rgb(theme.primary)).text_color(rgb(0xffffff))
                 })
@@ -267,6 +316,18 @@ pub(super) fn pane_resize_divider(id: impl Into<SharedString>, theme: Theme) -> 
         .h_full()
         .cursor(CursorStyle::ResizeLeftRight)
         .bg(rgb(theme.border))
+        .hover(move |style| style.bg(rgb(theme.primary)))
+}
+
+/// Like [`pane_resize_divider`] but invisible until hovered, for surfaces (the filter builder)
+/// where an always-on divider reads as a scrollbar.
+pub(super) fn hover_resize_divider(id: impl Into<SharedString>, theme: Theme) -> Stateful<Div> {
+    div()
+        .id(id.into())
+        .flex_none()
+        .w(px(super::PANE_DIVIDER_WIDTH))
+        .h_full()
+        .cursor(CursorStyle::ResizeLeftRight)
         .hover(move |style| style.bg(rgb(theme.primary)))
 }
 
@@ -373,6 +434,21 @@ pub(super) fn dialog_shadow() -> Vec<BoxShadow> {
         },
         blur_radius: px(18.0),
         spread_radius: px(0.0),
+        inset: false,
+    }]
+}
+
+/// The very soft shadow used by the filter builder's cards and floating pills, matching the
+/// reference design's `shadow-[0_2px_8px_-2px_rgba(15,23,42,0.06)]`.
+pub(super) fn soft_shadow() -> Vec<BoxShadow> {
+    vec![BoxShadow {
+        color: rgba(0x0f172a0f).into(),
+        offset: Point {
+            x: px(0.0),
+            y: px(2.0),
+        },
+        blur_radius: px(8.0),
+        spread_radius: px(-2.0),
         inset: false,
     }]
 }

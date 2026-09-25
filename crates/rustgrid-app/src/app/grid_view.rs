@@ -37,6 +37,10 @@ impl GridView {
             filter_active: None,
             filter_field_combos: BTreeMap::new(),
             filter_operator_combos: BTreeMap::new(),
+            filter_width: None,
+            filter_available_width: 0.0,
+            filter_rendered_width: FILTER_CONTENT_WIDTH_DEFAULT,
+            filter_resize: None,
             page_input,
             page_input_focus: cx.focus_handle(),
             page_input_focused: false,
@@ -664,6 +668,7 @@ impl Render for GridView {
             this.grid_hscroll_drag(event, cx);
             this.grid_vscroll_drag(event, cx);
             this.grid_column_drag(event, cx);
+            this.filter_resize_drag(event, cx);
         }))
         .on_mouse_up(
             MouseButton::Left,
@@ -671,7 +676,8 @@ impl Render for GridView {
                 let h = this.hscroll_grab.take().is_some();
                 let v = this.vscroll_grab.take().is_some();
                 let c = this.column_resize.take().is_some();
-                if h || v || c {
+                let f = this.filter_resize.take().is_some();
+                if h || v || c || f {
                     cx.notify();
                 }
             }),

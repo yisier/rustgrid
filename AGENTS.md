@@ -171,12 +171,13 @@ touching UI code.
   `popup_panel`. gpui-kit's own `Combobox`/`Select`/`Popover` already occlude, so they are fine.
 - **Dropdowns share one style: search on top, a check mark on the selected row.** gpui-kit's
   `Combobox` (via `ui::ComboBox`) already renders a searchable list and a right-aligned check that
-  is invisible when unselected (so rows never shift). `ui::ComboBox` is pinned to the kit's
-  `Size::XSmall` (20px, 12px text) so every dropdown in the project is the same compact size; do
-  not override it per call site. The table designer's type dropdown
-  (`design_view.rs::render_type_combo`) is hand-built and must mirror this: a 20px `ui::TextInput`
-  search (`TextInputOptions { size: Some(Size::XSmall), .. }`) above 20px rows, and an
-  `icons/check.svg` on the right of the selected row, `opacity(0)` on the others.
+  is invisible when unselected (so rows never shift). `ui::ComboBox` defaults to the kit's
+  `Size::XSmall` (20px, 12px text) so every dropdown in the project is the same compact size; the
+  filter builder is the one exception and opts into the design's taller trigger via
+  `ComboBox::height` / `text_size` / `radius`. The table designer's type dropdown
+  (`design_view.rs::render_type_combo`) is hand-built and must mirror the compact default: a 20px
+  `ui::TextInput` search (`TextInputOptions { size: Some(Size::XSmall), .. }`) above 20px rows, and
+  an `icons/check.svg` on the right of the selected row, `opacity(0)` on the others.
 - Keep dialog controls compact: 12px text, ~24px-high buttons, compact text fields. gpui-kit's
   sizing defaults are larger than the app's metrics, so `ui::TextInput` renders the kit input at
   `Size::Small`, disables the kit's focus ring (the "shadow" that otherwise floats over the field)
@@ -373,10 +374,16 @@ make more engines cheap later — do not build those features early.
   **path** (`Vec<usize>`, indices from the root) — keep that in sync when adding node operations.
   `rustgrid-mysql::filter_clause` and `session.rs::filter_display_clause` recurse over the tree,
   skip disabled/incomplete nodes, drop groups left empty, and must keep bind order identical to the
-  rendered `?` placeholders. Row layout: the first condition of a group is flush left (no
-  conjunction gutter); later conditions show the `并且/或者` toggle in that gutter. A group's
-  boundary row reuses the group's indent, centres its controls under the operator (`=`) column, and
-  reveals the `+`/`−` group actions only on hover (`group_hover`).
+  rendered `?` placeholders. The filter builder is a compact take on the reference design: 28px
+  controls, an 84px left rail holding the in-group `并且/或者` pill beside each condition after the
+  first, and 26px `−`/`+` row actions. Each group is a bordered card (12px radius/padding, 8px
+  gaps); between cards runs a 36px connector — a full-width hairline with the floating `并且/或者`
+  pill centred on it, bound to the **next** group's conjunction, and 22px `−`/`+` actions revealed
+  on hover to its right (in a balanced slot so the pill never shifts). The connector after the last
+  group has no next group to join, so its pill stays hidden until hovered; condition-row actions are
+  always visible. The condition block fills the pane (responsive) up to 700px; the hover-only
+  divider on its right edge (so it does not read as a scrollbar) drags a manual width (min 520,
+  max 700) and double-clicking it restores auto-fit (`filter_resize_drag`).
 
 - `rustgrid-mysql::map_connect_error` flags authentication failures as
   `rustgrid_core::Error::Authentication` by checking `MySqlDatabaseError::number()`

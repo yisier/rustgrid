@@ -73,6 +73,11 @@ pub(crate) struct ComboBox {
     field_width: Option<f32>,
     /// Stretches the trigger field to fill its parent instead of sizing to its content.
     full_width: bool,
+    /// Optional trigger height / text size / corner radius overrides (the filter builder renders
+    /// its selects taller than the app's compact default).
+    height: Option<f32>,
+    text_size: Option<f32>,
+    radius: Option<f32>,
     enabled: bool,
     placeholder: SharedString,
     icon: Option<(&'static str, u32)>,
@@ -101,6 +106,9 @@ impl ComboBox {
             width,
             field_width: None,
             full_width: false,
+            height: None,
+            text_size: None,
+            radius: None,
             enabled: true,
             placeholder: SharedString::default(),
             icon: None,
@@ -130,6 +138,24 @@ impl ComboBox {
     /// width of the text fields above it).
     pub(crate) fn full_width(mut self) -> Self {
         self.full_width = true;
+        self
+    }
+
+    /// Overrides the trigger height (the filter builder renders its selects at 40px).
+    pub(crate) fn height(mut self, height: f32) -> Self {
+        self.height = Some(height);
+        self
+    }
+
+    /// Overrides the trigger's font size, independent of the height.
+    pub(crate) fn text_size(mut self, size: f32) -> Self {
+        self.text_size = Some(size);
+        self
+    }
+
+    /// Overrides the trigger's corner radius.
+    pub(crate) fn radius(mut self, radius: f32) -> Self {
+        self.radius = Some(radius);
         self
     }
 
@@ -259,6 +285,15 @@ impl Render for ComboBox {
             .disabled(!self.enabled)
             .focus_ring(false)
             .xsmall();
+        if let Some(height) = self.height {
+            combo = combo.h(px(height));
+        }
+        if let Some(size) = self.text_size {
+            combo = combo.text_size(px(size));
+        }
+        if let Some(radius) = self.radius {
+            combo = combo.rounded(px(radius));
+        }
         if let Some((icon, color)) = self.icon {
             combo = combo.icon(Icon::default().path(icon).text_color(rgb(color)));
         }

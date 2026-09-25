@@ -882,13 +882,16 @@ impl GridView {
             .map(|column| column.name.clone())
             .unwrap_or_default();
         let entity = cx.new(move |cx| {
-            ComboBox::new(theme, options, selected, FILTER_FIELD_WIDTH, cx).on_select(Rc::new(
-                move |value, _window, cx| {
+            ComboBox::new(theme, options, selected, FILTER_FIELD_WIDTH, cx)
+                .field_width(FILTER_FIELD_WIDTH)
+                .height(FILTER_CONTROL_HEIGHT)
+                .text_size(FILTER_CONTROL_TEXT_SIZE)
+                .radius(FILTER_CONTROL_RADIUS)
+                .on_select(Rc::new(move |value, _window, cx| {
                     let _ = weak.update(cx, |grid, cx| {
                         grid.filter_choose_field(callback_path.clone(), value.to_string(), cx);
                     });
-                },
-            ))
+                }))
         });
         self.filter_field_combos.insert(key, entity.clone());
         entity
@@ -915,8 +918,12 @@ impl GridView {
             })
             .collect();
         let entity = cx.new(move |cx| {
-            ComboBox::new(theme, options, "0", FILTER_OPERATOR_WIDTH, cx).on_select(Rc::new(
-                move |value, _window, cx| {
+            ComboBox::new(theme, options, "0", FILTER_OPERATOR_WIDTH, cx)
+                .field_width(FILTER_OPERATOR_WIDTH)
+                .height(FILTER_CONTROL_HEIGHT)
+                .text_size(FILTER_CONTROL_TEXT_SIZE)
+                .radius(FILTER_CONTROL_RADIUS)
+                .on_select(Rc::new(move |value, _window, cx| {
                     let Ok(index) = value.parse::<usize>() else {
                         return;
                     };
@@ -926,8 +933,7 @@ impl GridView {
                     let _ = weak.update(cx, |grid, cx| {
                         grid.filter_choose_operator(callback_path.clone(), operator, cx);
                     });
-                },
-            ))
+                }))
         });
         self.filter_operator_combos.insert(key, entity.clone());
         entity

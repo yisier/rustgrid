@@ -981,6 +981,16 @@ struct GridView {
     /// any structural change so the paths stay valid.
     filter_field_combos: BTreeMap<Vec<usize>, Entity<ComboBox>>,
     filter_operator_combos: BTreeMap<Vec<usize>, Entity<ComboBox>>,
+    /// Width of the filter-condition block. `None` fills the pane (responsive); `Some` is a width
+    /// pinned by dragging the divider on its right edge.
+    filter_width: Option<f32>,
+    /// The pane width available to the filter list, measured each frame; drives the responsive
+    /// `None` width.
+    filter_available_width: f32,
+    /// The block's last rendered width, used as the anchor when a drag starts.
+    filter_rendered_width: f32,
+    /// `(pointer x, width)` captured when the filter-width drag started.
+    filter_resize: Option<(f32, f32)>,
 
     page_input: String,
     page_input_focus: FocusHandle,
@@ -1167,12 +1177,30 @@ pub(super) const INFO_MAX_WIDTH: f32 = 640.0;
 pub(super) const PANE_DIVIDER_WIDTH: f32 = 5.0;
 const GRID_ROW_HEIGHT: f32 = 24.0;
 const GRID_COLUMN_WIDTH: f32 = 120.0;
-/// Fixed column widths of a filter condition row. The filter builder's group boundary row reuses
-/// them to line its controls up under the operator column.
-const FILTER_TOGGLE_WIDTH: f32 = 78.0;
-const FILTER_FIELD_WIDTH: f32 = 170.0;
-const FILTER_OPERATOR_WIDTH: f32 = 150.0;
-const FILTER_VALUE_WIDTH: f32 = 200.0;
+/// Filter-builder metrics, a compact take on the reference design: 24px controls, an 80px left
+/// rail for the in-group `并且/或者` pill, 22px row actions, and a 30px between-groups bar carrying
+/// the floating pill with 20px actions in a balanced slot.
+const FILTER_CONTROL_HEIGHT: f32 = 24.0;
+const FILTER_CONTROL_TEXT_SIZE: f32 = 12.0;
+const FILTER_CONTROL_RADIUS: f32 = 6.0;
+const FILTER_RAIL_WIDTH: f32 = 80.0;
+const FILTER_FIELD_WIDTH: f32 = 120.0;
+const FILTER_OPERATOR_WIDTH: f32 = 90.0;
+/// Minimum width of the value field (it stretches to fill the rest of the row).
+const FILTER_VALUE_WIDTH: f32 = 110.0;
+const FILTER_ROW_ACTION_SIZE: f32 = 22.0;
+const FILTER_ROW_ACTION_RADIUS: f32 = 6.0;
+const FILTER_BOUNDARY_BAR_HEIGHT: f32 = 30.0;
+const FILTER_BOUNDARY_ACTION_SIZE: f32 = 20.0;
+const FILTER_BOUNDARY_ACTION_RADIUS: f32 = 4.0;
+/// One side of the boundary bar's balanced slot (two 20px actions + their 4px gap).
+const FILTER_BOUNDARY_ACTION_SLOT: f32 = 44.0;
+/// The filter content fills the pane (responsive) up to this cap so a very wide window does not
+/// stretch the value field and fling the row actions to the far edge. The divider on the block's
+/// right edge drags a manual width between the min and max; double-clicking it restores auto-fit.
+const FILTER_CONTENT_WIDTH_DEFAULT: f32 = 700.0;
+const FILTER_CONTENT_WIDTH_MIN: f32 = 520.0;
+const FILTER_CONTENT_WIDTH_MAX: f32 = 700.0;
 /// Clamp for a column dragged to its narrowest/widest.
 const MIN_COLUMN_WIDTH: f32 = 32.0;
 const MAX_COLUMN_WIDTH: f32 = 1200.0;

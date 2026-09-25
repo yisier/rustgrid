@@ -4,12 +4,21 @@ use super::*;
 /// The per-row actions of the filter builder.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FilterAction {
-    /// Remove the node.
+    /// Remove the node (a condition row or a group).
     Remove,
-    /// Add a condition child (inside a group) or sibling.
+    /// Add a condition inside the group that owns the row (the condition row's `+`).
     AddCondition,
-    /// Add a nested group child (inside a group) or sibling.
+    /// Add the next sibling group after the group whose boundary row owns the button.
     AddGroup,
+}
+
+/// The left rail cell of a filter row: the `并且/或者` toggle that joins the row to its previous
+/// sibling, a plain indent for the first row of a group, or nothing at the root.
+#[derive(Clone, Copy)]
+enum FilterRail {
+    None,
+    Spacer,
+    Toggle(FilterConjunction),
 }
 
 /// A stable string form of a filter node path, for element ids.
@@ -394,61 +403,128 @@ impl GridView {
             .id("filter-condition-list")
             .flex()
             .flex_col()
+            .gap_2()
             .flex_none()
             .min_h(px(46.0))
-            .max_h(px(224.0))
-            .px_2()
-            .py_1()
+            .max_h(px(300.0))
+            .px_4()
+            .py_2()
             .overflow_y_scroll();
 
-        if self.state.filter_draft.is_empty() {
-            list = list.child(
-                div()
-                    .id("filter-add-hint")
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_1()
-                    .px_2()
-                    .h(px(24.0))
-                    .w_full()
-                    .flex_none()
-                    .bg(rgb(theme.tree_hover_bg))
-                    .cursor_pointer()
-                    .hover(move |style| style.bg(rgb(theme.tree_selected_bg)))
-                    .on_click(cx.listener(|this, _event, _window, cx| {
-                        this.filter_add_condition(Vec::new(), cx);
-                    }))
-                    .child(sort_plus_badge(theme))
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(rgb(theme.text_muted))
-                            .child(t!("grid.filter_hint").to_string()),
-                    ),
-            );
+        let content: AnyElement = if self.state.filter_draft.is_empty() {
+            div()
+                .id("filter-add-hint")
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .px_4()
+                .h(px(36.0))
+                .w_full()
+                .flex_none()
+                .rounded(px(12.0))
+                .bg(rgb(theme.dialog_bg))
+                .border_1()
+                .border_color(rgb(theme.border))
+                .cursor_pointer()
+                .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                .on_click(cx.listener(|this, _event, _window, cx| {
+                    this.filter_add_condition(Vec::new(), cx);
+                }))
+                .child(sort_plus_badge(theme))
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(theme.text_muted))
+                        .child(t!("grid.filter_hint").to_string()),
+                )
+                .into_any_element()
         } else {
             let draft = self.state.filter_draft.clone();
-            list = list.child(self.render_filter_children(&draft, &mut Vec::new(), cx));
-        }
+            self.render_filter_children(&draft, &mut Vec::new(), false, cx)
+        };
+
+        // The condition block fills the pane by default (responsive) and freezes to a dragged width
+        // once the divider on its right edge is used. The pane width is measured from the full-width
+        // row each frame, so the block tracks window resizes.
+        let auto_width = if self.filter_available_width > 1.0 {
+            self.filter_available_width.min(FILTER_CONTENT_WIDTH_MAX)
+        } else {
+            FILTER_CONTENT_WIDTH_MAX
+        };
+        let width = self.filter_width.unwrap_or(auto_width);
+
+        let measure = cx.weak_entity();
+        let block =
+            div()
+                .flex_none()
+                .w(px(width))
+                .on_children_prepainted(move |bounds, _window, cx| {
+                    let Some(rect) = bounds.first().copied() else {
+                        return;
+                    };
+                    let rendered = f32::from(rect.size.width);
+                    let _ = measure.update(cx, |grid, _cx| grid.filter_rendered_width = rendered);
+                });
+
+        let avail = cx.weak_entity();
+        let row = div()
+            .flex()
+            .flex_row()
+            .items_stretch()
+            .w_full()
+            .flex_none()
+            .child(block.child(content))
+            .child(
+                ui::hover_resize_divider("filter-content-divider", theme)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                            this.filter_resize =
+                                Some((f32::from(event.position.x), this.filter_rendered_width));
+                            cx.notify();
+                        }),
+                    )
+                    .on_click(cx.listener(|this, event: &ClickEvent, _window, cx| {
+                        if matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2)
+                        {
+                            this.filter_width = None;
+                            cx.notify();
+                        }
+                    })),
+            );
+        list = list.child(
+            div()
+                .on_children_prepainted(move |bounds, _window, cx| {
+                    let Some(rect) = bounds.first().copied() else {
+                        return;
+                    };
+                    let width = f32::from(rect.size.width);
+                    let _ = avail.update(cx, |grid, cx| {
+                        if (grid.filter_available_width - width).abs() > 0.5 {
+                            grid.filter_available_width = width;
+                            cx.notify();
+                        }
+                    });
+                })
+                .child(row),
+        );
 
         let footer = div()
             .flex()
             .flex_row()
             .items_center()
             .gap_2()
-            .px_1()
-            .h(px(26.0))
+            .px_4()
+            .h(px(30.0))
             .flex_none()
-            .border_t_1()
-            .border_color(rgb(theme.border))
             .child(self.filter_apply_button(cx));
 
         div()
             .flex()
             .flex_col()
             .flex_none()
-            .bg(rgb(theme.editor_bg))
+            .bg(rgb(theme.header_bg))
             .border_b_1()
             .border_color(rgb(theme.border))
             .child(list)
@@ -456,19 +532,44 @@ impl GridView {
             .into_any_element()
     }
 
-    /// Render one level of filter nodes as a column. Siblings are separated by a horizontally
-    /// centred `并且/或者` toggle (bound to the following node's conjunction); a group node is drawn
-    /// as a bordered box around its own children.
+    /// Drag the divider on the filter block's right edge to resize it.
+    pub(super) fn filter_resize_drag(
+        &mut self,
+        event: &MouseMoveEvent,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some((start_x, start_width)) = self.filter_resize else {
+            return;
+        };
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.filter_resize = None;
+            cx.notify();
+            return;
+        }
+        let delta = f32::from(event.position.x) - start_x;
+        self.filter_width =
+            Some((start_width + delta).clamp(FILTER_CONTENT_WIDTH_MIN, FILTER_CONTENT_WIDTH_MAX));
+        cx.notify();
+    }
+
+    /// Render one level of filter nodes as a column.
+    ///
+    /// Inside a group (`in_group`) each condition row after the first carries its `并且/或者` toggle
+    /// in a left gutter, so no separate full-width row is spent on it. A group's outgoing boundary
+    /// (the toggle joining the *next* group plus the next-group actions) is rendered as its own
+    /// centred row *between* the group cards, not inside either card.
     fn render_filter_children(
         &mut self,
         nodes: &[FilterNode],
         prefix: &mut Vec<usize>,
+        in_group: bool,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let mut column = div().flex().flex_col().gap_1().w_full();
         for (index, node) in nodes.iter().enumerate() {
             prefix.push(index);
-            if index > 0 {
+            if index > 0 && !in_group && !matches!(nodes[index - 1], FilterNode::Group(_)) {
+                // Only root conditions need a standalone boundary row of their own.
                 column = column.child(self.render_filter_conjunction_row(
                     prefix,
                     node.conjunction(),
@@ -477,11 +578,28 @@ impl GridView {
             }
             match node {
                 FilterNode::Condition(_) => {
-                    column = column.child(self.render_filter_condition_row(prefix, node, cx));
+                    let rail = if in_group {
+                        if index == 0 {
+                            FilterRail::Spacer
+                        } else {
+                            FilterRail::Toggle(node.conjunction())
+                        }
+                    } else {
+                        FilterRail::None
+                    };
+                    column = column.child(self.render_filter_condition_row(prefix, node, rail, cx));
                 }
                 FilterNode::Group(group) => {
                     column =
                         column.child(self.render_filter_group_box(prefix, &group.children, cx));
+                    let next = nodes.get(index + 1).map(|next| {
+                        let mut next_path = prefix.clone();
+                        if let Some(last) = next_path.last_mut() {
+                            *last = index + 1;
+                        }
+                        (next_path, next.conjunction())
+                    });
+                    column = column.child(self.render_filter_boundary_row(prefix, next, cx));
                 }
             }
             prefix.pop();
@@ -489,7 +607,103 @@ impl GridView {
         column.into_any_element()
     }
 
-    /// The centred `并且/或者` row shown between two siblings.
+    /// The between-groups connector: a full-width hairline with the floating `并且/或者` pill centred
+    /// on it, and the `−`/`+` next-group actions revealed on hover to the pill's right. The actions
+    /// sit in a fixed slot balanced on the left so the pill never shifts.
+    fn render_filter_boundary_row(
+        &self,
+        path: &[usize],
+        next: Option<(Vec<usize>, FilterConjunction)>,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let theme = self.theme;
+        let path = path.to_vec();
+        let key = filter_path_key(&path);
+        let (toggle_path, toggle_conjunction, toggle_enabled) = match &next {
+            Some((next_path, conjunction)) => (next_path.clone(), *conjunction, true),
+            None => (path.clone(), FilterConjunction::And, false),
+        };
+        let hover_group = SharedString::from(format!("filter-boundary-hover-{key}"));
+        let toggle = self.filter_conjunction_toggle(
+            SharedString::from(format!("filter-boundary-toggle-{key}")),
+            &toggle_path,
+            toggle_conjunction,
+            ui::TogglePillStyle::boundary(theme),
+            toggle_enabled,
+            cx,
+        );
+        // The trailing connector (no next group yet) keeps its pill out of the way until hovered,
+        // so the panel does not end on a dangling `并且/或者`.
+        let toggle = if toggle_enabled {
+            toggle.into_any_element()
+        } else {
+            toggle
+                .opacity(0.0)
+                .group_hover(hover_group.clone(), |style| style.opacity(1.0))
+                .into_any_element()
+        };
+        let actions = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(4.0))
+            .flex_none()
+            .opacity(0.0)
+            .group_hover(hover_group.clone(), |style| style.opacity(1.0))
+            .child(self.filter_row_action(
+                &path,
+                FilterAction::Remove,
+                FILTER_BOUNDARY_ACTION_SIZE,
+                FILTER_BOUNDARY_ACTION_RADIUS,
+                cx,
+            ))
+            .child(self.filter_row_action(
+                &path,
+                FilterAction::AddGroup,
+                FILTER_BOUNDARY_ACTION_SIZE,
+                FILTER_BOUNDARY_ACTION_RADIUS,
+                cx,
+            ));
+
+        div()
+            .id(SharedString::from(format!("filter-boundary-{key}")))
+            .group(hover_group)
+            .relative()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_center()
+            .w_full()
+            .h(px(FILTER_BOUNDARY_BAR_HEIGHT))
+            .flex_none()
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top(px((FILTER_BOUNDARY_BAR_HEIGHT - 1.0) / 2.0))
+                    .h(px(1.0))
+                    .bg(rgb(theme.border)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(div().w(px(FILTER_BOUNDARY_ACTION_SLOT)).flex_none())
+                    .child(toggle)
+                    .child(
+                        div()
+                            .w(px(FILTER_BOUNDARY_ACTION_SLOT))
+                            .flex_none()
+                            .child(actions),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// The centred `并且/或者` row shown between two siblings outside a group.
     fn render_filter_conjunction_row(
         &self,
         path: &[usize],
@@ -501,22 +715,29 @@ impl GridView {
             .flex()
             .flex_row()
             .items_center()
+            .justify_center()
             .gap_2()
             .w_full()
-            .px_2()
-            .h(px(22.0))
+            .py_1()
             .flex_none()
-            .child(div().flex_1().h(px(1.0)).bg(rgb(theme.border)))
-            .child(self.filter_conjunction_toggle(path, conjunction, cx))
-            .child(div().flex_1().h(px(1.0)).bg(rgb(theme.border)))
+            .child(self.filter_conjunction_toggle(
+                SharedString::from(format!("filter-conjunction-{}", filter_path_key(path))),
+                path,
+                conjunction,
+                ui::TogglePillStyle::in_group(theme),
+                true,
+                cx,
+            ))
             .into_any_element()
     }
 
-    /// One condition row: `field op value ... [−][+]`, with the actions revealed on hover.
+    /// One condition row: `[rail] field op value ... [−][+]`, where the rail holds the `并且/或者`
+    /// toggle joining this row to the previous one inside a group.
     fn render_filter_condition_row(
         &mut self,
         path: &[usize],
         node: &FilterNode,
+        rail: FilterRail,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let theme = self.theme;
@@ -525,7 +746,6 @@ impl GridView {
         let FilterNode::Condition(condition) = node else {
             return div().into_any_element();
         };
-        let hover_group = SharedString::from(format!("filter-row-hover-{key}"));
 
         let field_options: Vec<ComboOption> = self
             .state
@@ -551,16 +771,37 @@ impl GridView {
 
         let mut row = div()
             .id(SharedString::from(format!("filter-row-{key}")))
-            .group(hover_group.clone())
             .flex()
             .flex_row()
             .items_center()
-            .gap_2()
-            .w_full()
-            .px_2()
-            .py_1()
-            .rounded(px(6.0))
-            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            .gap_3()
+            .w_full();
+        match rail {
+            FilterRail::None => {}
+            FilterRail::Spacer => {
+                row = row.child(div().w(px(FILTER_RAIL_WIDTH)).flex_none());
+            }
+            FilterRail::Toggle(conjunction) => {
+                row = row.child(
+                    div()
+                        .w(px(FILTER_RAIL_WIDTH))
+                        .flex_none()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_end()
+                        .child(self.filter_conjunction_toggle(
+                            SharedString::from(format!("filter-conjunction-{key}")),
+                            &path,
+                            conjunction,
+                            ui::TogglePillStyle::in_group(theme),
+                            true,
+                            cx,
+                        )),
+                );
+            }
+        }
+        row = row
             .child(field)
             .child(operator)
             .child(self.render_filter_value(&path, 0, cx));
@@ -568,30 +809,40 @@ impl GridView {
             row = row
                 .child(
                     div()
-                        .text_size(px(11.0))
+                        .text_size(px(12.0))
                         .text_color(rgb(theme.text_muted))
                         .child(t!("filter.between").to_string()),
                 )
                 .child(self.render_filter_value(&path, 1, cx));
         }
-        row = row.child(div().flex_1()).child(
+        row = row.child(
             div()
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap_1()
+                .gap(px(4.0))
                 .flex_none()
-                .opacity(0.0)
-                .group_hover(hover_group, |style| style.opacity(1.0))
-                .child(self.filter_row_action(&path, FilterAction::Remove, cx))
-                .child(self.filter_row_action(&path, FilterAction::AddCondition, cx)),
+                .child(self.filter_row_action(
+                    &path,
+                    FilterAction::Remove,
+                    FILTER_ROW_ACTION_SIZE,
+                    FILTER_ROW_ACTION_RADIUS,
+                    cx,
+                ))
+                .child(self.filter_row_action(
+                    &path,
+                    FilterAction::AddCondition,
+                    FILTER_ROW_ACTION_SIZE,
+                    FILTER_ROW_ACTION_RADIUS,
+                    cx,
+                )),
         );
 
         row.into_any_element()
     }
 
-    /// A group node: a bordered box around its children, with its own add/remove actions in a
-    /// footer revealed on hover.
+    /// A group node: a bordered card around its children. Its outgoing boundary (`并且/或者` plus
+    /// the next-group actions) is drawn as a separate row by [`Self::render_filter_children`].
     fn render_filter_group_box(
         &mut self,
         path: &[usize],
@@ -601,64 +852,60 @@ impl GridView {
         let theme = self.theme;
         let path: Vec<usize> = path.to_vec();
         let key = filter_path_key(&path);
-        let hover_group = SharedString::from(format!("filter-group-hover-{key}"));
-        let body = self.render_filter_children(children, &mut path.clone(), cx);
-        let actions = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_1()
-            .flex_none()
-            .opacity(0.0)
-            .group_hover(hover_group.clone(), |style| style.opacity(1.0))
-            .child(self.filter_row_action(&path, FilterAction::AddCondition, cx))
-            .child(self.filter_row_action(&path, FilterAction::AddGroup, cx))
-            .child(self.filter_row_action(&path, FilterAction::Remove, cx));
+        let body = self.render_filter_children(children, &mut path.clone(), true, cx);
 
         div()
             .id(SharedString::from(format!("filter-group-{key}")))
-            .group(hover_group)
             .flex()
             .flex_col()
-            .gap_1()
+            .gap_2()
             .w_full()
-            .p_2()
-            .rounded(px(6.0))
+            .p_3()
+            .rounded(px(12.0))
+            .bg(rgb(theme.dialog_bg))
             .border_1()
             .border_color(rgb(theme.border))
+            .shadow(ui::soft_shadow())
             .child(body)
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .justify_end()
-                    .items_center()
-                    .h(px(18.0))
-                    .flex_none()
-                    .child(actions),
-            )
             .into_any_element()
     }
 
+    /// A `并且/或者` segmented toggle. `id` must be unique within the panel (the same node can be
+    /// targeted by both its own rail row and a group's boundary footer). `enabled` is false for the
+    /// last group's boundary, where there is no next group to join yet.
     fn filter_conjunction_toggle(
         &self,
+        id: SharedString,
         path: &[usize],
         conjunction: FilterConjunction,
+        style: ui::TogglePillStyle,
+        enabled: bool,
         cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
+    ) -> Stateful<Div> {
         let theme = self.theme;
         let path = path.to_vec();
-        ui::segmented_toggle(
-            SharedString::from(format!("filter-conjunction-{}", filter_path_key(&path))),
-            t!(FilterConjunction::And.label_key()).to_string(),
-            t!(FilterConjunction::Or.label_key()).to_string(),
-            conjunction == FilterConjunction::Or,
-            FILTER_TOGGLE_WIDTH,
-            theme,
-            cx.listener(move |this, _event, _window, cx| {
-                this.filter_toggle_conjunction(path.clone(), cx);
-            }),
-        )
+        let and = t!(FilterConjunction::And.label_key()).to_string();
+        let or = t!(FilterConjunction::Or.label_key()).to_string();
+        let second_active = conjunction == FilterConjunction::Or;
+        let mut toggle = if enabled {
+            ui::segmented_toggle(
+                id,
+                and,
+                or,
+                second_active,
+                style,
+                theme,
+                cx.listener(move |this, _event, _window, cx| {
+                    this.filter_toggle_conjunction(path.clone(), cx);
+                }),
+            )
+        } else {
+            ui::segmented_toggle(id, and, or, second_active, style, theme, |_, _, _| {})
+        };
+        if !enabled {
+            toggle = toggle.opacity(0.45);
+        }
+        toggle
     }
 
     fn render_filter_value(
@@ -709,12 +956,12 @@ impl GridView {
             .flex()
             .flex_row()
             .items_center()
-            .w(px(FILTER_VALUE_WIDTH))
-            .h(px(20.0))
-            .flex_none()
-            .pl(px(2.0))
-            .pr(px(2.0))
+            .flex_1()
+            .min_w(px(FILTER_VALUE_WIDTH))
+            .h(px(FILTER_CONTROL_HEIGHT))
+            .px_2()
             .text_size(px(12.0))
+            .rounded(px(FILTER_CONTROL_RADIUS))
             .overflow_hidden();
         if enabled {
             if let Some(handle) = handle {
@@ -736,58 +983,83 @@ impl GridView {
                 .bg(rgb(theme.dialog_face))
                 .text_color(rgb(theme.text_muted));
         }
+        let placeholder = enabled && value.is_empty() && !focused;
+        let content = if placeholder {
+            div()
+                .text_color(rgb(theme.text_null))
+                .child(t!("filter.value_placeholder").to_string())
+        } else {
+            div().child(value)
+        };
         field.child(
             div()
                 .flex()
                 .flex_row()
                 .items_center()
-                .child(value)
+                .child(content)
                 .when(focused, move |style| {
                     style.child(div().w(px(1.5)).h(px(13.0)).flex_none().bg(rgb(theme.text)))
                 }),
         )
     }
 
+    /// One `−` / `+` action of the filter builder, drawn in the design's flat outlined style.
+    #[allow(clippy::too_many_arguments)]
     fn filter_row_action(
         &self,
         path: &[usize],
         action: FilterAction,
+        size: f32,
+        radius: f32,
         cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
+    ) -> Stateful<Div> {
         let theme = self.theme;
         let path = path.to_vec();
         let key = filter_path_key(&path);
         let (icon, color, id) = match action {
             FilterAction::AddCondition => (
                 "icons/plus.svg",
-                theme.icon_backups,
+                theme.text_muted,
                 format!("filter-add-condition-{key}"),
             ),
             FilterAction::AddGroup => (
-                "icons/folder.svg",
-                theme.icon_backups,
+                "icons/plus.svg",
+                theme.text_muted,
                 format!("filter-add-group-{key}"),
             ),
             FilterAction::Remove => (
                 "icons/minus.svg",
-                theme.danger,
+                theme.text_null,
                 format!("filter-remove-{key}"),
             ),
         };
-        ui::icon_button(
-            SharedString::from(id),
-            icon,
-            color,
-            18.0,
-            18.0,
-            false,
-            theme,
-            cx.listener(move |this, _event, _window, cx| match action {
+        div()
+            .id(SharedString::from(id))
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(size))
+            .h(px(size))
+            .flex_none()
+            .rounded(px(radius))
+            .border_1()
+            .border_color(rgb(theme.border))
+            .bg(rgb(theme.dialog_bg))
+            .cursor_pointer()
+            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            .on_click(cx.listener(move |this, _event, _window, cx| match action {
                 FilterAction::AddCondition => this.filter_add_condition(path.clone(), cx),
                 FilterAction::AddGroup => this.filter_add_group(path.clone(), cx),
                 FilterAction::Remove => this.filter_remove_node(path.clone(), cx),
-            }),
-        )
+            }))
+            .child(
+                svg()
+                    .path(icon)
+                    .w(px(size * 0.5))
+                    .h(px(size * 0.5))
+                    .flex_none()
+                    .text_color(rgb(color)),
+            )
     }
 
     fn filter_apply_button(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
