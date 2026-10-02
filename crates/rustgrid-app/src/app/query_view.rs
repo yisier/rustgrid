@@ -3,16 +3,20 @@ use super::*;
 
 impl AppView {
     pub(super) fn render_query_view(
-        &self,
-        query: &QueryTab,
+        &mut self,
+        query_index: usize,
         _window: &Window,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
-        if query.routine.is_some() {
-            return self.render_routine_view(query, cx);
+        let (is_routine, is_view) = match self.queries.get(query_index) {
+            Some(query) => (query.routine.is_some(), query.view.is_some()),
+            None => return div().into_any_element(),
+        };
+        if is_routine {
+            return self.render_routine_view(query_index, cx);
         }
-        if query.view.is_some() {
-            return self.render_view_view(query, cx);
+        if is_view {
+            return self.render_view_view(query_index, cx);
         }
         let theme = self.theme;
 
@@ -47,13 +51,35 @@ impl AppView {
                 cx.listener(|this, _event, _window, cx| this.format_query(cx)),
             ));
 
-        let has_connection = query
-            .connection_index
-            .and_then(|index| self.connection_arc(index))
-            .is_some();
-        let run_enabled = has_connection && !query.running;
+        // Copy the few scalars needed from the tab, so the `queries` borrow ends before the editor
+        // (which needs `&mut self`) and the result-panel renderers run.
+        let (
+            has_connection,
+            running,
+            has_selection,
+            grid_id,
+            has_error,
+            has_results,
+            active_result,
+        ) = {
+            let Some(query) = self.queries.get(query_index) else {
+                return div().into_any_element();
+            };
+            (
+                query
+                    .connection_index
+                    .and_then(|index| self.connection_arc(index))
+                    .is_some(),
+                query.running,
+                query.caret != query.anchor,
+                query.grid_id,
+                query.result_error.is_some(),
+                !query.results.is_empty(),
+                query.active_result,
+            )
+        };
+        let run_enabled = has_connection && !running;
         // One run button: it runs the selection when there is one, otherwise the whole editor.
-        let has_selection = query.caret != query.anchor;
         let run_label = if has_selection {
             t!("query.run_selected").to_string()
         } else {
@@ -89,21 +115,18 @@ impl AppView {
                 t!("query.stop").to_string(),
                 theme.text_muted,
                 theme.danger,
-                query.running,
+                running,
                 cx.listener(|this, _event, _window, cx| this.stop_query(cx)),
             ));
 
-        let editor = self.render_query_editor(query, cx).into_any_element();
-        let result_grid = query.grid_id.and_then(|id| {
+        let editor = self.render_query_editor(query_index, cx);
+        let result_grid = grid_id.and_then(|id| {
             self.grids
                 .iter()
                 .find(|grid| grid.read(cx).state.id == id)
                 .cloned()
         });
-        let has_result_panel = query.running
-            || query.result_error.is_some()
-            || !query.results.is_empty()
-            || result_grid.is_some();
+        let has_result_panel = running || has_error || has_results || result_grid.is_some();
         let body: AnyElement = if !has_result_panel {
             div()
                 .flex()
@@ -114,51 +137,64 @@ impl AppView {
                 .into_any_element()
         } else {
             // `active_result` is 0 for the 信息 tab, 1..=n for the n-th result set.
-            let result_body: AnyElement = if query.running {
+            let result_body: AnyElement = if running {
                 div()
                     .flex_1()
                     .p_2()
                     .text_color(rgb(theme.text_muted))
                     .child(t!("query.running").to_string())
                     .into_any_element()
-            } else if let Some(error) = &query.result_error {
-                div()
-                    .flex_1()
-                    .p_2()
-                    .text_color(rgb(theme.danger))
-                    .child(error.clone())
-                    .into_any_element()
-            } else if query.active_result == 0 {
-                self.render_query_info(query)
+            } else if active_result == 0 || has_error {
+                self.render_query_info(query_index)
             } else if let Some(grid) = result_grid {
                 grid.into_any_element()
             } else {
                 div().into_any_element()
             };
+            // The result panel keeps a user-draggable pixel height (Navicat's bottom pane); the
+            // editor takes everything above it and never spills over the splitter.
             let mut panel = div()
                 .flex()
                 .flex_col()
-                .flex_1()
+                .flex_none()
+                .h(px(self.query_result_height))
                 .min_h(px(0.0))
-                .border_t_1()
-                .border_color(rgb(theme.border))
+                .overflow_hidden()
                 .bg(rgb(theme.editor_bg));
-            if !query.results.is_empty() {
-                panel = panel.child(self.render_query_result_tabs(query, cx));
+            if has_results {
+                panel = panel.child(self.render_query_result_tabs(query_index, cx));
             }
-            panel = panel.child(result_body);
+            panel = panel.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .overflow_hidden()
+                    .child(result_body),
+            );
             div()
                 .flex()
                 .flex_col()
                 .flex_1()
                 .min_h(px(0.0))
+                .overflow_hidden()
                 .child(
                     div()
                         .flex()
                         .flex_col()
                         .flex_1()
-                        .min_h(px(0.0))
+                        .min_h(px(QUERY_EDITOR_MIN_HEIGHT))
+                        .overflow_hidden()
                         .child(editor),
+                )
+                .child(
+                    ui::pane_resize_divider_h("query-result-divider", theme).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                            this.begin_query_split_drag(event.position.y, cx);
+                        }),
+                    ),
                 )
                 .child(panel)
                 .into_any_element()
@@ -175,7 +211,14 @@ impl AppView {
     }
 
     /// The bottom result tabs: a fixed 信息 tab then one 结果 tag per result set.
-    fn render_query_result_tabs(&self, query: &QueryTab, cx: &mut Context<'_, Self>) -> AnyElement {
+    fn render_query_result_tabs(
+        &self,
+        query_index: usize,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let Some(query) = self.queries.get(query_index) else {
+            return div().into_any_element();
+        };
         let theme = self.theme;
         let mut bar = div()
             .flex()
@@ -729,6 +772,38 @@ impl AppView {
             .as_ref()
             .filter(|edit| edit.index == index)
             .map(|edit| edit.input.clone())
+    }
+
+    /// Begin dragging the splitter between the query editor and its result panel, capturing the
+    /// pointer y and the panel height it started at.
+    pub(super) fn begin_query_split_drag(&mut self, pointer_y: Pixels, cx: &mut Context<'_, Self>) {
+        self.query_split_drag = Some((f32::from(pointer_y), self.query_result_height));
+        cx.notify();
+    }
+
+    /// Continue dragging the result splitter. Routed from the window root, so the drag survives
+    /// the pointer leaving the 5px divider.
+    pub(super) fn drag_query_split(&mut self, event: &MouseMoveEvent, cx: &mut Context<'_, Self>) {
+        let Some((start_y, start_height)) = self.query_split_drag else {
+            return;
+        };
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.query_split_drag = None;
+            cx.notify();
+            return;
+        }
+        // The divider sits on the panel's top edge, so dragging down grows the panel.
+        let delta = f32::from(event.position.y) - start_y;
+        self.query_result_height =
+            (start_height + delta).clamp(QUERY_RESULT_MIN_HEIGHT, QUERY_RESULT_MAX_HEIGHT);
+        cx.notify();
+    }
+
+    /// Finish dragging the result splitter.
+    pub(super) fn end_query_split_drag(&mut self, cx: &mut Context<'_, Self>) {
+        if self.query_split_drag.take().is_some() {
+            cx.notify();
+        }
     }
 }
 

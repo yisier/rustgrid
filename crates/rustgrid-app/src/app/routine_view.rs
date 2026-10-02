@@ -7,11 +7,14 @@ impl AppView {
     /// The routine editor's full view, shown instead of the ordinary query view when the active
     /// tab carries routine state.
     pub(super) fn render_routine_view(
-        &self,
-        query: &QueryTab,
+        &mut self,
+        query_index: usize,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let theme = self.theme;
+        let Some(query) = self.queries.get(query_index) else {
+            return div().into_any_element();
+        };
         let Some(routine) = query.routine.as_ref() else {
             return div().into_any_element();
         };
@@ -137,9 +140,9 @@ impl AppView {
         };
 
         let body: AnyElement = match routine.tab {
-            RoutineTab::Definition => self.render_query_editor(query, cx).into_any_element(),
+            RoutineTab::Definition => self.render_query_editor(query_index, cx),
             RoutineTab::Info => self.render_routine_info(routine).into_any_element(),
-            RoutineTab::Sql => self.render_routine_preview(cx),
+            RoutineTab::Sql => self.render_routine_preview(query_index, cx),
         };
 
         div()
@@ -267,29 +270,15 @@ impl AppView {
     }
 
     /// The SQL 预览 tab: the script the Save button runs, read-only.
-    fn render_routine_preview(&self, cx: &mut Context<'_, Self>) -> AnyElement {
-        let theme = self.theme;
+    fn render_routine_preview(
+        &mut self,
+        query_index: usize,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
         let Some(sql) = self.routine_preview_sql() else {
             return div().into_any_element();
         };
-        let styled = self.styled_sql(&sql, (0, 0));
-        let _ = cx;
-        div()
-            .id("routine-preview-scroll")
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h(px(0.0))
-            .overflow_y_scroll()
-            .bg(rgb(theme.editor_bg))
-            .child(
-                div()
-                    .p_2()
-                    .font_family("Consolas")
-                    .text_size(px(12.5))
-                    .line_height(px(18.0))
-                    .child(styled),
-            )
-            .into_any_element()
+        let key = format!("routine-{query_index}");
+        self.render_sql_preview(&key, &sql, cx)
     }
 }

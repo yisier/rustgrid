@@ -7,21 +7,33 @@ impl AppView {
     /// The view designer's full view, shown instead of the ordinary query view when the active
     /// tab carries view state.
     pub(super) fn render_view_view(
-        &self,
-        query: &QueryTab,
+        &mut self,
+        query_index: usize,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let theme = self.theme;
-        let Some(view) = query.view.as_ref() else {
-            return div().into_any_element();
+        // Snapshot the fields needed, so the `queries` borrow ends before `render_query_editor`
+        // (which needs `&mut self`).
+        let (saving, original_name, explain_running, active_tab, explain_open, has_connection) = {
+            let Some(query) = self.queries.get(query_index) else {
+                return div().into_any_element();
+            };
+            let Some(view) = query.view.as_ref() else {
+                return div().into_any_element();
+            };
+            (
+                view.saving,
+                view.original_name.is_some(),
+                view.explain_running,
+                view.tab,
+                view.explain_open,
+                query
+                    .connection_index
+                    .and_then(|index| self.connection_arc(index))
+                    .is_some(),
+            )
         };
-        let has_connection = query
-            .connection_index
-            .and_then(|index| self.connection_arc(index))
-            .is_some();
-        let saving = view.saving;
-        let can_preview = has_connection && view.original_name.is_some() && !saving;
-        let explain_running = view.explain_running;
+        let can_preview = has_connection && original_name && !saving;
 
         let toolbar = div()
             .flex()
@@ -94,13 +106,23 @@ impl AppView {
             .border_b_1()
             .border_color(rgb(theme.border));
         for tab in ViewTab::ALL {
-            tabs = tabs.child(self.view_sub_tab(tab, view.tab == tab, cx));
+            tabs = tabs.child(self.view_sub_tab(tab, active_tab == tab, cx));
         }
 
-        let body: AnyElement = match view.tab {
-            ViewTab::Definition => self.render_query_editor(query, cx).into_any_element(),
-            ViewTab::Advanced => self.render_view_advanced(view).into_any_element(),
-            ViewTab::Sql => self.render_view_preview(cx),
+        let body: AnyElement = match active_tab {
+            ViewTab::Definition => self.render_query_editor(query_index, cx),
+            ViewTab::Advanced => {
+                let advanced = self
+                    .queries
+                    .get(query_index)
+                    .and_then(|query| query.view.as_ref())
+                    .cloned();
+                match advanced {
+                    Some(view) => self.render_view_advanced(&view).into_any_element(),
+                    None => div().into_any_element(),
+                }
+            }
+            ViewTab::Sql => self.render_view_preview(query_index, cx),
         };
 
         let mut root = div()
@@ -112,8 +134,8 @@ impl AppView {
             .child(toolbar)
             .child(tabs)
             .child(body);
-        if view.explain_open {
-            root = root.child(self.render_view_explain_panel(query, view, cx));
+        if explain_open {
+            root = root.child(self.render_view_explain_panel(query_index, cx));
         }
         root.into_any_element()
     }
@@ -122,11 +144,16 @@ impl AppView {
     /// the 信息 tab, the plan table on the 解释 tab.
     fn render_view_explain_panel(
         &self,
-        query: &QueryTab,
-        view: &ViewTabState,
+        query_index: usize,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let theme = self.theme;
+        let Some(query) = self.queries.get(query_index) else {
+            return div().into_any_element();
+        };
+        let Some(view) = query.view.as_ref() else {
+            return div().into_any_element();
+        };
         let mut tabs = div()
             .flex()
             .flex_row()
@@ -390,29 +417,15 @@ impl AppView {
     }
 
     /// The SQL 预览 tab: the script the Save button runs, read-only.
-    fn render_view_preview(&self, cx: &mut Context<'_, Self>) -> AnyElement {
-        let theme = self.theme;
+    fn render_view_preview(
+        &mut self,
+        query_index: usize,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
         let Some(sql) = self.view_preview_sql() else {
             return div().into_any_element();
         };
-        let styled = self.styled_sql(&sql, (0, 0));
-        let _ = cx;
-        div()
-            .id("view-preview-scroll")
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h(px(0.0))
-            .overflow_y_scroll()
-            .bg(rgb(theme.editor_bg))
-            .child(
-                div()
-                    .p_2()
-                    .font_family("Consolas")
-                    .text_size(px(12.5))
-                    .line_height(px(18.0))
-                    .child(styled),
-            )
-            .into_any_element()
+        let key = format!("view-{query_index}");
+        self.render_sql_preview(&key, &sql, cx)
     }
 }

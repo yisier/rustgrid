@@ -652,6 +652,7 @@ impl AppView {
                     }
                 }
                 view.completion_generation = view.completion_generation.wrapping_add(1);
+                view.refresh_completion_catalog();
                 view.notify_object_pane(cx);
                 cx.notify();
                 // The object list's scroll extents are only known after the
@@ -832,7 +833,6 @@ impl AppView {
         self.active_grid = index;
         self.active_query = None;
         self.active_design = None;
-        self.query_completion = None;
         cx.notify();
     }
 

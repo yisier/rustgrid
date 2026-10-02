@@ -1986,7 +1986,6 @@ impl AppView {
         self.active_design = index;
         self.active_query = None;
         self.active_grid = None;
-        self.query_completion = None;
         cx.notify();
     }
 

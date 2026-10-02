@@ -42,7 +42,6 @@ impl AppView {
         self.active_query = Some(index);
         self.active_design = None;
         self.active_grid = None;
-        self.query_completion = None;
         self.query_focus_pending = true;
         self.refresh_view_details(index, cx);
         cx.notify();
@@ -73,7 +72,6 @@ impl AppView {
         self.active_query = Some(index);
         self.active_design = None;
         self.active_grid = None;
-        self.query_completion = None;
         self.query_focus_pending = true;
         cx.notify();
     }

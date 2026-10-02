@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 const CURRENT_VERSION: u32 = 2;
 const PROFILES_FILE: &str = "connections.json";
-const SETTINGS_VERSION: u32 = 4;
+const SETTINGS_VERSION: u32 = 5;
 const SETTINGS_FILE: &str = "settings.json";
 const QUERIES_VERSION: u32 = 1;
 const QUERIES_FILE: &str = "queries.json";
@@ -100,14 +100,56 @@ struct SettingsFile {
     /// The remembered list layout per page, keyed by a stable page id (e.g. `"queries"`).
     #[serde(default)]
     view_modes: BTreeMap<String, String>,
+    /// The SQL editor font family; empty means the built-in default.
+    #[serde(default)]
+    editor_font_family: String,
+    /// The SQL editor font size in px.
+    #[serde(default = "default_editor_font_size")]
+    editor_font_size: u32,
+    #[serde(default = "default_true")]
+    editor_line_numbers: bool,
+    #[serde(default = "default_true")]
+    editor_word_wrap: bool,
 }
 
-#[derive(Debug, Clone, Default)]
+/// The default SQL editor font size, in px.
+pub const DEFAULT_EDITOR_FONT_SIZE: u32 = 13;
+
+fn default_editor_font_size() -> u32 {
+    DEFAULT_EDITOR_FONT_SIZE
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone)]
 pub struct AppSettings {
     pub theme: ThemeSetting,
     pub language: LanguageSetting,
     pub show_info_pane: bool,
     pub view_modes: BTreeMap<String, String>,
+    /// The SQL editor font family; empty means the built-in default.
+    pub editor_font_family: String,
+    /// The SQL editor font size in px.
+    pub editor_font_size: u32,
+    pub editor_line_numbers: bool,
+    pub editor_word_wrap: bool,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            theme: ThemeSetting::default(),
+            language: LanguageSetting::default(),
+            show_info_pane: false,
+            view_modes: BTreeMap::new(),
+            editor_font_family: String::new(),
+            editor_font_size: DEFAULT_EDITOR_FONT_SIZE,
+            editor_line_numbers: true,
+            editor_word_wrap: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -273,6 +315,10 @@ impl ConfigStore {
             language: file.language,
             show_info_pane: file.show_info_pane,
             view_modes: file.view_modes,
+            editor_font_family: file.editor_font_family,
+            editor_font_size: file.editor_font_size,
+            editor_line_numbers: file.editor_line_numbers,
+            editor_word_wrap: file.editor_word_wrap,
         })
     }
 
@@ -284,6 +330,10 @@ impl ConfigStore {
             language: settings.language,
             show_info_pane: settings.show_info_pane,
             view_modes: settings.view_modes.clone(),
+            editor_font_family: settings.editor_font_family.clone(),
+            editor_font_size: settings.editor_font_size,
+            editor_line_numbers: settings.editor_line_numbers,
+            editor_word_wrap: settings.editor_word_wrap,
         };
         let contents = serde_json::to_string_pretty(&file)?;
         fs::write(self.settings_path(), contents)?;

@@ -17,11 +17,13 @@ use crate::theme::Theme;
 
 mod calendar;
 mod combo;
+mod sql_editor;
 mod text_input;
 mod views;
 
 pub(crate) use calendar::compact_calendar;
 pub(crate) use combo::{ComboBox, ComboOption};
+pub(crate) use sql_editor::{SqlEditor, SqlEditorOptions};
 pub(crate) use text_input::{TextInput, TextInputOptions};
 pub(super) use views::{
     ColumnGrid, DetailColumns, DetailList, DetailScroll, ViewMode, approx_text_width,
@@ -315,6 +317,19 @@ pub(super) fn pane_resize_divider(id: impl Into<SharedString>, theme: Theme) -> 
         .w(px(super::PANE_DIVIDER_WIDTH))
         .h_full()
         .cursor(CursorStyle::ResizeLeftRight)
+        .bg(rgb(theme.border))
+        .hover(move |style| style.bg(rgb(theme.primary)))
+}
+
+/// The top/bottom counterpart of [`pane_resize_divider`]: the splitter between the query editor
+/// and its result panel. Same shared drag contract, laid out horizontally.
+pub(super) fn pane_resize_divider_h(id: impl Into<SharedString>, theme: Theme) -> Stateful<Div> {
+    div()
+        .id(id.into())
+        .flex_none()
+        .h(px(super::PANE_DIVIDER_WIDTH))
+        .w_full()
+        .cursor(CursorStyle::ResizeUpDown)
         .bg(rgb(theme.border))
         .hover(move |style| style.bg(rgb(theme.primary)))
 }

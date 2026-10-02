@@ -18,6 +18,7 @@ impl AppView {
             database.categories = CategoryExpansion::default();
         }
         self.completion_generation = self.completion_generation.wrapping_add(1);
+        self.refresh_completion_catalog();
         if let Some(pane) = self.object_pane.as_ref() {
             let matches = {
                 let pane = pane.read(cx);

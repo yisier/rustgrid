@@ -1,220 +1,223 @@
-use std::ops::Range;
+//! The SQL query editor and the result 信息 tab.
+//!
+//! The editor itself is gpui-kit's `Editor`, owned per query tab through [`ui::SqlEditor`]. This
+//! module only manages those entities (create on first use, mirror their text into `QueryTab::sql`,
+//! re-scope completion to the tab's connection/database) and renders the 信息 tab. Text editing,
+//! undo/redo, multi-cursor, search and syntax highlighting all come from the wrapped editor.
+
+use std::rc::Rc;
 
 use super::*;
 
 impl AppView {
-    pub(super) fn render_query_editor(
-        &self,
-        query: &QueryTab,
+    /// Ensure a [`ui::SqlEditor`] exists for the query at `index`, scoped to its connection and
+    /// database, and return it.
+    pub(super) fn ensure_query_editor(
+        &mut self,
+        index: usize,
         cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
-        let theme = self.theme;
-        let (start, end) = query.selection();
-        let line_starts = sql_line_starts(&query.sql);
-        let digits = line_starts.len().to_string().len().max(2);
-        let gutter_width = digits as f32 * 8.0 + 12.0;
-        let text_left = gutter_width + QUERY_EDITOR_PAD;
+    ) -> Option<Entity<ui::SqlEditor>> {
+        let tab = self.queries.get(index)?;
+        let sql = tab.sql.clone();
+        let connection_index = tab.connection_index;
+        let database = tab.database.clone();
 
-        let (caret_offset, caret_height) = if self.query_editor_measured
-            && self.query_editor_focused
-            && start >= end
-            && *self.query_editor_text.borrow() == query.sql
-        {
-            let previous = self.query_editor_layout.borrow();
-            let index = query.caret.min(previous.len());
-            match previous.position_for_index(index) {
-                Some(position) => {
-                    let bounds = previous.bounds();
-                    (
-                        Some((position.x - bounds.origin.x, position.y - bounds.origin.y)),
-                        previous.line_height(),
-                    )
-                }
-                None => (None, px(0.0)),
-            }
-        } else {
-            (None, px(0.0))
+        if self.query_editors.len() <= index {
+            self.query_editors.resize_with(index + 1, || None);
+        }
+        if let Some(editor) = self.query_editors[index].clone() {
+            // Keep the completion scope in step with the tab's connection/database.
+            editor.update(cx, |editor, cx| {
+                editor.set_scope(connection_index, database.clone(), cx)
+            });
+            return Some(editor);
+        }
+
+        let source = sql_completion::CompletionSource::new(self.completion_catalog.clone())
+            .with_scope(connection_index, database.clone());
+        let provider: Rc<dyn gpui_kit::component::input::CompletionProvider> =
+            Rc::new(sql_completion::SqlCompletionProvider::new(source));
+        let options = ui::SqlEditorOptions {
+            language: "sql".into(),
+            font_family: self.editor_font().into(),
+            font_size: self.editor_font_size(),
+            line_number: self.editor_line_numbers,
+            readonly: false,
         };
+        let weak = cx.weak_entity();
+        let editor = cx.new(|cx| {
+            ui::SqlEditor::new(cx)
+                .options(options)
+                .provider(provider)
+                .on_change(Rc::new(move |text, cx| {
+                    let _ = weak.update(cx, |app, cx| app.on_query_editor_changed(index, text, cx));
+                }))
+        });
+        editor.update(cx, |editor, cx| editor.set_text(sql, cx));
+        self.query_editors[index] = Some(editor.clone());
+        Some(editor)
+    }
 
-        let mut line_numbers: Vec<(usize, f32)> = Vec::new();
-        if self.query_editor_measured {
-            let previous = self.query_editor_layout.borrow();
-            let origin_y = f32::from(previous.bounds().origin.y);
-            for (line_index, line_start) in line_starts.iter().enumerate() {
-                if *line_start > previous.len() {
-                    break;
-                }
-                if let Some(position) = previous.position_for_index(*line_start) {
-                    line_numbers.push((line_index + 1, f32::from(position.y) - origin_y));
+    /// Mirror an edit from the wrapped editor into the tab, so run/save/format read current text.
+    fn on_query_editor_changed(&mut self, index: usize, text: &str, cx: &mut Context<'_, Self>) {
+        let connection_index = self.queries.get(index).and_then(|tab| tab.connection_index);
+        let database = self.queries.get(index).and_then(|tab| tab.database.clone());
+        if let Some(tab) = self.queries.get_mut(index) {
+            tab.sql = text.to_string();
+        }
+        // Warm the completion catalog's columns for every table the statement now references, so
+        // `alias.`/`table.` completion has types and comments ready.
+        if let Some(connection_index) = connection_index {
+            let referenced = sql::referenced_tables(&sql::current_statement(text, text.len()));
+            for table in referenced {
+                let target_database = table
+                    .database
+                    .filter(|name| !name.is_empty())
+                    .or_else(|| database.clone());
+                if let Some(target_database) = target_database {
+                    self.ensure_query_columns(cx, connection_index, &target_database, &table.name);
                 }
             }
         }
+        cx.notify();
+    }
 
-        let styled = self.styled_sql(&query.sql, (start, end));
-        let layout = styled.layout().clone();
-        *self.query_editor_layout.borrow_mut() = layout;
-        *self.query_editor_text.borrow_mut() = query.sql.clone();
-        // A routine editor can turn line wrapping off; ordinary query editors always wrap.
-        let wrap = query
-            .routine
-            .as_ref()
-            .map(|routine| routine.word_wrap)
-            .unwrap_or(true);
-
-        let mut gutter = div()
-            .absolute()
-            .top_0()
-            .left_0()
-            .h_full()
-            .w(px(gutter_width))
-            .bg(rgb(theme.header_bg))
-            .border_r_1()
-            .border_color(rgb(theme.border));
-        for (number, y) in line_numbers {
-            gutter = gutter.child(
-                div()
-                    .absolute()
-                    .top(px(y + QUERY_EDITOR_PAD))
-                    .right(px(8.0))
-                    .text_size(px(12.0))
-                    .line_height(px(18.0))
-                    .text_color(rgb(theme.text_muted))
-                    .child(number.to_string()),
-            );
+    /// Drop a closed tab's editor and shift the ones after it down.
+    pub(super) fn remove_query_editor(&mut self, index: usize) {
+        if index < self.query_editors.len() {
+            self.query_editors.remove(index);
         }
+    }
 
-        let mut root = div()
-            .relative()
+    /// Push a tab's current text into its editor (after programmatic changes like 美化SQL or
+    /// loading a saved query).
+    pub(super) fn sync_query_editor_text(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        let Some(text) = self.queries.get(index).map(|tab| tab.sql.clone()) else {
+            return;
+        };
+        if let Some(Some(editor)) = self.query_editors.get(index)
+            && editor.read(cx).text() != text
+        {
+            let editor = editor.clone();
+            editor.update(cx, |editor, cx| editor.set_text(text, cx));
+        }
+    }
+
+    /// The active query tab's editor, rendering it as the editor surface.
+    pub(super) fn render_query_editor(
+        &mut self,
+        query_index: usize,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let theme = self.theme;
+        let Some(editor) = self.ensure_query_editor(query_index, cx) else {
+            return div().into_any_element();
+        };
+        let focus = self.query_focus.clone();
+        let index = query_index;
+        div()
+            .flex()
+            .flex_col()
             .flex_1()
             .min_h(px(0.0))
             .w_full()
-            .bg(rgb(theme.editor_bg))
             .overflow_hidden()
-            .track_focus(&self.query_focus)
-            .cursor_text()
-            .on_key_down(
-                cx.listener(|this, event, window, cx| this.query_editor_key(event, window, cx)),
-            )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    this.query_editor_mouse_down(event, window, cx);
-                }),
-            )
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    this.query_editor_context_menu(event, window, cx);
-                }),
-            )
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
-                this.query_editor_mouse_move(event, cx);
+            .bg(rgb(theme.editor_bg))
+            .track_focus(&focus)
+            .on_action(cx.listener(move |this, _: &RunSelectedQuery, _window, cx| {
+                // Bring the tab that owns this editor to the front, then run its selection.
+                this.activate_query(index, cx);
+                this.run_query(true, cx);
             }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _event, _window, cx| {
-                    if let Some(index) = this.active_query
-                        && let Some(tab) = this.queries.get_mut(index)
-                    {
-                        tab.selecting = false;
-                    }
-                    cx.notify();
-                }),
-            )
-            .child(gutter)
-            .child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .pl(px(text_left))
-                    .pr(px(QUERY_EDITOR_PAD))
-                    .pt(px(QUERY_EDITOR_PAD))
-                    .pb(px(QUERY_EDITOR_PAD))
-                    .font_family("Consolas")
-                    .text_size(px(12.5))
-                    .line_height(px(18.0))
-                    .when(!wrap, |style| style.whitespace_nowrap())
-                    .child(styled)
-                    .child({
-                        let entity = cx.entity();
-                        let focus = self.query_focus.clone();
-                        canvas(
-                            |_, _, _| {},
-                            move |bounds, _, window, cx| {
-                                window.handle_input(
-                                    &focus,
-                                    ElementInputHandler::new(bounds, entity.clone()),
-                                    cx,
-                                );
-                            },
-                        )
-                        .absolute()
-                        .inset_0()
-                    }),
-            );
+            .child(editor)
+            .into_any_element()
+    }
 
-        if let Some((x, y)) = caret_offset
-            && self.caret_visible
-        {
-            root = root.child(
-                div()
-                    .absolute()
-                    .left(px(f32::from(x) + text_left))
-                    .top(px(f32::from(y) + QUERY_EDITOR_PAD))
-                    .w(px(1.5))
-                    .h(caret_height)
-                    .bg(rgb(theme.text)),
-            );
-        }
-
-        if let Some(completion) = self.query_completion.as_ref()
-            && let Some((x, y)) = caret_offset
-        {
-            let mut list = ui::popup_panel(theme)
-                .id("query-completion")
-                .left(px(f32::from(x) + text_left))
-                .top(px(f32::from(y) + QUERY_EDITOR_PAD + 18.0))
-                .w(px(220.0))
-                .max_h(px(210.0))
-                .overflow_y_scroll()
-                .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
-                    cx.stop_propagation();
-                });
-            for (index, candidate) in completion.candidates.iter().enumerate() {
-                let selected = index == completion.selected;
-                let label = candidate.clone();
-                let insert = candidate.clone();
-                list = list.child(
-                    div()
-                        .id(SharedString::from(format!("query-completion-{index}")))
-                        .flex()
-                        .items_center()
-                        .h(px(20.0))
-                        .px_2()
-                        .flex_none()
-                        .text_size(px(12.0))
-                        .cursor_pointer()
-                        .when(selected, move |style| {
-                            style
-                                .bg(rgb(theme.tree_selected_bg))
-                                .text_color(rgb(theme.tree_selected_text))
-                        })
-                        .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-                        .on_click(cx.listener(move |this, _event, _window, cx| {
-                            this.accept_query_completion(insert.clone(), cx);
-                        }))
-                        .child(label),
-                );
+    /// A read-only SQL preview (routine/view 预览 tabs), rendered with the wrapped gpui-kit editor.
+    /// The entity is cached by `key` so scroll position and syntax highlighting survive re-renders.
+    pub(super) fn render_sql_preview(
+        &mut self,
+        key: &str,
+        sql: &str,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        if let Some(editor) = self.preview_editors.get(key).cloned() {
+            if editor.read(cx).text() != sql {
+                let sql = sql.to_string();
+                editor.update(cx, |editor, cx| editor.set_text(sql, cx));
             }
-            root = root.child(deferred(list).with_priority(20));
+            return editor.into_any_element();
         }
+        let options = ui::SqlEditorOptions {
+            language: "sql".into(),
+            font_family: self.editor_font().into(),
+            font_size: self.editor_font_size(),
+            line_number: false,
+            readonly: true,
+        };
+        let sql = sql.to_string();
+        let editor = cx.new(|cx| ui::SqlEditor::new(cx).options(options));
+        editor.update(cx, |editor, cx| editor.set_text(sql, cx));
+        self.preview_editors.insert(key.to_string(), editor.clone());
+        editor.into_any_element()
+    }
 
-        root
+    /// Refresh the shared completion catalog from every loaded connection catalog.
+    pub(super) fn refresh_completion_catalog(&self) {
+        let mut catalog = sql_completion::CompletionCatalog::default();
+        for (connection_index, node) in self.connections.iter().enumerate() {
+            if let Loadable::Loaded(databases) = &node.databases {
+                for database in databases {
+                    if let Loadable::Loaded(tables) = &database.tables {
+                        let names: Vec<String> =
+                            tables.iter().map(|table| table.name.clone()).collect();
+                        catalog
+                            .tables
+                            .insert((connection_index, database.name.clone()), names);
+                    }
+                    if let Loadable::Loaded(routines) = &database.routines {
+                        catalog.functions.insert(
+                            connection_index,
+                            routines
+                                .iter()
+                                .filter(|routine| routine.kind == RoutineKind::Function)
+                                .map(|routine| routine.name.clone())
+                                .collect(),
+                        );
+                    }
+                }
+            }
+        }
+        // Carry over the on-demand column cache (loaded by the editor's completion).
+        if let Ok(mut target) = self.completion_catalog.write() {
+            for (key, entry) in self.query_column_cache.borrow().iter() {
+                if let ColumnCacheEntry::Loaded(columns) = entry {
+                    target.columns.insert(
+                        key.clone(),
+                        columns
+                            .iter()
+                            .map(|column| {
+                                (
+                                    column.name.clone(),
+                                    column.data_type.clone(),
+                                    column.comment.clone(),
+                                )
+                            })
+                            .collect(),
+                    );
+                }
+            }
+            target.tables = catalog.tables;
+            target.functions = catalog.functions;
+        }
     }
 
     /// The 信息 tab: the executed script and one status line per statement result.
-    pub(super) fn render_query_info(&self, query: &QueryTab) -> AnyElement {
+    pub(super) fn render_query_info(&self, query_index: usize) -> AnyElement {
         let theme = self.theme;
+        let Some(query) = self.queries.get(query_index) else {
+            return div().into_any_element();
+        };
         if let Some(error) = &query.result_error {
             return div()
                 .flex_1()
@@ -224,15 +227,6 @@ impl AppView {
                 .into_any_element();
         }
         let mut body = div().flex().flex_col().gap_2().p_2().w_full();
-        if !query.last_sql.is_empty() {
-            body = body.child(
-                div()
-                    .font_family("Consolas")
-                    .text_size(px(12.0))
-                    .text_color(rgb(theme.text))
-                    .child(query.last_sql.clone()),
-            );
-        }
         for (index, result) in query.results.iter().enumerate() {
             let status = if result.has_result_set {
                 t!("query.result_rows", count = result.row_count).to_string()
@@ -278,594 +272,5 @@ impl AppView {
             .overflow_y_scroll()
             .child(body)
             .into_any_element()
-    }
-
-    pub(super) fn query_editor_index_for_position(&self, position: Point<Pixels>) -> Option<usize> {
-        if !self.query_editor_measured {
-            return None;
-        }
-        let index = self.active_query?;
-        let text = self.queries.get(index)?.sql.clone();
-        if *self.query_editor_text.borrow() != text {
-            return None;
-        }
-        let layout = self.query_editor_layout.borrow();
-        Some(match layout.index_for_position(position) {
-            Ok(index) | Err(index) => index,
-        })
-    }
-
-    pub(super) fn query_editor_mouse_down(
-        &mut self,
-        event: &MouseDownEvent,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let Some(index) = self.active_query else {
-            return;
-        };
-        window.focus(&self.query_focus, cx);
-        let position = self.query_editor_index_for_position(event.position);
-        if let (Some(position), Some(tab)) = (position, self.queries.get_mut(index)) {
-            if event.click_count >= 2 {
-                let (start, end) = word_bounds(&tab.sql, position);
-                tab.anchor = start;
-                tab.caret = end;
-            } else if event.modifiers.shift {
-                tab.caret = position;
-            } else {
-                tab.anchor = position;
-                tab.caret = position;
-            }
-            tab.selecting = true;
-        }
-        self.caret_visible = true;
-        cx.notify();
-    }
-
-    pub(super) fn query_editor_mouse_move(
-        &mut self,
-        event: &MouseMoveEvent,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let Some(index) = self.active_query else {
-            return;
-        };
-        if !self
-            .queries
-            .get(index)
-            .map(|tab| tab.selecting)
-            .unwrap_or(false)
-        {
-            return;
-        }
-        let position = self.query_editor_index_for_position(event.position);
-        if let (Some(position), Some(tab)) = (position, self.queries.get_mut(index)) {
-            tab.caret = position;
-        }
-        cx.notify();
-    }
-
-    pub(super) fn query_editor_key(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let Some(index) = self.active_query else {
-            return;
-        };
-        if self.query_completion.is_some() {
-            match event.keystroke.key.as_str() {
-                "up" => {
-                    self.move_query_completion(-1, cx);
-                    return;
-                }
-                "down" => {
-                    self.move_query_completion(1, cx);
-                    return;
-                }
-                "enter" | "tab" => {
-                    self.accept_selected_query_completion(cx);
-                    return;
-                }
-                "escape" => {
-                    self.query_completion = None;
-                    cx.notify();
-                    return;
-                }
-                _ => {}
-            }
-        }
-        let Some(tab) = self.queries.get(index) else {
-            return;
-        };
-        let sql = tab.sql.clone();
-        let mut anchor = tab.anchor.min(sql.len());
-        let mut caret = tab.caret.min(sql.len());
-        if !sql.is_char_boundary(anchor) {
-            anchor = previous_boundary(&sql, anchor);
-        }
-        if !sql.is_char_boundary(caret) {
-            caret = previous_boundary(&sql, caret);
-        }
-        let (start, end) = (anchor.min(caret), anchor.max(caret));
-
-        let keystroke = &event.keystroke;
-        let command = keystroke.modifiers.control || keystroke.modifiers.platform;
-        let shift = keystroke.modifiers.shift;
-
-        let mut new_sql = sql.clone();
-        let new_caret;
-        let new_anchor;
-        let mut modified = false;
-        let mut close_completion = false;
-
-        if command {
-            match keystroke.key.as_str() {
-                "a" => {
-                    new_anchor = 0;
-                    new_caret = sql.len();
-                }
-                "c" => {
-                    if start < end {
-                        cx.write_to_clipboard(ClipboardItem::new_string(
-                            sql[start..end].to_string(),
-                        ));
-                    }
-                    return;
-                }
-                "x" => {
-                    if start < end {
-                        cx.write_to_clipboard(ClipboardItem::new_string(
-                            sql[start..end].to_string(),
-                        ));
-                        new_sql.replace_range(start..end, "");
-                        new_caret = start;
-                        new_anchor = start;
-                        modified = true;
-                    } else {
-                        return;
-                    }
-                }
-                "v" => {
-                    let Some(pasted) = cx.read_from_clipboard().and_then(|item| item.text()) else {
-                        return;
-                    };
-                    let pasted = pasted.replace("\r\n", "\n").replace('\r', "\n");
-                    if pasted.is_empty() {
-                        return;
-                    }
-                    new_sql.replace_range(start..end, &pasted);
-                    new_caret = start + pasted.len();
-                    new_anchor = new_caret;
-                    modified = true;
-                }
-                "space" => {
-                    // Only Ctrl+Space is handled here (manual completion); plain space is
-                    // delivered by the platform input handler.
-                    self.refresh_query_completion(true);
-                    cx.stop_propagation();
-                    return;
-                }
-                "s" => {
-                    let tab = self.queries.get(index);
-                    let is_routine = tab.is_some_and(|tab| tab.routine.is_some());
-                    let is_view = tab.is_some_and(|tab| tab.view.is_some());
-                    if is_routine {
-                        self.save_routine(cx);
-                    } else if is_view {
-                        self.save_view(cx);
-                    } else {
-                        self.begin_save_query(window, cx);
-                    }
-                    cx.stop_propagation();
-                    return;
-                }
-                _ => return,
-            }
-        } else {
-            match keystroke.key.as_str() {
-                "left" => {
-                    let cursor = if shift {
-                        previous_boundary(&sql, caret)
-                    } else if start < end {
-                        start
-                    } else {
-                        previous_boundary(&sql, start)
-                    };
-                    new_caret = cursor;
-                    new_anchor = if shift { anchor } else { cursor };
-                    close_completion = true;
-                }
-                "right" => {
-                    let cursor = if shift {
-                        next_boundary(&sql, caret)
-                    } else if start < end {
-                        end
-                    } else {
-                        next_boundary(&sql, start)
-                    };
-                    new_caret = cursor;
-                    new_anchor = if shift { anchor } else { cursor };
-                    close_completion = true;
-                }
-                "up" => {
-                    let cursor = move_vertical(&sql, caret, -1);
-                    new_caret = cursor;
-                    new_anchor = if shift { anchor } else { cursor };
-                    close_completion = true;
-                }
-                "down" => {
-                    let cursor = move_vertical(&sql, caret, 1);
-                    new_caret = cursor;
-                    new_anchor = if shift { anchor } else { cursor };
-                    close_completion = true;
-                }
-                "home" => {
-                    let (line_start, _) = line_bounds(&sql, caret);
-                    new_caret = line_start;
-                    new_anchor = if shift { anchor } else { line_start };
-                    close_completion = true;
-                }
-                "end" => {
-                    let (_, line_end) = line_bounds(&sql, caret);
-                    new_caret = line_end;
-                    new_anchor = if shift { anchor } else { line_end };
-                    close_completion = true;
-                }
-                "backspace" => {
-                    if start < end {
-                        new_sql.replace_range(start..end, "");
-                        new_caret = start;
-                        new_anchor = start;
-                    } else if start > 0 {
-                        let previous = previous_boundary(&sql, start);
-                        new_sql.replace_range(previous..start, "");
-                        new_caret = previous;
-                        new_anchor = previous;
-                    } else {
-                        return;
-                    }
-                    modified = true;
-                }
-                "delete" => {
-                    if start < end {
-                        new_sql.replace_range(start..end, "");
-                        new_caret = start;
-                        new_anchor = start;
-                    } else if start < sql.len() {
-                        let next = next_boundary(&sql, start);
-                        new_sql.replace_range(start..next, "");
-                        new_caret = start;
-                        new_anchor = start;
-                    } else {
-                        return;
-                    }
-                    modified = true;
-                }
-                "enter" => {
-                    new_sql.replace_range(start..end, "\n");
-                    new_caret = start + 1;
-                    new_anchor = new_caret;
-                    modified = true;
-                }
-                "tab" => {
-                    new_sql.replace_range(start..end, "    ");
-                    new_caret = start + 4;
-                    new_anchor = new_caret;
-                    modified = true;
-                }
-                _ => {
-                    // Text characters (including IME composition) are delivered by the platform
-                    // input handler so composed input is not lost.
-                    return;
-                }
-            }
-        }
-
-        if let Some(tab) = self.queries.get_mut(index) {
-            if modified {
-                tab.undo.push((sql.clone(), tab.caret, tab.anchor));
-            }
-            tab.sql = new_sql;
-            tab.caret = new_caret;
-            tab.anchor = new_anchor;
-        }
-        if close_completion {
-            self.query_completion = None;
-        } else if modified {
-            self.refresh_query_completion(false);
-        }
-        self.caret_visible = true;
-        cx.notify();
-    }
-
-    pub(super) fn query_editor_context_menu(
-        &mut self,
-        event: &MouseDownEvent,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        window.focus(&self.query_focus, cx);
-        self.context_menu = Some(ContextMenu {
-            target: ContextTarget::QueryEditor,
-            position: event.position,
-        });
-        cx.notify();
-    }
-
-    pub(super) fn query_editor_undo(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(index) = self.active_query else {
-            return;
-        };
-        if let Some(tab) = self.queries.get_mut(index)
-            && let Some((sql, caret, anchor)) = tab.undo.pop()
-        {
-            tab.sql = sql;
-            tab.caret = caret;
-            tab.anchor = anchor;
-            tab.selecting = false;
-        }
-        self.query_completion = None;
-        self.caret_visible = true;
-        cx.notify();
-    }
-
-    pub(super) fn query_editor_copy(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(index) = self.active_query else {
-            return;
-        };
-        let Some(tab) = self.queries.get(index) else {
-            return;
-        };
-        let (start, end) = tab.selection();
-        if start < end {
-            cx.write_to_clipboard(ClipboardItem::new_string(tab.sql[start..end].to_string()));
-        }
-    }
-
-    pub(super) fn query_editor_cut(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(index) = self.active_query else {
-            return;
-        };
-        let Some(tab) = self.queries.get(index) else {
-            return;
-        };
-        let (start, end) = tab.selection();
-        if start >= end {
-            return;
-        }
-        cx.write_to_clipboard(ClipboardItem::new_string(tab.sql[start..end].to_string()));
-        let sql = tab.sql.clone();
-        let caret = tab.caret;
-        let anchor = tab.anchor;
-        if let Some(tab) = self.queries.get_mut(index) {
-            tab.undo.push((sql, caret, anchor));
-            tab.sql.replace_range(start..end, "");
-            tab.caret = start;
-            tab.anchor = start;
-            tab.selecting = false;
-        }
-        self.query_completion = None;
-        self.caret_visible = true;
-        cx.notify();
-    }
-
-    pub(super) fn query_editor_paste(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(index) = self.active_query else {
-            return;
-        };
-        let Some(pasted) = cx.read_from_clipboard().and_then(|item| item.text()) else {
-            return;
-        };
-        let pasted = pasted.replace("\r\n", "\n").replace('\r', "\n");
-        if pasted.is_empty() {
-            return;
-        }
-        let Some(tab) = self.queries.get(index) else {
-            return;
-        };
-        let (start, end) = tab.selection();
-        let sql = tab.sql.clone();
-        let caret = tab.caret;
-        let anchor = tab.anchor;
-        let new_caret = start + pasted.len();
-        if let Some(tab) = self.queries.get_mut(index) {
-            tab.undo.push((sql, caret, anchor));
-            tab.sql.replace_range(start..end, &pasted);
-            tab.caret = new_caret;
-            tab.anchor = new_caret;
-            tab.selecting = false;
-        }
-        self.query_completion = None;
-        self.caret_visible = true;
-        cx.notify();
-    }
-
-    pub(super) fn query_editor_select_all(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(index) = self.active_query else {
-            return;
-        };
-        if let Some(tab) = self.queries.get_mut(index) {
-            tab.anchor = 0;
-            tab.caret = tab.sql.len();
-            tab.selecting = false;
-        }
-        self.query_completion = None;
-        cx.notify();
-    }
-
-    /// Insert `text` into the active SQL tab, replacing `range` (byte offsets) or the current
-    /// selection. Drives both IME composition and ordinary `WM_CHAR` input.
-    fn query_insert(
-        &mut self,
-        range: Option<(usize, usize)>,
-        text: &str,
-        mark: bool,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let Some(index) = self.active_query else {
-            return;
-        };
-        let Some(tab) = self.queries.get(index) else {
-            return;
-        };
-        let sql = tab.sql.clone();
-        let (default_start, default_end) = tab.selection();
-        let (mut start, mut end) = range.unwrap_or((default_start, default_end));
-        start = start.min(sql.len());
-        end = end.min(sql.len()).max(start);
-        if !sql.is_char_boundary(start) {
-            start = previous_boundary(&sql, start);
-        }
-        if !sql.is_char_boundary(end) {
-            end = next_boundary(&sql, end).min(sql.len());
-        }
-
-        let mut new_sql = sql.clone();
-        new_sql.replace_range(start..end, text);
-        let caret = start + text.len();
-        let undo_caret = tab.caret;
-        let undo_anchor = tab.anchor;
-        if let Some(tab) = self.queries.get_mut(index) {
-            tab.undo.push((sql, undo_caret, undo_anchor));
-            tab.sql = new_sql;
-            tab.caret = caret;
-            tab.anchor = caret;
-        }
-
-        if mark && !text.is_empty() {
-            self.query_ime_marked = Some(start..caret);
-        } else {
-            self.query_ime_marked = None;
-        }
-        self.caret_visible = true;
-        if !mark {
-            self.refresh_query_completion(false);
-        }
-        cx.notify();
-    }
-}
-
-impl EntityInputHandler for AppView {
-    fn text_for_range(
-        &mut self,
-        range_utf16: Range<usize>,
-        actual_range: &mut Option<Range<usize>>,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> Option<String> {
-        let tab = self.queries.get(self.active_query?)?;
-        let text = tab.sql.clone();
-        let start = offset_from_utf16(&text, range_utf16.start);
-        let end = offset_from_utf16(&text, range_utf16.end);
-        actual_range.replace(offset_to_utf16(&text, start)..offset_to_utf16(&text, end));
-        Some(text[start..end].to_string())
-    }
-
-    fn selected_text_range(
-        &mut self,
-        _ignore_disabled_input: bool,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> Option<UTF16Selection> {
-        let tab = self.queries.get(self.active_query?)?;
-        let text = tab.sql.clone();
-        let (start, end) = tab.selection();
-        Some(UTF16Selection {
-            range: offset_to_utf16(&text, start)..offset_to_utf16(&text, end),
-            reversed: false,
-        })
-    }
-
-    fn marked_text_range(
-        &self,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> Option<Range<usize>> {
-        let tab = self.queries.get(self.active_query?)?;
-        let marked = self.query_ime_marked.clone()?;
-        Some(offset_to_utf16(&tab.sql, marked.start)..offset_to_utf16(&tab.sql, marked.end))
-    }
-
-    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
-        self.query_ime_marked = None;
-    }
-
-    fn replace_text_in_range(
-        &mut self,
-        range_utf16: Option<Range<usize>>,
-        new_text: &str,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(index) = self.active_query else {
-            return;
-        };
-        let Some(tab) = self.queries.get(index) else {
-            return;
-        };
-        let text = tab.sql.clone();
-        let range = range_utf16.map(|range| {
-            (
-                offset_from_utf16(&text, range.start),
-                offset_from_utf16(&text, range.end),
-            )
-        });
-        self.query_insert(range, new_text, false, cx);
-    }
-
-    fn replace_and_mark_text_in_range(
-        &mut self,
-        range_utf16: Option<Range<usize>>,
-        new_text: &str,
-        _new_selected_range_utf16: Option<Range<usize>>,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(index) = self.active_query else {
-            return;
-        };
-        let Some(tab) = self.queries.get(index) else {
-            return;
-        };
-        let text = tab.sql.clone();
-        let range = range_utf16
-            .map(|range| {
-                (
-                    offset_from_utf16(&text, range.start),
-                    offset_from_utf16(&text, range.end),
-                )
-            })
-            .or_else(|| {
-                self.query_ime_marked
-                    .clone()
-                    .map(|marked| (marked.start, marked.end))
-            });
-        self.query_insert(range, new_text, !new_text.is_empty(), cx);
-    }
-
-    fn bounds_for_range(
-        &mut self,
-        _range_utf16: Range<usize>,
-        bounds: Bounds<Pixels>,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> Option<Bounds<Pixels>> {
-        let line_height = self.query_editor_layout.borrow().line_height();
-        Some(Bounds::new(
-            bounds.origin,
-            gpui::size(px(1.0), line_height.max(px(1.0))),
-        ))
-    }
-
-    fn character_index_for_point(
-        &mut self,
-        _point: Point<Pixels>,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> Option<usize> {
-        None
     }
 }

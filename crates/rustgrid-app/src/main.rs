@@ -47,6 +47,10 @@ fn main() {
 
     gpui_kit::application().with_assets(Assets).run(move |cx| {
         gpui_kit::init(cx);
+        // Register the SQL editing rules (bracket pairs, indentation) for the query editor's
+        // gpui-kit `Editor`. The grammar itself (tree-sitter `sql`) is linked in through the
+        // `tree-sitter-sql` feature and needs no runtime registration.
+        install_sql_language(cx);
         // Dialogs (and gpui-kit's other animated chrome) should appear in place rather than
         // sliding/fading in; this is the engine's global switch for that.
         cx.set_reduce_motion(true);
@@ -76,4 +80,27 @@ fn main() {
         )
         .expect("failed to open the main window");
     });
+}
+
+/// Register the SQL editing rules for gpui-kit's `Editor`. `set_language_config` replaces the
+/// language's bracket pairs and indentation rules for the whole application; the tree-sitter
+/// grammar is linked in by the `tree-sitter-sql` feature, so no parser setup is needed here.
+fn install_sql_language(cx: &mut gpui::App) {
+    use gpui_kit::component::input::language_config::LanguageConfig;
+    use gpui_kit::component::input::{AutoClosingPair, BracketPair, set_language_config};
+
+    let rules = LanguageConfig::default()
+        .brackets([
+            BracketPair::new("(", ")"),
+            BracketPair::new("{", "}"),
+            BracketPair::new("[", "]"),
+        ])
+        .auto_closing_pairs([
+            AutoClosingPair::new("(", ")"),
+            AutoClosingPair::new("{", "}"),
+            AutoClosingPair::new("[", "]"),
+            AutoClosingPair::new("'", "'"),
+            AutoClosingPair::new("`", "`"),
+        ]);
+    set_language_config("sql", rules, cx);
 }

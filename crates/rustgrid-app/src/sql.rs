@@ -270,6 +270,650 @@ pub fn view_select(sql: &str) -> Option<String> {
     None
 }
 
+/// One table referenced by a statement (its `FROM`/`JOIN`/`INTO`/`UPDATE` target), with the
+/// database qualifier and alias the user wrote. Used to offer a referenced table's columns and to
+/// resolve `alias.` completion.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SqlTableRef {
+    /// The database/schema qualifier written before the table, if any.
+    pub database: Option<String>,
+    pub name: String,
+    pub alias: Option<String>,
+}
+
+/// Whether the caret is where a table name is expected (after `FROM`/`JOIN`/`INTO`/`UPDATE`) or
+/// where a column/expression is expected.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SqlCompletionKind {
+    Table,
+    Column,
+}
+
+/// What the query editor should offer at the caret: the identifier fragment completion replaces,
+/// the dotted qualifier before it, whether a table name is expected, and the statement's
+/// referenced tables.
+#[derive(Clone, Debug)]
+pub struct SqlCompletionContext {
+    /// The lowercased fragment from the identifier start to the caret.
+    pub prefix: String,
+    /// The dotted qualifier parts before the fragment (`["db", "table"]`, `["alias"]`, ...).
+    pub qualifier: Vec<String>,
+    pub kind: SqlCompletionKind,
+    pub tables: Vec<SqlTableRef>,
+    /// Whether the caret is inside a string literal or comment, where completion is suppressed.
+    pub suppress: bool,
+}
+
+/// Analyze `sql` at `caret` (a byte offset) for context-aware completion. The whole statement
+/// containing the caret is scanned for table references (so a `SELECT |FROM t` already offers
+/// `t`'s columns), while the fragment and qualifier come from the text just before the caret.
+pub fn completion_context(sql: &str, caret: usize) -> SqlCompletionContext {
+    let end = caret.min(sql.len());
+    let mut start = end;
+    while start > 0 {
+        let previous = previous_boundary(sql, start);
+        if is_identifier_char(sql[previous..start].chars().next().unwrap_or(' ')) {
+            start = previous;
+        } else {
+            break;
+        }
+    }
+    let prefix = sql[start..end].to_lowercase();
+    let qualifier = qualifier_parts(sql, start);
+    let statement = current_statement(sql, end);
+    let tables = referenced_tables(&statement);
+    let kind = if qualifier.is_empty() && expects_table_name(sql, start) {
+        SqlCompletionKind::Table
+    } else {
+        SqlCompletionKind::Column
+    };
+    SqlCompletionContext {
+        prefix,
+        qualifier,
+        kind,
+        tables,
+        suppress: in_string_or_comment(sql, end),
+    }
+}
+
+/// The built-in function names offered by completion. MySQL is the bundled engine; a second
+/// engine would add its own list behind the driver boundary.
+pub fn functions() -> &'static [&'static str] {
+    BUILTIN_FUNCTIONS
+}
+
+fn is_identifier_char(character: char) -> bool {
+    character.is_alphanumeric() || character == '_' || character == '$'
+}
+
+/// The byte offset of the character before `index` (which must be a char boundary).
+fn previous_boundary(text: &str, index: usize) -> usize {
+    let mut previous = index.saturating_sub(1);
+    while previous > 0 && !text.is_char_boundary(previous) {
+        previous -= 1;
+    }
+    previous
+}
+
+/// The dotted qualifier immediately before byte offset `start`, handling `` ` ``/`"`/`[]` quoting.
+fn qualifier_parts(sql: &str, start: usize) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut index = start;
+    while index > 0 {
+        let dot = previous_boundary(sql, index);
+        if &sql[dot..index] != "." {
+            break;
+        }
+        let (name_start, name) = identifier_before(sql, dot);
+        if name.is_empty() {
+            break;
+        }
+        parts.push(name);
+        index = name_start;
+    }
+    parts.reverse();
+    parts
+}
+
+/// Read the identifier ending at `end`, unquoting `` ` ``/`"`/`[...]` when present.
+fn identifier_before(sql: &str, end: usize) -> (usize, String) {
+    if end == 0 {
+        return (0, String::new());
+    }
+    let last = previous_boundary(sql, end);
+    let last_char = sql[last..end].chars().next().unwrap_or(' ');
+    match last_char {
+        '`' | '"' => {
+            let mut index = last;
+            while index > 0 {
+                let previous = previous_boundary(sql, index);
+                if sql[previous..index] == sql[last..end] {
+                    return (previous, sql[previous + 1..last].to_string());
+                }
+                index = previous;
+            }
+            (0, String::new())
+        }
+        ']' => {
+            let mut index = last;
+            while index > 0 {
+                let previous = previous_boundary(sql, index);
+                if &sql[previous..index] == "[" {
+                    return (previous, sql[previous + 1..last].to_string());
+                }
+                index = previous;
+            }
+            (0, String::new())
+        }
+        character if is_identifier_char(character) => {
+            let mut index = last;
+            while index > 0 {
+                let previous = previous_boundary(sql, index);
+                if is_identifier_char(sql[previous..index].chars().next().unwrap_or(' ')) {
+                    index = previous;
+                } else {
+                    break;
+                }
+            }
+            (index, sql[index..end].to_string())
+        }
+        _ => (end, String::new()),
+    }
+}
+
+/// Whether the last word before `before` is a clause that expects a table name next.
+fn expects_table_name(sql: &str, before: usize) -> bool {
+    let mut index = before;
+    while index > 0 {
+        let previous = previous_boundary(sql, index);
+        if sql[previous..index]
+            .chars()
+            .next()
+            .unwrap_or(' ')
+            .is_whitespace()
+        {
+            index = previous;
+        } else {
+            break;
+        }
+    }
+    let (_, word) = identifier_before(sql, index);
+    matches!(
+        word.to_ascii_uppercase().as_str(),
+        "FROM" | "JOIN" | "INTO" | "UPDATE" | "TABLE"
+    )
+}
+
+/// Every table referenced by `statement` (across `FROM`/`JOIN`/`INTO`/`UPDATE`), with aliases.
+pub fn referenced_tables(statement: &str) -> Vec<SqlTableRef> {
+    let tokens = meaningful_tokens(statement);
+    let mut tables: Vec<SqlTableRef> = Vec::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        let trigger = matches!(
+            &tokens[index],
+            Token::Word(word)
+                if word.keyword != Keyword::NoKeyword
+                    && matches!(
+                        word.value.to_ascii_uppercase().as_str(),
+                        "FROM" | "JOIN" | "INTO" | "UPDATE"
+                    )
+        );
+        if trigger && let Some((table, next)) = table_reference_at(&tokens, index + 1) {
+            if !tables.contains(&table) {
+                tables.push(table);
+            }
+            index = next;
+            continue;
+        }
+        index += 1;
+    }
+    tables
+}
+
+/// Read one table reference starting at `start` (which must be a `Word`, not a subquery), plus its
+/// optional `AS alias`/bare alias. Returns the reference and the index after it.
+fn table_reference_at(tokens: &[Token], start: usize) -> Option<(SqlTableRef, usize)> {
+    if matches!(tokens.get(start), Some(Token::LParen)) {
+        return None;
+    }
+    let mut parts = Vec::new();
+    let mut index = start;
+    loop {
+        match tokens.get(index) {
+            Some(Token::Word(word)) => {
+                parts.push(word.value.clone());
+                index += 1;
+            }
+            _ => return None,
+        }
+        if matches!(tokens.get(index), Some(Token::Period)) {
+            index += 1;
+        } else {
+            break;
+        }
+    }
+    let name = parts.pop()?;
+    let database = parts.pop();
+    let mut alias = None;
+    let mut next = index;
+    if let Some(Token::Word(word)) = tokens.get(index) {
+        if word.keyword == Keyword::AS {
+            if let Some(Token::Word(alias_word)) = tokens.get(index + 1) {
+                alias = Some(alias_word.value.clone());
+                next = index + 2;
+            }
+        } else if word.keyword == Keyword::NoKeyword {
+            alias = Some(word.value.clone());
+            next = index + 1;
+        }
+    }
+    Some((
+        SqlTableRef {
+            database,
+            name,
+            alias,
+        },
+        next,
+    ))
+}
+
+/// The `;`-delimited statement containing `caret`, quotation- and comment-aware. Falls back to the
+/// whole text when no boundary is found.
+pub fn current_statement(sql: &str, caret: usize) -> String {
+    let bytes = sql.as_bytes();
+    let mut start = 0usize;
+    let mut index = 0usize;
+    let mut state = ScanState::Normal;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        match state {
+            ScanState::Normal => match byte {
+                b'\'' => state = ScanState::Single,
+                b'"' => state = ScanState::Double,
+                b'`' => state = ScanState::Backtick,
+                b'#' => state = ScanState::LineComment,
+                b'-' if bytes.get(index + 1) == Some(&b'-') => {
+                    state = ScanState::LineComment;
+                    index += 1;
+                }
+                b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                    state = ScanState::BlockComment;
+                    index += 1;
+                }
+                b';' => {
+                    if index >= caret {
+                        return sql[start..index].to_string();
+                    }
+                    start = index + 1;
+                }
+                _ => {}
+            },
+            ScanState::Single => {
+                if byte == b'\\' {
+                    index += 1;
+                } else if byte == b'\'' {
+                    state = ScanState::Normal;
+                }
+            }
+            ScanState::Double => {
+                if byte == b'\\' {
+                    index += 1;
+                } else if byte == b'"' {
+                    state = ScanState::Normal;
+                }
+            }
+            ScanState::Backtick => {
+                if byte == b'`' {
+                    state = ScanState::Normal;
+                }
+            }
+            ScanState::LineComment => {
+                if byte == b'\n' {
+                    state = ScanState::Normal;
+                }
+            }
+            ScanState::BlockComment => {
+                if byte == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                    state = ScanState::Normal;
+                    index += 1;
+                }
+            }
+        }
+        index += 1;
+    }
+    sql[start..].to_string()
+}
+
+#[derive(Clone, Copy)]
+enum ScanState {
+    Normal,
+    Single,
+    Double,
+    Backtick,
+    LineComment,
+    BlockComment,
+}
+
+/// Whether byte offset `caret` sits inside a string literal or comment — a context where the
+/// editor must not offer completion.
+fn in_string_or_comment(sql: &str, caret: usize) -> bool {
+    let bytes = sql.as_bytes();
+    let end = caret.min(bytes.len());
+    let mut index = 0usize;
+    let mut state = ScanState::Normal;
+    while index < end {
+        let byte = bytes[index];
+        match state {
+            ScanState::Normal => match byte {
+                b'\'' => state = ScanState::Single,
+                b'"' => state = ScanState::Double,
+                b'`' => state = ScanState::Backtick,
+                b'#' => state = ScanState::LineComment,
+                b'-' if bytes.get(index + 1) == Some(&b'-') => {
+                    state = ScanState::LineComment;
+                    index += 1;
+                }
+                b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                    state = ScanState::BlockComment;
+                    index += 1;
+                }
+                _ => {}
+            },
+            ScanState::Single => {
+                if byte == b'\\' {
+                    index += 1;
+                } else if byte == b'\'' {
+                    state = ScanState::Normal;
+                }
+            }
+            ScanState::Double => {
+                if byte == b'\\' {
+                    index += 1;
+                } else if byte == b'"' {
+                    state = ScanState::Normal;
+                }
+            }
+            ScanState::Backtick => {
+                if byte == b'`' {
+                    state = ScanState::Normal;
+                }
+            }
+            ScanState::LineComment => {
+                if byte == b'\n' {
+                    state = ScanState::Normal;
+                }
+            }
+            ScanState::BlockComment => {
+                if byte == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                    state = ScanState::Normal;
+                    index += 1;
+                }
+            }
+        }
+        index += 1;
+    }
+    matches!(
+        state,
+        ScanState::Single | ScanState::Double | ScanState::LineComment | ScanState::BlockComment
+    )
+}
+
+/// Common MySQL functions. Kept static so the editor can offer them without a database round-trip.
+const BUILTIN_FUNCTIONS: &[&str] = &[
+    "ABS",
+    "ACOS",
+    "ADDDATE",
+    "ADDTIME",
+    "AES_DECRYPT",
+    "AES_ENCRYPT",
+    "ASCII",
+    "ASIN",
+    "ATAN",
+    "ATAN2",
+    "AVG",
+    "BENCHMARK",
+    "BIN",
+    "BIN_TO_UUID",
+    "BIT_AND",
+    "BIT_LENGTH",
+    "BIT_OR",
+    "BIT_XOR",
+    "CAST",
+    "CEIL",
+    "CEILING",
+    "CHAR",
+    "CHAR_LENGTH",
+    "CHARACTER_LENGTH",
+    "CHARSET",
+    "COALESCE",
+    "COERCIBILITY",
+    "COLLATION",
+    "COMPRESS",
+    "CONCAT",
+    "CONCAT_WS",
+    "CONNECTION_ID",
+    "CONV",
+    "CONVERT",
+    "CONVERT_TZ",
+    "COS",
+    "COT",
+    "COUNT",
+    "CRC32",
+    "CUME_DIST",
+    "CURDATE",
+    "CURRENT_DATE",
+    "CURRENT_ROLE",
+    "CURRENT_TIME",
+    "CURRENT_TIMESTAMP",
+    "CURRENT_USER",
+    "CURTIME",
+    "DATABASE",
+    "DATE",
+    "DATE_ADD",
+    "DATE_FORMAT",
+    "DATE_SUB",
+    "DATEDIFF",
+    "DAY",
+    "DAYNAME",
+    "DAYOFMONTH",
+    "DAYOFWEEK",
+    "DAYOFYEAR",
+    "DEGREES",
+    "DENSE_RANK",
+    "ELT",
+    "EXP",
+    "EXPORT_SET",
+    "EXTRACT",
+    "FIELD",
+    "FIND_IN_SET",
+    "FIRST_VALUE",
+    "FLOOR",
+    "FORMAT",
+    "FOUND_ROWS",
+    "FROM_BASE64",
+    "FROM_DAYS",
+    "FROM_UNIXTIME",
+    "GET_FORMAT",
+    "GET_LOCK",
+    "GREATEST",
+    "GROUP_CONCAT",
+    "HEX",
+    "HOUR",
+    "IF",
+    "IFNULL",
+    "INET6_ATON",
+    "INET6_NTOA",
+    "INET_ATON",
+    "INET_NTOA",
+    "INSERT",
+    "INSTR",
+    "IS_FREE_LOCK",
+    "IS_IPV4",
+    "IS_IPV6",
+    "IS_USED_LOCK",
+    "IS_UUID",
+    "ISNULL",
+    "JSON_ARRAY",
+    "JSON_ARRAYAGG",
+    "JSON_ARRAY_APPEND",
+    "JSON_ARRAY_INSERT",
+    "JSON_CONTAINS",
+    "JSON_CONTAINS_PATH",
+    "JSON_DEPTH",
+    "JSON_EXTRACT",
+    "JSON_INSERT",
+    "JSON_KEYS",
+    "JSON_LENGTH",
+    "JSON_MERGE",
+    "JSON_MERGE_PATCH",
+    "JSON_MERGE_PRESERVE",
+    "JSON_OBJECT",
+    "JSON_OBJECTAGG",
+    "JSON_OVERLAPS",
+    "JSON_PRETTY",
+    "JSON_QUOTE",
+    "JSON_REMOVE",
+    "JSON_REPLACE",
+    "JSON_SEARCH",
+    "JSON_SET",
+    "JSON_STORAGE_FREE",
+    "JSON_STORAGE_SIZE",
+    "JSON_TYPE",
+    "JSON_UNQUOTE",
+    "JSON_VALID",
+    "JSON_VALUE",
+    "LAG",
+    "LAST_DAY",
+    "LAST_INSERT_ID",
+    "LAST_VALUE",
+    "LCASE",
+    "LEAD",
+    "LEAST",
+    "LEFT",
+    "LENGTH",
+    "LN",
+    "LOAD_FILE",
+    "LOCALTIME",
+    "LOCALTIMESTAMP",
+    "LOCATE",
+    "LOG",
+    "LOG10",
+    "LOG2",
+    "LOWER",
+    "LPAD",
+    "LTRIM",
+    "MAKEDATE",
+    "MAKETIME",
+    "MAX",
+    "MD5",
+    "MICROSECOND",
+    "MID",
+    "MIN",
+    "MINUTE",
+    "MOD",
+    "MONTH",
+    "MONTHNAME",
+    "NAME_CONST",
+    "NOW",
+    "NTH_VALUE",
+    "NTILE",
+    "NULLIF",
+    "OCT",
+    "OCTET_LENGTH",
+    "ORD",
+    "PERCENT_RANK",
+    "PERIOD_ADD",
+    "PERIOD_DIFF",
+    "PI",
+    "POSITION",
+    "POW",
+    "POWER",
+    "QUARTER",
+    "QUOTE",
+    "RADIANS",
+    "RAND",
+    "RANDOM_BYTES",
+    "RANK",
+    "REGEXP_INSTR",
+    "REGEXP_LIKE",
+    "REGEXP_REPLACE",
+    "REGEXP_SUBSTR",
+    "RELEASE_ALL_LOCKS",
+    "RELEASE_LOCK",
+    "REPEAT",
+    "REPLACE",
+    "REVERSE",
+    "RIGHT",
+    "ROUND",
+    "ROW_COUNT",
+    "ROW_NUMBER",
+    "RPAD",
+    "RTRIM",
+    "SCHEMA",
+    "SEC_TO_TIME",
+    "SECOND",
+    "SESSION_USER",
+    "SHA1",
+    "SHA2",
+    "SIGN",
+    "SIN",
+    "SLEEP",
+    "SOUNDEX",
+    "SPACE",
+    "SQRT",
+    "STD",
+    "STDDEV",
+    "STDDEV_POP",
+    "STDDEV_SAMP",
+    "STR_TO_DATE",
+    "SUBDATE",
+    "SUBSTR",
+    "SUBSTRING",
+    "SUBSTRING_INDEX",
+    "SUBTIME",
+    "SUM",
+    "SYSDATE",
+    "SYSTEM_USER",
+    "TAN",
+    "TIME",
+    "TIME_FORMAT",
+    "TIME_TO_SEC",
+    "TIMEDIFF",
+    "TIMESTAMP",
+    "TIMESTAMPADD",
+    "TIMESTAMPDIFF",
+    "TO_BASE64",
+    "TO_DAYS",
+    "TO_SECONDS",
+    "TRIM",
+    "TRUNCATE",
+    "UCASE",
+    "UNCOMPRESS",
+    "UNCOMPRESSED_LENGTH",
+    "UNHEX",
+    "UNIX_TIMESTAMP",
+    "UPPER",
+    "USER",
+    "UTC_DATE",
+    "UTC_TIME",
+    "UTC_TIMESTAMP",
+    "UUID",
+    "UUID_SHORT",
+    "UUID_TO_BIN",
+    "VALIDATE_PASSWORD_STRENGTH",
+    "VAR_POP",
+    "VAR_SAMP",
+    "VARIANCE",
+    "VERSION",
+    "WEEK",
+    "WEEKDAY",
+    "WEEKOFYEAR",
+    "WEIGHT_STRING",
+    "YEAR",
+    "YEARWEEK",
+];
+
 fn classify(token: &Token) -> Option<SqlToken> {
     match token {
         Token::Word(word) => Some(if word.quote_style.is_some() {
@@ -422,5 +1066,74 @@ mod tests {
         assert_eq!(infer_single_table("SELECT a FROM t1, t2"), None);
         assert_eq!(infer_single_table("SELECT 1"), None);
         assert_eq!(infer_single_table("UPDATE users SET a = 1"), None);
+    }
+
+    #[test]
+    fn lists_builtin_functions() {
+        assert!(functions().contains(&"COUNT"));
+        assert!(functions().contains(&"JSON_EXTRACT"));
+    }
+
+    #[test]
+    fn extracts_referenced_tables_and_aliases() {
+        let tables =
+            referenced_tables("SELECT a.id FROM `app`.`users` AS a JOIN orders o ON o.uid = a.id");
+        assert_eq!(
+            tables,
+            vec![
+                SqlTableRef {
+                    database: Some("app".to_string()),
+                    name: "users".to_string(),
+                    alias: Some("a".to_string()),
+                },
+                SqlTableRef {
+                    database: None,
+                    name: "orders".to_string(),
+                    alias: Some("o".to_string()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn analyzes_completion_context() {
+        // The table after the caret is still offered (mirrors `SELECT |FROM t`).
+        let sql = "SELECT \nFROM ams_item";
+        let context = completion_context(sql, "SELECT \n".len());
+        assert_eq!(context.prefix, "");
+        assert_eq!(context.kind, SqlCompletionKind::Column);
+        assert_eq!(context.tables.len(), 1);
+        assert_eq!(context.tables[0].name, "ams_item");
+
+        // A partial identifier after FROM expects a table name.
+        let sql = "SELECT * FROM ams";
+        let context = completion_context(sql, sql.len());
+        assert_eq!(context.prefix, "ams");
+        assert_eq!(context.kind, SqlCompletionKind::Table);
+
+        // `alias.` and `db.table.` qualifiers are split out.
+        let sql = "SELECT a. FROM t a";
+        let context = completion_context(sql, "SELECT a.".len());
+        assert_eq!(context.prefix, "");
+        assert_eq!(context.qualifier, vec!["a".to_string()]);
+
+        let sql = "SELECT app.us.";
+        let context = completion_context(sql, sql.len());
+        assert_eq!(context.qualifier, vec!["app".to_string(), "us".to_string()]);
+
+        // Completion is suppressed inside strings and comments.
+        assert!(completion_context("SELECT 'abc", "SELECT 'abc".len()).suppress);
+        assert!(completion_context("SELECT 1 -- x", "SELECT 1 -- x".len()).suppress);
+        assert!(!completion_context("SELECT a.", "SELECT a.".len()).suppress);
+    }
+
+    #[test]
+    fn scopes_statements_around_the_caret() {
+        assert_eq!(current_statement("SELECT 1; SELECT 2", 5), "SELECT 1");
+        assert_eq!(current_statement("SELECT 1; SELECT 2", 12), " SELECT 2");
+        assert_eq!(
+            current_statement("SELECT ';' FROM t", 5),
+            "SELECT ';' FROM t"
+        );
     }
 }

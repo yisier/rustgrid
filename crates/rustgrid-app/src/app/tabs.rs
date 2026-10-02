@@ -2,58 +2,57 @@ use super::*;
 
 impl AppView {
     pub(super) fn render_content(
-        &self,
+        &mut self,
         window: &Window,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let theme = self.theme;
 
-        let body: AnyElement = if let Some(design) =
-            self.active_design.and_then(|index| self.designs.get(index))
-        {
-            design
-                .clone()
-                .cached(cached_style(|d| {
-                    d.flex().flex_col().flex_1().min_w(px(0.0)).min_h(px(0.0))
-                }))
-                .into_any_element()
-        } else if let Some(query) = self.active_query.and_then(|index| self.queries.get(index)) {
-            self.render_query_view(query, window, cx).into_any_element()
-        } else if let Some(grid) = self.active_grid.and_then(|index| self.grids.get(index)) {
-            grid.clone()
-                .cached(cached_style(|d| {
-                    d.flex().flex_col().flex_1().min_w(px(0.0)).min_h(px(0.0))
-                }))
-                .into_any_element()
-        } else if self.main_tab == MainTab::Users {
-            self.render_users(cx).into_any_element()
-        } else if self.main_tab == MainTab::Queries {
-            div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .overflow_hidden()
-                .child(self.render_query_object_toolbar(cx))
-                .child(self.render_saved_queries(cx))
-                .into_any_element()
-        } else if self.main_tab == MainTab::Backups {
-            self.render_backups(cx).into_any_element()
-        } else if matches!(self.main_tab, MainTab::Functions | MainTab::Views)
-            && self.object_pane.is_none()
-        {
-            div().flex_1().into_any_element()
-        } else if let Some(pane) = self.object_pane.clone() {
-            div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .overflow_hidden()
-                .child(self.render_object_toolbar(&pane, cx))
-                .child(pane.clone())
-                .into_any_element()
-        } else {
-            div().into_any_element()
-        };
+        let body: AnyElement =
+            if let Some(design) = self.active_design.and_then(|index| self.designs.get(index)) {
+                design
+                    .clone()
+                    .cached(cached_style(|d| {
+                        d.flex().flex_col().flex_1().min_w(px(0.0)).min_h(px(0.0))
+                    }))
+                    .into_any_element()
+            } else if let Some(index) = self.active_query {
+                self.render_query_view(index, window, cx).into_any_element()
+            } else if let Some(grid) = self.active_grid.and_then(|index| self.grids.get(index)) {
+                grid.clone()
+                    .cached(cached_style(|d| {
+                        d.flex().flex_col().flex_1().min_w(px(0.0)).min_h(px(0.0))
+                    }))
+                    .into_any_element()
+            } else if self.main_tab == MainTab::Users {
+                self.render_users(cx).into_any_element()
+            } else if self.main_tab == MainTab::Queries {
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .overflow_hidden()
+                    .child(self.render_query_object_toolbar(cx))
+                    .child(self.render_saved_queries(cx))
+                    .into_any_element()
+            } else if self.main_tab == MainTab::Backups {
+                self.render_backups(cx).into_any_element()
+            } else if matches!(self.main_tab, MainTab::Functions | MainTab::Views)
+                && self.object_pane.is_none()
+            {
+                div().flex_1().into_any_element()
+            } else if let Some(pane) = self.object_pane.clone() {
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .overflow_hidden()
+                    .child(self.render_object_toolbar(&pane, cx))
+                    .child(pane.clone())
+                    .into_any_element()
+            } else {
+                div().into_any_element()
+            };
 
         let has_tabs = self.main_tab != MainTab::Backups
             && (self.object_pane.is_some()

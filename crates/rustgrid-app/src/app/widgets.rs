@@ -775,60 +775,6 @@ impl AppView {
                         }),
                     ));
             }
-            ContextTarget::QueryEditor => {
-                items = items
-                    .child(self.context_item(
-                        "editor-run-selected",
-                        t!("query.run_selected").to_string(),
-                        cx.listener(|this, _event, _window, cx| {
-                            this.context_menu = None;
-                            this.run_query(true, cx);
-                        }),
-                    ))
-                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
-                    .child(self.context_item(
-                        "editor-undo",
-                        t!("query.undo").to_string(),
-                        cx.listener(|this, _event, _window, cx| {
-                            this.context_menu = None;
-                            this.query_editor_undo(cx);
-                        }),
-                    ))
-                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
-                    .child(self.context_item(
-                        "editor-cut",
-                        t!("query.cut").to_string(),
-                        cx.listener(|this, _event, _window, cx| {
-                            this.context_menu = None;
-                            this.query_editor_cut(cx);
-                        }),
-                    ))
-                    .child(self.context_item(
-                        "editor-copy",
-                        t!("query.copy").to_string(),
-                        cx.listener(|this, _event, _window, cx| {
-                            this.context_menu = None;
-                            this.query_editor_copy(cx);
-                        }),
-                    ))
-                    .child(self.context_item(
-                        "editor-paste",
-                        t!("query.paste").to_string(),
-                        cx.listener(|this, _event, _window, cx| {
-                            this.context_menu = None;
-                            this.query_editor_paste(cx);
-                        }),
-                    ))
-                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
-                    .child(self.context_item(
-                        "editor-select-all",
-                        t!("query.select_all").to_string(),
-                        cx.listener(|this, _event, _window, cx| {
-                            this.context_menu = None;
-                            this.query_editor_select_all(cx);
-                        }),
-                    ));
-            }
         }
 
         ui::popup_panel(theme)

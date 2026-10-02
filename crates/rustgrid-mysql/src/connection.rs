@@ -176,7 +176,7 @@ impl Connection for MysqlConnection {
 
     async fn columns(&self, database: &str, table: &str) -> Result<Vec<ColumnInfo>> {
         let rows = sqlx::query(
-            "SELECT column_name, column_type, is_nullable, column_key \
+            "SELECT column_name, column_type, is_nullable, column_key, column_comment \
              FROM information_schema.columns \
              WHERE table_schema = ? AND table_name = ? \
              ORDER BY ordinal_position",
@@ -193,11 +193,13 @@ impl Connection for MysqlConnection {
             let data_type: String = row.try_get(1).map_err(map_query_error)?;
             let nullable: String = row.try_get(2).map_err(map_query_error)?;
             let key: String = row.try_get(3).map_err(map_query_error)?;
+            let comment: String = row.try_get(4).unwrap_or_default();
             columns.push(ColumnInfo {
                 name,
                 data_type,
                 nullable: nullable.eq_ignore_ascii_case("YES"),
                 primary_key: key.eq_ignore_ascii_case("PRI"),
+                comment,
             });
         }
         Ok(columns)
@@ -2089,6 +2091,7 @@ fn column_info(column: &MySqlColumn) -> ColumnInfo {
         data_type: column.type_info().to_string(),
         nullable: true,
         primary_key: false,
+        comment: String::new(),
     }
 }
 

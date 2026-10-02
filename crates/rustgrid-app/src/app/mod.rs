@@ -16,7 +16,9 @@ use gpui::{
     WeakEntity, Window, WindowBounds, WindowControlArea, WindowHandle, WindowId, WindowOptions,
     canvas, deferred, div, img, prelude::*, px, rgb, rgba, size, svg, uniform_list,
 };
-use rustgrid_config::{AppSettings, ConfigStore, LanguageSetting, ThemeSetting};
+use rustgrid_config::{
+    AppSettings, ConfigStore, DEFAULT_EDITOR_FONT_SIZE, LanguageSetting, ThemeSetting,
+};
 use rustgrid_core::{
     BackupObjectKind, CellValue, Connection, ConnectionConfig, DriverId, DriverRegistry, Error,
     FilterCondition, FilterConjunction, FilterGroup, FilterNode, FilterOperator, ObjectGrant,
@@ -35,7 +37,7 @@ use crate::session::{
     DatabaseNode, GridState, Loadable, QueryResultPlan, QueryResultSummary, QueryTab, RoutineTab,
     RoutineTabState, SortRule, ViewExplainTab, ViewTab, ViewTabState, compute_column_widths,
 };
-use crate::sql::{self, SqlSpan, SqlToken};
+use crate::sql::{self, SqlToken};
 use crate::theme::Theme;
 
 // The in-place date/time picker is built from gpui-kit: the calendar supplies the date half
@@ -64,6 +66,12 @@ gpui::actions!(backup, [CopyBackupFile, PasteBackupFile, RenameBackupFile]);
 // Saved-query file-list actions, mirroring the backup list's F2 / Ctrl+C / Ctrl+V handling.
 gpui::actions!(queryfile, [CopyQueryFile, PasteQueryFile, RenameQueryFile]);
 
+// Query-editor actions. `Root` binds `ctrl-z` (and `ctrl-c`/`ctrl-v`) in the `"Root"` context,
+// which would swallow the keystroke before `on_key_down`; binding our own actions in the editor's
+// deeper context takes precedence, so undo/redo actually reach the editor. `RunSelectedQuery` is
+// dispatched from the editor's right-click menu.
+gpui::actions!(queryeditor, [UndoQuery, RedoQuery, RunSelectedQuery]);
+
 /// Key context applied to the cell that owns the in-place editor.
 const GRID_CELL_CONTEXT: &str = "GridCell";
 
@@ -72,6 +80,9 @@ const BACKUP_LIST_CONTEXT: &str = "BackupList";
 
 /// Key context applied to the saved-query file list.
 const QUERY_LIST_CONTEXT: &str = "QueryList";
+
+/// Key context applied to the SQL query editor, so Ctrl+Z / Ctrl+Y reach it.
+const QUERY_EDITOR_CONTEXT: &str = "QueryEditor";
 
 /// The stable settings key for the Queries tab's remembered list layout.
 pub(super) const VIEW_PAGE_QUERIES: &str = "queries";
@@ -820,7 +831,6 @@ enum ContextTarget {
     BackupList,
     /// The blank area of the Queries main tab's list.
     QueryList,
-    QueryEditor,
 }
 
 struct ContextMenu {
@@ -1026,20 +1036,11 @@ struct CellEditor {
     input: Entity<TextInput>,
 }
 
-/// The SQL completion popup state for the active query editor.
-struct Completion {
-    candidates: Vec<String>,
-    selected: usize,
-    start: usize,
-    end: usize,
-}
-
-/// The lowercased completion candidates `(lowercase, original)` for one connection's loaded
-/// tables plus the SQL keyword list, reused across keystrokes until the tables change.
-struct CompletionCache {
-    connection_index: Option<usize>,
-    generation: u64,
-    items: Rc<Vec<(String, String)>>,
+/// Column metadata for a referenced table, loaded on demand by the query editor's completion.
+enum ColumnCacheEntry {
+    Loading,
+    Loaded(Vec<rustgrid_core::ColumnInfo>),
+    Failed,
 }
 
 /// Where a pointer position lands inside the data grid.
@@ -1176,6 +1177,13 @@ pub(super) const INFO_MIN_WIDTH: f32 = 180.0;
 pub(super) const INFO_MAX_WIDTH: f32 = 640.0;
 /// Width of a pane's drag-to-resize divider.
 pub(super) const PANE_DIVIDER_WIDTH: f32 = 5.0;
+/// Default and clamp heights of the query page's bottom result panel (the Navicat-style splitter
+/// between the SQL editor and the 结果 tabs).
+pub(super) const QUERY_RESULT_DEFAULT_HEIGHT: f32 = 280.0;
+pub(super) const QUERY_RESULT_MIN_HEIGHT: f32 = 100.0;
+pub(super) const QUERY_RESULT_MAX_HEIGHT: f32 = 1000.0;
+/// The query editor keeps at least this height when the result splitter is dragged up.
+pub(super) const QUERY_EDITOR_MIN_HEIGHT: f32 = 80.0;
 const GRID_ROW_HEIGHT: f32 = 24.0;
 const GRID_COLUMN_WIDTH: f32 = 120.0;
 /// Filter-builder metrics, a compact take on the reference design: 24px controls, an 80px left
@@ -1208,9 +1216,15 @@ const MAX_COLUMN_WIDTH: f32 = 1200.0;
 const GRID_GUTTER_WIDTH: f32 = 22.0;
 /// Thickness of the app-drawn grid scrollbars (matches `ui::vscrollbar_track` / `hscrollbar_track`).
 const GRID_SCROLLBAR_THICKNESS: f32 = 14.0;
-const QUERY_EDITOR_PAD: f32 = 6.0;
 /// Cap used when "Limit Records" is unchecked, standing in for an unlimited fetch.
 const NO_LIMIT_PAGE_SIZE: u64 = 1_000_000;
+
+/// The Options window's left-nav pages.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OptionsSection {
+    General,
+    Editor,
+}
 
 pub struct AppView {
     registry: Arc<DriverRegistry>,
@@ -1291,12 +1305,14 @@ pub struct AppView {
     save_query_focus_pending: bool,
     query_focus: FocusHandle,
     query_focus_pending: bool,
-    query_editor_focused: bool,
-    /// The SQL editor's IME composing byte range, if any.
-    query_ime_marked: Option<std::ops::Range<usize>>,
-    query_editor_layout: RefCell<TextLayout>,
-    query_editor_text: RefCell<String>,
-    query_editor_measured: bool,
+    /// One gpui-kit editor per query tab, index-aligned with `queries` and `None` until built.
+    /// `ui::SqlEditor` owns the text, undo/redo, multi-cursor and search; `QueryTab::sql` mirrors
+    /// it for the run/save/format paths.
+    query_editors: Vec<Option<Entity<ui::SqlEditor>>>,
+    /// Read-only SQL preview editors (routine/view ?? tabs), keyed by tab fingerprint.
+    preview_editors: std::collections::HashMap<String, Entity<ui::SqlEditor>>,
+    /// Shared completion catalog, refreshed as the connection tree loads tables and columns.
+    completion_catalog: Arc<std::sync::RwLock<sql_completion::CompletionCatalog>>,
     /// The saved-query 详细列表's scroll state (vertical rows, horizontal header + rows) and its
     /// scrollbar-thumb drags.
     query_detail_scroll: DetailScroll,
@@ -1304,13 +1320,17 @@ pub struct AppView {
     query_detail_columns: Rc<RefCell<DetailColumns>>,
     query_connection_combo: Option<Entity<ComboBox>>,
     query_database_combo: Option<Entity<ComboBox>>,
-    query_completion: Option<Completion>,
-    query_completion_cache: RefCell<Option<CompletionCache>>,
+    /// The query page's bottom result-panel height, set by dragging the splitter between the
+    /// editor and the 结果 tabs.
+    query_result_height: f32,
+    /// `(pointer y, panel height)` captured while that splitter is being dragged.
+    query_split_drag: Option<(f32, f32)>,
+    /// Column metadata keyed by `(connection index, database, table)`, loaded on demand for
+    /// completion.
+    query_column_cache:
+        RefCell<std::collections::HashMap<(usize, String, String), ColumnCacheEntry>>,
     /// Bumped whenever the loaded table sets change, invalidating the completion cache.
     completion_generation: u64,
-    /// Tokenizer spans for the SQL editor, cached by the exact text so each frame does not
-    /// re-tokenize the whole document (see `styled_sql`).
-    sql_highlight_cache: RefCell<Option<(String, Rc<Vec<SqlSpan>>)>>,
     active_grid: Option<usize>,
     next_grid_id: u64,
     form: Option<ConnectionForm>,
@@ -1363,7 +1383,6 @@ pub struct AppView {
     /// Focus target for the connection window, so ESC works before any field is focused.
     form_focus: FocusHandle,
     caret_visible: bool,
-    caret_blink_running: bool,
     password_prompt: Option<PasswordPrompt>,
     password_focus_pending: bool,
     rename_edit: Option<RenameEdit>,
@@ -1386,6 +1405,20 @@ pub struct AppView {
     language: LanguageSetting,
     options_language: LanguageSetting,
     language_combo: Option<Entity<ComboBox>>,
+    /// The SQL editor font family; empty means the built-in default.
+    editor_font_family: String,
+    editor_font_size: u32,
+    editor_line_numbers: bool,
+    editor_word_wrap: bool,
+    /// The Options window's selected left-nav page.
+    options_section: OptionsSection,
+    /// Staged editor settings, applied on OK so Cancel discards them.
+    options_editor_font_family: String,
+    options_editor_font_size: u32,
+    options_editor_line_numbers: bool,
+    options_editor_word_wrap: bool,
+    editor_font_combo: Option<Entity<ComboBox>>,
+    editor_size_combo: Option<Entity<ComboBox>>,
     /// The OS window hosting the Options dialog, if open.
     options_window: Option<WindowHandle<gpui_kit::component::Root>>,
     /// Focus target for the Options window, so ESC works before any control is focused.
@@ -1532,6 +1565,7 @@ mod query_view;
 mod routine;
 mod routine_view;
 mod sidebar;
+mod sql_completion;
 mod tabs;
 mod toolbar;
 mod tree;
@@ -1613,6 +1647,12 @@ impl AppView {
             KeyBinding::new("cmd-c", CopyQueryFile, Some(QUERY_LIST_CONTEXT)),
             KeyBinding::new("ctrl-v", PasteQueryFile, Some(QUERY_LIST_CONTEXT)),
             KeyBinding::new("cmd-v", PasteQueryFile, Some(QUERY_LIST_CONTEXT)),
+            // The query editor owns undo/redo, since `Root`'s `ctrl-z` would otherwise swallow it.
+            KeyBinding::new("ctrl-z", UndoQuery, Some(QUERY_EDITOR_CONTEXT)),
+            KeyBinding::new("ctrl-shift-z", RedoQuery, Some(QUERY_EDITOR_CONTEXT)),
+            KeyBinding::new("ctrl-y", RedoQuery, Some(QUERY_EDITOR_CONTEXT)),
+            KeyBinding::new("cmd-z", UndoQuery, Some(QUERY_EDITOR_CONTEXT)),
+            KeyBinding::new("cmd-shift-z", RedoQuery, Some(QUERY_EDITOR_CONTEXT)),
         ]);
         let app = cx.weak_entity();
         let app_entity = cx.entity();
@@ -1699,19 +1739,19 @@ impl AppView {
             save_query_focus_pending: false,
             query_focus: cx.focus_handle(),
             query_focus_pending: false,
-            query_editor_focused: false,
-            query_ime_marked: None,
-            query_editor_layout: RefCell::new(TextLayout::default()),
-            query_editor_text: RefCell::new(String::new()),
-            query_editor_measured: false,
+            query_editors: Vec::new(),
+            preview_editors: std::collections::HashMap::new(),
+            completion_catalog: Arc::new(std::sync::RwLock::new(
+                sql_completion::CompletionCatalog::default(),
+            )),
             query_detail_scroll: DetailScroll::default(),
             query_detail_columns: Rc::new(RefCell::new(DetailColumns::default())),
             query_connection_combo: None,
             query_database_combo: None,
-            query_completion: None,
-            query_completion_cache: RefCell::new(None),
+            query_result_height: QUERY_RESULT_DEFAULT_HEIGHT,
+            query_split_drag: None,
+            query_column_cache: RefCell::new(std::collections::HashMap::new()),
             completion_generation: 0,
-            sql_highlight_cache: RefCell::new(None),
             active_grid: None,
             next_grid_id: 0,
             form: None,
@@ -1750,7 +1790,6 @@ impl AppView {
             connection_window: None,
             form_focus: cx.focus_handle(),
             caret_visible: true,
-            caret_blink_running: false,
             password_prompt: None,
             password_focus_pending: false,
             rename_edit: None,
@@ -1792,6 +1831,17 @@ impl AppView {
             language,
             options_language: language,
             language_combo: None,
+            editor_font_family: settings.editor_font_family.clone(),
+            editor_font_size: settings.editor_font_size,
+            editor_line_numbers: settings.editor_line_numbers,
+            editor_word_wrap: settings.editor_word_wrap,
+            options_section: OptionsSection::General,
+            options_editor_font_family: settings.editor_font_family.clone(),
+            options_editor_font_size: settings.editor_font_size,
+            options_editor_line_numbers: settings.editor_line_numbers,
+            options_editor_word_wrap: settings.editor_word_wrap,
+            editor_font_combo: None,
+            editor_size_combo: None,
             options_window: None,
             options_focus: cx.focus_handle(),
             tree_revision: 0,
@@ -1948,7 +1998,25 @@ impl AppView {
             language: self.language,
             show_info_pane: self.info_open,
             view_modes: self.view_modes.clone(),
+            editor_font_family: self.editor_font_family.clone(),
+            editor_font_size: self.editor_font_size,
+            editor_line_numbers: self.editor_line_numbers,
+            editor_word_wrap: self.editor_word_wrap,
         });
+    }
+
+    /// The SQL editor's font family (the built-in default when the setting is empty).
+    pub(super) fn editor_font(&self) -> String {
+        if self.editor_font_family.is_empty() {
+            "Consolas".to_string()
+        } else {
+            self.editor_font_family.clone()
+        }
+    }
+
+    /// The SQL editor's font size in px, clamped to a usable range.
+    pub(super) fn editor_font_size(&self) -> f32 {
+        self.editor_font_size.clamp(8, 48) as f32
     }
 
     /// The remembered list layout for a page, defaulting to 详细列表.
@@ -2425,41 +2493,6 @@ fn sort_plus_badge(theme: Theme) -> impl IntoElement {
         )
 }
 
-/// The color used to render a token category in the SQL editor.
-fn sql_token_color(theme: Theme, token: SqlToken) -> u32 {
-    match token {
-        SqlToken::Keyword => theme.sql_keyword,
-        SqlToken::Identifier => theme.text,
-        SqlToken::String => theme.sql_string,
-        SqlToken::Number => theme.sql_number,
-        SqlToken::Comment => theme.sql_comment,
-    }
-}
-
-/// The byte offset of the character boundary preceding `offset`.
-fn previous_boundary(text: &str, offset: usize) -> usize {
-    if offset == 0 {
-        return 0;
-    }
-    let mut index = offset - 1;
-    while index > 0 && !text.is_char_boundary(index) {
-        index -= 1;
-    }
-    index
-}
-
-/// The byte offset of the character boundary following `offset`.
-fn next_boundary(text: &str, offset: usize) -> usize {
-    if offset >= text.len() {
-        return text.len();
-    }
-    let mut index = offset + 1;
-    while index < text.len() && !text.is_char_boundary(index) {
-        index += 1;
-    }
-    index
-}
-
 /// The byte offset for a UTF-16 offset (used by the platform IME protocol).
 fn offset_from_utf16(text: &str, offset: usize) -> usize {
     let mut utf8 = 0;
@@ -2486,91 +2519,6 @@ fn offset_to_utf16(text: &str, offset: usize) -> usize {
         utf16 += character.len_utf16();
     }
     utf16
-}
-
-/// The byte range of the line containing `offset`, excluding the trailing newline.
-fn line_bounds(text: &str, offset: usize) -> (usize, usize) {
-    let offset = offset.min(text.len());
-    let start = text[..offset]
-        .rfind('\n')
-        .map(|index| index + 1)
-        .unwrap_or(0);
-    let end = text[offset..]
-        .find('\n')
-        .map(|index| offset + index)
-        .unwrap_or(text.len());
-    (start, end)
-}
-
-/// The byte range of the identifier-like word around `offset` (alphanumerics and `_`).
-fn word_bounds(text: &str, offset: usize) -> (usize, usize) {
-    let mut offset = offset.min(text.len());
-    while offset > 0 && !text.is_char_boundary(offset) {
-        offset -= 1;
-    }
-    let is_word = |character: char| character.is_alphanumeric() || character == '_';
-    let start = text[..offset]
-        .char_indices()
-        .rev()
-        .take_while(|(_, character)| is_word(*character))
-        .last()
-        .map(|(index, _)| index)
-        .unwrap_or(offset);
-    let end = text[offset..]
-        .char_indices()
-        .take_while(|(_, character)| is_word(*character))
-        .last()
-        .map(|(index, character)| offset + index + character.len_utf8())
-        .unwrap_or(offset);
-    (start, end)
-}
-
-/// The byte offset of the first character of every line in `text`, starting at 0.
-fn sql_line_starts(text: &str) -> Vec<usize> {
-    let mut starts = vec![0];
-    for (index, byte) in text.bytes().enumerate() {
-        if byte == b'\n' {
-            starts.push(index + 1);
-        }
-    }
-    starts
-}
-
-/// Move the caret one line up (`delta < 0`) or down, keeping the character column.
-fn move_vertical(text: &str, offset: usize, delta: isize) -> usize {
-    let (line_start, _) = line_bounds(text, offset);
-    let column = text[line_start..offset.min(text.len())].chars().count();
-
-    if delta < 0 {
-        if line_start == 0 {
-            return 0;
-        }
-        let previous_end = line_start - 1;
-        let (previous_start, _) = line_bounds(text, previous_end);
-        let mut boundary = previous_start;
-        for _ in 0..column {
-            if boundary >= previous_end {
-                break;
-            }
-            boundary = next_boundary(text, boundary);
-        }
-        boundary
-    } else {
-        let (_, line_end) = line_bounds(text, offset);
-        if line_end >= text.len() {
-            return text.len();
-        }
-        let next_start = line_end + 1;
-        let (_, next_end) = line_bounds(text, next_start);
-        let mut boundary = next_start;
-        for _ in 0..column {
-            if boundary >= next_end {
-                break;
-            }
-            boundary = next_boundary(text, boundary);
-        }
-        boundary
-    }
 }
 
 impl Render for AppView {
@@ -2602,6 +2550,7 @@ impl Render for AppView {
         self.sync_query_combos(cx);
         self.sync_save_dialog_combos(cx);
         self.sync_language_combo(cx);
+        self.sync_editor_combos(cx);
         self.sync_info(cx);
         self.sync_users(cx);
         // Remember the main window so closing it can take the Backup/Restore window with it.
@@ -2687,32 +2636,8 @@ impl Render for AppView {
             self.query_rename_focus_pending = false;
         }
 
-        self.query_editor_focused = self.query_focus.is_focused(window);
-
-        if self.query_editor_focused && !self.caret_blink_running {
-            self.caret_blink_running = true;
-            let executor = cx.background_executor().clone();
-            cx.spawn(async move |this, cx| {
-                loop {
-                    executor.timer(Duration::from_millis(530)).await;
-                    let keep_going = this.update(cx, |view, cx| {
-                        if view.query_editor_focused {
-                            view.caret_visible = !view.caret_visible;
-                            cx.notify();
-                            true
-                        } else {
-                            view.caret_blink_running = false;
-                            view.caret_visible = true;
-                            false
-                        }
-                    });
-                    if !matches!(keep_going, Ok(true)) {
-                        break;
-                    }
-                }
-            })
-            .detach();
-        }
+        // The wrapped gpui-kit editor owns its own caret blink, so the app no longer tracks an
+        // editor blink loop here.
 
         let mut body = div().flex().flex_row().flex_1().w_full().overflow_hidden();
         if self.sidebar_open {
@@ -2739,6 +2664,7 @@ impl Render for AppView {
                 host.update(cx, |host, cx| host.drag_move(event, cx));
                 let pane = this.info_pane.clone();
                 pane.update(cx, |pane, cx| pane.drag_move(event, cx));
+                this.drag_query_split(event, cx);
             }))
             .on_mouse_up(
                 MouseButton::Left,
@@ -2747,6 +2673,7 @@ impl Render for AppView {
                     host.update(cx, |host, cx| host.end_drag(cx));
                     let pane = this.info_pane.clone();
                     pane.update(cx, |pane, cx| pane.end_drag(cx));
+                    this.end_query_split_drag(cx);
                 }),
             )
             .child(self.render_titlebar(cx))
@@ -2773,8 +2700,6 @@ impl Render for AppView {
         // Dialogs are hosted by `Root` (opened imperatively); AppView state remains the source
         // of truth and this reconciles it with the Root dialog stack.
         self.sync_dialog(window, cx);
-
-        self.query_editor_measured = self.active_query.is_some();
 
         root
     }
@@ -2960,45 +2885,6 @@ fn parse_datetime(value: &str) -> Option<NaiveDateTime> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn boundaries_respect_utf8() {
-        let text = "a你好b";
-        assert_eq!(previous_boundary(text, text.len()), 7);
-        assert_eq!(previous_boundary(text, 7), 4);
-        assert_eq!(previous_boundary(text, 4), 1);
-        assert_eq!(previous_boundary(text, 1), 0);
-        assert_eq!(next_boundary(text, 0), 1);
-        assert_eq!(next_boundary(text, 1), 4);
-        assert_eq!(next_boundary(text, 4), 7);
-        assert_eq!(next_boundary(text, 7), 8);
-    }
-
-    #[test]
-    fn line_bounds_find_current_line() {
-        let text = "select 1\nfrom t\nwhere x";
-        assert_eq!(line_bounds(text, 0), (0, 8));
-        assert_eq!(line_bounds(text, 8), (0, 8));
-        assert_eq!(line_bounds(text, 9), (9, 15));
-        assert_eq!(line_bounds(text, 16), (16, 23));
-    }
-
-    #[test]
-    fn line_starts_cover_every_line() {
-        assert_eq!(sql_line_starts(""), vec![0]);
-        assert_eq!(sql_line_starts("select 1"), vec![0]);
-        assert_eq!(sql_line_starts("select 1\nfrom t\n"), vec![0, 9, 16]);
-    }
-
-    #[test]
-    fn vertical_movement_keeps_column() {
-        let text = "abcd\nef\nghij";
-        assert_eq!(move_vertical(text, 0, 1), 5);
-        assert_eq!(move_vertical(text, 3, 1), 7);
-        assert_eq!(move_vertical(text, 9, -1), 6);
-        assert_eq!(move_vertical(text, 5, -1), 0);
-        assert_eq!(move_vertical(text, 10, 1), text.len());
-    }
 
     #[test]
     fn multi_range_selection_unions_cells() {

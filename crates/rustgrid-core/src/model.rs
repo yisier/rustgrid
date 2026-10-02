@@ -98,6 +98,9 @@ pub struct ColumnInfo {
     pub data_type: String,
     pub nullable: bool,
     pub primary_key: bool,
+    /// The column's comment, when the engine exposes one (e.g. MySQL's `column_comment`).
+    #[serde(default)]
+    pub comment: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

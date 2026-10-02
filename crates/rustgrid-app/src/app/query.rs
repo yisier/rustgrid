@@ -108,7 +108,6 @@ impl AppView {
         self.active_query = Some(self.queries.len() - 1);
         self.active_grid = None;
         self.active_design = None;
-        self.query_completion = None;
         self.clear_object_search(cx);
         self.query_focus_pending = true;
         self.main_tab = MainTab::Queries;
@@ -127,7 +126,6 @@ impl AppView {
                     .iter()
                     .position(|grid| grid.read(cx).state.id == id)
             });
-        self.query_completion = None;
         self.query_focus_pending = true;
         cx.notify();
     }
@@ -138,6 +136,7 @@ impl AppView {
         }
         let active_id = self.active_grid_id(cx);
         let removed = self.queries.remove(index);
+        self.remove_query_editor(index);
         let mut grid_ids: Vec<u64> = removed.result_grids.iter().flatten().copied().collect();
         if let Some(id) = removed.grid_id
             && !grid_ids.contains(&id)
@@ -183,7 +182,6 @@ impl AppView {
                         .position(|grid| grid.read(cx).state.id == id)
                 })
             });
-        self.query_completion = None;
         cx.notify();
     }
 
@@ -383,7 +381,6 @@ impl AppView {
     }
 
     pub(super) fn query_connection_selected(&mut self, value: &str, cx: &mut Context<'_, Self>) {
-        self.query_completion = None;
         let Some(index) = self.active_query else {
             return;
         };
@@ -407,7 +404,6 @@ impl AppView {
     }
 
     pub(super) fn query_database_selected(&mut self, value: &str, cx: &mut Context<'_, Self>) {
-        self.query_completion = None;
         if let Some(index) = self.active_query
             && let Some(tab) = self.queries.get_mut(index)
         {
@@ -453,7 +449,6 @@ impl AppView {
             tab.last_sql = executable.clone();
             tab.last_elapsed = None;
         }
-        self.query_completion = None;
         cx.notify();
 
         let runtime = self.runtime.clone();
@@ -777,220 +772,59 @@ impl AppView {
         tab.sql = sql::format(&tab.sql);
         tab.caret = tab.sql.len();
         tab.anchor = tab.caret;
-        self.query_completion = None;
         self.caret_visible = true;
+        // Push the formatted text into the wrapped editor.
+        self.sync_query_editor_text(index, cx);
         cx.notify();
     }
 
-    pub(super) fn query_completion_items(
-        &self,
-        connection_index: Option<usize>,
-    ) -> Rc<Vec<(String, String)>> {
-        {
-            let cache = self.query_completion_cache.borrow();
-            if let Some(cache) = cache.as_ref()
-                && cache.connection_index == connection_index
-                && cache.generation == self.completion_generation
-            {
-                return cache.items.clone();
-            }
-        }
-
-        let mut items: Vec<(String, String)> = sql::keywords()
-            .iter()
-            .map(|keyword| (keyword.to_lowercase(), (*keyword).to_string()))
-            .collect();
-
-        if let Some(index) = connection_index
-            && let Some(node) = self.connections.get(index)
-            && let Loadable::Loaded(databases) = &node.databases
-        {
-            for database in databases {
-                if let Loadable::Loaded(tables) = &database.tables {
-                    items.extend(
-                        tables
-                            .iter()
-                            .map(|table| (table.name.to_lowercase(), table.name.clone())),
-                    );
-                }
-            }
-        }
-
-        items.sort_by(|a, b| a.0.cmp(&b.0));
-        items.dedup_by(|a, b| a.0 == b.0);
-        let items = Rc::new(items);
-        *self.query_completion_cache.borrow_mut() = Some(CompletionCache {
-            connection_index,
-            generation: self.completion_generation,
-            items: items.clone(),
-        });
-        items
-    }
-
-    pub(super) fn refresh_query_completion(&mut self, force: bool) {
-        let Some(index) = self.active_query else {
-            self.query_completion = None;
-            return;
-        };
-        let Some(tab) = self.queries.get(index) else {
-            self.query_completion = None;
-            return;
-        };
-
-        let caret = tab.caret.min(tab.sql.len());
-        let mut start = caret;
-        while start > 0 {
-            let previous = previous_boundary(&tab.sql, start);
-            let character = tab.sql[previous..start].chars().next().unwrap_or(' ');
-            if character.is_alphanumeric() || character == '_' || character == '$' {
-                start = previous;
-            } else {
-                break;
-            }
-        }
-        let prefix = tab.sql[start..caret].to_lowercase();
-        let connection_index = tab.connection_index;
-
-        if prefix.is_empty() && !force {
-            self.query_completion = None;
-            return;
-        }
-
-        let candidates: Vec<String> = self
-            .query_completion_items(connection_index)
-            .iter()
-            .filter(|(lower, _)| lower.starts_with(&prefix))
-            .take(64)
-            .map(|(_, original)| original.clone())
-            .collect();
-
-        if candidates.is_empty() {
-            self.query_completion = None;
-            return;
-        }
-        self.query_completion = Some(Completion {
-            candidates,
-            selected: 0,
-            start,
-            end: caret,
-        });
-    }
-
-    pub(super) fn move_query_completion(&mut self, delta: isize, cx: &mut Context<'_, Self>) {
-        if let Some(completion) = self.query_completion.as_mut()
-            && !completion.candidates.is_empty()
-        {
-            let length = completion.candidates.len() as isize;
-            completion.selected =
-                ((completion.selected as isize + delta).rem_euclid(length)) as usize;
-            cx.notify();
-        }
-    }
-
-    pub(super) fn accept_query_completion(
+    /// Load (once) the columns of `table`, so the completion catalog can offer its columns with
+    /// types and comments. Cached for the session by `(connection, database, table)`.
+    pub(super) fn ensure_query_columns(
         &mut self,
-        candidate: String,
         cx: &mut Context<'_, Self>,
+        connection_index: usize,
+        database: &str,
+        table: &str,
     ) {
-        let Some(completion) = self.query_completion.take() else {
+        let key = (connection_index, database.to_string(), table.to_string());
+        if self.query_column_cache.borrow().contains_key(&key) {
+            return;
+        }
+        let Some(node) = self.connections.get(connection_index) else {
             return;
         };
-        let Some(index) = self.active_query else {
+        let ConnectionStatus::Connected(connection) = &node.status else {
             return;
         };
-        if let Some(tab) = self.queries.get_mut(index) {
-            let end = completion.end.min(tab.sql.len());
-            let start = completion.start.min(end);
-            tab.sql.replace_range(start..end, &candidate);
-            let caret = start + candidate.len();
-            tab.caret = caret;
-            tab.anchor = caret;
-        }
-        self.caret_visible = true;
-        cx.notify();
-    }
-
-    pub(super) fn accept_selected_query_completion(&mut self, cx: &mut Context<'_, Self>) {
-        let candidate = self
-            .query_completion
-            .as_ref()
-            .and_then(|completion| completion.candidates.get(completion.selected))
-            .cloned();
-        if let Some(candidate) = candidate {
-            self.accept_query_completion(candidate, cx);
-        }
-    }
-
-    pub(super) fn styled_sql(&self, text: &str, selection: (usize, usize)) -> StyledText {
-        let theme = self.theme;
-        let spans = self.sql_spans(text);
-        let (selection_start, selection_end) = selection;
-
-        let mut boundaries = Vec::with_capacity(spans.len() * 2 + 4);
-        boundaries.push(0);
-        boundaries.push(text.len());
-        for span in spans.iter() {
-            boundaries.push(span.start);
-            boundaries.push(span.end);
-        }
-        if selection_start < selection_end {
-            boundaries.push(selection_start);
-            boundaries.push(selection_end);
-        }
-        boundaries.sort_unstable();
-        boundaries.dedup();
-
-        let mut highlights = Vec::new();
-        // `spans` and `boundaries` are both sorted and non-overlapping, so a single advancing
-        // cursor finds the token for every boundary window in linear time.
-        let mut span_index = 0usize;
-        for window in boundaries.windows(2) {
-            let (start, end) = (window[0], window[1]);
-            if start >= end {
-                continue;
-            }
-            while span_index < spans.len() && spans[span_index].end <= start {
-                span_index += 1;
-            }
-            let token = spans
-                .get(span_index)
-                .filter(|span| span.start <= start && end <= span.end)
-                .map(|span| span.token);
-            let selected =
-                selection_start < selection_end && selection_start <= start && end <= selection_end;
-            let color = token.map(|token| rgb(sql_token_color(theme, token)).into());
-            let background_color = if selected {
-                Some(rgb(theme.tree_selected_bg).into())
-            } else {
-                None
+        let connection = connection.clone();
+        self.query_column_cache
+            .borrow_mut()
+            .insert(key.clone(), ColumnCacheEntry::Loading);
+        let database = database.to_string();
+        let table = table.to_string();
+        let runtime = self.runtime.clone();
+        cx.spawn(async move |this, cx| {
+            let result = match runtime
+                .spawn(async move { connection.columns(&database, &table).await })
+                .await
+            {
+                Ok(inner) => inner,
+                Err(error) => Err(Error::other(error)),
             };
-            if color.is_none() && background_color.is_none() {
-                continue;
-            }
-            highlights.push((
-                start..end,
-                HighlightStyle {
-                    color,
-                    background_color,
-                    ..Default::default()
-                },
-            ));
-        }
-
-        StyledText::new(text.to_string()).with_highlights(highlights)
-    }
-
-    /// The tokenizer spans for `text`, reusing the previous result when the text is unchanged.
-    fn sql_spans(&self, text: &str) -> Rc<Vec<SqlSpan>> {
-        let mut cache = self.sql_highlight_cache.borrow_mut();
-        if let Some((cached, spans)) = cache.as_ref()
-            && cached == text
-        {
-            return spans.clone();
-        }
-        let spans = Rc::new(sql::highlight(text));
-        *cache = Some((text.to_string(), spans.clone()));
-        spans
+            let _ = this.update(cx, |view, cx| {
+                view.query_column_cache.borrow_mut().insert(
+                    key,
+                    match result {
+                        Ok(columns) => ColumnCacheEntry::Loaded(columns),
+                        Err(_) => ColumnCacheEntry::Failed,
+                    },
+                );
+                view.refresh_completion_catalog();
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     // ------------------------------------------------------------------------------------------
@@ -1527,6 +1361,9 @@ impl AppView {
             tab.name = Some(name);
             tab.caret = tab.sql.len();
             tab.anchor = tab.caret;
+        }
+        if let Some(active) = self.active_query {
+            self.sync_query_editor_text(active, cx);
         }
         if let Some(connection_index) = connection_index
             && !matches!(

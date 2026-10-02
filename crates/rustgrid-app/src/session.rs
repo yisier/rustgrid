@@ -394,6 +394,7 @@ impl ViewExplainTab {
 /// The view-designer state carried by a [`QueryTab`] whose `view` is set. A view designer reuses
 /// the SQL editor (and its tab) but adds the view's identity, metadata and the
 /// 定义/高级/SQL 预览 sub-tabs.
+#[derive(Clone)]
 pub struct ViewTabState {
     /// The view's current name (the name Save will create).
     pub name: String,
@@ -467,8 +468,6 @@ pub struct QueryTab {
     pub last_elapsed: Option<std::time::Duration>,
     /// The id of the grid in `AppView::grids` that shows this tab's active result set, if any.
     pub grid_id: Option<u64>,
-    /// Undo history for the editor: `(sql, caret, anchor)` snapshots before each edit.
-    pub undo: Vec<(String, usize, usize)>,
     /// `Some` when this tab edits a stored routine instead of a free-form query.
     pub routine: Option<RoutineTabState>,
     /// `Some` when this tab designs a database view instead of a free-form query.
@@ -494,7 +493,6 @@ impl QueryTab {
             last_sql: String::new(),
             last_elapsed: None,
             grid_id: None,
-            undo: Vec::new(),
             routine: None,
             view: None,
         }

@@ -1415,7 +1415,7 @@ impl GridView {
                     .to_string()
                 }
             }
-            None => self.state.sql(),
+            None => flatten_status_sql(&self.state.sql()),
         };
 
         div()
@@ -1458,5 +1458,31 @@ impl GridView {
             .upgrade()
             .map(|app| app.read(cx).limit_records)
             .unwrap_or(true)
+    }
+}
+
+/// Collapse a statement into the single-line preview the 24px status bar can show.
+///
+/// A query grid's `sql` keeps its author's newlines and indentation. gpui shapes every `\n` as a
+/// line break even under `whitespace_nowrap`, so the raw text would lay out as a block far taller
+/// than the bar and spill over the result rows above it.
+pub(super) fn flatten_status_sql(sql: &str) -> String {
+    sql.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::flatten_status_sql;
+
+    #[test]
+    fn status_sql_flattens_newlines_and_indentation() {
+        let sql = "SELECT DISTINCT\n  loc.positive_aisle_no\nFROM\n  wes_location loc\nLEFT JOIN wes_capacity capacity ON capacity.id = loc.capacity_id\n";
+        assert_eq!(
+            flatten_status_sql(sql),
+            "SELECT DISTINCT loc.positive_aisle_no FROM wes_location loc \
+             LEFT JOIN wes_capacity capacity ON capacity.id = loc.capacity_id"
+        );
+        assert_eq!(flatten_status_sql("  "), "");
+        assert_eq!(flatten_status_sql(""), "");
     }
 }

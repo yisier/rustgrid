@@ -41,7 +41,9 @@ rust-i18n = "4"
 directories = "6"
 sys-locale = "0.3"
 gpui = { package = "gpui-pre", version = "0.3.7" }
-gpui-kit = "0.7"
+gpui-kit = { version = "0.7", features = ["tree-sitter-sql"] }
+lsp-types = "0.97"
+ropey = "=2.0.0-beta.1"
 sqlparser = "0.62"
 sqlformat = "0.5"
 rust_xlsxwriter = { version = "0.99", default-features = false }

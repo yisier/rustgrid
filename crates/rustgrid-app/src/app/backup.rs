@@ -1224,7 +1224,6 @@ impl AppView {
         self.active_query = Some(self.queries.len() - 1);
         self.active_grid = None;
         self.active_design = None;
-        self.query_completion = None;
         self.query_focus_pending = true;
         self.main_tab = MainTab::Queries;
         cx.notify();

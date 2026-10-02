@@ -20,6 +20,9 @@ rustgrid-mysql.workspace = true
 rustgrid-config.workspace = true
 gpui.workspace = true
 gpui-kit.workspace = true
+lsp-types.workspace = true
+ropey.workspace = true
+anyhow.workspace = true
 rust-i18n.workspace = true
 sqlparser.workspace = true
 sqlformat.workspace = true
@@ -38,3 +41,7 @@ embed-resource.workspace = true
 [target.'cfg(target_os = "windows")'.dependencies]
 raw-window-handle.workspace = true
 windows.workspace = true
+
+[dev-dependencies]
+# UI tests render the SQL editor in a real (headless) gpui-kit window.
+gpui-kit = { workspace = true, features = ["test-support"] }
