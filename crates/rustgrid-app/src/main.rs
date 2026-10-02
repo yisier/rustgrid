@@ -19,10 +19,9 @@ mod win_resize;
 use std::sync::Arc;
 
 use gpui::{AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
-use gpui_kit::component::Root;
 use rustgrid_core::DriverRegistry;
 
-use crate::app::{AppShell, AppView};
+use crate::app::AppView;
 use crate::assets::Assets;
 use crate::runtime::Runtime;
 
@@ -56,7 +55,9 @@ fn main() {
         let config = config.clone();
         let runtime = runtime.clone();
 
-        cx.open_window(
+        // `open_window` wraps the content in gpui-kit's `Root`, which now hosts dialogs,
+        // sheets, notifications and tooltips automatically.
+        gpui_kit::open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
@@ -66,13 +67,11 @@ fn main() {
                 }),
                 ..Default::default()
             },
+            cx,
             move |window, cx| {
                 #[cfg(target_os = "windows")]
                 win_resize::install(window);
-                let view = cx
-                    .new(|cx| AppView::new(registry.clone(), config.clone(), runtime.clone(), cx));
-                let shell = cx.new(|_| AppShell::new(view));
-                cx.new(|cx| Root::new(shell, window, cx))
+                cx.new(|cx| AppView::new(registry.clone(), config.clone(), runtime.clone(), cx))
             },
         )
         .expect("failed to open the main window");

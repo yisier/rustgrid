@@ -67,7 +67,7 @@ pub(super) fn popup_button(
     } else {
         ButtonKind::Normal
     };
-    sized_button(id, label, kind, Size::Small, theme, on_click)
+    sized_button(id, label, kind, Size::XSmall, theme, on_click)
 }
 
 fn sized_button(

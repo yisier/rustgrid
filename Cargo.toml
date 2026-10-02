@@ -40,8 +40,8 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 rust-i18n = "4"
 directories = "6"
 sys-locale = "0.3"
-gpui = { package = "gpui-pre", version = "0.3" }
-gpui-kit = "0.6"
+gpui = { package = "gpui-pre", version = "0.3.7" }
+gpui-kit = "0.7"
 sqlparser = "0.62"
 sqlformat = "0.5"
 rust_xlsxwriter = { version = "0.99", default-features = false }

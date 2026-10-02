@@ -1,47 +1,39 @@
 use super::*;
 
 impl GridView {
-    pub(super) fn date_picker_shift_time(
-        &mut self,
-        field: usize,
-        delta: i32,
-        cx: &mut Context<'_, Self>,
-    ) {
-        if let Some(picker) = self.date_picker.as_mut() {
-            match field {
-                0 => picker.hour = wrap_unit(picker.hour, delta, 24),
-                1 => picker.minute = wrap_unit(picker.minute, delta, 60),
-                _ => picker.second = wrap_unit(picker.second, delta, 60),
-            }
-        }
-        self.sync_date_picker_to_editor(cx);
-        cx.notify();
-    }
-
     pub(super) fn date_picker_today(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let now = chrono::Local::now().naive_local();
         let Some(picker) = self.date_picker.as_ref() else {
             return;
         };
         let calendar = picker.calendar.clone();
+        let time_field = picker.time_field.clone();
         if let Some(today) = NaiveDate::from_ymd_opt(now.year(), now.month(), now.day()) {
             calendar.update(cx, |calendar, cx| calendar.set_date(today, window, cx));
         }
-        if let Some(picker) = self.date_picker.as_mut() {
-            picker.hour = now.hour();
-            picker.minute = now.minute();
-            picker.second = now.second();
+        if let Some(field) = time_field
+            && let Some(time) = NaiveTime::from_hms_opt(now.hour(), now.minute(), now.second())
+        {
+            field.update(cx, |field, cx| field.set_time(time, window, cx));
         }
-        self.sync_date_picker_to_editor(cx);
         cx.notify();
     }
 
-    pub(super) fn date_picker_ok(&mut self, cx: &mut Context<'_, Self>) {
-        if self.date_picker.take().is_none() {
+    /// Close the picker after accepting its value. The value is written into the in-place editor
+    /// and focus returns there, so the date/time cell behaves like the other cell editors: the
+    /// change is committed only when the editor loses focus, Enter is pressed, or the bottom
+    /// commit button is clicked — never merely by confirming the picker.
+    pub(super) fn date_picker_ok(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        if self.date_picker.is_none() {
             return;
         }
         self.sync_date_picker_to_editor(cx);
-        self.finish_cell_editor(cx);
+        self.date_picker = None;
+        if let Some(editor) = self.cell_editor.as_ref() {
+            let focus = editor.input.read(cx).focus_handle();
+            window.focus(&focus, cx);
+        }
+        cx.notify();
     }
 
     pub(super) fn date_picker_cancel(&mut self, cx: &mut Context<'_, Self>) {

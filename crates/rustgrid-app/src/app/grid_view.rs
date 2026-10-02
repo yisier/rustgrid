@@ -291,10 +291,15 @@ impl Render for GridView {
         // Used to route the Tab/Shift+Tab cell actions from inside the (weak-context) list
         // closure back into `GridView`.
         let action_weak = self.self_weak.clone();
-        let editing_temporal = self
-            .date_picker
-            .as_ref()
-            .map(|picker| (picker.row, picker.col));
+        // The cell being edited when its column is temporal. Such a cell carries a "…" button
+        // that toggles the date/time popup, whether or not the popup is currently open.
+        let editing_temporal = self.cell_editor.as_ref().and_then(|editor| {
+            self.state
+                .columns
+                .get(editor.col)
+                .is_some_and(|column| is_temporal_type(&column.data_type))
+                .then_some((editor.row, editor.col))
+        });
         // The cell being edited, with its live input entity. The editor is rendered *inside* that
         // cell (below) rather than as an overlay, so it scrolls with the rows and can never be left
         // floating at a stale offset; the cell's own text is replaced by it.
@@ -457,8 +462,12 @@ impl Render for GridView {
                                 .border_color(rgb(theme.grid_line))
                                 .bg(rgb(cell_background));
                             if editing_temporal == Some((row_index, index)) {
+                                let toggle_weak = action_weak.clone();
                                 cell_element = cell_element.relative().pr(px(22.0)).child(
                                     div()
+                                        .id(SharedString::from(format!(
+                                            "date-toggle-{row_index}-{index}"
+                                        )))
                                         .absolute()
                                         .right(px(1.0))
                                         .top(px(1.0))
@@ -467,11 +476,20 @@ impl Render for GridView {
                                         .flex()
                                         .items_center()
                                         .justify_center()
+                                        .cursor_pointer()
+                                        .hover(move |style| style.bg(rgb(theme.button_hover_bg)))
                                         .border_1()
                                         .border_color(rgb(theme.button_border))
                                         .bg(rgb(theme.button_bg))
                                         .text_size(px(11.0))
                                         .text_color(rgb(theme.text))
+                                        .on_click(move |_event, window, cx| {
+                                            let _ = toggle_weak.update(cx, |grid, cx| {
+                                                grid.toggle_date_picker(
+                                                    row_index, index, window, cx,
+                                                );
+                                            });
+                                        })
                                         .child("…"),
                                 );
                             }

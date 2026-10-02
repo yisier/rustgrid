@@ -46,10 +46,10 @@ not a later refactor.
 
 - Rust **stable**, **edition 2024** (`rust-toolchain.toml` pins `stable`; workspace
   `rust-version = "1.94"`).
-- UI: **`gpui-kit = "0.6"`** (crates.io). It is the facade over `gpui-pre` (a published
+- UI: **`gpui-kit = "0.7"`** (crates.io). It is the facade over `gpui-pre` (a published
   snapshot of Zed's GPUI) plus `gpui-base` and the shadcn-styled `gpui-component`; it also
   re-exports GPUI itself. The workspace additionally depends on the same engine under the
-  name the app imports: `gpui = { package = "gpui-pre", version = "0.3" }`, so the ~40 view
+  name the app imports: `gpui = { package = "gpui-pre", version = "0.3.7" }`, so the ~40 view
   files keep `use gpui::…`. **These two must move in lockstep** — see "Upgrading gpui-kit".
   Do **not** switch either to a git dependency on the Zed monorepo.
 - MySQL: **sqlx 0.9**, `default-features = false`, only features
@@ -72,10 +72,11 @@ not a later refactor.
   iterating; finish with `cargo build`. Debug builds do not need the shader toolchain below.
 - `cargo check --workspace` / `cargo build`
 - `cargo run -p rustgrid-app` (produced binary is `RustGrid`)
-- Release build (`cargo build --release -p rustgrid-app`) normally needs no shader toolchain
-  (gpui-kit enables `runtime_shaders`). If that ever changes, see Gotchas: build the fallback
-  shim once with `gcc -O2 -o fxc.exe tools/fxc-shim/fxc.c -lkernel32`, then run cargo with
-  `GPUI_FXC_PATH=<abs path to fxc.exe>` (plus the GNU toolchain env vars below).
+- Release build (`cargo build --release -p rustgrid-app`) needs an HLSL compiler on Windows: on
+  this machine the Windows SDK `fxc.exe` is absent, so build the fallback shim once
+  (`gcc -O2 -o fxc.exe tools/fxc-shim/fxc.c -lkernel32`) and run cargo with
+  `GPUI_FXC_PATH=<abs path to fxc.exe>` (plus the GNU toolchain env vars below). See Gotchas.
+  The shim binary is gitignored; only `tools/fxc-shim/fxc.c` is tracked.
 - `cargo test --workspace`
 - Live MySQL integration test (ignored by default): set `RUSTGRID_MYSQL_PASSWORD` (and
   optionally `RUSTGRID_MYSQL_HOST`/`PORT`/`USER`/`DATABASE`), then
@@ -206,18 +207,20 @@ touching UI code.
 bumped together** in the root `Cargo.toml`; a mismatch gives two GPUI copies and incompatible
 element types. Two kinds of upgrade:
 
-- **`0.6.x` → `0.6.y` (no code):** `cargo update -p gpui-kit -p gpui-pre`. The `"0.6"`/`"0.3"`
+- **`0.7.x` → `0.7.y` (no code):** `cargo update -p gpui-kit -p gpui-pre`. The `"0.7"`/`"0.3.7"`
   ranges in the root `Cargo.toml` keep this in-family.
-- **A breaking bump (e.g. `gpui-kit 0.7`, a new `gpui-pre` snapshot):** edit both lines in the
+- **A breaking bump (e.g. `gpui-kit 0.8`, a new `gpui-pre` snapshot):** edit both lines in the
   root `Cargo.toml`, then fix the fallout. It is localized by design:
   - `ui/text_input.rs`, `ui/combo.rs` (the wrappers) and the dialog builders
     (`dialogs.rs`, `db_dialog.rs`, `options.rs`) absorb gpui-kit component API changes; the
     40+ call sites behind them do not move.
-  - The rest is plain GPUI API churn (the `gpui 0.2` → `gpui-pre 0.3` jump was ~41 mechanical
-    errors across ~17 files: `focus(&h, cx)`, `ScrollHandle::max_offset()` returning `Point`,
-    `ShapedLine::paint` taking `TextAlign` + `Option<Pixels>`, `BoxShadow { inset }`,
-    `track_scroll(&h)`, `Entity::update` returning `R`). Budget one pass like that per
-    breaking engine bump.
+  - The rest is plain GPUI API churn. The `0.6` → `0.7` bump only needed the main window to
+    move from `cx.open_window` + `Root::new(AppShell)` to `gpui_kit::open_window` (0.7's `Root`
+    hosts dialogs/sheets/notifications automatically, so `AppShell` was deleted). The
+    `gpui 0.2` → `gpui-pre 0.3` jump was ~41 mechanical errors across ~17 files
+    (`focus(&h, cx)`, `ScrollHandle::max_offset()` returning `Point`, `ShapedLine::paint`
+    taking `TextAlign` + `Option<Pixels>`, `BoxShadow { inset }`, `track_scroll(&h)`,
+    `Entity::update` returning `R`). Budget one pass like that per breaking engine bump.
   - `Cargo.lock` is committed, so pin exactly what built.
 
 ## Dependency policy
@@ -237,21 +240,29 @@ element types. Two kinds of upgrade:
   wiring the kit's component over porting an implementation. Only fall back to porting upstream
   code when the kit genuinely lacks the widget; keep ports under `src/app/ui/` and retain the
   upstream Apache-2.0 attribution. Upgrade procedure and blast radius: "Upgrading gpui-kit".
-- **The grid's in-place date/time picker reuses the kit's `Calendar`.** `DatePicker` holds an
-  `Entity<CalendarState>` (`gpui_kit::component::calendar`) as the source of truth for the date
-  and subscribes to `CalendarEvent::Selected`; `grid_cell.rs::render_date_picker` renders it and
-  only app-draws the time-of-day spinner row and the today/OK/Cancel footer. Do not hand-roll the
-  calendar again. The kit's styled `Calendar` facade is sized for a full popup (28px cells), so
+- **The grid's in-place date/time picker reuses the kit's `Calendar` + `TimeField`.** `DatePicker`
+  holds an `Entity<CalendarState>` (`gpui_kit::component::calendar`) as the source of truth for
+  the date and an `Option<Entity<TimeFieldState>>` (`gpui_kit::component::time_field`, precision
+  `Second`) for `datetime`/`timestamp` columns; `grid_cell.rs::render_date_picker` renders both
+  and only app-draws the today/OK/Cancel footer. Do not hand-roll the calendar or the time
+  spinners again. Picking a date/time does **not** mirror into the cell editor; the picker's 确定
+  (`date_picker_ok`) syncs once, closes the popup and returns focus to the in-place editor, so a
+  temporal cell commits exactly like every other cell editor — on blur, Enter, or the bottom 提交
+  button, never by confirming the picker. 取消/Esc discard. While a temporal cell is in edit mode
+  it shows a `…` button (`grid_view.rs`) that toggles the popup: it opens it from the editor's
+  value, or applies-and-closes it when already open. The footer's 取消/确定 use
+  `ui::popup_button` at `Size::XSmall`.
+  The kit's styled `Calendar` facade is sized for a full popup (28px cells), so
   `ui/calendar.rs::compact_calendar` wraps the **unstyled** `gpui_base::Calendar` and overrides
   the cell metrics through its `Calendar::item` hook (the styled facade exposes no item hook);
   the localized labels come from the app's own `calendar.week.*` / `calendar.month.*` entries in
   `locales/{en,zh-CN}.yml`, because the kit's `Calendar.*` translations live in the kit's
-  `rust-i18n` backend and are not reachable from the app's `t!`. The kit's `DatePicker`/`Date`
-  model is date-only (`NaiveDate`), so it cannot represent `datetime`/`timestamp` values by
-  itself — that is why time stays app-drawn. Keep that popup from stealing focus: gpui focuses
-  any `track_focus` element on mouse-down (the calendar root and the kit buttons are focusable),
-  which would blur the cell editor and auto-commit, so the popup calls
-  `capture_any_mouse_down(|_, window, _| window.prevent_default())`.
+  `rust-i18n` backend and are not reachable from the app's `t!`. Keep the popup from stealing
+  focus: gpui focuses any `track_focus` element on mouse-down, so the calendar is wrapped in
+  `capture_any_mouse_down(|_, window, _| window.prevent_default())` (the `TimeField` is left
+  focusable so it can be keyboard-edited), and the cell editor's blur handler skips its
+  auto-commit while `date_picker` is `Some` (clicking another cell still commits through
+  `grid_mouse_down`).
 
 ## Scope (do not exceed)
 
@@ -473,13 +484,13 @@ make more engines cheap later — do not build those features early.
   `SetWindowSubclass` hook that answers `WM_NCHITTEST` with the real frame-metric resize codes
   before gpui sees the message (`install(window)` is called from `open_window`). Do **not** edit
   the crates.io copy of gpui under `~/.cargo/registry` to fix this — it is not reproducible.
-- gpui's build script only compiles HLSL when `debug_assertions` is **off** (release). With
-  gpui-kit this is normally avoided: `gpui-kit` enables `runtime_shaders` on
-  `gpui-pre-platform`, so shaders compile at runtime and the Windows SDK `fxc.exe` is not
-  needed. If a future dependency change drops that feature, a plain release build panics in
-  `gpui/build.rs` with `Failed to find fxc.exe`; the fallback is `tools/fxc-shim` (speaks the
-  fxc subset gpui invokes; drives the system `d3dcompiler_47.dll`) via
-  `GPUI_FXC_PATH=<abs path to fxc.exe>`. Debug builds are unaffected either way.
+- gpui-pre's Windows build script (`gpui-pre-windows`) compiles HLSL whenever `debug_assertions`
+  is **off** (release); it is **not** gated by a feature, so `runtime_shaders` does not avoid it.
+  On this machine the Windows SDK `fxc.exe` is absent, so a plain `cargo build --release` panics
+  in `gpui-pre-windows/build.rs` with `Failed to find fxc.exe`. The fallback is `tools/fxc-shim`
+  (speaks the fxc subset gpui invokes; drives the system `d3dcompiler_47.dll`) built once with
+  `gcc -O2 -o fxc.exe tools/fxc-shim/fxc.c -lkernel32` and passed via
+  `GPUI_FXC_PATH=<abs path to fxc.exe>`. The binary is gitignored. Debug builds are unaffected.
 - **Cross-platform** (Windows/macOS/Linux). Avoid OS-only APIs; gate platform-specific code
   behind `#[cfg(target_os = ...)]`; watch per-OS native deps (e.g. Linux system libraries).
 - **Small install size is a hard requirement.** The release profile already sets `lto`,

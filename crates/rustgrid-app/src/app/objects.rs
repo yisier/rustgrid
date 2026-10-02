@@ -752,9 +752,7 @@ impl ObjectPane {
                 return div().into_any_element();
             };
             return match routines {
-                Loadable::Idle | Loadable::Loading => {
-                    object_message(theme.text_muted, t!("common.loading").to_string())
-                }
+                Loadable::Idle | Loadable::Loading => div().into_any_element(),
                 Loadable::Failed(error) => object_message(theme.danger, error),
                 Loadable::Loaded(routines) => {
                     let items: Vec<&RoutineInfo> = routines
@@ -778,9 +776,7 @@ impl ObjectPane {
             return div().into_any_element();
         };
         match tables {
-            Loadable::Idle | Loadable::Loading => {
-                object_message(theme.text_muted, t!("common.loading").to_string())
-            }
+            Loadable::Idle | Loadable::Loading => div().into_any_element(),
             Loadable::Failed(error) => object_message(theme.danger, error),
             Loadable::Loaded(tables) => {
                 let want_view = match self.category {

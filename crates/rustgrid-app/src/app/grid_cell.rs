@@ -28,26 +28,28 @@ impl GridView {
         };
 
         // The date grid, its day/month/year views and all navigation come from gpui-kit's
-        // calendar (through the compact `ui` wrapper); only the time-of-day row and the footer
-        // are app-drawn.
-        let calendar = ui::compact_calendar(&picker.calendar);
+        // calendar (through the compact `ui` wrapper); the time-of-day row is gpui-kit's
+        // `TimeField`. Only the footer is app-drawn.
+        //
+        // The mouse-down capture keeps focus where it is (the cell editor or the time field)
+        // when a calendar cell is pressed: gpui focuses any `track_focus` element on mouse-down,
+        // which would otherwise blur the editor and auto-commit.
+        let calendar = div()
+            .capture_any_mouse_down(|_event, window, _cx| window.prevent_default())
+            .child(ui::compact_calendar(&picker.calendar));
 
         let now = chrono::Local::now().naive_local();
 
-        let mut time_row = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_center()
-            .gap_1();
-        if picker.has_time {
-            time_row = time_row
-                .child(self.time_spinner("date-hour", picker.hour, 0, cx))
-                .child(":")
-                .child(self.time_spinner("date-minute", picker.minute, 1, cx))
-                .child(":")
-                .child(self.time_spinner("date-second", picker.second, 2, cx));
-        }
+        let time_row: Option<AnyElement> = picker.time_field.as_ref().map(|field| {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_center()
+                .pb_1()
+                .child(TimeField::new(field).small())
+                .into_any_element()
+        });
 
         let footer = div()
             .flex()
@@ -89,7 +91,7 @@ impl GridView {
                         t!("form.ok").to_string(),
                         true,
                         theme,
-                        cx.listener(|this, _event, _window, cx| this.date_picker_ok(cx)),
+                        cx.listener(|this, _event, window, cx| this.date_picker_ok(window, cx)),
                     )),
             );
 
@@ -101,61 +103,17 @@ impl GridView {
             .p_2()
             .gap_1()
             .border_color(rgb(theme.text_muted))
-            // gpui moves focus to any element with a tracked focus handle on mouse-down. The
-            // kit's calendar root (and its OK/Cancel buttons) are focusable, so without this
-            // the in-place editor would blur and auto-commit on the first click. Suppressing
-            // the default keeps focus in the editor until OK/Cancel/click-away.
-            .capture_any_mouse_down(|_event, window, _cx| window.prevent_default())
+            // Focus can sit in the `TimeField`, whose keys never reach the grid list, so Escape
+            // is handled here (it bubbles from the focused time segment through this panel).
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                if event.keystroke.key == "escape" {
+                    this.date_picker_cancel(cx);
+                    cx.stop_propagation();
+                }
+            }))
             .child(calendar)
-            .child(time_row)
+            .children(time_row)
             .child(footer)
             .into_any_element()
-    }
-
-    pub(super) fn time_spinner(
-        &self,
-        id_prefix: &str,
-        value: u32,
-        field: usize,
-        cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
-        let theme = self.theme;
-        div()
-            .flex()
-            .flex_col()
-            .items_center()
-            .child(
-                div()
-                    .id(SharedString::from(format!("{id_prefix}-up")))
-                    .cursor_pointer()
-                    .text_size(px(8.0))
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.date_picker_shift_time(field, 1, cx);
-                    }))
-                    .child("▲"),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .w(px(28.0))
-                    .h(px(18.0))
-                    .bg(rgb(theme.input_bg))
-                    .border_1()
-                    .border_color(rgb(theme.border))
-                    .text_size(px(11.0))
-                    .child(format!("{value:02}")),
-            )
-            .child(
-                div()
-                    .id(SharedString::from(format!("{id_prefix}-down")))
-                    .cursor_pointer()
-                    .text_size(px(8.0))
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.date_picker_shift_time(field, -1, cx);
-                    }))
-                    .child("▼"),
-            )
     }
 }

@@ -564,7 +564,11 @@ impl GridView {
         input.update(cx, |input, cx| input.set_padding_left(0.0, cx));
         self.cell_editor_blur_subscription =
             Some(cx.on_blur(&focus, window, |this, _window, cx| {
-                if this.cell_editor.is_some() {
+                // While the date/time picker is open focus may sit in its `TimeField`; losing the
+                // editor's focus then is not "leaving the edit", so do not auto-commit. The picker
+                // commits or cancels explicitly (and clicking another cell commits through
+                // `grid_mouse_down`).
+                if this.cell_editor.is_some() && this.date_picker.is_none() {
                     this.finish_cell_editor(cx);
                 }
             }));
@@ -609,25 +613,50 @@ impl GridView {
             state.set_date(date, window, cx);
             state
         });
-        let subscription = cx.subscribe(&calendar, |this, _calendar, event: &CalendarEvent, cx| {
-            if let CalendarEvent::Selected(date) = event
-                && date.is_some()
-            {
-                this.sync_date_picker_to_editor(cx);
-            }
-            cx.notify();
-        });
+        // `TimePrecision::Second` matches MySQL's rendered `datetime`/`timestamp`; a `date` column
+        // gets no time field at all.
+        let time_field = if has_time {
+            let time = NaiveTime::from_hms_opt(base.hour(), base.minute(), base.second())
+                .unwrap_or_default();
+            Some(cx.new(|cx| {
+                let mut state = TimeFieldState::new(window, cx).precision(TimePrecision::Second);
+                state.set_time(time, window, cx);
+                state
+            }))
+        } else {
+            None
+        };
         self.date_picker = Some(DatePicker {
             row,
             col,
-            hour: base.hour(),
-            minute: base.minute(),
-            second: base.second(),
             has_time,
             calendar,
-            _subscription: subscription,
+            time_field,
         });
         cx.notify();
+    }
+
+    /// Toggle the in-place date/time picker for the cell being edited (the cell's "…" button):
+    /// open it from the editor's current value, or apply-and-close it when already open.
+    pub(super) fn toggle_date_picker(
+        &mut self,
+        row: usize,
+        col: usize,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self
+            .date_picker
+            .as_ref()
+            .is_some_and(|picker| picker.row == row && picker.col == col)
+        {
+            self.date_picker_ok(window, cx);
+            return;
+        }
+        let Some(value) = self.cell_editor.as_ref().map(|editor| editor.value.clone()) else {
+            return;
+        };
+        self.open_date_picker(row, col, &value, window, cx);
     }
 
     /// Rewrite the cell editor's text from the current date picker state.
@@ -639,14 +668,19 @@ impl GridView {
             return;
         };
         let value = if picker.has_time {
+            let time = picker
+                .time_field
+                .as_ref()
+                .map(|field| field.read(cx).time())
+                .unwrap_or_default();
             format!(
                 "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
                 date.year(),
                 date.month(),
                 date.day(),
-                picker.hour,
-                picker.minute,
-                picker.second
+                time.hour(),
+                time.minute(),
+                time.second()
             )
         } else {
             format!("{:04}-{:02}-{:02}", date.year(), date.month(), date.day())

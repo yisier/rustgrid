@@ -4,7 +4,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{Datelike, NaiveDate, NaiveDateTime, Timelike};
+use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, DispatchPhase, Div,
@@ -38,9 +38,12 @@ use crate::session::{
 use crate::sql::{self, SqlSpan, SqlToken};
 use crate::theme::Theme;
 
-// The date half of the in-place date/time picker is gpui-kit's calendar (day, month and year
-// views, navigation, selection and localization); only the time-of-day row is app-drawn.
-use gpui_kit::component::calendar::{CalendarEvent, CalendarState};
+// The in-place date/time picker is built from gpui-kit: the calendar supplies the date half
+// (day/month/year views, navigation, selection and localization) and the `TimeField` the time
+// half (segmented hours/minutes/seconds with keyboard editing).
+use gpui_kit::component::Sizable;
+use gpui_kit::component::calendar::CalendarState;
+use gpui_kit::component::time_field::{TimeField, TimeFieldState, TimePrecision};
 
 use ui::{
     ButtonKind, ColumnGrid, ComboBox, ComboOption, DetailColumns, DetailScroll, TextInput,
@@ -1049,15 +1052,13 @@ enum GridHit {
 struct DatePicker {
     row: usize,
     col: usize,
-    hour: u32,
-    minute: u32,
-    second: u32,
+    /// Whether the column carries a time of day (`datetime`/`timestamp`).
     has_time: bool,
     /// The date half, owned by gpui-kit's calendar: day/month/year views, navigation and the
     /// selected date all live here (the calendar is the source of truth for the date).
     calendar: Entity<CalendarState>,
-    /// Keeps the calendar's selection event wired for as long as the picker is open.
-    _subscription: Subscription,
+    /// The time half, owned by gpui-kit's `TimeField`. `None` for a `date`-only column.
+    time_field: Option<Entity<TimeFieldState>>,
 }
 
 /// An in-progress drag of a grid column's right edge.
@@ -1530,7 +1531,6 @@ mod query_editor;
 mod query_view;
 mod routine;
 mod routine_view;
-mod shell;
 mod sidebar;
 mod tabs;
 mod toolbar;
@@ -1541,8 +1541,6 @@ mod user_create;
 mod view;
 mod view_view;
 mod widgets;
-
-pub use shell::AppShell;
 
 use info_pane::{InfoPane, SidebarHost};
 
@@ -2957,10 +2955,6 @@ fn parse_datetime(value: &str) -> Option<NaiveDateTime> {
         return date.and_hms_opt(0, 0, 0);
     }
     None
-}
-
-fn wrap_unit(value: u32, delta: i32, modulus: u32) -> u32 {
-    (value as i32 + delta).rem_euclid(modulus as i32) as u32
 }
 
 #[cfg(test)]
