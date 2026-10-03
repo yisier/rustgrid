@@ -93,7 +93,7 @@ impl CompletionProvider for SqlCompletionProvider {
         let range = replacement_range(text, &context, offset);
         for item in &mut items {
             item.text_edit = Some(CompletionTextEdit::Edit(TextEdit {
-                range: range.clone(),
+                range,
                 new_text: item.label.clone(),
             }));
         }

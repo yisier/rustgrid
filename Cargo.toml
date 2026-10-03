@@ -6,6 +6,7 @@ members = [
     "crates/rustgrid-export",
     "crates/rustgrid-import",
     "crates/rustgrid-mysql",
+    "crates/rustgrid-sqlite",
     "crates/rustgrid-config",
     "crates/rustgrid-app",
 ]
@@ -24,6 +25,7 @@ rustgrid-backup = { path = "crates/rustgrid-backup" }
 rustgrid-export = { path = "crates/rustgrid-export" }
 rustgrid-import = { path = "crates/rustgrid-import" }
 rustgrid-mysql = { path = "crates/rustgrid-mysql" }
+rustgrid-sqlite = { path = "crates/rustgrid-sqlite" }
 rustgrid-config = { path = "crates/rustgrid-config" }
 
 async-trait = "0.1"

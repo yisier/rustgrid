@@ -15,16 +15,21 @@ use sqlx::{
     Statement, ValueRef,
 };
 
+use crate::engine::Engine;
+
 pub struct MysqlConnection {
     pub(crate) pool: MySqlPool,
+    /// Which MySQL-protocol engine (MySQL or MariaDB) this connection targets.
+    engine: Engine,
     /// The tunnel forwarding this connection, kept alive for as long as the connection is.
     _tunnel: Option<crate::tunnel::Tunnel>,
 }
 
 impl MysqlConnection {
-    pub fn new(pool: MySqlPool, tunnel: Option<crate::tunnel::Tunnel>) -> Self {
+    pub fn new(pool: MySqlPool, engine: Engine, tunnel: Option<crate::tunnel::Tunnel>) -> Self {
         Self {
             pool,
+            engine,
             _tunnel: tunnel,
         }
     }
@@ -124,7 +129,7 @@ impl MysqlConnection {
 #[async_trait]
 impl Connection for MysqlConnection {
     fn driver_id(&self) -> DriverId {
-        DriverId::new("mysql")
+        DriverId::new(self.engine.driver_id())
     }
 
     async fn list_databases(&self) -> Result<Vec<DatabaseInfo>> {

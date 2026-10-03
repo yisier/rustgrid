@@ -1,4 +1,6 @@
 /target
+# Machine-local CPU throttle for cargo (see .cargo/config.toml); not shared.
+.cargo/config.toml
 **/*.rs.bk
 *.pdb
 .DS_Store

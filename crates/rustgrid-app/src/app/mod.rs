@@ -1171,6 +1171,15 @@ const MAIN_TABS: [(MainTab, &str, &str); 6] = [
     (MainTab::Backups, "icons/backups.svg", "main.backups"),
 ];
 
+/// An engine capability that some drivers lack. The UI hides or disables actions that would only
+/// fail on a driver without it (SQLite has no databases/users/routines of its own).
+#[derive(Clone, Copy)]
+enum DriverCapability {
+    DatabaseManagement,
+    Users,
+    Routines,
+}
+
 /// Default and clamp widths of the drag-resizable side panes.
 pub(super) const SIDEBAR_DEFAULT_WIDTH: f32 = 260.0;
 pub(super) const SIDEBAR_MIN_WIDTH: f32 = 150.0;
@@ -2066,6 +2075,22 @@ impl AppView {
         }
     }
 
+    /// Whether the driver behind `connection_index` supports `capability`. An unknown connection or
+    /// driver keeps the historical "supported" behaviour so nothing is hidden by accident.
+    fn driver_supports(&self, connection_index: usize, capability: DriverCapability) -> bool {
+        let Some(node) = self.connections.get(connection_index) else {
+            return true;
+        };
+        let Some(driver) = self.registry.get(&node.profile.driver) else {
+            return true;
+        };
+        match capability {
+            DriverCapability::DatabaseManagement => driver.supports_database_management(),
+            DriverCapability::Users => driver.supports_users(),
+            DriverCapability::Routines => driver.supports_routines(),
+        }
+    }
+
     /// The rename editor's row data for `pane`, or `None` while the editor belongs to the other
     /// pane (or no editor is open).
     fn rename_row(&self, pane: RowPane) -> Option<RenameRow> {
@@ -2732,6 +2757,8 @@ fn chevron_spacer() -> AnyElement {
 fn driver_icon(driver: &str) -> &'static str {
     match driver {
         "mysql" => "icons/mysql.svg",
+        "mariadb" => "icons/mariadb.svg",
+        "sqlite" => "icons/sqlite.svg",
         _ => "icons/connection.svg",
     }
 }
@@ -2741,7 +2768,7 @@ fn driver_icon(driver: &str) -> &'static str {
 /// status color.
 fn tree_driver_icon(driver: &str, color: u32, badge: u32) -> AnyElement {
     let path = driver_icon(driver);
-    if driver == "mysql" {
+    if matches!(driver, "mysql" | "mariadb") {
         return div()
             .flex()
             .items_center()

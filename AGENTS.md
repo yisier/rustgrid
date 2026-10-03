@@ -18,7 +18,14 @@ not a later refactor.
   parser (`encoding_rs` GB18030 fallback; TXT auto-detects its field delimiter among
   tab/comma/semicolon/pipe), plus the source-column type inference used when the wizard creates a
   table.
-- `crates/rustgrid-mysql` — the only compiled-in driver; implements the core traits with sqlx.
+- `crates/rustgrid-mysql` — the MySQL-protocol drivers; implements the core traits with sqlx.
+  It serves both **MySQL** and **MariaDB** (`MysqlDriver` / `MariaDbDriver`) because they share the
+  wire protocol and almost all catalog/DDL syntax; `engine.rs`'s `Engine` carries the few dialect
+  differences (driver id, session-variable names).
+- `crates/rustgrid-sqlite` — the file-based **SQLite** driver. One database is one file: the
+  profile's `database` holds the path and there is no server/user/password (see `Driver::is_file_based`).
+  Browsing, paging, editing, arbitrary SQL, table DDL and backup/restore are implemented; SQLite has
+  no stored routines or events, so those trait methods return empty.
 - `crates/rustgrid-config` — versioned settings/profiles plus encrypted secret storage in the
   OS config dir (`connections.json`, `settings.json`, `secrets.json`).
 - `crates/rustgrid-app` — GPUI binary `RustGrid`: `src/app/` is the view/render layer, split
@@ -54,6 +61,9 @@ not a later refactor.
   Do **not** switch either to a git dependency on the Zed monorepo.
 - MySQL: **sqlx 0.9**, `default-features = false`, only features
   `runtime-tokio`, `mysql`, `tls-rustls-ring`, `chrono`.
+- SQLite: the same **sqlx 0.9** with its `sqlite` feature added by `rustgrid-sqlite` (this
+  statically bundles SQLite through `libsqlite3-sys`, so a C compiler is required — `gcc` on
+  Windows, see Gotchas).
 - i18n: **rust-i18n 4**. Config dir: **directories 6**.
 - Stored secrets: **chacha20poly1305 0.11** + **base64 0.22** (XChaCha20-Poly1305).
 - Export: **rust_xlsxwriter 0.99** writes `.xlsx`; **rfd 0.17** (XDG-portal backend on Linux) drives
@@ -377,8 +387,8 @@ shadcn chrome described above. Implemented today:
     layout-independent so both layouts share the selection, and publish row rectangles through
     `AppView::note_row_rect(MarqueeTarget::…, …)` from each row's `on_children_prepainted`.
 
-Still out of scope: a second database engine, and the disabled placeholder UI (the
-`Design/New/Delete Table` toolbar buttons and the query editor's `Query Builder`/`Snippets`
+Still out of scope: engines other than MySQL, MariaDB and SQLite, and the disabled placeholder UI
+(the `Design/New/Delete Table` toolbar buttons and the query editor's `Query Builder`/`Snippets`
 items are deliberate stubs — leave them disabled unless asked). The abstractions above are what
 make more engines cheap later — do not build those features early.
 

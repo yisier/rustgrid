@@ -55,6 +55,12 @@ impl FormTab {
 
 #[derive(Clone)]
 pub struct ConnectionForm {
+    /// The engine this connection targets. Chosen from the New Connection dropdown and preserved
+    /// when an existing connection is edited.
+    pub driver: DriverId,
+    /// Whether the engine is file-based (SQLite): the general page then edits a single database
+    /// file path instead of host/port/username/password. Resolved from the driver registry.
+    pub file_based: bool,
     pub name: String,
     pub host: String,
     pub port: String,
@@ -71,6 +77,8 @@ pub struct ConnectionForm {
 impl Default for ConnectionForm {
     fn default() -> Self {
         Self {
+            driver: DriverId::new("mysql"),
+            file_based: false,
             name: String::new(),
             host: "127.0.0.1".to_string(),
             port: "3306".to_string(),
@@ -91,6 +99,15 @@ impl Default for ConnectionForm {
 }
 
 impl ConnectionForm {
+    /// A fresh form for a newly chosen engine, pre-filled with that engine's default port.
+    pub fn for_driver(driver: DriverId, default_port: u16) -> Self {
+        Self {
+            driver,
+            port: default_port.to_string(),
+            ..Self::default()
+        }
+    }
+
     pub fn from_profile(
         profile: &ConnectionProfile,
         password: Option<String>,
@@ -103,6 +120,8 @@ impl ConnectionForm {
             settings.query_timeout = Some(DEFAULT_QUERY_TIMEOUT);
         }
         Self {
+            driver: profile.driver.clone(),
+            file_based: false,
             name: profile.name.clone(),
             host: profile.host.clone(),
             port: profile.port.to_string(),
@@ -138,21 +157,28 @@ impl ConnectionForm {
         }
     }
 
-    /// The required general-page fields that are currently empty (alias, host, port, username).
+    /// The required general-page fields that are currently empty. A network engine needs alias,
+    /// host, port and username; a file-based engine (SQLite) needs the alias and its file path.
     /// Password and default database stay optional.
     pub fn missing_required(&self) -> Vec<FormField> {
         let mut missing = Vec::new();
         if self.name.trim().is_empty() {
             missing.push(FormField::Name);
         }
-        if self.host.trim().is_empty() {
-            missing.push(FormField::Host);
-        }
-        if self.port.trim().is_empty() {
-            missing.push(FormField::Port);
-        }
-        if self.username.trim().is_empty() {
-            missing.push(FormField::Username);
+        if self.file_based {
+            if self.database.trim().is_empty() {
+                missing.push(FormField::Database);
+            }
+        } else {
+            if self.host.trim().is_empty() {
+                missing.push(FormField::Host);
+            }
+            if self.port.trim().is_empty() {
+                missing.push(FormField::Port);
+            }
+            if self.username.trim().is_empty() {
+                missing.push(FormField::Username);
+            }
         }
         missing
     }
@@ -160,23 +186,39 @@ impl ConnectionForm {
     pub fn to_profile(&self) -> ConnectionProfile {
         let name = self.name.trim();
         let database = self.database.trim();
+        let database = if database.is_empty() {
+            None
+        } else {
+            Some(database.to_string())
+        };
+        // A file-based engine stores the chosen path as the database and has no network identity.
+        let (host, port, username) = if self.file_based {
+            (String::new(), 0, String::new())
+        } else {
+            (
+                self.host.trim().to_string(),
+                self.port.trim().parse().unwrap_or(3306),
+                self.username.trim().to_string(),
+            )
+        };
 
         ConnectionProfile {
             id: format!("conn-{}", now_nanos()),
             name: if name.is_empty() {
-                self.host.trim().to_string()
+                let fallback = self.host.trim();
+                if fallback.is_empty() {
+                    self.database.trim().to_string()
+                } else {
+                    fallback.to_string()
+                }
             } else {
                 name.to_string()
             },
-            driver: DriverId::new("mysql"),
-            host: self.host.trim().to_string(),
-            port: self.port.trim().parse().unwrap_or(3306),
-            username: self.username.trim().to_string(),
-            database: if database.is_empty() {
-                None
-            } else {
-                Some(database.to_string())
-            },
+            driver: self.driver.clone(),
+            host,
+            port,
+            username,
+            database,
             options: Default::default(),
             settings: self.settings.clone(),
         }

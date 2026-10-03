@@ -15,6 +15,8 @@ struct TreeConnection {
     index: usize,
     name: String,
     driver: String,
+    /// Whether the engine has stored routines; when false the Functions category is hidden.
+    supports_routines: bool,
     status: TreeStatus,
     expanded: bool,
     databases: Loadable<Vec<TreeDatabase>>,
@@ -115,6 +117,11 @@ fn snapshot_connections(app: &AppView) -> Vec<TreeConnection> {
                 index,
                 name: node.profile.name.clone(),
                 driver: node.profile.driver.as_str().to_string(),
+                supports_routines: app
+                    .registry
+                    .get(&node.profile.driver)
+                    .map(|driver| driver.supports_routines())
+                    .unwrap_or(true),
                 status,
                 expanded: node.expanded,
                 databases,
@@ -317,6 +324,7 @@ impl TreePane {
                             index,
                             database,
                             &connection.saved_queries,
+                            connection.supports_routines,
                             cx,
                         ));
                     }
@@ -332,6 +340,7 @@ impl TreePane {
         connection_index: usize,
         database: &TreeDatabase,
         saved_queries: &[TreeSavedQuery],
+        supports_routines: bool,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let theme = self.theme;
@@ -449,6 +458,9 @@ impl TreePane {
                 }
                 Loadable::Loaded(_) => {
                     for category in Category::ALL {
+                        if category == Category::Functions && !supports_routines {
+                            continue;
+                        }
                         sub = sub.child(self.render_category(
                             connection_index,
                             database_index,

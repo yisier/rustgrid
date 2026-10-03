@@ -53,6 +53,12 @@ impl AppView {
             cx.notify();
             return;
         };
+        // An engine without accounts (SQLite) reports an empty list instead of an error.
+        if !self.driver_supports(connection_index, DriverCapability::Users) {
+            self.users = Loadable::Loaded(Vec::new());
+            cx.notify();
+            return;
+        }
         let Some(connection) = self.connection_arc(connection_index) else {
             self.users = Loadable::Failed(t!("info.not_connected").to_string());
             cx.notify();

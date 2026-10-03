@@ -17,6 +17,7 @@ rustgrid-backup.workspace = true
 rustgrid-export.workspace = true
 rustgrid-import.workspace = true
 rustgrid-mysql.workspace = true
+rustgrid-sqlite.workspace = true
 rustgrid-config.workspace = true
 gpui.workspace = true
 gpui-kit.workspace = true

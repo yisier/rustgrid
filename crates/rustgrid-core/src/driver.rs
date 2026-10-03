@@ -17,6 +17,31 @@ pub trait Driver: Send + Sync {
 
     fn default_port(&self) -> u16;
 
+    /// Whether this engine connects to a database file rather than a network server. File-based
+    /// engines ignore host/port/username/password and take the file path as the profile's
+    /// `database`.
+    fn is_file_based(&self) -> bool {
+        false
+    }
+
+    /// Whether the engine can create/alter/drop databases. SQLite cannot (a database is a file),
+    /// so the app hides the database-management actions for it.
+    fn supports_database_management(&self) -> bool {
+        true
+    }
+
+    /// Whether the engine has server accounts and privileges. SQLite does not, so the Users tab is
+    /// disabled for it.
+    fn supports_users(&self) -> bool {
+        true
+    }
+
+    /// Whether the engine has stored routines (functions/procedures). SQLite does not, so the
+    /// Functions tab and tree category are hidden for it.
+    fn supports_routines(&self) -> bool {
+        true
+    }
+
     async fn connect(&self, config: &ConnectionConfig) -> Result<Box<dyn Connection>>;
 }
 

@@ -37,9 +37,19 @@ impl AppView {
         }
     }
 
-    pub(super) fn open_new_form(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+    pub(super) fn open_new_form(
+        &mut self,
+        driver: DriverId,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         self.editing = None;
-        self.show_form(ConnectionForm::default(), window, cx);
+        let default_port = self
+            .registry
+            .get(&driver)
+            .map(|driver| driver.default_port())
+            .unwrap_or(3306);
+        self.show_form(ConnectionForm::for_driver(driver, default_port), window, cx);
     }
 
     pub(super) fn open_edit_form(
@@ -92,10 +102,15 @@ impl AppView {
 
     fn show_form(
         &mut self,
-        form: ConnectionForm,
+        mut form: ConnectionForm,
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
+        form.file_based = self
+            .registry
+            .get(&form.driver)
+            .map(|driver| driver.is_file_based())
+            .unwrap_or(false);
         let weak = cx.weak_entity();
         let theme = self.theme;
         let inputs = FormInputs {
@@ -401,6 +416,11 @@ impl AppView {
         let mut should_load = false;
         let mut should_load_routines = false;
         let mut just_opened = false;
+        let supports_routines = self.driver_supports(connection_index, DriverCapability::Routines);
+        // Do not leave a stale Functions tab selected on an engine without routines.
+        if !supports_routines && self.main_tab == MainTab::Functions {
+            self.main_tab = MainTab::Tables;
+        }
 
         if let Some(node) = self.connections.get_mut(connection_index)
             && let Loadable::Loaded(databases) = &mut node.databases
@@ -415,7 +435,8 @@ impl AppView {
                 if matches!(database.tables, Loadable::Idle | Loadable::Failed(_)) {
                     should_load = true;
                 }
-                if self.main_tab == MainTab::Functions
+                if supports_routines
+                    && self.main_tab == MainTab::Functions
                     && matches!(database.routines, Loadable::Idle | Loadable::Failed(_))
                 {
                     should_load_routines = true;
@@ -462,7 +483,7 @@ impl AppView {
                 }
                 _ => match self.main_tab {
                     MainTab::Views => Category::Views,
-                    MainTab::Functions => Category::Functions,
+                    MainTab::Functions if supports_routines => Category::Functions,
                     MainTab::Queries => Category::Queries,
                     _ => Category::Tables,
                 },
@@ -507,6 +528,12 @@ impl AppView {
         category: Category,
         cx: &mut Context<'_, Self>,
     ) {
+        // A category the engine does not have (SQLite functions) is never opened.
+        if category == Category::Functions
+            && !self.driver_supports(connection_index, DriverCapability::Routines)
+        {
+            return;
+        }
         self.clear_info_selection();
         if category == Category::Backups {
             // Selecting the Backups category scopes the Backup main tab to this database. The

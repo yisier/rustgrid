@@ -155,9 +155,10 @@ impl AppView {
                     .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)));
 
                 // Creating a database and refreshing the list both need a live connection, but stay
-                // visible (greyed out) when disconnected.
-                items =
-                    if connected {
+                // visible (greyed out) when disconnected. Engines without database management
+                // (SQLite) do not show the create item at all.
+                if self.driver_supports(index, DriverCapability::DatabaseManagement) {
+                    items = if connected {
                         items.child(self.context_item(
                             "ctx-new-database",
                             t!("database.new").to_string(),
@@ -172,6 +173,7 @@ impl AppView {
                             t!("database.new").to_string(),
                         ))
                     };
+                }
 
                 items = items.child(self.context_item(
                     "ctx-new-query",
@@ -236,31 +238,34 @@ impl AppView {
                     ));
                 }
 
+                if self.driver_supports(ci, DriverCapability::DatabaseManagement) {
+                    items = items
+                        .child(self.context_item(
+                            "db-edit",
+                            t!("database.edit").to_string(),
+                            cx.listener(move |this, _event, window, cx| {
+                                this.context_menu = None;
+                                this.open_edit_database(ci, di, window, cx);
+                            }),
+                        ))
+                        .child(self.context_item(
+                            "db-new",
+                            t!("database.new").to_string(),
+                            cx.listener(move |this, _event, window, cx| {
+                                this.context_menu = None;
+                                this.open_new_database(ci, window, cx);
+                            }),
+                        ))
+                        .child(self.context_item(
+                            "db-delete",
+                            t!("database.delete").to_string(),
+                            cx.listener(move |this, _event, _window, cx| {
+                                this.context_menu = None;
+                                this.open_delete_database(ci, di, cx);
+                            }),
+                        ));
+                }
                 items = items
-                    .child(self.context_item(
-                        "db-edit",
-                        t!("database.edit").to_string(),
-                        cx.listener(move |this, _event, window, cx| {
-                            this.context_menu = None;
-                            this.open_edit_database(ci, di, window, cx);
-                        }),
-                    ))
-                    .child(self.context_item(
-                        "db-new",
-                        t!("database.new").to_string(),
-                        cx.listener(move |this, _event, window, cx| {
-                            this.context_menu = None;
-                            this.open_new_database(ci, window, cx);
-                        }),
-                    ))
-                    .child(self.context_item(
-                        "db-delete",
-                        t!("database.delete").to_string(),
-                        cx.listener(move |this, _event, _window, cx| {
-                            this.context_menu = None;
-                            this.open_delete_database(ci, di, cx);
-                        }),
-                    ))
                     .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
                     .child(self.context_item(
                         "db-new-query",

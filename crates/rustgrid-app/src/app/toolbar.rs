@@ -7,7 +7,7 @@ const THEME_MENU_WIDTH: f32 = 168.0;
 /// The project's public repository, opened by the titlebar GitHub button.
 const GITHUB_URL: &str = "https://github.com/yisier/rustgrid";
 /// The connection types Navicat's New Connection menu lists. Only the engines present in the
-/// driver registry are selectable (today that is just MySQL); the rest are shown greyed out.
+/// driver registry are selectable (today MySQL and MariaDB); the rest are shown greyed out.
 const CONNECTION_TYPES: [(&str, &str); 7] = [
     ("mysql", "MySQL..."),
     ("postgresql", "PostgreSQL..."),
@@ -299,7 +299,7 @@ impl AppView {
     }
 
     /// The New Connection engine dropdown. Only engines present in the driver registry are
-    /// selectable (today that is just MySQL); the rest are listed greyed out, like Navicat's menu.
+    /// selectable (today MySQL and MariaDB); the rest are listed greyed out, like Navicat's menu.
     pub(super) fn render_connect_menu(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
         let anchor = *self.connect_menu_anchor.borrow();
@@ -307,12 +307,13 @@ impl AppView {
         let mut items = div().flex().flex_col().w(px(150.0)).p_0p5();
         for (id, label) in CONNECTION_TYPES {
             if self.registry.get(&DriverId::new(id)).is_some() {
+                let driver = DriverId::new(id);
                 items = items.child(self.context_item(
                     id,
                     label.to_string(),
-                    cx.listener(|this, _event, window, cx| {
+                    cx.listener(move |this, _event, window, cx| {
                         this.connect_menu_open = false;
-                        this.open_new_form(window, cx);
+                        this.open_new_form(driver.clone(), window, cx);
                     }),
                 ));
             } else {
@@ -346,7 +347,7 @@ impl AppView {
                 | MainTab::Users
                 | MainTab::Queries
                 | MainTab::Backups
-        );
+        ) && self.main_tab_usable(tab, cx);
         self.main_button(
             SharedString::from(format!("main-tab-{}", tab as usize)),
             icon,
@@ -362,6 +363,24 @@ impl AppView {
                 }
             }),
         )
+    }
+
+    /// Whether a main tab applies to the connection it would read from. Users/Functions are
+    /// disabled on engines without accounts or stored routines (SQLite).
+    fn main_tab_usable(&self, tab: MainTab, cx: &App) -> bool {
+        match tab {
+            MainTab::Users => self
+                .users_connection_index(cx)
+                .map(|index| self.driver_supports(index, DriverCapability::Users))
+                .unwrap_or(true),
+            MainTab::Functions => self
+                .object_pane
+                .as_ref()
+                .map(|pane| pane.read(cx).connection_index)
+                .map(|index| self.driver_supports(index, DriverCapability::Routines))
+                .unwrap_or(true),
+            _ => true,
+        }
     }
 
     pub(super) fn main_button(

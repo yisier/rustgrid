@@ -331,6 +331,12 @@ impl AppView {
     fn form_tab_strip(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
         let current = self.form.as_ref().map(|form| form.tab);
+        // A file-based engine has no TLS or tunnel, so those two pages are hidden.
+        let file_based = self
+            .form
+            .as_ref()
+            .map(|form| form.file_based)
+            .unwrap_or(false);
         let relay = self.relay_label();
         let mut strip = div()
             .flex()
@@ -345,6 +351,9 @@ impl AppView {
             .border_color(rgb(theme.border));
 
         for tab in FormTab::ALL {
+            if file_based && matches!(tab, FormTab::Tls | FormTab::Tunnel) {
+                continue;
+            }
             let active = current == Some(tab);
             let relay = relay.clone();
             strip = strip.child(
@@ -426,12 +435,31 @@ impl AppView {
 
     // ----- 常规 --------------------------------------------------------------------------------
 
-    fn render_general_page(
-        &self,
-        form: &ConnectionForm,
-        cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
+    fn render_general_page(&self, form: &ConnectionForm, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
+        let driver_name = self
+            .registry
+            .get(&form.driver)
+            .map(|driver| driver.display_name())
+            .unwrap_or_else(|| form.driver.to_string());
+        // A read-only box showing the engine, used on both the network and file layouts.
+        let engine_box = |name: String| -> AnyElement {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .w_full()
+                .h(px(32.0))
+                .px_3()
+                .rounded(px(8.0))
+                .border_1()
+                .border_color(rgb(theme.border))
+                .bg(rgb(theme.input_bg))
+                .text_size(px(13.0))
+                .text_color(rgb(theme.text_muted))
+                .child(name)
+                .into_any_element()
+        };
         let input = |field: FormField| -> AnyElement {
             match self
                 .form_inputs
@@ -453,10 +481,62 @@ impl AppView {
                     .into_any_element()
             })
         };
+
+        // A file-based engine (SQLite) has no host/port/user/password: it edits one database file.
+        if form.file_based {
+            return div()
+                .flex()
+                .flex_col()
+                .gap_4()
+                .child(form_field(
+                    t!("form.engine").to_string(),
+                    false,
+                    None,
+                    engine_box(driver_name),
+                    theme,
+                ))
+                .child(form_field(
+                    t!("form.alias").to_string(),
+                    true,
+                    error_hint(FormField::Name),
+                    input(FormField::Name),
+                    theme,
+                ))
+                .child(form_field(
+                    t!("form.database_file").to_string(),
+                    true,
+                    error_hint(FormField::Database).or_else(|| {
+                        Some(
+                            div()
+                                .text_size(px(11.5))
+                                .text_color(rgb(theme.text_muted))
+                                .child(t!("form.database_file_hint").to_string())
+                                .into_any_element(),
+                        )
+                    }),
+                    database_file_row(theme, input(FormField::Database), cx),
+                    theme,
+                ))
+                .child(match &self.test_status {
+                    TestStatus::Failed(error) => self
+                        .render_selectable_text("form-error", error, theme.danger, cx)
+                        .into_any_element(),
+                    _ => div().into_any_element(),
+                })
+                .into_any_element();
+        }
+
         div()
             .flex()
             .flex_col()
             .gap_4()
+            .child(form_field(
+                t!("form.engine").to_string(),
+                false,
+                None,
+                engine_box(driver_name),
+                theme,
+            ))
             .child(form_field(
                 t!("form.alias").to_string(),
                 true,
@@ -580,6 +660,7 @@ impl AppView {
                     .into_any_element(),
                 _ => div().into_any_element(),
             })
+            .into_any_element()
     }
 
     // ----- TLS / SSL ---------------------------------------------------------------------------
@@ -794,6 +875,34 @@ impl AppView {
             let _ = this.update(cx, move |app, cx| {
                 app.set_form_extra(field, &path, cx);
                 if let Some(input) = app.form_extra_inputs.get(&field).cloned() {
+                    input.update(cx, |input, cx| input.set_text(path.clone(), cx));
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Open the native file picker for a file-based engine's database (the SQLite file).
+    fn browse_database_file(&mut self, cx: &mut Context<'_, Self>) {
+        let title = t!("form.database_file").to_string();
+        cx.spawn(async move |this, cx| {
+            let Some(handle) = AsyncFileDialog::new()
+                .set_title(title)
+                .add_filter("SQLite", &["db", "sqlite", "sqlite3"])
+                .pick_file()
+                .await
+            else {
+                return;
+            };
+            let path = handle.path().to_string_lossy().into_owned();
+            let _ = this.update(cx, move |app, cx| {
+                app.set_form_field(FormField::Database, &path, cx);
+                if let Some(input) = app
+                    .form_inputs
+                    .as_ref()
+                    .map(|inputs| inputs.get(FormField::Database).clone())
+                {
                     input.update(cx, |input, cx| input.set_text(path.clone(), cx));
                 }
                 cx.notify();
@@ -1779,6 +1888,50 @@ fn file_row(
                 .hover(move |style| style.bg(rgb(theme.button_hover_bg)))
                 .on_click(cx.listener(move |this, _event, _window, cx| {
                     this.browse_form_file(field, cx);
+                }))
+                .child(
+                    svg()
+                        .path("icons/folder.svg")
+                        .w(px(14.0))
+                        .h(px(14.0))
+                        .text_color(rgb(theme.text_muted)),
+                )
+                .child(t!("form.browse").to_string()),
+        )
+}
+
+/// A text input with a trailing 浏览 button for a file-based engine's database file.
+fn database_file_row(
+    theme: Theme,
+    input: AnyElement,
+    cx: &mut Context<'_, AppView>,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_3()
+        .child(div().flex_1().min_w(px(0.0)).child(input))
+        .child(
+            div()
+                .id("form-database-browse")
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .h(px(32.0))
+                .px_4()
+                .flex_none()
+                .rounded(px(8.0))
+                .border_1()
+                .border_color(rgb(theme.border))
+                .bg(rgb(theme.dialog_bg))
+                .cursor_pointer()
+                .text_size(px(12.5))
+                .hover(move |style| style.bg(rgb(theme.button_hover_bg)))
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    this.browse_database_file(cx);
                 }))
                 .child(
                     svg()

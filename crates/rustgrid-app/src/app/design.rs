@@ -985,11 +985,20 @@ impl TableDesignView {
     }
 
     fn insert_field_at(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        // Default to `int` when the engine offers it (MySQL); otherwise use the engine's first
+        // type, so SQLite defaults to `INTEGER`. Length/decimals stay empty (unset) and render
+        // blank, matching a column loaded from an existing table.
+        let data_type = self
+            .column_types
+            .iter()
+            .find(|data_type| data_type.eq_ignore_ascii_case("int"))
+            .or_else(|| self.column_types.first())
+            .copied()
+            .unwrap_or("int")
+            .to_string();
         let column = ColumnDef {
             name: self.unique_field_name(),
-            data_type: "int".to_string(),
-            length: "0".to_string(),
-            decimals: "0".to_string(),
+            data_type,
             nullable: true,
             ..ColumnDef::default()
         };
