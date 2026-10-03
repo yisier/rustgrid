@@ -831,8 +831,8 @@ impl AppView {
     // Saved queries: named SQL documents listed under the Queries main tab.
     // ------------------------------------------------------------------------------------------
 
-    /// Open the "save query" dialog for the active editor tab, pre-filled with its current name
-    /// and save location.
+    /// Save the active editor tab: overwrite its file in place when it is already bound to one,
+    /// otherwise open the "save query" dialog pre-filled with its current name and save location.
     pub(super) fn begin_save_query(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let Some(index) = self.active_query else {
             return;
@@ -841,12 +841,24 @@ impl AppView {
             return;
         };
         let name = tab.name.clone().unwrap_or_default();
-        let connection_index = tab
-            .connection_index
-            .or_else(|| self.default_query_connection(cx));
-        let database = tab
-            .database
-            .clone()
+        let saved_path = tab.saved_path.clone();
+        let tab_connection = tab.connection_index;
+        let tab_database = tab.database.clone();
+
+        // A tab already bound to a saved file overwrites it in place; only an unsaved tab (or one
+        // whose file disappeared, e.g. it was renamed or deleted from the list) asks for a location.
+        if let Some(path) = saved_path {
+            if path.exists() {
+                self.save_query_in_place(index, path, cx);
+                return;
+            }
+            if let Some(tab) = self.queries.get_mut(index) {
+                tab.saved_path = None;
+            }
+        }
+
+        let connection_index = tab_connection.or_else(|| self.default_query_connection(cx));
+        let database = tab_database
             .or_else(|| connection_index.and_then(|i| self.default_query_database(i, cx)))
             .unwrap_or_default();
 
@@ -887,6 +899,36 @@ impl AppView {
             error: None,
         });
         self.save_query_focus_pending = true;
+        cx.notify();
+    }
+
+    /// Overwrite the `.sql` file an already-saved tab is bound to, without prompting. The file keeps
+    /// its name and location even if the tab's run-target connection/database were changed since.
+    fn save_query_in_place(
+        &mut self,
+        tab_index: usize,
+        path: std::path::PathBuf,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(sql) = self.queries.get(tab_index).map(|tab| tab.sql.clone()) else {
+            return;
+        };
+        if let Some(dir) = path.parent()
+            && let Err(error) = std::fs::create_dir_all(dir)
+        {
+            self.error_dialog = Some(error.to_string());
+            cx.notify();
+            return;
+        }
+        if let Err(error) = std::fs::write(&path, sql) {
+            self.error_dialog = Some(error.to_string());
+            cx.notify();
+            return;
+        }
+        self.refresh_query_files(cx);
+        if let Some(index) = self.query_files.iter().position(|file| file.path == path) {
+            self.select_query_one(index);
+        }
         cx.notify();
     }
 
@@ -1106,6 +1148,9 @@ impl AppView {
 
         if let Some(tab) = self.queries.get_mut(tab_index) {
             tab.name = Some(name);
+            // Bind the tab to the file it was just written to, so the next Save overwrites this
+            // exact file instead of re-asking for a name and location.
+            tab.saved_path = Some(saved_path);
             // Keep the editor bound to the location it was filed under, so a later save does not
             // duplicate it under the tab's previous connection.
             tab.connection_index = connection_index;
@@ -1332,6 +1377,7 @@ impl AppView {
         let connection_id = file.connection_id.clone();
         let database = file.database.clone();
         let name = file.name.clone();
+        let saved_path = file.path.clone();
         let Ok(sql) = std::fs::read_to_string(&file.path) else {
             self.error_dialog = Some(t!("query.read_failed", name = name).to_string());
             cx.notify();
@@ -1359,6 +1405,7 @@ impl AppView {
         {
             tab.sql = sql;
             tab.name = Some(name);
+            tab.saved_path = Some(saved_path);
             tab.caret = tab.sql.len();
             tab.anchor = tab.caret;
         }

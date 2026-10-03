@@ -124,6 +124,13 @@ impl AppView {
             .overflow_hidden()
             .bg(rgb(theme.editor_bg))
             .track_focus(&focus)
+            .key_context(QUERY_EDITOR_CONTEXT)
+            .on_action(cx.listener(move |this, _: &SaveQuery, window, cx| {
+                // Bring the tab that owns this editor to the front, then save it (in place when it
+                // is already bound to a file, otherwise through the name/location dialog).
+                this.activate_query(index, cx);
+                this.begin_save_query(window, cx);
+            }))
             .on_action(cx.listener(move |this, _: &RunSelectedQuery, _window, cx| {
                 // Bring the tab that owns this editor to the front, then run its selection.
                 this.activate_query(index, cx);

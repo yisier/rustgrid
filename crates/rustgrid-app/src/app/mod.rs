@@ -69,8 +69,11 @@ gpui::actions!(queryfile, [CopyQueryFile, PasteQueryFile, RenameQueryFile]);
 // Query-editor actions. `Root` binds `ctrl-z` (and `ctrl-c`/`ctrl-v`) in the `"Root"` context,
 // which would swallow the keystroke before `on_key_down`; binding our own actions in the editor's
 // deeper context takes precedence, so undo/redo actually reach the editor. `RunSelectedQuery` is
-// dispatched from the editor's right-click menu.
-gpui::actions!(queryeditor, [UndoQuery, RedoQuery, RunSelectedQuery]);
+// dispatched from the editor's right-click menu, and `SaveQuery` from `Ctrl+S`.
+gpui::actions!(
+    queryeditor,
+    [UndoQuery, RedoQuery, RunSelectedQuery, SaveQuery]
+);
 
 /// Key context applied to the cell that owns the in-place editor.
 const GRID_CELL_CONTEXT: &str = "GridCell";
@@ -81,7 +84,7 @@ const BACKUP_LIST_CONTEXT: &str = "BackupList";
 /// Key context applied to the saved-query file list.
 const QUERY_LIST_CONTEXT: &str = "QueryList";
 
-/// Key context applied to the SQL query editor, so Ctrl+Z / Ctrl+Y reach it.
+/// Key context applied to the SQL query editor, so Ctrl+Z / Ctrl+Y / Ctrl+S reach it.
 const QUERY_EDITOR_CONTEXT: &str = "QueryEditor";
 
 /// The stable settings key for the Queries tab's remembered list layout.
@@ -1653,6 +1656,8 @@ impl AppView {
             KeyBinding::new("ctrl-y", RedoQuery, Some(QUERY_EDITOR_CONTEXT)),
             KeyBinding::new("cmd-z", UndoQuery, Some(QUERY_EDITOR_CONTEXT)),
             KeyBinding::new("cmd-shift-z", RedoQuery, Some(QUERY_EDITOR_CONTEXT)),
+            KeyBinding::new("ctrl-s", SaveQuery, Some(QUERY_EDITOR_CONTEXT)),
+            KeyBinding::new("cmd-s", SaveQuery, Some(QUERY_EDITOR_CONTEXT)),
         ]);
         let app = cx.weak_entity();
         let app_entity = cx.entity();

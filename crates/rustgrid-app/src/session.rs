@@ -445,6 +445,9 @@ pub struct QueryTab {
     pub id: u64,
     /// The saved query name, once this tab was saved to (or opened from) the saved-query list.
     pub name: Option<String>,
+    /// The `.sql` file this tab is bound to, once it was saved (or opened from the list). While this
+    /// is set, Save overwrites the file in place instead of asking for a name and location again.
+    pub saved_path: Option<std::path::PathBuf>,
     pub connection_index: Option<usize>,
     pub database: Option<String>,
     pub sql: String,
@@ -479,6 +482,7 @@ impl QueryTab {
         Self {
             id,
             name: None,
+            saved_path: None,
             connection_index: None,
             database: None,
             sql: String::new(),

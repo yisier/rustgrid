@@ -282,8 +282,13 @@ shadcn chrome described above. Implemented today:
    the shared confirm dialog, while Rename (or `F2` on the selection) edits the name **in place**
    in the row that started it. These run through `Connection`
    (`drop_table`/`empty_table`/`truncate_table`/`rename_table`), never as raw SQL written in the UI.
-7. Saving named queries: `Save` (or `Ctrl+S`) in the query editor opens a dialog for the query
-   name and save location (connection + database). Saved queries are listed under the `Queries`
+7. Saving named queries: `Save` (or `Ctrl+S`) in the query editor overwrites the `.sql` file an
+   already-saved tab is bound to (`QueryTab::saved_path`), without prompting; only an unsaved tab —
+   or one whose bound file was renamed/deleted from the list — opens a dialog for the query name and
+   save location (connection + database). `Ctrl+S`/`Cmd+S` are bound in the editor's
+   `QUERY_EDITOR_CONTEXT`, which `query_editor.rs::render_query_editor` sets on the focus container
+   (key bindings only fire while that context is in the focused element's path). Saved queries are
+   listed under the `Queries`
    main tab in a **sortable three-column list** (query name / connection / database; click a header
    to sort). The list is scoped by the connection tree's selection — a selected database shows only
    that database's queries, a selected connection shows all of its databases, and any other
