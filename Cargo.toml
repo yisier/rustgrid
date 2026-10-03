@@ -7,6 +7,7 @@ members = [
     "crates/rustgrid-import",
     "crates/rustgrid-mysql",
     "crates/rustgrid-sqlite",
+    "crates/rustgrid-sqlserver",
     "crates/rustgrid-config",
     "crates/rustgrid-app",
 ]
@@ -26,6 +27,7 @@ rustgrid-export = { path = "crates/rustgrid-export" }
 rustgrid-import = { path = "crates/rustgrid-import" }
 rustgrid-mysql = { path = "crates/rustgrid-mysql" }
 rustgrid-sqlite = { path = "crates/rustgrid-sqlite" }
+rustgrid-sqlserver = { path = "crates/rustgrid-sqlserver" }
 rustgrid-config = { path = "crates/rustgrid-config" }
 
 async-trait = "0.1"
@@ -38,6 +40,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "mysql", "tls-rustls-ring", "chrono"] }
+tiberius = { version = "0.13", default-features = false, features = ["tds80", "rustls", "chrono"] }
+bb8 = { version = "0.9", default-features = false }
+tokio-util = { version = "0.7", features = ["compat"] }
+uuid = { version = "1", default-features = false }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 rust-i18n = "4"
 directories = "6"

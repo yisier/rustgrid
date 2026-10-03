@@ -379,6 +379,7 @@ impl AppView {
                                                 opened: existing.opened,
                                                 expanded: existing.expanded,
                                                 categories: existing.categories,
+                                                expanded_schemas: existing.expanded_schemas,
                                             }
                                         } else {
                                             DatabaseNode {
@@ -389,6 +390,7 @@ impl AppView {
                                                 opened: false,
                                                 expanded: false,
                                                 categories: Default::default(),
+                                                expanded_schemas: Default::default(),
                                             }
                                         }
                                     })
@@ -488,7 +490,7 @@ impl AppView {
                     _ => Category::Tables,
                 },
             };
-            self.open_object_pane(connection_index, database_index, category, cx);
+            self.open_object_pane(connection_index, database_index, None, category, cx);
             self.clear_object_search(cx);
             self.active_grid = None;
             self.active_query = None;
@@ -503,6 +505,7 @@ impl AppView {
         &mut self,
         connection_index: usize,
         database_index: usize,
+        schema: Option<String>,
         category: Category,
         cx: &mut Context<'_, Self>,
     ) {
@@ -515,16 +518,24 @@ impl AppView {
         self.clear_info_selection();
         self.objects_selection.clear();
         self.objects_row_rects.clear();
-        self.object_pane =
-            Some(cx.new(|cx| {
-                ObjectPane::new(app, connection_index, database_index, category, theme, cx)
-            }));
+        self.object_pane = Some(cx.new(|cx| {
+            ObjectPane::new(
+                app,
+                connection_index,
+                database_index,
+                schema,
+                category,
+                theme,
+                cx,
+            )
+        }));
     }
 
     pub(super) fn toggle_category(
         &mut self,
         connection_index: usize,
         database_index: usize,
+        schema: Option<String>,
         category: Category,
         cx: &mut Context<'_, Self>,
     ) {
@@ -581,7 +592,7 @@ impl AppView {
             self.load_routines(connection_index, database_index, connection, name, cx);
         }
 
-        self.open_object_pane(connection_index, database_index, category, cx);
+        self.open_object_pane(connection_index, database_index, schema, category, cx);
         self.clear_object_search(cx);
         self.active_grid = None;
         self.active_query = None;
@@ -592,6 +603,24 @@ impl AppView {
             Category::Functions => self.main_tab = MainTab::Functions,
             Category::Queries => self.main_tab = MainTab::Queries,
             _ => {}
+        }
+        cx.notify();
+    }
+
+    /// Expand or collapse one schema node under a database (SQL Server).
+    pub(super) fn toggle_schema(
+        &mut self,
+        connection_index: usize,
+        database_index: usize,
+        schema: String,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(node) = self.connections.get_mut(connection_index)
+            && let Loadable::Loaded(databases) = &mut node.databases
+            && let Some(database) = databases.get_mut(database_index)
+            && !database.expanded_schemas.insert(schema.clone())
+        {
+            database.expanded_schemas.remove(&schema);
         }
         cx.notify();
     }

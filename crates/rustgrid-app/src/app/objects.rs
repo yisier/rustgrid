@@ -58,12 +58,29 @@ fn object_message(color: u32, text: String) -> AnyElement {
 /// tables/routines, the search text, the current multi-selection and the rename editor.
 struct ObjectRenderData {
     mode: ViewMode,
+    schema: Option<String>,
     tables: Option<Loadable<Vec<rustgrid_core::TableInfo>>>,
     table_statuses: Option<Vec<(String, rustgrid_core::TableStatus)>>,
     routines: Option<Loadable<Vec<RoutineInfo>>>,
     search: String,
     selected: std::collections::HashSet<String>,
     rename: Option<RenameRow>,
+}
+
+/// The schema prefix of a schema-qualified object name (`dbo` in `dbo.users`).
+fn schema_of(name: &str) -> Option<&str> {
+    name.split_once('.')
+        .filter(|(schema, object)| !schema.is_empty() && !object.is_empty())
+        .map(|(schema, _)| schema)
+}
+
+/// The bare object name shown in lists (`wes_station` for `dbo.wes_station`); the schema is
+/// already implied by the selected schema node.
+fn object_display(name: &str) -> String {
+    name.split_once('.')
+        .filter(|(schema, object)| !schema.is_empty() && !object.is_empty())
+        .map(|(_, object)| object.to_string())
+        .unwrap_or_else(|| name.to_string())
 }
 
 /// Wrap an object row/tile so it publishes its window-space rectangle for the marquee.
@@ -608,9 +625,14 @@ impl AppView {
         cx: &Context<'_, Self>,
     ) -> impl IntoElement {
         let theme = self.theme;
-        let (connection_index, database_index, category) = {
+        let (connection_index, database_index, schema, category) = {
             let pane = pane.read(cx);
-            (pane.connection_index, pane.database_index, pane.category)
+            (
+                pane.connection_index,
+                pane.database_index,
+                pane.schema.clone(),
+                pane.category,
+            )
         };
         let connection_name = self
             .connections
@@ -620,7 +642,12 @@ impl AppView {
         let database_name = self
             .database_name(connection_index, database_index)
             .unwrap_or_default();
-        let count = self.object_count(connection_index, database_index, category);
+        let count = self.object_count(
+            connection_index,
+            database_index,
+            schema.as_deref(),
+            category,
+        );
 
         div()
             .flex()
@@ -668,6 +695,7 @@ impl AppView {
         &self,
         connection_index: usize,
         database_index: usize,
+        schema: Option<&str>,
         category: Category,
     ) -> usize {
         let Some(node) = self.connections.get(connection_index) else {
@@ -679,9 +707,13 @@ impl AppView {
         let Some(database) = databases.get(database_index) else {
             return 0;
         };
+        let in_schema = |name: &str| schema.is_none_or(|scope| schema_of(name) == Some(scope));
         if category == Category::Functions {
             return match &database.routines {
-                Loadable::Loaded(routines) => routines.len(),
+                Loadable::Loaded(routines) => routines
+                    .iter()
+                    .filter(|routine| in_schema(&routine.name))
+                    .count(),
                 _ => 0,
             };
         }
@@ -695,7 +727,10 @@ impl AppView {
         };
         tables
             .iter()
-            .filter(|table| matches!(table.kind, rustgrid_core::ObjectKind::View) == want_view)
+            .filter(|table| {
+                matches!(table.kind, rustgrid_core::ObjectKind::View) == want_view
+                    && in_schema(&table.name)
+            })
             .count()
     }
 }
@@ -705,6 +740,7 @@ impl ObjectPane {
         app: WeakEntity<AppView>,
         connection_index: usize,
         database_index: usize,
+        schema: Option<String>,
         category: Category,
         theme: Theme,
         cx: &mut Context<'_, Self>,
@@ -713,6 +749,7 @@ impl ObjectPane {
             app,
             connection_index,
             database_index,
+            schema,
             category,
             selected: None,
             selected_routine: None,
@@ -737,6 +774,7 @@ impl ObjectPane {
     fn render_body(&mut self, data: ObjectRenderData, cx: &mut Context<'_, Self>) -> AnyElement {
         let ObjectRenderData {
             mode,
+            schema,
             tables,
             table_statuses,
             routines,
@@ -758,7 +796,11 @@ impl ObjectPane {
                     let items: Vec<&RoutineInfo> = routines
                         .iter()
                         .filter(|routine| {
-                            query.is_empty() || routine.name.to_lowercase().contains(&query)
+                            schema
+                                .as_deref()
+                                .is_none_or(|scope| schema_of(&routine.name) == Some(scope))
+                                && (query.is_empty()
+                                    || routine.name.to_lowercase().contains(&query))
                         })
                         .collect();
                     self.visible_keys
@@ -791,6 +833,9 @@ impl ObjectPane {
                     .iter()
                     .filter(|table| {
                         matches!(table.kind, rustgrid_core::ObjectKind::View) == want_view
+                            && schema
+                                .as_deref()
+                                .is_none_or(|scope| schema_of(&table.name) == Some(scope))
                             && (query.is_empty() || table.name.to_lowercase().contains(&query))
                     })
                     .collect();
@@ -838,7 +883,7 @@ impl ObjectPane {
             _ => {}
         }
         for table in tables {
-            longest[0] = longest[0].max(ui::approx_text_width(&table.name) + 30.0);
+            longest[0] = longest[0].max(ui::approx_text_width(&object_display(&table.name)) + 30.0);
             let status = statuses.and_then(|list| {
                 list.iter()
                     .find(|(name, _)| name == &table.name)
@@ -986,7 +1031,7 @@ impl ObjectPane {
         let connection_index = self.connection_index;
         let database_index = self.database_index;
         let name = table.name.clone();
-        let label_name = name.clone();
+        let label_name = object_display(&name);
         let hit_key = name.clone();
         let open_name = name.clone();
         let menu_name = name.clone();
@@ -1155,7 +1200,7 @@ impl ObjectPane {
         let width = ui::grid_item_width(
             tables
                 .iter()
-                .map(|table| ui::approx_text_width(&table.name))
+                .map(|table| ui::approx_text_width(&object_display(&table.name)))
                 .fold(0.0, f32::max),
         );
         let rows = self.grid.rows_per_column();
@@ -1194,7 +1239,7 @@ impl ObjectPane {
         let connection_index = self.connection_index;
         let database_index = self.database_index;
         let name = table.name.clone();
-        let label_name = name.clone();
+        let label_name = object_display(&name);
         let hit_key = name.clone();
         let open_name = name.clone();
         let menu_name = name.clone();
@@ -1296,7 +1341,8 @@ impl ObjectPane {
             ui::approx_text_width(&t!("routine.field.comment")),
         ];
         for routine in routines {
-            longest[0] = longest[0].max(ui::approx_text_width(&routine.name) + 30.0);
+            longest[0] =
+                longest[0].max(ui::approx_text_width(&object_display(&routine.name)) + 30.0);
             longest[1] = longest[1].max(ui::approx_text_width(
                 &routine.modified.clone().unwrap_or_default(),
             ));
@@ -1380,7 +1426,7 @@ impl ObjectPane {
         let connection_index = self.connection_index;
         let database_index = self.database_index;
         let name = routine.name.clone();
-        let label_name = name.clone();
+        let label_name = object_display(&name);
         let hit_key = name.clone();
         let open_name = name.clone();
         let menu_name = name.clone();
@@ -1504,7 +1550,7 @@ impl ObjectPane {
         let width = ui::grid_item_width(
             routines
                 .iter()
-                .map(|routine| ui::approx_text_width(&routine.name))
+                .map(|routine| ui::approx_text_width(&object_display(&routine.name)))
                 .fold(0.0, f32::max),
         );
         let rows = self.grid.rows_per_column();
@@ -1540,7 +1586,7 @@ impl ObjectPane {
         let connection_index = self.connection_index;
         let database_index = self.database_index;
         let name = routine.name.clone();
-        let label_name = name.clone();
+        let label_name = object_display(&name);
         let hit_key = name.clone();
         let open_name = name.clone();
         let menu_name = name.clone();
@@ -1860,6 +1906,7 @@ impl Render for ObjectPane {
         let body = self.render_body(
             ObjectRenderData {
                 mode,
+                schema: self.schema.clone(),
                 tables,
                 table_statuses,
                 routines,

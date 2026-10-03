@@ -32,11 +32,52 @@ struct TreeDatabase {
     categories: CategoryExpansion,
     tables: Loadable<Vec<TreeTable>>,
     routines: Loadable<Vec<RoutineInfo>>,
+    /// Schema names derived from the object names (`dbo`, `sales`, ...). Empty for engines whose
+    /// objects are not schema-qualified (MySQL/SQLite), which then render categories directly.
+    schemas: Vec<String>,
+    expanded_schemas: BTreeSet<String>,
 }
 
+#[derive(Clone)]
 struct TreeTable {
     name: String,
+    /// The leaf label shown in the tree: the bare object name when `name` is
+    /// schema-qualified (`users` for `dbo.users`), so it is not redundant under a schema node.
+    display: String,
     is_view: bool,
+    /// The schema prefix of `name` (`dbo` in `dbo.users`), when present.
+    schema: Option<String>,
+}
+
+/// Split a schema-qualified object name (`dbo.users`) into `(schema, object)`.
+fn split_schema(name: &str) -> Option<(String, &str)> {
+    name.split_once('.')
+        .filter(|(schema, object)| !schema.is_empty() && !object.is_empty())
+        .map(|(schema, object)| (schema.to_string(), object))
+}
+
+/// The distinct schema prefixes among the loaded tables/routines. Empty when no object is
+/// schema-qualified, so schema-less engines keep the flat database → category tree.
+fn build_schema_nodes(
+    tables: &Loadable<Vec<TreeTable>>,
+    routines: &Loadable<Vec<RoutineInfo>>,
+) -> Vec<String> {
+    let mut names: BTreeSet<String> = BTreeSet::new();
+    if let Loadable::Loaded(items) = tables {
+        for table in items {
+            if let Some(schema) = &table.schema {
+                names.insert(schema.clone());
+            }
+        }
+    }
+    if let Loadable::Loaded(items) = routines {
+        for routine in items {
+            if let Some((schema, _)) = split_schema(&routine.name) {
+                names.insert(schema);
+            }
+        }
+    }
+    names.into_iter().collect()
 }
 
 /// One saved-query leaf shown under a database's Queries category in the connection tree.
@@ -68,14 +109,9 @@ fn snapshot_connections(app: &AppView) -> Vec<TreeConnection> {
                     databases
                         .iter()
                         .enumerate()
-                        .map(|(index, database)| TreeDatabase {
-                            index,
-                            name: database.name.clone(),
-                            opened: database.opened,
-                            expanded: database.expanded,
-                            categories: database.categories,
+                        .map(|(index, database)| {
                             // Leaf tables are only read when the database is expanded.
-                            tables: if database.expanded {
+                            let tables = if database.expanded {
                                 match &database.tables {
                                     Loadable::Idle => Loadable::Idle,
                                     Loadable::Loading => Loadable::Loading,
@@ -83,21 +119,32 @@ fn snapshot_connections(app: &AppView) -> Vec<TreeConnection> {
                                     Loadable::Loaded(tables) => Loadable::Loaded(
                                         tables
                                             .iter()
-                                            .map(|table| TreeTable {
-                                                name: table.name.clone(),
-                                                is_view: matches!(
-                                                    table.kind,
-                                                    rustgrid_core::ObjectKind::View
-                                                ),
+                                            .map(|table| {
+                                                let (schema, object) =
+                                                    match split_schema(&table.name) {
+                                                        Some((schema, object)) => {
+                                                            (Some(schema), object.to_string())
+                                                        }
+                                                        None => (None, table.name.clone()),
+                                                    };
+                                                TreeTable {
+                                                    name: table.name.clone(),
+                                                    display: object,
+                                                    is_view: matches!(
+                                                        table.kind,
+                                                        rustgrid_core::ObjectKind::View
+                                                    ),
+                                                    schema,
+                                                }
                                             })
                                             .collect(),
                                     ),
                                 }
                             } else {
                                 Loadable::Idle
-                            },
+                            };
                             // Routine leaves are only read when the Functions category is expanded.
-                            routines: if database.expanded {
+                            let routines = if database.expanded {
                                 match &database.routines {
                                     Loadable::Idle => Loadable::Idle,
                                     Loadable::Loading => Loadable::Loading,
@@ -108,7 +155,19 @@ fn snapshot_connections(app: &AppView) -> Vec<TreeConnection> {
                                 }
                             } else {
                                 Loadable::Idle
-                            },
+                            };
+                            let schemas = build_schema_nodes(&tables, &routines);
+                            TreeDatabase {
+                                index,
+                                name: database.name.clone(),
+                                opened: database.opened,
+                                expanded: database.expanded,
+                                categories: database.categories,
+                                tables,
+                                routines,
+                                schemas,
+                                expanded_schemas: database.expanded_schemas.clone(),
+                            }
                         })
                         .collect(),
                 ),
@@ -457,18 +516,34 @@ impl TreePane {
                     sub = sub.child(tree_message(error.clone(), 36.0, theme.danger));
                 }
                 Loadable::Loaded(_) => {
-                    for category in Category::ALL {
-                        if category == Category::Functions && !supports_routines {
-                            continue;
+                    if database.schemas.is_empty() {
+                        // Schema-less engines (MySQL/SQLite) keep the flat category list.
+                        for category in Category::ALL {
+                            if category == Category::Functions && !supports_routines {
+                                continue;
+                            }
+                            sub = sub.child(self.render_category(
+                                connection_index,
+                                database_index,
+                                None,
+                                category,
+                                database,
+                                saved_queries,
+                                cx,
+                            ));
                         }
-                        sub = sub.child(self.render_category(
-                            connection_index,
-                            database_index,
-                            category,
-                            database,
-                            saved_queries,
-                            cx,
-                        ));
+                    } else {
+                        for schema in &database.schemas {
+                            sub = sub.child(self.render_schema(
+                                connection_index,
+                                database_index,
+                                database,
+                                schema,
+                                saved_queries,
+                                supports_routines,
+                                cx,
+                            ));
+                        }
                     }
                 }
             }
@@ -477,32 +552,29 @@ impl TreePane {
         div().flex().flex_col().w_full().child(row).child(sub)
     }
 
-    fn render_category(
+    /// One schema node under a database (SQL Server), holding all of the database's categories
+    /// for that schema.
+    #[allow(clippy::too_many_arguments)]
+    fn render_schema(
         &self,
         connection_index: usize,
         database_index: usize,
-        category: Category,
         database: &TreeDatabase,
+        schema: &str,
         saved_queries: &[TreeSavedQuery],
+        supports_routines: bool,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let theme = self.theme;
-        let expanded = database.categories.get(category);
-        let cat_id = format!("cat-{connection_index}-{database_index}-{}", category.id());
-        let selected = self.selected.as_deref() == Some(cat_id.as_str());
-        let label = t!(category.label()).to_string();
-        let icon_color = match category {
-            Category::Tables => theme.icon_tables,
-            Category::Views => theme.icon_views,
-            Category::Functions => theme.icon_functions,
-            Category::Queries => theme.icon_queries,
-            Category::Backups => theme.icon_backups,
-        };
-        let click_id = cat_id.clone();
+        let expanded = database.expanded_schemas.contains(schema);
+        let schema_id = format!("schema-{connection_index}-{database_index}-{schema}");
+        let selected = self.selected.as_deref() == Some(schema_id.as_str());
+        let click_id = schema_id.clone();
+        let click_name = schema.to_string();
         let app = self.app.clone();
 
         let row = div()
-            .id(SharedString::from(cat_id))
+            .id(SharedString::from(schema_id))
             .flex()
             .flex_row()
             .items_center()
@@ -524,8 +596,97 @@ impl TreePane {
                 this.selected_table = None;
                 window.focus(&this.focus, cx);
                 this.selected = Some(click_id.clone());
+                let name = click_name.clone();
                 let _ = app.update(cx, |app, cx| {
-                    app.toggle_category(connection_index, database_index, category, cx);
+                    app.toggle_schema(connection_index, database_index, name, cx);
+                });
+            }))
+            .child(tree_chevron(expanded, theme.chevron))
+            .child(tree_icon("icons/database.svg", theme.icon_database))
+            .child(div().child(schema.to_string()));
+
+        let mut sub = div().flex().flex_col().w_full();
+        if expanded {
+            // Every category lives under the schema, so the whole tree reads as
+            // database → schema → 表/视图/函数/查询/备份.
+            for category in Category::ALL {
+                if category == Category::Functions && !supports_routines {
+                    continue;
+                }
+                sub = sub.child(self.render_category(
+                    connection_index,
+                    database_index,
+                    Some(schema),
+                    category,
+                    database,
+                    saved_queries,
+                    cx,
+                ));
+            }
+        }
+
+        div().flex().flex_col().w_full().child(row).child(sub)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_category(
+        &self,
+        connection_index: usize,
+        database_index: usize,
+        schema: Option<&str>,
+        category: Category,
+        database: &TreeDatabase,
+        saved_queries: &[TreeSavedQuery],
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
+        let theme = self.theme;
+        let expanded = database.categories.get(category);
+        let scope = schema.unwrap_or("");
+        let cat_id = format!(
+            "cat-{connection_index}-{database_index}-{scope}-{}",
+            category.id()
+        );
+        let selected = self.selected.as_deref() == Some(cat_id.as_str());
+        // Under a schema the category sits one level deeper.
+        let indent = if schema.is_some() { 54.0 } else { 36.0 };
+        let label = t!(category.label()).to_string();
+        let icon_color = match category {
+            Category::Tables => theme.icon_tables,
+            Category::Views => theme.icon_views,
+            Category::Functions => theme.icon_functions,
+            Category::Queries => theme.icon_queries,
+            Category::Backups => theme.icon_backups,
+        };
+        let click_id = cat_id.clone();
+        let click_schema = schema.map(str::to_string);
+        let app = self.app.clone();
+
+        let row = div()
+            .id(SharedString::from(cat_id))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .w_full()
+            .h(px(22.0))
+            .pl(px(indent))
+            .pr_2()
+            .rounded_sm()
+            .cursor_pointer()
+            .when(selected, move |style| {
+                style
+                    .bg(rgb(theme.tree_selected_bg))
+                    .text_color(rgb(theme.tree_selected_text))
+            })
+            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            .on_click(cx.listener(move |this, _event, window, cx| {
+                this.commit_pending_rename(cx);
+                this.selected_table = None;
+                window.focus(&this.focus, cx);
+                this.selected = Some(click_id.clone());
+                let schema = click_schema.clone();
+                let _ = app.update(cx, |app, cx| {
+                    app.toggle_category(connection_index, database_index, schema, category, cx);
                 });
             }))
             .child(tree_chevron(expanded, theme.chevron))
@@ -544,11 +705,17 @@ impl TreePane {
                             if table.is_view != want_view {
                                 continue;
                             }
+                            if let Some(schema) = schema
+                                && table.schema.as_deref() != Some(schema)
+                            {
+                                continue;
+                            }
                             sub = sub.child(self.render_table(
                                 connection_index,
                                 database_index,
                                 leaf_index,
                                 &database.name,
+                                indent + 18.0,
                                 table,
                                 cx,
                             ));
@@ -569,11 +736,18 @@ impl TreePane {
                     }
                     Loadable::Loaded(routines) => {
                         for (index, routine) in routines.iter().enumerate() {
+                            if let Some(schema) = schema
+                                && !split_schema(&routine.name)
+                                    .is_some_and(|(candidate, _)| candidate == schema)
+                            {
+                                continue;
+                            }
                             sub = sub.child(self.render_routine(
                                 connection_index,
                                 database_index,
                                 index,
                                 &database.name,
+                                indent + 18.0,
                                 routine,
                                 cx,
                             ));
@@ -601,19 +775,26 @@ impl TreePane {
     }
 
     /// One stored routine leaf under the connection tree's Functions category.
+    #[allow(clippy::too_many_arguments)]
     fn render_routine(
         &self,
         connection_index: usize,
         database_index: usize,
         routine_index: usize,
         database_name: &str,
+        indent: f32,
         routine: &RoutineInfo,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let theme = self.theme;
-        let routine_id = format!("rtn-{connection_index}-{database_index}-{routine_index}");
+        // The routine's schema-qualified name keeps the id unique across schema nodes.
+        let _ = routine_index;
+        let routine_id = format!("rtn-{connection_index}-{database_index}-{}", routine.name);
         let selected = self.selected.as_deref() == Some(routine_id.as_str());
         let name = routine.name.clone();
+        let display = split_schema(&routine.name)
+            .map(|(_, object)| object.to_string())
+            .unwrap_or_else(|| routine.name.clone());
         let click_name = name.clone();
         let kind = routine.kind;
         let click_id = routine_id.clone();
@@ -630,7 +811,7 @@ impl TreePane {
             .gap_1()
             .w_full()
             .h(px(22.0))
-            .pl(px(54.0))
+            .pl(px(indent))
             .pr_2()
             .rounded_sm()
             .cursor_pointer()
@@ -673,7 +854,7 @@ impl TreePane {
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                     window.focus(&this.focus, cx);
                     this.selected = Some(format!(
-                        "rtn-{connection_index}-{database_index}-{routine_index}"
+                        "rtn-{connection_index}-{database_index}-{menu_name}"
                     ));
                     this.selected_table = None;
                     let _ = menu_app.update(cx, |app, cx| {
@@ -700,22 +881,26 @@ impl TreePane {
                     .flex_1()
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .child(name),
+                    .child(display),
             )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_table(
         &self,
         connection_index: usize,
         database_index: usize,
         table_index: usize,
         database_name: &str,
+        indent: f32,
         table: &TreeTable,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let theme = self.theme;
         let is_view = table.is_view;
-        let table_id = format!("tbl-{connection_index}-{database_index}-{table_index}");
+        // The table's schema-qualified name keeps the id unique across schema nodes.
+        let _ = table_index;
+        let table_id = format!("tbl-{connection_index}-{database_index}-{}", table.name);
         let selected = self.selected.as_deref() == Some(table_id.as_str());
         let table_name = table.name.clone();
         let database_name = database_name.to_string();
@@ -741,7 +926,7 @@ impl TreePane {
             None => div()
                 .overflow_hidden()
                 .whitespace_nowrap()
-                .child(table.name.clone())
+                .child(table.display.clone())
                 .into_any_element(),
         };
 
@@ -753,7 +938,7 @@ impl TreePane {
             .gap_1()
             .w_full()
             .h(px(22.0))
-            .pl(px(54.0))
+            .pl(px(indent))
             .pr_2()
             .rounded_sm()
             .cursor_pointer()

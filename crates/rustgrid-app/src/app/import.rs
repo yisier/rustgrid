@@ -1875,13 +1875,17 @@ fn normalize_key(value: &str) -> String {
         .collect()
 }
 
-/// The existing table whose normalised name matches `name`, if any.
+/// The existing table whose normalised name matches `name`, if any. A schema-qualified
+/// existing name (`dbo.users`) is also matched by its bare object name.
 fn find_existing<'a>(existing: &'a [String], name: &str) -> Option<&'a str> {
     let key = normalize_key(name);
-    existing
-        .iter()
-        .map(String::as_str)
-        .find(|table| normalize_key(table) == key)
+    existing.iter().map(String::as_str).find(|table| {
+        normalize_key(table) == key
+            || table
+                .rsplit('.')
+                .next()
+                .is_some_and(|bare| normalize_key(bare) == key)
+    })
 }
 
 /// The new table's primary key: the source column named `id`, if there is one.

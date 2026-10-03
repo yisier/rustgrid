@@ -893,6 +893,8 @@ struct ObjectPane {
     app: WeakEntity<AppView>,
     connection_index: usize,
     database_index: usize,
+    /// The schema the list is scoped to (SQL Server), or `None` for the whole database.
+    schema: Option<String>,
     category: Category,
     selected: Option<String>,
     /// The kind of the selected routine, when `category` is [`Category::Functions`].
@@ -2759,14 +2761,22 @@ fn driver_icon(driver: &str) -> &'static str {
         "mysql" => "icons/mysql.svg",
         "mariadb" => "icons/mariadb.svg",
         "sqlite" => "icons/sqlite.svg",
+        "sqlserver" => "icons/sqlserver.svg",
         _ => "icons/connection.svg",
     }
 }
 
-/// A connection icon. Engine logos with fine detail are drawn as a white glyph on a solid badge
-/// so they stay legible on both light and dark backgrounds; `badge` also carries the connection
-/// status color.
+/// A connection icon. SQL Server and SQLite use their own brand marks (red / blue) so they are
+/// recognisable at a glance; the detailed MySQL/MariaDB glyphs are drawn white on a solid badge
+/// (whose colour also carries the connection status), and anything else falls back to the plain
+/// status-coloured icon.
 fn tree_driver_icon(driver: &str, color: u32, badge: u32) -> AnyElement {
+    match driver {
+        "sqlserver" => return tree_icon("icons/sqlserver.svg", 0xcc2927).into_any_element(),
+        // A slightly brighter blue than the logo's #003b57 so it stays legible on dark themes.
+        "sqlite" => return tree_icon("icons/sqlite.svg", 0x0f80cc).into_any_element(),
+        _ => {}
+    }
     let path = driver_icon(driver);
     if matches!(driver, "mysql" | "mariadb") {
         return div()

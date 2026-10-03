@@ -37,6 +37,7 @@ fn main() {
     registry.register(Arc::new(rustgrid_mysql::MysqlDriver::new()));
     registry.register(Arc::new(rustgrid_mysql::MariaDbDriver::new()));
     registry.register(Arc::new(rustgrid_sqlite::SqliteDriver::new()));
+    registry.register(Arc::new(rustgrid_sqlserver::SqlServerDriver::new()));
     let registry = Arc::new(registry);
 
     let config = Arc::new(

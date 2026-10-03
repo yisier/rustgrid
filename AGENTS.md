@@ -26,6 +26,16 @@ not a later refactor.
   profile's `database` holds the path and there is no server/user/password (see `Driver::is_file_based`).
   Browsing, paging, editing, arbitrary SQL, table DDL and backup/restore are implemented; SQLite has
   no stored routines or events, so those trait methods return empty.
+- `crates/rustgrid-sqlserver` — the **Microsoft SQL Server** driver, built on **tiberius** (pure-Rust
+  async TDS) with a **bb8** connection pool (`pool.rs`). It is not sqlx-based (sqlx 0.9 has no MSSQL
+  driver). `driver.rs` builds the tiberius `Config` (host/port, SQL authentication, TLS, timeouts) and
+  maps login failures to `Error::Authentication`; `connection.rs` implements `Connection` with
+  `[bracketed]` identifiers, `@P1` parameters and `OFFSET … FETCH NEXT` paging (always with an
+  `ORDER BY`); `helpers.rs` holds the dialect helpers (quoting, script splitting aware of
+  `BEGIN`/`CASE … END`, filter translation, `CellValue` decoding); `user.rs` maps SQL Server logins
+  onto the account model (database/object privilege management is still partial). Statements use the
+  text/batch path for DDL and `CREATE PROCEDURE`, and the parameterized RPC path for `SELECT`/DML so
+  row counts are available.
 - `crates/rustgrid-config` — versioned settings/profiles plus encrypted secret storage in the
   OS config dir (`connections.json`, `settings.json`, `secrets.json`).
 - `crates/rustgrid-app` — GPUI binary `RustGrid`: `src/app/` is the view/render layer, split
@@ -64,6 +74,10 @@ not a later refactor.
 - SQLite: the same **sqlx 0.9** with its `sqlite` feature added by `rustgrid-sqlite` (this
   statically bundles SQLite through `libsqlite3-sys`, so a C compiler is required — `gcc` on
   Windows, see Gotchas).
+- SQL Server: **tiberius 0.13** (`tds80` + `rustls` + `chrono`, `default-features = false`) with
+  **bb8 0.9** and **tokio-util** (`compat`). tiberius is not sqlx-based, uses rustls (so no OpenSSL),
+  and its `Client` is `Send` but not `Sync`, so every operation checks out a pooled client. tokio's
+  `net` feature is enabled for `TcpStream`.
 - i18n: **rust-i18n 4**. Config dir: **directories 6**.
 - Stored secrets: **chacha20poly1305 0.11** + **base64 0.22** (XChaCha20-Poly1305).
 - Export: **rust_xlsxwriter 0.99** writes `.xlsx`; **rfd 0.17** (XDG-portal backend on Linux) drives
@@ -92,6 +106,11 @@ not a later refactor.
   optionally `RUSTGRID_MYSQL_HOST`/`PORT`/`USER`/`DATABASE`), then
   `cargo test -p rustgrid-mysql -- --ignored`. It exercises connect, catalog listing, paging,
   and the auth-failure mapping against a real server.
+- Live SQL Server integration test (ignored by default): set `RUSTGRID_SQLSERVER_PASSWORD` (and
+  optionally `RUSTGRID_SQLSERVER_HOST`/`PORT`/`USER`/`DATABASE`), then
+  `cargo test -p rustgrid-sqlserver -- --ignored`. It exercises connect, catalog listing, paging,
+  editing, arbitrary SQL, schema introspection, backup/restore and views against a real server
+  (e.g. Docker `mcr.microsoft.com/mssql/server`).
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo fmt --all`
 - No `DATABASE_URL` or sqlx offline cache: queries use the **runtime** API (`sqlx::query`,
@@ -387,7 +406,7 @@ shadcn chrome described above. Implemented today:
     layout-independent so both layouts share the selection, and publish row rectangles through
     `AppView::note_row_rect(MarqueeTarget::…, …)` from each row's `on_children_prepainted`.
 
-Still out of scope: engines other than MySQL, MariaDB and SQLite, and the disabled placeholder UI
+Still out of scope: engines other than MySQL, MariaDB, SQLite and SQL Server, and the disabled placeholder UI
 (the `Design/New/Delete Table` toolbar buttons and the query editor's `Query Builder`/`Snippets`
 items are deliberate stubs — leave them disabled unless asked). The abstractions above are what
 make more engines cheap later — do not build those features early.
@@ -412,6 +431,28 @@ make more engines cheap later — do not build those features early.
   divider on its right edge (so it does not read as a scrollbar) drags a manual width (min 520,
   max 700) and double-clicking it restores auto-fit (`filter_resize_drag`).
 
+- **SQL Server (tiberius) is not sqlx.** `tiberius::Client` drives one request at a time and is
+  `Send` but **not `Sync`**, so `SqlServerConnection` holds a `bb8::Pool` and checks a client out per
+  operation. `OFFSET n ROWS FETCH NEXT m ROWS ONLY` requires an `ORDER BY`, so `fetch_page` orders by
+  the primary key when no sort is requested and `ORDER BY (SELECT NULL)` otherwise. Result-set
+  statements use the parameterized RPC path, DML uses the RPC path for its row count, and everything
+  else (DDL, `CREATE PROCEDURE`/`CREATE VIEW`) is sent as one text batch so the server receives it
+  intact; `helpers::split_statements` splits scripts on top-level semicolons while tracking
+  `BEGIN`/`CASE … END` and falls back to the whole script when blocks are unbalanced. Decimal/numeric
+  values decode to `CellValue::Text` (their exact `Numeric` string) rather than a lossy `f64`; money
+  decodes to `Float`. The driver's `columns`/`fetch_page` fully qualify objects because a pooled
+  session's database cannot be assumed. Three T-SQL quirks matter: `DROP VIEW`/`DROP PROCEDURE`/
+  `DROP FUNCTION` reject a database-qualified name (`DROP TABLE` accepts one), so those drops `USE`
+  the database and use a two-part `[schema].[name]`; `SET IDENTITY_INSERT` does **not** carry over
+  across `sp_executesql` requests, so restore wraps `SET IDENTITY_INSERT … ON`, the `INSERT`, and
+  `… OFF` in one plain text batch; and a script that starts with `DECLARE` is sent whole (batch-scoped
+  variables cannot span the split statements). `list_tables`/`list_routine_infos` return
+  **schema-qualified names** (`dbo.users`), and every table/view/routine operation parses that prefix
+  (`resolve_object`). The connection tree therefore inserts a schema level — 数据库 → dbo/… →
+  表/视图/函数/查询/备份 — for any engine whose object names are schema-qualified (SQL Server);
+  schema-less engines (MySQL/SQLite) keep the flat database → category tree. Queries and backups are
+  stored per database, so they appear (duplicated) under every schema node. The object pane is scoped
+  to the clicked schema for tables/views/functions; queries/backups stay database-scoped.
 - `rustgrid-mysql::map_connect_error` flags authentication failures as
   `rustgrid_core::Error::Authentication` by checking `MySqlDatabaseError::number()`
   (1044/1045/1698) — **not** `DatabaseError::code()`, which returns the SQLSTATE (e.g.

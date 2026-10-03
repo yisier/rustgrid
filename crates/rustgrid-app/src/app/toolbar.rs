@@ -522,6 +522,8 @@ impl AppView {
         if let Some(pane) = self.object_pane.as_ref() {
             pane.update(cx, |pane, cx| {
                 pane.category = category;
+                // Switching the main tab shows the whole database, not a single schema.
+                pane.schema = None;
                 pane.selected = None;
                 pane.selected_routine = None;
                 cx.notify();

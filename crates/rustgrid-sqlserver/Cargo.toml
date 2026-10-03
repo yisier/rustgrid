@@ -1,0 +1,22 @@
+[package]
+name = "rustgrid-sqlserver"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+rustgrid-core.workspace = true
+async-trait.workspace = true
+tiberius.workspace = true
+bb8.workspace = true
+tokio = { workspace = true, features = ["net"] }
+tokio-util.workspace = true
+futures-util.workspace = true
+chrono = { workspace = true, features = ["serde"] }
+uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

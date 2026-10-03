@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use rustgrid_core::{
@@ -43,6 +43,9 @@ pub struct DatabaseNode {
     pub opened: bool,
     pub expanded: bool,
     pub categories: CategoryExpansion,
+    /// The schemas the connection tree has expanded (SQL Server). Empty for schema-less
+    /// engines, where the tree renders the database's categories directly.
+    pub expanded_schemas: BTreeSet<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

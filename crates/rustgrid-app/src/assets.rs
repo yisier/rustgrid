@@ -12,6 +12,7 @@ impl AssetSource for Assets {
             "icons/mysql.svg" => Some(include_bytes!("../assets/icons/mysql.svg")),
             "icons/mariadb.svg" => Some(include_bytes!("../assets/icons/mariadb.svg")),
             "icons/sqlite.svg" => Some(include_bytes!("../assets/icons/sqlite.svg")),
+            "icons/sqlserver.svg" => Some(include_bytes!("../assets/icons/sqlserver.svg")),
             "icons/database.svg" => Some(include_bytes!("../assets/icons/database.svg")),
             "icons/tables.svg" => Some(include_bytes!("../assets/icons/tables.svg")),
             "icons/design_table.svg" => Some(include_bytes!("../assets/icons/design_table.svg")),

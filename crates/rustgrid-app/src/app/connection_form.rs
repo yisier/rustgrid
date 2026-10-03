@@ -224,6 +224,7 @@ impl AppView {
             }))
             .child(self.form_header())
             .child(self.form_tab_strip(cx))
+            .child(self.form_error_banner(cx))
             .child(
                 div()
                     .id("form-page")
@@ -256,13 +257,41 @@ impl AppView {
         root.into_any_element()
     }
 
+    /// A fixed error strip under the tab bar. The page body scrolls, so a message rendered at
+    /// the bottom of a page could be off-screen; this keeps a failed 测试连接 / 保存 visible.
+    fn form_error_banner(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        match &self.test_status {
+            TestStatus::Failed(error) => div()
+                .flex_none()
+                .w_full()
+                .px_6()
+                .py_2()
+                .border_b_1()
+                .border_color(rgb(theme.border))
+                .child(self.render_selectable_text("form-error", error, theme.danger, cx))
+                .into_any_element(),
+            _ => div().into_any_element(),
+        }
+    }
+
     /// The slim header: a status dot, the title, and the window controls.
     fn form_header(&self) -> impl IntoElement {
         let theme = self.theme;
-        let title = if self.editing.is_some() {
+        let action = if self.editing.is_some() {
             t!("form.window.edit")
         } else {
             t!("form.window.new")
+        };
+        // The engine is part of the header title so the window reads `New Connection · SQL Server`
+        // rather than hard-coding MySQL.
+        let title = match self
+            .form
+            .as_ref()
+            .and_then(|form| self.registry.get(&form.driver))
+        {
+            Some(driver) => format!("{action} · {}", driver.display_name()),
+            None => action.to_string(),
         };
 
         div()
@@ -517,12 +546,6 @@ impl AppView {
                     database_file_row(theme, input(FormField::Database), cx),
                     theme,
                 ))
-                .child(match &self.test_status {
-                    TestStatus::Failed(error) => self
-                        .render_selectable_text("form-error", error, theme.danger, cx)
-                        .into_any_element(),
-                    _ => div().into_any_element(),
-                })
                 .into_any_element();
         }
 
@@ -654,12 +677,6 @@ impl AppView {
                             .child(t!("form.keyring_hint").to_string()),
                     ),
             )
-            .child(match &self.test_status {
-                TestStatus::Failed(error) => self
-                    .render_selectable_text("form-error", error, theme.danger, cx)
-                    .into_any_element(),
-                _ => div().into_any_element(),
-            })
             .into_any_element()
     }
 
@@ -671,6 +688,9 @@ impl AppView {
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let theme = self.theme;
+        // The cleartext-password plugin only exists on MySQL/MariaDB; other engines do not
+        // offer that option.
+        let mysql = matches!(form.driver.as_str(), "mysql" | "mariadb");
         let extra = |field: FormExtra| -> AnyElement {
             match self.form_extra_inputs.get(&field).cloned() {
                 Some(input) => div().w_full().child(input).into_any_element(),
@@ -710,40 +730,43 @@ impl AppView {
                 file_row(FormExtra::TlsKey, theme, extra(FormExtra::TlsKey), cx),
                 theme,
             ))
-            .child(
-                div()
-                    .id("form-tls-cleartext")
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .cursor_pointer()
-                    .on_click(cx.listener(|this, _event, _window, cx| {
-                        if let Some(form) = this.form.as_mut() {
-                            form.settings.cleartext_password = !form.settings.cleartext_password;
-                        }
-                        cx.notify();
-                    }))
-                    .child(checkbox_box(form.settings.cleartext_password, theme))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_size(px(12.5))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(t!("form.tls.cleartext").to_string()),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.5))
-                                    .text_color(rgb(theme.text_muted))
-                                    .child(t!("form.tls.cleartext_sub").to_string()),
-                            ),
-                    ),
-            )
+            .when(mysql, |page| {
+                page.child(
+                    div()
+                        .id("form-tls-cleartext")
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _event, _window, cx| {
+                            if let Some(form) = this.form.as_mut() {
+                                form.settings.cleartext_password =
+                                    !form.settings.cleartext_password;
+                            }
+                            cx.notify();
+                        }))
+                        .child(checkbox_box(form.settings.cleartext_password, theme))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_size(px(12.5))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child(t!("form.tls.cleartext").to_string()),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(11.5))
+                                        .text_color(rgb(theme.text_muted))
+                                        .child(t!("form.tls.cleartext_sub").to_string()),
+                                ),
+                        ),
+                )
+            })
     }
 
     /// The custom select that shows the TLS mode and opens its option menu.
@@ -1525,7 +1548,14 @@ impl AppView {
                         .child(t!("form.test_success").to_string()),
                 );
             }
-            TestStatus::Failed(_) => {}
+            TestStatus::Failed(_) => {
+                status = status.child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(theme.danger))
+                        .child(t!("form.test_failed").to_string()),
+                );
+            }
         }
 
         div()
