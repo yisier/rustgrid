@@ -250,7 +250,8 @@ element types. Two kinds of upgrade:
   temporal cell commits exactly like every other cell editor — on blur, Enter, or the bottom 提交
   button, never by confirming the picker. 取消/Esc discard. While a temporal cell is in edit mode
   it shows a `…` button (`grid_view.rs`) that toggles the popup: it opens it from the editor's
-  value, or applies-and-closes it when already open. The footer's 取消/确定 use
+  value, or applies-and-closes it when already open. The popup opens **only** from that `…` button
+  — `begin_edit` no longer auto-opens it for temporal cells. The footer's 取消/确定 use
   `ui::popup_button` at `Size::XSmall`.
   The kit's styled `Calendar` facade is sized for a full popup (28px cells), so
   `ui/calendar.rs::compact_calendar` wraps the **unstyled** `gpui_base::Calendar` and overrides
@@ -483,6 +484,13 @@ make more engines cheap later — do not build those features early.
   while there is no window yet, so `ui/text_input.rs` and `ui/combo.rs` create the inner state
   on the first `render` and queue setters/callbacks to that frame. Keep new gpui-kit-backed
   state behind the same lazy wrapper pattern.
+- **Completion items must carry an explicit `text_edit` range.** gpui's `CompletionMenu` builds
+  the accept range from `trigger_start_offset`, which `gpui-base` pins to the offset *after the
+  first keystroke* that opened the menu. Accepting `SELECT` after typing `sele` therefore replaces
+  only the tail and yields `seSELECT`. `sql_completion.rs` works around this by setting
+  `CompletionTextEdit::Edit` on every item, anchored at `SqlCompletionContext::prefix_start ..
+  caret` (the real identifier fragment). Keep that range in sync if the trigger/filter logic
+  changes; do not fix it by editing the crates.io copy under `~/.cargo/registry`.
 - **Window-edge resizing on Windows is app-owned.** gpui hides the OS titlebar, so its
   `WM_NCCALCSIZE` leaves only a 1px frame and the titlebar's `WindowControlArea::Drag` claims
   the top edge, making the window effectively unresizable. `src/win_resize.rs` installs a

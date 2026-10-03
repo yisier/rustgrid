@@ -770,7 +770,11 @@ impl AppView {
 
         if let Some(index) = self.grids.iter().position(|grid| {
             let grid = grid.read(cx);
-            grid.state.database == database
+            // Only reuse a real table grid; a query result grid also carries the inferred
+            // database/table (for editing) but shows no tab, so matching it would open the
+            // table with no tab at all.
+            grid.state.sql.is_none()
+                && grid.state.database == database
                 && grid.state.table == table
                 && Arc::ptr_eq(&grid.state.connection, &connection)
         }) {

@@ -513,7 +513,6 @@ impl GridView {
                     String::new()
                 }
             });
-        let is_temporal = is_temporal_type(&self.state.columns[col].data_type);
         let cells = self
             .state
             .selection
@@ -581,9 +580,8 @@ impl GridView {
         });
         self.cell_editor_focus_pending = true;
         window.focus(&focus, cx);
-        if is_temporal {
-            self.open_date_picker(row, col, &value, window, cx);
-        }
+        // A temporal cell's picker opens only from its "…" button (see `toggle_date_picker`), not
+        // automatically when the editor appears.
         cx.notify();
     }
 

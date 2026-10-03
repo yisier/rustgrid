@@ -296,6 +296,9 @@ pub enum SqlCompletionKind {
 pub struct SqlCompletionContext {
     /// The lowercased fragment from the identifier start to the caret.
     pub prefix: String,
+    /// The byte offset where `prefix` begins (the identifier start). Completion must replace
+    /// `prefix_start..caret`, so the editor's completion accept range is anchored here.
+    pub prefix_start: usize,
     /// The dotted qualifier parts before the fragment (`["db", "table"]`, `["alias"]`, ...).
     pub qualifier: Vec<String>,
     pub kind: SqlCompletionKind,
@@ -329,6 +332,7 @@ pub fn completion_context(sql: &str, caret: usize) -> SqlCompletionContext {
     };
     SqlCompletionContext {
         prefix,
+        prefix_start: start,
         qualifier,
         kind,
         tables,
@@ -1109,6 +1113,7 @@ mod tests {
         let sql = "SELECT * FROM ams";
         let context = completion_context(sql, sql.len());
         assert_eq!(context.prefix, "ams");
+        assert_eq!(context.prefix_start, "SELECT * FROM ".len());
         assert_eq!(context.kind, SqlCompletionKind::Table);
 
         // `alias.` and `db.table.` qualifiers are split out.

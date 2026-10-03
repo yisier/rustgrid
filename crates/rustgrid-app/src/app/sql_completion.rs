@@ -10,7 +10,11 @@ use std::sync::Arc;
 
 use gpui::{App, Task, Window};
 use gpui_kit::component::input::CompletionProvider;
-use lsp_types::{CompletionContext, CompletionItem, CompletionItemKind, CompletionResponse};
+use gpui_kit::component::input::RopeExt as _;
+use lsp_types::{
+    CompletionContext, CompletionItem, CompletionItemKind, CompletionResponse, CompletionTextEdit,
+    Range, TextEdit,
+};
 use ropey::Rope;
 
 use crate::sql;
@@ -80,7 +84,19 @@ impl CompletionProvider for SqlCompletionProvider {
     ) -> Task<anyhow::Result<CompletionResponse>> {
         let sql_text = text.to_string();
         let context = sql::completion_context(&sql_text, offset);
-        let items = build_items(&self.source, &context);
+        let mut items = build_items(&self.source, &context);
+        // Anchor the replacement range explicitly. gpui's completion menu derives it from the
+        // offset of the *first* keystroke that opened the menu (`trigger_start_offset`), so
+        // accepting "SELECT" after typing "sele" inserts at the wrong place ("seSELECT"). An
+        // explicit `text_edit` overrides that range with the real identifier fragment
+        // (`prefix_start..offset`).
+        let range = replacement_range(text, &context, offset);
+        for item in &mut items {
+            item.text_edit = Some(CompletionTextEdit::Edit(TextEdit {
+                range: range.clone(),
+                new_text: item.label.clone(),
+            }));
+        }
         Task::ready(Ok(CompletionResponse::Array(items)))
     }
 
@@ -250,5 +266,38 @@ fn completion_item(label: &str, detail: &str, kind: CompletionItemKind) -> Compl
         kind: Some(kind),
         detail: Some(detail.to_string()),
         ..Default::default()
+    }
+}
+
+/// The range (in gpui's char-column positions) that accepting a completion must replace: the
+/// identifier fragment from `context.prefix_start` up to the caret offset.
+fn replacement_range(text: &Rope, context: &sql::SqlCompletionContext, offset: usize) -> Range {
+    Range::new(
+        text.offset_to_position(context.prefix_start),
+        text.offset_to_position(offset),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replacement_range_covers_the_typed_identifier() {
+        let sql = "SELECT * FROM ams";
+        let context = crate::sql::completion_context(sql, sql.len());
+        let range = replacement_range(&Rope::from(sql), &context, sql.len());
+        assert_eq!(range.start.line, 0);
+        assert_eq!(range.start.character, "SELECT * FROM ".len() as u32);
+        assert_eq!(range.end.character, sql.len() as u32);
+    }
+
+    #[test]
+    fn replacement_range_is_empty_at_a_fresh_dot() {
+        let sql = "SELECT t.";
+        let context = crate::sql::completion_context(sql, sql.len());
+        let range = replacement_range(&Rope::from(sql), &context, sql.len());
+        assert_eq!(range.start, range.end);
+        assert_eq!(range.end.character, sql.len() as u32);
     }
 }

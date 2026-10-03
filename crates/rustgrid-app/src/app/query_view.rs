@@ -792,10 +792,11 @@ impl AppView {
             cx.notify();
             return;
         }
-        // The divider sits on the panel's top edge, so dragging down grows the panel.
+        // The divider sits on the panel's top edge, so dragging up grows the panel (a negative
+        // pointer delta must increase the height, not shrink it).
         let delta = f32::from(event.position.y) - start_y;
         self.query_result_height =
-            (start_height + delta).clamp(QUERY_RESULT_MIN_HEIGHT, QUERY_RESULT_MAX_HEIGHT);
+            (start_height - delta).clamp(QUERY_RESULT_MIN_HEIGHT, QUERY_RESULT_MAX_HEIGHT);
         cx.notify();
     }
 
