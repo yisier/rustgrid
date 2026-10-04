@@ -1567,6 +1567,10 @@ pub struct AppView {
     info_table_selected: Option<(usize, usize, String)>,
     /// The selected table's status for the table info pane.
     info_table_status: Loadable<TableStatus>,
+    /// The selected table's `CREATE` script for the table info pane's DDL view.
+    info_table_ddl: Loadable<Option<String>>,
+    /// Whether the table info pane shows the details or the DDL script.
+    info_table_ddl_view: bool,
     /// The selected stored routine `(connection, database, name, kind)` driving the routine info
     /// pane, set by the connection tree and the Functions object list.
     info_routine_selected: Option<(usize, usize, String, RoutineKind)>,
@@ -1983,6 +1987,8 @@ impl AppView {
             info_database: Loadable::Idle,
             info_table_selected: None,
             info_table_status: Loadable::Idle,
+            info_table_ddl: Loadable::Idle,
+            info_table_ddl_view: false,
             info_routine_selected: None,
             info_routine: Loadable::Idle,
             users: Loadable::Idle,

@@ -660,6 +660,20 @@ impl Connection for MysqlConnection {
         Ok(statuses)
     }
 
+    async fn object_ddl(
+        &self,
+        database: &str,
+        name: &str,
+        is_view: bool,
+    ) -> Result<Option<String>> {
+        // `SHOW CREATE TABLE` reports both tables and views, so the flag is informational.
+        let _ = is_view;
+        match self.show_create(database, name, "TABLE").await {
+            Ok(ddl) => Ok(Some(ddl)),
+            Err(_) => Ok(None),
+        }
+    }
+
     async fn character_sets(&self) -> Result<Vec<String>> {
         let rows = sqlx::query(
             "SELECT character_set_name FROM information_schema.character_sets \

@@ -201,6 +201,18 @@ pub trait Connection: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// The `CREATE`/DDL script for one table or view, for the info pane's DDL view. `is_view`
+    /// distinguishes a view from a table where the engine stores both in the same catalog. Engines
+    /// that cannot reproduce a script return `None`.
+    async fn object_ddl(
+        &self,
+        _database: &str,
+        _name: &str,
+        _is_view: bool,
+    ) -> Result<Option<String>> {
+        Ok(None)
+    }
+
     async fn character_sets(&self) -> Result<Vec<String>>;
 
     async fn collations(&self) -> Result<Vec<String>>;

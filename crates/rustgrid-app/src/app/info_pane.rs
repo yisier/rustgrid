@@ -190,8 +190,9 @@ impl Render for InfoPane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let (theme, body) = match self.app.upgrade() {
             Some(app) => {
+                let weak = self.app.clone();
                 let app = app.read(cx);
-                (app.theme, app.info_body(cx))
+                (app.theme, app.info_body(&weak, cx))
             }
             None => return div().into_any_element(),
         };
@@ -387,6 +388,8 @@ impl AppView {
         self.info_server = Loadable::Idle;
         self.info_database = Loadable::Idle;
         self.info_table_status = Loadable::Idle;
+        self.info_table_ddl = Loadable::Idle;
+        self.info_table_ddl_view = false;
         self.info_routine = Loadable::Idle;
         self.info_user = Loadable::Idle;
 
@@ -451,13 +454,36 @@ impl AppView {
                 let Some(database) = self.database_name(connection_index, database_index) else {
                     return;
                 };
+                // A view is scripted with the view verb; a table with the table verb.
+                let is_view = self.table_is_view(connection_index, database_index, &name);
                 let runtime = self.runtime.clone();
                 cx.spawn(async move |this, cx| {
-                    let result = runtime
-                        .spawn(async move { connection.table_status(&database, &name).await })
+                    let status_connection = connection.clone();
+                    let ddl_connection = connection.clone();
+                    let status_database = database.clone();
+                    let ddl_database = database.clone();
+                    let status_name = name.clone();
+                    let ddl_name = name.clone();
+                    let status = runtime
+                        .spawn(async move {
+                            status_connection
+                                .table_status(&status_database, &status_name)
+                                .await
+                        })
+                        .await;
+                    let ddl = runtime
+                        .spawn(async move {
+                            ddl_connection
+                                .object_ddl(&ddl_database, &ddl_name, is_view)
+                                .await
+                        })
                         .await;
                     let _ = this.update(cx, |app, cx| {
-                        app.info_table_status = match result {
+                        app.info_table_status = match status {
+                            Ok(inner) => loadable(inner),
+                            Err(error) => Loadable::Failed(error.to_string()),
+                        };
+                        app.info_table_ddl = match ddl {
                             Ok(inner) => loadable(inner),
                             Err(error) => Loadable::Failed(error.to_string()),
                         };
@@ -525,7 +551,7 @@ impl AppView {
     }
 
     /// Build the info pane's contents for the current selection.
-    pub(super) fn info_body(&self, cx: &App) -> AnyElement {
+    pub(super) fn info_body(&self, app: &WeakEntity<AppView>, cx: &App) -> AnyElement {
         let theme = self.theme;
         match self.info_target(cx) {
             InfoTarget::None => div().into_any_element(),
@@ -541,7 +567,7 @@ impl AppView {
                 self.database_info(connection, database, theme)
             }
             InfoTarget::Table(connection, database, name) => {
-                self.table_info(connection, database, &name, theme)
+                self.table_info(connection, database, &name, app, theme)
             }
             InfoTarget::Routine(_, _, name, kind) => self.routine_info(&name, kind, theme),
             InfoTarget::User(_, index) => self.user_info(index, theme),
@@ -704,20 +730,14 @@ impl AppView {
         connection_index: usize,
         database_index: usize,
         name: &str,
+        app: &WeakEntity<AppView>,
         theme: Theme,
     ) -> AnyElement {
         // A view reads as a view; a table's status is loaded from the server.
-        let is_view = self
-            .connections
-            .get(connection_index)
-            .and_then(|node| match &node.databases {
-                Loadable::Loaded(databases) => databases.get(database_index),
-                _ => None,
-            })
-            .is_some_and(|database| {
-                matches!(&database.tables, Loadable::Loaded(tables)
-                    if tables.iter().any(|table| table.name == name && matches!(table.kind, rustgrid_core::ObjectKind::View)))
-            });
+        let is_view = self.table_is_view(connection_index, database_index, name);
+        if self.info_table_ddl_view {
+            return self.table_ddl_view(name, is_view, theme);
+        }
         let empty = TableStatus::default();
         let status = match &self.info_table_status {
             Loadable::Loaded(status) => Some(status),
@@ -794,7 +814,148 @@ impl AppView {
         } else {
             theme.icon_table
         };
-        info_panel(icon, color, name, &kind, &fields)
+        let body = info_panel(icon, color, name, &kind, &fields);
+        self.table_info_view_bar(app, theme)
+            .child(body)
+            .into_any_element()
+    }
+
+    /// Whether the table/view `name` is a view in its database's loaded catalog.
+    fn table_is_view(&self, connection_index: usize, database_index: usize, name: &str) -> bool {
+        self.connections
+            .get(connection_index)
+            .and_then(|node| match &node.databases {
+                Loadable::Loaded(databases) => databases.get(database_index),
+                _ => None,
+            })
+            .is_some_and(|database| {
+                matches!(&database.tables, Loadable::Loaded(tables)
+                    if tables.iter().any(|table| table.name == name && matches!(table.kind, rustgrid_core::ObjectKind::View)))
+            })
+    }
+
+    /// The table info pane's two view buttons (详细信息 / DDL), Navicat's icon pair above the
+    /// object title. The active one is filled.
+    fn table_info_view_bar(&self, app: &WeakEntity<AppView>, theme: Theme) -> Div {
+        let details = !self.info_table_ddl_view;
+        let ddl = self.info_table_ddl_view;
+        let weak_details = app.clone();
+        let weak_ddl = app.clone();
+        let button = |id: &'static str, icon: &'static str, active: bool| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .justify_center()
+                .w(px(28.0))
+                .h(px(22.0))
+                .rounded_sm()
+                .cursor_pointer()
+                .when(active, |style| style.bg(rgb(theme.button_bg)))
+                .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                .child(
+                    svg()
+                        .path(icon)
+                        .w(px(15.0))
+                        .h(px(15.0))
+                        .text_color(rgb(if active { theme.text } else { theme.text_muted })),
+                )
+        };
+        let mut tabs = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .child(
+                button("info-view-details", "icons/database.svg", details).on_click(
+                    move |_event, _window, cx| {
+                        let _ = weak_details.update(cx, |app, cx| {
+                            app.info_table_ddl_view = false;
+                            cx.notify();
+                        });
+                    },
+                ),
+            )
+            .child(button("info-view-ddl", "icons/queries.svg", ddl).on_click(
+                move |_event, _window, cx| {
+                    let _ = weak_ddl.update(cx, |app, cx| {
+                        app.info_table_ddl_view = true;
+                        cx.notify();
+                    });
+                },
+            ));
+        // A copy button for the script, only while the DDL view is showing.
+        if let (true, Loadable::Loaded(Some(ddl))) =
+            (self.info_table_ddl_view, &self.info_table_ddl)
+        {
+            let ddl = ddl.clone();
+            tabs = tabs.child(
+                div()
+                    .id("info-ddl-copy")
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .h(px(22.0))
+                    .px_2()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .text_size(px(11.0))
+                    .text_color(rgb(theme.text_muted))
+                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                    .child(svg().path("icons/queries.svg").w(px(13.0)).h(px(13.0)))
+                    .child(t!("query.copy").to_string())
+                    .on_click(move |_event, _window, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(ddl.clone()));
+                    }),
+            );
+        }
+        div().flex().flex_col().w_full().child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .px_3()
+                .pt_3()
+                .child(tabs),
+        )
+    }
+
+    /// The table info pane's DDL view: the `CREATE` script in a copyable code block.
+    fn table_ddl_view(&self, name: &str, is_view: bool, theme: Theme) -> AnyElement {
+        let _ = (name, is_view, theme);
+        let script: AnyElement = match &self.info_table_ddl {
+            Loadable::Loaded(Some(ddl)) => div()
+                .id("info-ddl")
+                .p_3()
+                .child(
+                    TextView::markdown("info-ddl-text", format!("```sql\n{ddl}\n```"))
+                        .selectable(true)
+                        .text_size(px(12.0)),
+                )
+                .into_any_element(),
+            Loadable::Loaded(None) => div()
+                .p_4()
+                .text_color(rgb(self.theme.text_muted))
+                .child(t!("info.ddl_unavailable").to_string())
+                .into_any_element(),
+            Loadable::Failed(error) => div()
+                .p_4()
+                .text_color(rgb(self.theme.danger))
+                .child(error.clone())
+                .into_any_element(),
+            Loadable::Idle | Loadable::Loading => div()
+                .p_4()
+                .text_color(rgb(self.theme.text_muted))
+                .child(t!("common.loading").to_string())
+                .into_any_element(),
+        };
+        div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .child(script)
+            .into_any_element()
     }
 
     /// The details pane for a stored routine (the Functions tab's selection): its kind, timestamps,

@@ -147,6 +147,169 @@ impl SqlServerConnection {
         );
         self.execute_batch(None, &sql).await
     }
+
+    /// Rebuild a table's `CREATE TABLE` script plus its non-clustered indexes from catalog
+    /// metadata, since SQL Server does not store a table's original DDL.
+    pub(crate) async fn table_ddl(
+        &self,
+        database: &str,
+        schema: &str,
+        table: &str,
+        is_view: bool,
+    ) -> Result<String> {
+        if is_view {
+            return Ok(format!(
+                "CREATE VIEW {}.{} AS\n/* definition unavailable */\nGO",
+                quote_identifier(schema),
+                quote_identifier(table)
+            ));
+        }
+        let status = self.table_status(database, table).await?;
+        let db = quote_identifier(database);
+        let column_sql = format!(
+            "SELECT c.name, t.name, c.max_length, c.precision, c.scale, c.is_nullable, \
+                    c.is_identity, dc.definition, c.is_computed, cc.definition \
+             FROM {db}.sys.columns c \
+             JOIN {db}.sys.types t ON t.user_type_id = c.user_type_id \
+             JOIN {db}.sys.objects o ON o.object_id = c.object_id \
+             JOIN {db}.sys.schemas s ON s.schema_id = o.schema_id \
+             LEFT JOIN {db}.sys.default_constraints dc ON dc.parent_object_id = c.object_id \
+                  AND dc.parent_column_id = c.column_id \
+             LEFT JOIN {db}.sys.computed_columns cc ON cc.object_id = c.object_id \
+                  AND cc.column_id = c.column_id \
+             WHERE o.name = @P1 AND s.name = @P2 \
+             ORDER BY c.column_id",
+            db = db
+        );
+        let columns = self
+            .run(
+                None,
+                &column_sql,
+                &[Some(table.to_string()), Some(schema.to_string())],
+            )
+            .await?;
+
+        let mut definitions: Vec<String> = Vec::new();
+        let mut primary_columns: Vec<String> = Vec::new();
+        for row in &columns.rows {
+            let name = quote_identifier(&text_cell(row, 0));
+            if bool_cell(row, 8) {
+                definitions.push(format!("  {name} AS {}", text_cell(row, 9)));
+                continue;
+            }
+            let type_sql = render_column_type(
+                &text_cell(row, 1),
+                u64_cell(row, 2),
+                u64_cell(row, 3),
+                u64_cell(row, 4),
+            );
+            let mut definition = format!("  {name} {type_sql}");
+            if bool_cell(row, 7) {
+                definition.push_str(" IDENTITY(1,1)");
+            }
+            definition.push_str(if bool_cell(row, 5) {
+                " NULL"
+            } else {
+                " NOT NULL"
+            });
+            let default = text_cell(row, 6);
+            if !default.is_empty() {
+                definition.push_str(&format!(" DEFAULT {default}"));
+            }
+            definitions.push(definition);
+        }
+
+        let pk_sql = format!(
+            "SELECT c.name FROM {db}.sys.indexes i \
+             JOIN {db}.sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id \
+             JOIN {db}.sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id \
+             JOIN {db}.sys.objects o ON o.object_id = i.object_id \
+             JOIN {db}.sys.schemas s ON s.schema_id = o.schema_id \
+             WHERE i.is_primary_key = 1 AND o.name = @P1 AND s.name = @P2 \
+             ORDER BY ic.key_ordinal",
+            db = db
+        );
+        let pk = self
+            .run(
+                None,
+                &pk_sql,
+                &[Some(table.to_string()), Some(schema.to_string())],
+            )
+            .await?;
+        for row in &pk.rows {
+            primary_columns.push(quote_identifier(&text_cell(row, 0)));
+        }
+        if !primary_columns.is_empty() {
+            definitions.push(format!("  PRIMARY KEY ({})", primary_columns.join(", ")));
+        }
+
+        let mut ddl = format!(
+            "CREATE TABLE {}.{} (\n{}\n)\nGO",
+            quote_identifier(schema),
+            quote_identifier(table),
+            definitions.join(",\n")
+        );
+        if let Some(comment) = status.comment.filter(|value| !value.is_empty()) {
+            ddl = format!("-- {comment}\n{ddl}");
+        }
+
+        let index_sql = format!(
+            "SELECT i.name, i.is_unique, c.name, i.is_descending_key \
+             FROM {db}.sys.indexes i \
+             JOIN {db}.sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id \
+             JOIN {db}.sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id \
+             JOIN {db}.sys.objects o ON o.object_id = i.object_id \
+             JOIN {db}.sys.schemas s ON s.schema_id = o.schema_id \
+             WHERE i.is_primary_key = 0 AND i.is_unique_constraint = 0 \
+               AND i.type = 2 AND i.name IS NOT NULL AND o.name = @P1 AND s.name = @P2 \
+             ORDER BY i.name, ic.key_ordinal",
+            db = db
+        );
+        let indexes = self
+            .run(
+                None,
+                &index_sql,
+                &[Some(table.to_string()), Some(schema.to_string())],
+            )
+            .await?;
+        let mut current: Option<(String, bool, Vec<String>)> = None;
+        let mut index_scripts: Vec<String> = Vec::new();
+        let flush = |current: Option<(String, bool, Vec<String>)>, out: &mut Vec<String>| {
+            if let Some((name, unique, columns)) = current
+                && !columns.is_empty()
+            {
+                out.push(format!(
+                    "CREATE {}INDEX {} ON {}.{} ({})\nGO",
+                    if unique { "UNIQUE " } else { "" },
+                    quote_identifier(&name),
+                    quote_identifier(schema),
+                    quote_identifier(table),
+                    columns.join(", ")
+                ));
+            }
+        };
+        for row in &indexes.rows {
+            let index_name = text_cell(row, 0);
+            let unique = bool_cell(row, 1);
+            let column = if bool_cell(row, 3) {
+                format!("{} DESC", quote_identifier(&text_cell(row, 2)))
+            } else {
+                quote_identifier(&text_cell(row, 2))
+            };
+            match current.as_mut() {
+                Some((name, _, columns)) if *name == index_name => columns.push(column),
+                _ => {
+                    flush(current.take(), &mut index_scripts);
+                    current = Some((index_name, unique, vec![column]));
+                }
+            }
+        }
+        flush(current.take(), &mut index_scripts);
+        for script in index_scripts {
+            ddl.push_str(&format!("\n\n{script}"));
+        }
+        Ok(ddl)
+    }
 }
 
 #[async_trait]
@@ -607,7 +770,8 @@ impl Connection for SqlServerConnection {
              FROM {db}.sys.dm_db_partition_stats ps \
              JOIN {db}.sys.objects o ON o.object_id = ps.object_id \
              JOIN {db}.sys.schemas s ON s.schema_id = o.schema_id \
-             WHERE o.name = @P1 AND s.name = @P2 AND ps.index_id IN (0, 1)",
+             WHERE o.name = @P1 AND s.name = @P2 AND ps.index_id IN (0, 1) \
+             GROUP BY o.create_date, o.modify_date",
             db = quote_identifier(database)
         );
         let result = self.run(None, &sql, &[Some(bare), Some(schema)]).await?;
@@ -663,6 +827,35 @@ impl Connection for SqlServerConnection {
         // SQL Server encodes characters through the collation; there is no independent
         // charset list, so the dialog leaves the charset unset and lists collations.
         Ok(Vec::new())
+    }
+
+    async fn object_ddl(
+        &self,
+        database: &str,
+        name: &str,
+        is_view: bool,
+    ) -> Result<Option<String>> {
+        let (schema, bare) = self.resolve_object(database, name).await?;
+        // A view's source lives in `sys.sql_modules`; `OBJECT_DEFINITION` returns it and `NULL`
+        // for a table, which has no original DDL to recover.
+        let definition = self
+            .scalar_text(
+                None,
+                &format!(
+                    "USE {}; SELECT OBJECT_DEFINITION(OBJECT_ID(N'{}.{}'))",
+                    quote_identifier(database),
+                    escape_literal_part(&schema),
+                    escape_literal_part(&bare)
+                ),
+                &[],
+            )
+            .await?;
+        if let Some(definition) = definition.filter(|text| !text.trim().is_empty()) {
+            return Ok(Some(definition));
+        }
+        Ok(Some(
+            self.table_ddl(database, &schema, &bare, is_view).await?,
+        ))
     }
 
     async fn collations(&self) -> Result<Vec<String>> {
@@ -1913,6 +2106,44 @@ fn escape_literal_part(value: &str) -> String {
     value.replace('\'', "''")
 }
 
+/// Render a column's T-SQL type: length-qualified for character/binary types (in characters for
+/// `n`-prefixed, bytes otherwise), precision/scale for `decimal`/`numeric`, and bare otherwise.
+fn render_column_type(
+    type_name: &str,
+    max_length: Option<u64>,
+    precision: Option<u64>,
+    scale: Option<u64>,
+) -> String {
+    let max = || match max_length {
+        // tiberius reports `MAX` as a huge sentinel; treat anything over 8000 as `MAX`.
+        Some(value) if value >= 8000 => "MAX".to_string(),
+        Some(value) => value.to_string(),
+        None => "MAX".to_string(),
+    };
+    match type_name.to_ascii_lowercase().as_str() {
+        "varchar" | "char" | "varbinary" | "binary" => format!("{type_name}({})", max()),
+        "nvarchar" | "nchar" => {
+            let length = match max_length {
+                Some(value) if value >= 8000 => "MAX".to_string(),
+                Some(value) => (value / 2).to_string(),
+                None => "MAX".to_string(),
+            };
+            format!("{type_name}({length})")
+        }
+        "decimal" | "numeric" => {
+            format!(
+                "{type_name}({},{})",
+                precision.unwrap_or(18),
+                scale.unwrap_or(0)
+            )
+        }
+        "datetime2" | "datetimeoffset" | "time" => {
+            format!("{type_name}({})", scale.unwrap_or(7))
+        }
+        _ => type_name.to_string(),
+    }
+}
+
 /// Split an optional `schema.object` name at the first dot. A name without a usable prefix
 /// (or with an empty part) is returned whole with `None`.
 fn split_schema(name: &str) -> Option<(&str, &str)> {
@@ -2226,4 +2457,41 @@ pub(crate) fn privilege_set(
         .into_iter()
         .filter_map(|name| rustgrid_core::Privilege::from_sql_name(&name))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn renders_column_types_with_their_qualifiers() {
+        // Character lengths are bytes for non-`n` types and characters for `n` types.
+        assert_eq!(
+            render_column_type("varchar", Some(50), None, None),
+            "varchar(50)"
+        );
+        assert_eq!(
+            render_column_type("nvarchar", Some(100), None, None),
+            "nvarchar(50)"
+        );
+        assert_eq!(
+            render_column_type("varbinary", Some(u64::MAX), None, None),
+            "varbinary(MAX)"
+        );
+        assert_eq!(
+            render_column_type("nvarchar", Some(u64::MAX), None, None),
+            "nvarchar(MAX)"
+        );
+        assert_eq!(
+            render_column_type("decimal", Some(9), Some(20), Some(6)),
+            "decimal(20,6)"
+        );
+        assert_eq!(
+            render_column_type("datetime2", Some(8), None, Some(7)),
+            "datetime2(7)"
+        );
+        // Types without a qualifier are rendered bare.
+        assert_eq!(render_column_type("int", Some(4), None, None), "int");
+        assert_eq!(render_column_type("bit", Some(1), None, None), "bit");
+    }
 }
