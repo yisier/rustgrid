@@ -1,5 +1,13 @@
 use super::*;
 
+/// Which operation the database dialog's OK button triggers. Resolved from `db_dialog` before the
+/// branch runs, because the `match` scrutinee's borrow would otherwise outlive the `&mut self` call.
+enum DbOp {
+    Create,
+    Alter,
+    Drop,
+}
+
 impl AppView {
     pub(super) fn close_database(
         &mut self,
@@ -250,136 +258,226 @@ impl AppView {
         };
         self.db_dialog = Some(DbDialog::Delete {
             connection_index,
-            database_index,
             name,
+            submitting: false,
             error: None,
         });
         cx.notify();
     }
 
+    /// Dispatch the dialog's OK button to whichever database operation is in flight.
+    ///
+    /// The dialog deliberately stays in `db_dialog` for the whole round-trip: `db_dialog_body`
+    /// renders an empty div whenever it is `None`, so taking it out here would blank the entire
+    /// form (name field, charset/collation combos) from the moment OK is pressed until the
+    /// request returns. Each branch carries its busy state in `loading` / `submitting` instead.
     pub(super) fn db_submit(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(dialog) = self.db_dialog.take() else {
+        // Resolve the operation first: the scrutinee borrow of `db_dialog` lives for the whole
+        // `match`, so it must end before the `&mut self` branch runs.
+        let op = match self.db_dialog.as_ref() {
+            Some(DbDialog::Edit(form)) if form.database_index.is_none() => DbOp::Create,
+            Some(DbDialog::Edit(_)) => DbOp::Alter,
+            Some(DbDialog::Delete { .. }) => DbOp::Drop,
+            None => return,
+        };
+        match op {
+            DbOp::Create => self.db_create(cx),
+            DbOp::Alter => self.db_alter(cx),
+            DbOp::Drop => self.db_drop(cx),
+        }
+    }
+
+    /// Create the database named in the dialog (`database_index == None`).
+    fn db_create(&mut self, cx: &mut Context<'_, Self>) {
+        // Read what the request needs first, so the borrow of `db_dialog` ends before
+        // `connection_arc` borrows `self` again.
+        let (name, connection_index, options, loading) = {
+            let Some(DbDialog::Edit(form)) = self.db_dialog.as_ref() else {
+                return;
+            };
+            (
+                form.name.trim().to_string(),
+                form.connection_index,
+                form.options(),
+                form.loading,
+            )
+        };
+        if loading {
+            return;
+        }
+        if !is_valid_identifier(&name) {
+            let Some(DbDialog::Edit(form)) = self.db_dialog.as_mut() else {
+                return;
+            };
+            form.name = name;
+            form.error = Some(t!("database.invalid_name").to_string());
+            cx.notify();
+            return;
+        }
+        let Some(connection) = self.connection_arc(connection_index) else {
             return;
         };
-
-        match dialog {
-            DbDialog::Edit(mut form) => {
-                if form.database_index.is_none() {
-                    let name = form.name.trim().to_string();
-                    if !is_valid_identifier(&name) {
-                        form.name = name;
-                        form.error = Some(t!("database.invalid_name").to_string());
-                        self.db_dialog = Some(DbDialog::Edit(form));
-                        cx.notify();
-                        return;
-                    }
-
-                    let options = form.options();
-                    let Some(connection) = self.connection_arc(form.connection_index) else {
-                        return;
-                    };
-                    let runtime = self.runtime.clone();
-                    cx.spawn(async move |this, cx| {
-                        let result = match runtime
-                            .spawn(async move { connection.create_database(&name, &options).await })
-                            .await
-                        {
-                            Ok(inner) => inner,
-                            Err(error) => Err(Error::other(error)),
-                        };
-
-                        let _ = this.update(cx, |view, cx| {
-                            match result {
-                                Ok(()) => {
-                                    view.db_name_input = None;
-                                    view.load_databases(form.connection_index, cx);
-                                }
-                                Err(error) => {
-                                    form.loading = false;
-                                    form.error = Some(error.to_string());
-                                    view.db_dialog = Some(DbDialog::Edit(form));
-                                }
-                            }
-                            cx.notify();
-                        });
-                    })
-                    .detach();
-                } else {
-                    let modified = form.options();
-                    let original = form.original_options();
-                    if modified == original {
-                        cx.notify();
-                        return;
-                    }
-
-                    let Some(connection) = self.connection_arc(form.connection_index) else {
-                        return;
-                    };
-                    let runtime = self.runtime.clone();
-                    let edit_name = form.name.clone();
-                    cx.spawn(async move |this, cx| {
-                        let result = match runtime
-                            .spawn(async move {
-                                connection
-                                    .alter_database_options(&edit_name, &original, &modified)
-                                    .await
-                            })
-                            .await
-                        {
-                            Ok(inner) => inner,
-                            Err(error) => Err(Error::other(error)),
-                        };
-
-                        let _ = this.update(cx, |view, cx| {
-                            if let Err(error) = result {
-                                form.loading = false;
-                                form.error = Some(error.to_string());
-                                view.db_dialog = Some(DbDialog::Edit(form));
-                            }
-                            cx.notify();
-                        });
-                    })
-                    .detach();
-                }
-            }
-            DbDialog::Delete {
-                connection_index,
-                database_index,
-                name,
-                ..
-            } => {
-                let Some(connection) = self.connection_arc(connection_index) else {
-                    return;
-                };
-                let runtime = self.runtime.clone();
-                let drop_name = name.clone();
-                cx.spawn(async move |this, cx| {
-                    let result = match runtime
-                        .spawn(async move { connection.drop_database(&drop_name).await })
-                        .await
-                    {
-                        Ok(inner) => inner,
-                        Err(error) => Err(Error::other(error)),
-                    };
-
-                    let _ = this.update(cx, |view, cx| {
-                        match result {
-                            Ok(()) => view.load_databases(connection_index, cx),
-                            Err(error) => {
-                                view.db_dialog = Some(DbDialog::Delete {
-                                    connection_index,
-                                    database_index,
-                                    name,
-                                    error: Some(error.to_string()),
-                                });
-                            }
-                        }
-                        cx.notify();
-                    });
-                })
-                .detach();
-            }
+        {
+            let Some(DbDialog::Edit(form)) = self.db_dialog.as_mut() else {
+                return;
+            };
+            form.loading = true;
+            form.error = None;
         }
+        let runtime = self.runtime.clone();
+        cx.spawn(async move |this, cx| {
+            let result = match runtime
+                .spawn(async move { connection.create_database(&name, &options).await })
+                .await
+            {
+                Ok(inner) => inner,
+                Err(error) => Err(Error::other(error)),
+            };
+
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok(()) => {
+                        view.db_name_input = None;
+                        view.db_dialog = None;
+                        view.load_databases(connection_index, cx);
+                    }
+                    Err(error) => {
+                        // The dialog may have been cancelled while the request was in flight.
+                        if let Some(DbDialog::Edit(form)) = view.db_dialog.as_mut() {
+                            form.loading = false;
+                            form.error = Some(error.to_string());
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Apply the edited options to an existing database.
+    fn db_alter(&mut self, cx: &mut Context<'_, Self>) {
+        let (name, connection_index, modified, original, loading) = {
+            let Some(DbDialog::Edit(form)) = self.db_dialog.as_ref() else {
+                return;
+            };
+            (
+                form.name.clone(),
+                form.connection_index,
+                form.options(),
+                form.original_options(),
+                form.loading,
+            )
+        };
+        if loading {
+            return;
+        }
+        if modified == original {
+            cx.notify();
+            return;
+        }
+        let Some(connection) = self.connection_arc(connection_index) else {
+            return;
+        };
+        {
+            let Some(DbDialog::Edit(form)) = self.db_dialog.as_mut() else {
+                return;
+            };
+            form.loading = true;
+            form.error = None;
+        }
+        let runtime = self.runtime.clone();
+        cx.spawn(async move |this, cx| {
+            let result = match runtime
+                .spawn(async move {
+                    connection
+                        .alter_database_options(&name, &original, &modified)
+                        .await
+                })
+                .await
+            {
+                Ok(inner) => inner,
+                Err(error) => Err(Error::other(error)),
+            };
+
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok(()) => view.db_dialog = None,
+                    Err(error) => {
+                        if let Some(DbDialog::Edit(form)) = view.db_dialog.as_mut() {
+                            form.loading = false;
+                            form.error = Some(error.to_string());
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Drop the database named in the confirm page.
+    fn db_drop(&mut self, cx: &mut Context<'_, Self>) {
+        let (connection_index, name, submitting) = {
+            let Some(DbDialog::Delete {
+                connection_index,
+                name,
+                submitting,
+                ..
+            }) = self.db_dialog.as_ref()
+            else {
+                return;
+            };
+            (*connection_index, name.clone(), *submitting)
+        };
+        if submitting {
+            return;
+        }
+        let Some(connection) = self.connection_arc(connection_index) else {
+            return;
+        };
+        {
+            let Some(DbDialog::Delete {
+                submitting, error, ..
+            }) = self.db_dialog.as_mut()
+            else {
+                return;
+            };
+            *submitting = true;
+            *error = None;
+        }
+        let runtime = self.runtime.clone();
+        cx.spawn(async move |this, cx| {
+            let result = match runtime
+                .spawn(async move { connection.drop_database(&name).await })
+                .await
+            {
+                Ok(inner) => inner,
+                Err(error) => Err(Error::other(error)),
+            };
+
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok(()) => {
+                        view.db_dialog = None;
+                        view.load_databases(connection_index, cx);
+                    }
+                    Err(error) => {
+                        if let Some(DbDialog::Delete {
+                            submitting,
+                            error: slot,
+                            ..
+                        }) = view.db_dialog.as_mut()
+                        {
+                            *submitting = false;
+                            *slot = Some(error.to_string());
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Create (once) the two editable drop-downs of the edit-database dialog. Their options and
@@ -855,32 +953,54 @@ impl AppView {
 
     /// Create the schema named in the dialog and reload the database's schema list.
     pub(super) fn schema_submit(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(mut dialog) = self.schema_dialog.take() else {
-            return;
+        // The dialog deliberately stays in place for the whole round-trip: the body renders an
+        // empty div whenever `schema_dialog` is `None`, so taking it here would blank the name
+        // field (and its hint) from the moment OK is pressed until the request returns.
+        //
+        // Read what the request needs first, so the borrow of `schema_dialog` ends before
+        // `connection_arc` / `database_name` borrow `self` again.
+        let (name, connection_index, database_index, submitting) = {
+            let Some(dialog) = self.schema_dialog.as_ref() else {
+                return;
+            };
+            (
+                dialog.name.trim().to_string(),
+                dialog.connection_index,
+                dialog.database_index,
+                dialog.submitting,
+            )
         };
-        let name = dialog.name.trim().to_string();
+        // The footer is built once when the dialog opens, so its `submitting` check cannot go
+        // stale-proof: guard re-entry here instead.
+        if submitting {
+            return;
+        }
         if !is_valid_identifier(&name) {
+            let Some(dialog) = self.schema_dialog.as_mut() else {
+                return;
+            };
             dialog.submitting = false;
             dialog.error = Some(t!("database.invalid_name").to_string());
-            self.schema_dialog = Some(dialog);
             cx.notify();
             return;
         }
-        let Some(connection) = self.connection_arc(dialog.connection_index) else {
+        let Some(connection) = self.connection_arc(connection_index) else {
             self.schema_name_input = None;
             cx.notify();
             return;
         };
-        let Some(database) = self.database_name(dialog.connection_index, dialog.database_index)
-        else {
+        let Some(database) = self.database_name(connection_index, database_index) else {
             self.schema_name_input = None;
             cx.notify();
             return;
         };
-
-        dialog.submitting = true;
-        let connection_index = dialog.connection_index;
-        let database_index = dialog.database_index;
+        {
+            let Some(dialog) = self.schema_dialog.as_mut() else {
+                return;
+            };
+            dialog.submitting = true;
+            dialog.error = None;
+        }
         let runtime = self.runtime.clone();
         cx.spawn(async move |this, cx| {
             let result = match runtime
@@ -915,9 +1035,13 @@ impl AppView {
                         }
                     }
                     Err(error) => {
-                        dialog.submitting = false;
-                        dialog.error = Some(error.to_string());
-                        view.schema_dialog = Some(dialog);
+                        // Clear `submitting` and keep the name field where it is, so the user can
+                        // fix the name and retry without losing what they typed. The dialog may
+                        // have been cancelled while the request was in flight.
+                        if let Some(dialog) = view.schema_dialog.as_mut() {
+                            dialog.submitting = false;
+                            dialog.error = Some(error.to_string());
+                        }
                     }
                 }
                 cx.notify();

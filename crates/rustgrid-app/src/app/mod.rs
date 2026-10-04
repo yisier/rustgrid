@@ -952,8 +952,9 @@ enum DbDialog {
     Edit(Box<DatabaseForm>),
     Delete {
         connection_index: usize,
-        database_index: usize,
         name: String,
+        /// True while the drop request is in flight, so a second OK click is ignored.
+        submitting: bool,
         error: Option<String>,
     },
 }

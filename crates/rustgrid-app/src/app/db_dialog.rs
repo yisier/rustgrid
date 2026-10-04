@@ -33,14 +33,9 @@ impl AppView {
     pub(super) fn open_schema_dialog(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let app = cx.entity();
         window.open_dialog(cx, move |dialog, window, cx| {
-            let (title, submitting) = app.update(cx, |app, _| {
-                let submitting = app
-                    .schema_dialog
-                    .as_ref()
-                    .map(|dialog| dialog.submitting)
-                    .unwrap_or(false);
-                (t!("database.new_schema").to_string(), submitting)
-            });
+            // The footer is built once here and is never rebuilt, so anything it reads must not
+            // depend on later state. `submitting` is only read per-frame inside `content`.
+            let title = app.update(cx, |_, _| t!("database.new_schema").to_string());
             let theme = app.read(cx).theme;
             let on_close = app.downgrade();
             let footer_cancel = app.downgrade();
@@ -61,6 +56,7 @@ impl AppView {
                             None => div().w_full(),
                         };
                         let error = dialog.error.clone();
+                        let submitting = dialog.submitting;
                         let theme = app.theme;
                         div()
                             .flex()
@@ -73,6 +69,16 @@ impl AppView {
                                     .text_color(rgb(theme.text_muted))
                                     .child(t!("database.schema_name_hint").to_string()),
                             )
+                            // Kept in `content`, which re-renders every frame, so the busy state
+                            // actually reaches the screen (the footer cannot carry it).
+                            .when(submitting, |this| {
+                                this.child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .text_color(rgb(theme.text_muted))
+                                        .child(t!("common.loading").to_string()),
+                                )
+                            })
                             .child(app.render_db_error(&error))
                             .into_any_element()
                     });
@@ -100,9 +106,9 @@ impl AppView {
                             ButtonKind::Default,
                             theme,
                             move |_event, _window, cx| {
-                                if !submitting {
-                                    let _ = footer_ok.update(cx, |app, cx| app.schema_submit(cx));
-                                }
+                                // Re-entry is guarded inside `schema_submit`, which sees the
+                                // live state; this closure cannot (it is built once).
+                                let _ = footer_ok.update(cx, |app, cx| app.schema_submit(cx));
                             },
                         )),
                 )
@@ -113,7 +119,11 @@ impl AppView {
                         .show_cancel(true)
                         .on_ok(move |_, _, cx| {
                             let _ = ok_app.update(cx, |app, cx| app.schema_submit(cx));
-                            true
+                            // Never close from here. Returning `true` would dismiss the dialog on
+                            // Enter even when the create failed, leaving `schema_dialog` set with
+                            // no dialog on screen (and the error unreadable). Closing is driven
+                            // entirely by `schema_dialog` going back to `None`.
+                            false
                         })
                         .on_cancel(move |_, _, cx| {
                             let _ = cancel_app.update(cx, |app, cx| app.schema_cancel(cx));
@@ -402,7 +412,12 @@ impl AppView {
                     )
                     .into_any_element()
             }
-            Some(DbDialog::Delete { name, error, .. }) => {
+            Some(DbDialog::Delete {
+                name,
+                submitting,
+                error,
+                ..
+            }) => {
                 let body = div()
                     .flex()
                     .flex_col()
@@ -418,6 +433,16 @@ impl AppView {
                             .text_color(rgb(theme.danger))
                             .child(t!("database.delete_confirm").to_string()),
                     )
+                    // The footer is built once, so the busy state can only reach the screen
+                    // from here (rebuilt every frame).
+                    .when(*submitting, |this| {
+                        this.child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(rgb(theme.text_muted))
+                                .child(t!("common.loading").to_string()),
+                        )
+                    })
                     .child(self.render_db_error(error));
                 div().p_4().child(body).into_any_element()
             }
