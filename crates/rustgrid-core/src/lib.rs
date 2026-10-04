@@ -7,14 +7,14 @@ pub mod routine;
 pub mod user;
 pub mod view;
 
-pub use driver::{Connection, Driver};
+pub use driver::{Connection, DatabaseEditorSpec, DatabaseEditorTab, Driver};
 pub use error::{Error, Result};
 pub use model::{
     BackupObjectKind, CellValue, ColumnDef, ColumnInfo, ConnectionConfig, ConnectionProfile,
-    DatabaseInfo, DriverId, FilterCondition, FilterConjunction, FilterGroup, FilterNode,
-    FilterOperator, ForeignKeyDef, IndexDef, ObjectDump, ObjectKind, PageRequest, QueryResult,
-    RowInsert, RowUpdate, SavedBackup, SavedBackupSelection, SavedQuery, SortColumn, TableInfo,
-    TableOptions, TablePage, TableSchema, TableStatus, TriggerDef,
+    DatabaseInfo, DatabaseOptions, DriverId, FilterCondition, FilterConjunction, FilterGroup,
+    FilterNode, FilterOperator, ForeignKeyDef, IndexDef, ObjectDump, ObjectKind, PageRequest,
+    QueryResult, RowInsert, RowUpdate, SavedBackup, SavedBackupSelection, SavedQuery, SortColumn,
+    TableInfo, TableOptions, TablePage, TableSchema, TableStatus, TriggerDef,
 };
 pub use options::{ConnectionOptions, TlsMode, TlsOptions, TunnelAuth, TunnelKind, TunnelLayer};
 pub use registry::{DriverRegistry, DriverSource};

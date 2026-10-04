@@ -4,11 +4,11 @@ use std::collections::BTreeSet;
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
 use rustgrid_core::{
-    BackupObjectKind, CellValue, ColumnDef, ColumnInfo, Connection, DatabaseInfo, DriverId, Error,
-    ForeignKeyDef, IndexDef, ObjectDump, ObjectKind, ObjectPrivilegeRow, PageRequest, QueryResult,
-    Result, RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind, RowInsert, RowUpdate, TableInfo,
-    TableOptions, TablePage, TableSchema, TableStatus, TriggerDef, UserAccount, UserDetails,
-    UserEdit, UserEditSection, ViewDetails, ViewEdit, ViewInfo,
+    BackupObjectKind, CellValue, ColumnDef, ColumnInfo, Connection, DatabaseInfo, DatabaseOptions,
+    DriverId, Error, ForeignKeyDef, IndexDef, ObjectDump, ObjectKind, ObjectPrivilegeRow,
+    PageRequest, QueryResult, Result, RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind,
+    RowInsert, RowUpdate, TableInfo, TableOptions, TablePage, TableSchema, TableStatus, TriggerDef,
+    UserAccount, UserDetails, UserEdit, UserEditSection, ViewDetails, ViewEdit, ViewInfo,
 };
 use tiberius::{QueryItem, Row, ToSql};
 
@@ -135,6 +135,17 @@ impl SqlServerConnection {
     /// Execute one non-query statement on a fresh client (DDL, maintenance).
     pub(crate) async fn execute_batch(&self, database: Option<&str>, sql: &str) -> Result<()> {
         self.run(database, sql, &[]).await.map(|_| ())
+    }
+
+    /// Change a database's owner. `ALTER AUTHORIZATION` requires the target to be bracket-quoted
+    /// by literal, because identifiers cannot be parameterized here.
+    async fn apply_database_owner(&self, database: &str, owner: &str) -> Result<()> {
+        let sql = format!(
+            "ALTER AUTHORIZATION ON DATABASE::{} TO {}",
+            quote_identifier(database),
+            quote_identifier(owner)
+        );
+        self.execute_batch(None, &sql).await
     }
 }
 
@@ -460,23 +471,21 @@ impl Connection for SqlServerConnection {
         Ok(results)
     }
 
-    async fn create_database(
-        &self,
-        name: &str,
-        _charset: Option<&str>,
-        collation: Option<&str>,
-    ) -> Result<()> {
-        self.execute_batch(None, &create_database_sql(name, collation))
-            .await
+    async fn create_database(&self, name: &str, options: &DatabaseOptions) -> Result<()> {
+        let sql = create_database_sql(name, options);
+        if !sql.is_empty() {
+            self.execute_batch(None, &sql).await?;
+        }
+        // `CREATE DATABASE ... COLLATE` leaves the owner at the server default; set it explicitly
+        // when the dialog named one.
+        if let Some(owner) = non_empty(&options.owner) {
+            self.apply_database_owner(name, owner).await?;
+        }
+        Ok(())
     }
 
-    fn create_database_sql(
-        &self,
-        name: &str,
-        _charset: Option<&str>,
-        collation: Option<&str>,
-    ) -> String {
-        create_database_sql(name, collation)
+    fn create_database_sql(&self, name: &str, options: &DatabaseOptions) -> String {
+        create_database_sql(name, options)
     }
 
     async fn drop_database(&self, name: &str) -> Result<()> {
@@ -520,17 +529,38 @@ impl Connection for SqlServerConnection {
         self.execute_batch(Some(database), &sql).await
     }
 
-    async fn database_defaults(&self, name: &str) -> Result<(String, String)> {
-        let collation = self
-            .scalar_text(
+    async fn database_options(&self, name: &str) -> Result<DatabaseOptions> {
+        let sql = "SELECT collation_name, SUSER_NAME(owner_sid), \
+                          CONVERT(nvarchar(20), recovery_model_desc), \
+                          CONVERT(nvarchar(20), compatibility_level) \
+                   FROM sys.databases WHERE name = @P1";
+        let result = self.run(None, sql, &[Some(name.to_string())]).await?;
+        let row = result.rows.first();
+        Ok(DatabaseOptions {
+            // SQL Server selects a charset through the collation, so there is no separate one.
+            charset: String::new(),
+            collation: row.map(|row| text_cell(row, 0)).unwrap_or_default(),
+            owner: row.map(|row| text_cell(row, 1)).unwrap_or_default(),
+            recovery_model: row.map(|row| text_cell(row, 2)).unwrap_or_default(),
+            compatibility_level: row.map(|row| text_cell(row, 3)).unwrap_or_default(),
+        })
+    }
+
+    async fn database_owners(&self) -> Result<Vec<String>> {
+        let result = self
+            .run(
                 None,
-                "SELECT collation_name FROM sys.databases WHERE name = @P1",
-                &[Some(name.to_string())],
+                "SELECT name FROM sys.server_principals \
+                 WHERE type IN ('S', 'U', 'G') AND is_disabled = 0 AND name NOT LIKE '##%' \
+                 ORDER BY CASE WHEN name = SUSER_SNAME() THEN 0 ELSE 1 END, name",
+                &[],
             )
-            .await?
-            .unwrap_or_default();
-        // SQL Server selects a charset through the collation, so there is no separate one.
-        Ok((String::new(), collation))
+            .await?;
+        Ok(result
+            .rows
+            .into_iter()
+            .filter_map(|row| row.first().map(CellValue::as_display))
+            .collect())
     }
 
     async fn server_version(&self) -> Result<String> {
@@ -634,26 +664,72 @@ impl Connection for SqlServerConnection {
             .collect())
     }
 
-    async fn alter_database_defaults(
+    async fn alter_database_options(
         &self,
         name: &str,
-        _charset: Option<&str>,
-        collation: Option<&str>,
+        original: &DatabaseOptions,
+        modified: &DatabaseOptions,
     ) -> Result<()> {
-        let sql = alter_database_sql(name, collation);
-        if sql.is_empty() {
-            return Ok(());
+        let sql = alter_database_sql(name, original, modified);
+        if !sql.is_empty() {
+            self.execute_batch(None, &sql).await?;
         }
-        self.execute_batch(None, &sql).await
+        // `ALTER DATABASE ... SET OWNER` is not valid T-SQL; ownership moves through
+        // `ALTER AUTHORIZATION`.
+        if modified.owner != original.owner
+            && let Some(owner) = non_empty(&modified.owner)
+        {
+            self.apply_database_owner(name, owner).await?;
+        }
+        Ok(())
     }
 
     fn alter_database_sql(
         &self,
         name: &str,
-        _charset: Option<&str>,
-        collation: Option<&str>,
+        original: &DatabaseOptions,
+        modified: &DatabaseOptions,
     ) -> String {
-        alter_database_sql(name, collation)
+        alter_database_sql(name, original, modified)
+    }
+
+    async fn list_schemas(&self, database: &str) -> Result<Vec<String>> {
+        // `sys.schemas` is database-scoped, so fully qualify it with the target database (a pooled
+        // session's current database cannot be assumed). Fixed roles are excluded so the tree only
+        // shows user schemas.
+        let sql = format!(
+            "SELECT name FROM {db}.sys.schemas \
+             WHERE name NOT IN ('sys', 'INFORMATION_SCHEMA', 'guest', \
+                                'db_owner', 'db_accessadmin', 'db_securityadmin', \
+                                'db_ddladmin', 'db_backupoperator', 'db_datareader', \
+                                'db_datawriter', 'db_denydatareader', 'db_denydatawriter') \
+             ORDER BY name",
+            db = quote_identifier(database)
+        );
+        let result = self.run(None, &sql, &[]).await?;
+        Ok(result
+            .rows
+            .into_iter()
+            .filter_map(|row| row.first().map(CellValue::as_display))
+            .collect())
+    }
+
+    async fn create_schema(&self, database: &str, schema: &str) -> Result<()> {
+        let sql = format!(
+            "USE {}; EXEC('CREATE SCHEMA {}')",
+            quote_identifier(database),
+            quote_identifier(schema)
+        );
+        self.execute_batch(None, &sql).await
+    }
+
+    async fn drop_schema(&self, database: &str, schema: &str) -> Result<()> {
+        let sql = format!(
+            "USE {}; EXEC('DROP SCHEMA {}')",
+            quote_identifier(database),
+            quote_identifier(schema)
+        );
+        self.execute_batch(None, &sql).await
     }
 
     fn column_types(&self) -> Vec<&'static str> {
@@ -1444,24 +1520,57 @@ const SQL_SERVER_TYPES: [&str; 33] = [
     "geometry",
 ];
 
-fn create_database_sql(name: &str, collation: Option<&str>) -> String {
+/// A trimmed non-empty value, or `None`.
+fn non_empty(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+fn create_database_sql(name: &str, options: &DatabaseOptions) -> String {
     let mut sql = format!("CREATE DATABASE {}", quote_identifier(name));
-    if let Some(collation) = collation.filter(|value| !value.trim().is_empty()) {
+    if let Some(collation) = non_empty(&options.collation) {
         sql.push_str(" COLLATE ");
-        sql.push_str(collation.trim());
+        sql.push_str(collation);
     }
     sql
 }
 
-fn alter_database_sql(name: &str, collation: Option<&str>) -> String {
-    match collation.filter(|value| !value.trim().is_empty()) {
-        Some(collation) => format!(
+fn alter_database_sql(
+    name: &str,
+    original: &DatabaseOptions,
+    modified: &DatabaseOptions,
+) -> String {
+    let mut statements = Vec::new();
+    if modified.collation != original.collation
+        && let Some(collation) = non_empty(&modified.collation)
+    {
+        statements.push(format!(
             "ALTER DATABASE {} COLLATE {}",
             quote_identifier(name),
-            collation.trim()
-        ),
-        None => String::new(),
+            collation
+        ));
     }
+    if modified.recovery_model != original.recovery_model
+        && let Some(model) = non_empty(&modified.recovery_model)
+    {
+        // `SIMPLE` | `FULL` | `BULK_LOGGED` are keywords, not literals; they come from a fixed
+        // dropdown, so appending the value verbatim is safe.
+        statements.push(format!(
+            "ALTER DATABASE {} SET RECOVERY {}",
+            quote_identifier(name),
+            model.to_ascii_uppercase()
+        ));
+    }
+    if modified.compatibility_level != original.compatibility_level
+        && let Some(level) = non_empty(&modified.compatibility_level)
+    {
+        statements.push(format!(
+            "ALTER DATABASE {} SET COMPATIBILITY_LEVEL = {}",
+            quote_identifier(name),
+            level
+        ));
+    }
+    statements.join("; ")
 }
 
 fn empty_result(statement: String) -> QueryResult {

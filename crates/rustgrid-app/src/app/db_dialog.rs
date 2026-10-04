@@ -29,6 +29,103 @@ impl AppView {
         });
     }
 
+    /// Opens the SQL Server "New Schema" dialog as a `Root`-managed modal.
+    pub(super) fn open_schema_dialog(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let app = cx.entity();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let (title, submitting) = app.update(cx, |app, _| {
+                let submitting = app
+                    .schema_dialog
+                    .as_ref()
+                    .map(|dialog| dialog.submitting)
+                    .unwrap_or(false);
+                (t!("database.new_schema").to_string(), submitting)
+            });
+            let theme = app.read(cx).theme;
+            let on_close = app.downgrade();
+            let footer_cancel = app.downgrade();
+            let footer_ok = app.downgrade();
+            let content_app = app.clone();
+            let ok_app = app.downgrade();
+            let cancel_app = app.downgrade();
+            dialog
+                .title(title)
+                .margin_top(super::dialogs::centered_margin_top(window, 190.0))
+                .content(move |content, _window, cx| {
+                    let body = content_app.update(cx, |app, _cx| {
+                        let Some(dialog) = app.schema_dialog.as_ref() else {
+                            return div().into_any_element();
+                        };
+                        let field = match app.schema_name_input.as_ref() {
+                            Some(input) => div().h(px(24.0)).w_full().child(input.clone()),
+                            None => div().w_full(),
+                        };
+                        let error = dialog.error.clone();
+                        let theme = app.theme;
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(field)
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(rgb(theme.text_muted))
+                                    .child(t!("database.schema_name_hint").to_string()),
+                            )
+                            .child(app.render_db_error(&error))
+                            .into_any_element()
+                    });
+                    content.child(body)
+                })
+                .footer(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .justify_end()
+                        .gap_2()
+                        .w_full()
+                        .child(ui::button(
+                            "schema-cancel",
+                            t!("form.cancel").to_string(),
+                            ButtonKind::Normal,
+                            theme,
+                            move |_event, _window, cx| {
+                                let _ = footer_cancel.update(cx, |app, cx| app.schema_cancel(cx));
+                            },
+                        ))
+                        .child(ui::button(
+                            "schema-ok",
+                            t!("form.ok").to_string(),
+                            ButtonKind::Default,
+                            theme,
+                            move |_event, _window, cx| {
+                                if !submitting {
+                                    let _ = footer_ok.update(cx, |app, cx| app.schema_submit(cx));
+                                }
+                            },
+                        )),
+                )
+                .button_props(
+                    gpui_kit::component::dialog::DialogButtonProps::default()
+                        .ok_text(t!("form.ok").to_string())
+                        .cancel_text(t!("form.cancel").to_string())
+                        .show_cancel(true)
+                        .on_ok(move |_, _, cx| {
+                            let _ = ok_app.update(cx, |app, cx| app.schema_submit(cx));
+                            true
+                        })
+                        .on_cancel(move |_, _, cx| {
+                            let _ = cancel_app.update(cx, |app, cx| app.schema_cancel(cx));
+                            true
+                        }),
+                )
+                .on_close(move |_, _, cx| {
+                    let _ = on_close.update(cx, |app, cx| app.schema_cancel(cx));
+                })
+        });
+    }
+
     pub(super) fn db_cancel(&mut self, cx: &mut Context<'_, Self>) {
         self.db_dialog = None;
         self.db_name_input = None;
@@ -105,16 +202,17 @@ impl AppView {
                         .into_any_element()
                 };
 
-                let tabs = div()
+                let mut tabs = div()
                     .flex()
                     .flex_row()
                     .w_full()
                     .gap_0p5()
                     .px_2()
                     .pt_2()
-                    .bg(rgb(theme.dialog_face))
-                    .child(self.db_tab_button(DbTab::General, cx))
-                    .child(self.db_tab_button(DbTab::Sql, cx));
+                    .bg(rgb(theme.dialog_face));
+                for tab in self.db_tabs() {
+                    tabs = tabs.child(self.db_tab_button(tab, cx));
+                }
 
                 let page: AnyElement = match form.tab {
                     DbTab::General => {
@@ -141,16 +239,62 @@ impl AppView {
                                     .child(t!("common.loading").to_string()),
                             );
                         } else {
-                            body = body.child(db_combo_row(
-                                format!("{}:", t!("database.charset")),
-                                self.db_charset_combo.clone(),
-                            ));
-                            body = body.child(db_combo_row(
-                                format!("{}:", t!("database.collation")),
-                                self.db_collation_combo.clone(),
-                            ));
+                            if form.spec.owner {
+                                body = body.child(db_combo_row(
+                                    format!("{}:", t!("database.owner")),
+                                    self.db_owner_combo.clone(),
+                                ));
+                            }
+                            if form.spec.charset {
+                                body = body.child(db_combo_row(
+                                    format!("{}:", t!("database.charset")),
+                                    self.db_charset_combo.clone(),
+                                ));
+                            }
+                            if form.spec.collation {
+                                body = body.child(db_combo_row(
+                                    format!("{}:", t!("database.collation")),
+                                    self.db_collation_combo.clone(),
+                                ));
+                            }
+                            if form.spec.recovery_model {
+                                body = body.child(db_combo_row(
+                                    format!("{}:", t!("database.recovery_model")),
+                                    self.db_recovery_combo.clone(),
+                                ));
+                            }
+                            if form.spec.compatibility_level {
+                                body = body.child(db_combo_row(
+                                    format!("{}:", t!("database.compatibility_level")),
+                                    self.db_compat_combo.clone(),
+                                ));
+                            }
                         }
-                        body = body.child(db_error(&form.error, theme));
+                        body = body.child(self.render_db_error(&form.error));
+                        body.into_any_element()
+                    }
+                    DbTab::Extra(kind) => {
+                        let body = div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .p_4()
+                            .flex_1()
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(rgb(theme.text_muted))
+                                    .child(
+                                        t!(super::database::database_editor_tab_key(kind))
+                                            .to_string(),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(rgb(theme.text_muted))
+                                    .child(t!("database.tab.not_editable").to_string()),
+                            );
                         body.into_any_element()
                     }
                     DbTab::Sql => {
@@ -274,7 +418,7 @@ impl AppView {
                             .text_color(rgb(theme.danger))
                             .child(t!("database.delete_confirm").to_string()),
                     )
-                    .child(db_error(error, theme));
+                    .child(self.render_db_error(error));
                 div().p_4().child(body).into_any_element()
             }
             None => div().into_any_element(),

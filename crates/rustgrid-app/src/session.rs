@@ -46,6 +46,9 @@ pub struct DatabaseNode {
     /// The schemas the connection tree has expanded (SQL Server). Empty for schema-less
     /// engines, where the tree renders the database's categories directly.
     pub expanded_schemas: BTreeSet<String>,
+    /// The database's schemas, loaded when it is opened so a freshly created (still empty) schema
+    /// is visible in the tree. `None` for schema-less engines.
+    pub schemas: Option<Loadable<Vec<String>>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

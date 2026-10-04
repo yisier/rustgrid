@@ -1,4 +1,5 @@
 use super::*;
+use gpui_kit::base::SelectableText;
 
 impl AppView {
     pub(super) fn render_selectable_text(
@@ -44,6 +45,24 @@ impl AppView {
             )
             .on_key_down(cx.listener(|this, event, _window, cx| this.db_sql_key(event, cx)))
             .child(styled)
+    }
+
+    /// A selectable error message, used wherever a driver/validation failure is shown.
+    ///
+    /// Built on `gpui_base::SelectableText`, the plain-text primitive that participates in the
+    /// window-scoped text selection the dialog already installs. Unlike a focus-tracking text
+    /// element it adds nothing to the dialog's layout or focus, so neighbouring controls (the
+    /// schema dialog's name input) keep their own state.
+    pub(super) fn render_db_error(&self, error: &Option<String>) -> AnyElement {
+        match error {
+            Some(message) => div()
+                .w_full()
+                .text_size(px(12.0))
+                .text_color(rgb(self.theme.danger))
+                .child(SelectableText::new("db-error", message.clone()))
+                .into_any_element(),
+            None => div().into_any_element(),
+        }
     }
 
     pub(super) fn dialog_button(
@@ -281,6 +300,44 @@ impl AppView {
                         cx.listener(move |this, _event, _window, cx| {
                             this.context_menu = None;
                             this.load_databases(ci, cx);
+                        }),
+                    ));
+                if self.driver_supports(ci, DriverCapability::Schemas) {
+                    items = items
+                        .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                        .child(self.context_item(
+                            "db-new-schema",
+                            t!("database.new_schema").to_string(),
+                            cx.listener(move |this, _event, window, cx| {
+                                this.context_menu = None;
+                                this.open_new_schema(ci, di, window, cx);
+                            }),
+                        ));
+                }
+            }
+            ContextTarget::Schema {
+                connection_index,
+                database_index,
+                schema,
+            } => {
+                let ci = *connection_index;
+                let di = *database_index;
+                let schema = schema.clone();
+                items = items
+                    .child(self.context_item(
+                        "schema-new",
+                        t!("database.new_schema").to_string(),
+                        cx.listener(move |this, _event, window, cx| {
+                            this.context_menu = None;
+                            this.open_new_schema(ci, di, window, cx);
+                        }),
+                    ))
+                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(self.context_item(
+                        "schema-delete",
+                        t!("database.delete_schema").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.confirm_delete_schema(ci, di, schema.clone(), cx);
                         }),
                     ));
             }

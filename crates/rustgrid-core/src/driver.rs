@@ -2,8 +2,9 @@ use async_trait::async_trait;
 
 use crate::error::{Error, Result};
 use crate::model::{
-    BackupObjectKind, ColumnInfo, ConnectionConfig, DatabaseInfo, DriverId, ObjectDump,
-    PageRequest, QueryResult, RowInsert, RowUpdate, TableInfo, TablePage, TableSchema, TableStatus,
+    BackupObjectKind, ColumnInfo, ConnectionConfig, DatabaseInfo, DatabaseOptions, DriverId,
+    ObjectDump, PageRequest, QueryResult, RowInsert, RowUpdate, TableInfo, TablePage, TableSchema,
+    TableStatus,
 };
 use crate::routine::{RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind};
 use crate::user::{ObjectPrivilegeRow, UserAccount, UserDetails, UserEdit, UserEditSection};
@@ -42,7 +43,61 @@ pub trait Driver: Send + Sync {
         true
     }
 
+    /// Whether the engine has schemas as a first-class object (SQL Server). When true the tree
+    /// nests databases under their schemas and offers 新建模式 / 删除模式.
+    fn supports_schemas(&self) -> bool {
+        false
+    }
+
+    /// Which fields and tabs the New/Edit Database dialog shows for this engine. The default is
+    /// MySQL's charset + collation.
+    fn database_editor(&self) -> DatabaseEditorSpec {
+        DatabaseEditorSpec {
+            charset: true,
+            collation: true,
+            ..Default::default()
+        }
+    }
+
+    /// The recovery models offered by the database dialog (SQL Server). Empty hides the field.
+    fn database_recovery_models(&self) -> Vec<&'static str> {
+        Vec::new()
+    }
+
+    /// The compatibility levels offered by the database dialog (SQL Server). Empty hides the field.
+    fn database_compatibility_levels(&self) -> Vec<&'static str> {
+        Vec::new()
+    }
+
     async fn connect(&self, config: &ConnectionConfig) -> Result<Box<dyn Connection>>;
+}
+
+/// Which fields the New/Edit Database dialog shows for an engine, and which extra (currently
+/// informational) tabs sit between 常规 and SQL 预览. Keeping this on the driver is what lets the
+/// dialog stay engine-agnostic while SQL Server shows its owner/recovery/compatibility options.
+#[derive(Debug, Clone, Default)]
+pub struct DatabaseEditorSpec {
+    /// Whether the charset dropdown is shown (MySQL/MariaDB).
+    pub charset: bool,
+    /// Whether the collation dropdown is shown.
+    pub collation: bool,
+    /// Whether the owner dropdown is shown (SQL Server).
+    pub owner: bool,
+    /// Whether the recovery-model dropdown is shown (SQL Server).
+    pub recovery_model: bool,
+    /// Whether the compatibility-level dropdown is shown (SQL Server).
+    pub compatibility_level: bool,
+    /// Extra informational tabs shown in order after 常规.
+    pub extra_tabs: Vec<DatabaseEditorTab>,
+}
+
+/// An informational tab of the Edit Database dialog that has no editable state yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatabaseEditorTab {
+    Filegroups,
+    Files,
+    Advanced,
+    Comment,
 }
 
 #[async_trait]
@@ -96,23 +151,13 @@ pub trait Connection: Send + Sync {
         Ok(vec![self.execute_query(database, sql).await?])
     }
 
-    /// Create a database. `charset`/`collation` are omitted when `None`, letting the engine pick
-    /// its defaults.
-    async fn create_database(
-        &self,
-        name: &str,
-        charset: Option<&str>,
-        collation: Option<&str>,
-    ) -> Result<()>;
+    /// Create a database with the given engine-agnostic options. Fields the engine does not use
+    /// (empty strings) are omitted, letting the engine pick its defaults.
+    async fn create_database(&self, name: &str, options: &DatabaseOptions) -> Result<()>;
 
     /// The `CREATE DATABASE` statement [`Connection::create_database`] runs, for the dialog's SQL
-    /// preview. `charset`/`collation` are omitted when `None`.
-    fn create_database_sql(
-        &self,
-        name: &str,
-        charset: Option<&str>,
-        collation: Option<&str>,
-    ) -> String;
+    /// preview.
+    fn create_database_sql(&self, name: &str, options: &DatabaseOptions) -> String;
 
     async fn drop_database(&self, name: &str) -> Result<()>;
 
@@ -129,7 +174,15 @@ pub trait Connection: Send + Sync {
     /// Rename a table within its database.
     async fn rename_table(&self, database: &str, table: &str, new_name: &str) -> Result<()>;
 
-    async fn database_defaults(&self, name: &str) -> Result<(String, String)>;
+    /// Load a database's current editable options (charset/collation/owner/recovery/…), so the
+    /// Edit Database dialog can show them and diff the user's changes.
+    async fn database_options(&self, name: &str) -> Result<DatabaseOptions>;
+
+    /// The SQL Server server logins offered as database owners. Engines without an owner concept
+    /// return an empty list.
+    async fn database_owners(&self) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
 
     /// The server's version string (e.g. `8.0.31`), for the connection info pane.
     async fn server_version(&self) -> Result<String>;
@@ -152,19 +205,42 @@ pub trait Connection: Send + Sync {
 
     async fn collations(&self) -> Result<Vec<String>>;
 
-    async fn alter_database_defaults(
+    /// Apply the options that changed between `original` and `modified`. The driver decides which
+    /// fields it supports and emits only the necessary `ALTER DATABASE` statements.
+    async fn alter_database_options(
         &self,
         name: &str,
-        charset: Option<&str>,
-        collation: Option<&str>,
+        original: &DatabaseOptions,
+        modified: &DatabaseOptions,
     ) -> Result<()>;
 
+    /// The script [`Connection::alter_database_options`] runs, for the dialog's SQL preview.
     fn alter_database_sql(
         &self,
         name: &str,
-        charset: Option<&str>,
-        collation: Option<&str>,
+        original: &DatabaseOptions,
+        modified: &DatabaseOptions,
     ) -> String;
+
+    /// List a database's schemas, ordered by name. Engines without schemas return an empty list.
+    /// Used by the connection tree so a newly created (still empty) schema is visible.
+    async fn list_schemas(&self, _database: &str) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
+    /// Create a schema in a database (SQL Server).
+    async fn create_schema(&self, _database: &str, _schema: &str) -> Result<()> {
+        Err(Error::Query(
+            "schema management is not supported by this driver".to_string(),
+        ))
+    }
+
+    /// Drop a schema from a database (SQL Server). Engines reject dropping a non-empty schema.
+    async fn drop_schema(&self, _database: &str, _schema: &str) -> Result<()> {
+        Err(Error::Query(
+            "schema management is not supported by this driver".to_string(),
+        ))
+    }
 
     /// The column types this engine offers in the table designer's type list, in display order.
     fn column_types(&self) -> Vec<&'static str>;

@@ -24,6 +24,8 @@ impl AppView {
     pub(super) fn sync_dialog(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let desired = if self.db_dialog.is_some() {
             Some(DialogKind::DbDialog)
+        } else if self.schema_dialog.is_some() {
+            Some(DialogKind::Schema)
         } else if self.create_table_dialog.is_some() {
             Some(DialogKind::CreateTable)
         } else if self.password_prompt.is_some() {
@@ -48,6 +50,7 @@ impl AppView {
 
         match desired {
             Some(DialogKind::DbDialog) => self.open_db_dialog(window, cx),
+            Some(DialogKind::Schema) => self.open_schema_dialog(window, cx),
             Some(DialogKind::CreateTable) => self.open_create_table_modal(window, cx),
             Some(DialogKind::Password) => self.open_password_prompt(window, cx),
             Some(DialogKind::SaveQuery) => self.open_save_query_dialog(window, cx),
@@ -802,6 +805,11 @@ impl AppView {
                 t!("view.delete_title").to_string(),
                 t!("view.delete_confirm", name = label.clone()).to_string(),
                 t!("view.delete_button").to_string(),
+            ),
+            Some(DeleteConfirm::Schema { schema, .. }) => (
+                t!("database.schema_delete_title").to_string(),
+                t!("database.schema_delete_confirm", name = schema.clone()).to_string(),
+                t!("database.schema_delete_button").to_string(),
             ),
             None => (String::new(), String::new(), t!("form.ok").to_string()),
         }

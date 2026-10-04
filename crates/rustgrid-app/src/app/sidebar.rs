@@ -17,6 +17,9 @@ struct TreeConnection {
     driver: String,
     /// Whether the engine has stored routines; when false the Functions category is hidden.
     supports_routines: bool,
+    /// Whether the engine has schemas; when false the flat category tree is used and the
+    /// schema create/drop actions are not offered.
+    supports_schemas: bool,
     status: TreeStatus,
     expanded: bool,
     databases: Loadable<Vec<TreeDatabase>>,
@@ -156,7 +159,18 @@ fn snapshot_connections(app: &AppView) -> Vec<TreeConnection> {
                             } else {
                                 Loadable::Idle
                             };
-                            let schemas = build_schema_nodes(&tables, &routines);
+                            // Merge the schemas derived from object names with the database's own
+                            // schema list (loaded on open), so an empty/newly created schema
+                            // still appears in the tree.
+                            let mut schemas = build_schema_nodes(&tables, &routines);
+                            if let Some(Loadable::Loaded(loaded)) = &database.schemas {
+                                for name in loaded {
+                                    if !schemas.contains(name) {
+                                        schemas.push(name.clone());
+                                    }
+                                }
+                                schemas.sort();
+                            }
                             TreeDatabase {
                                 index,
                                 name: database.name.clone(),
@@ -181,6 +195,11 @@ fn snapshot_connections(app: &AppView) -> Vec<TreeConnection> {
                     .get(&node.profile.driver)
                     .map(|driver| driver.supports_routines())
                     .unwrap_or(true),
+                supports_schemas: app
+                    .registry
+                    .get(&node.profile.driver)
+                    .map(|driver| driver.supports_schemas())
+                    .unwrap_or(false),
                 status,
                 expanded: node.expanded,
                 databases,
@@ -384,6 +403,7 @@ impl TreePane {
                             database,
                             &connection.saved_queries,
                             connection.supports_routines,
+                            connection.supports_schemas,
                             cx,
                         ));
                     }
@@ -400,6 +420,7 @@ impl TreePane {
         database: &TreeDatabase,
         saved_queries: &[TreeSavedQuery],
         supports_routines: bool,
+        supports_schemas: bool,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let theme = self.theme;
@@ -516,8 +537,9 @@ impl TreePane {
                     sub = sub.child(tree_message(error.clone(), 36.0, theme.danger));
                 }
                 Loadable::Loaded(_) => {
-                    if database.schemas.is_empty() {
-                        // Schema-less engines (MySQL/SQLite) keep the flat category list.
+                    if !supports_schemas || database.schemas.is_empty() {
+                        // Schema-less engines (MySQL/SQLite), or a schema engine whose database has
+                        // no user schemas yet, keep the flat category list.
                         for category in Category::ALL {
                             if category == Category::Functions && !supports_routines {
                                 continue;
@@ -572,6 +594,8 @@ impl TreePane {
         let click_id = schema_id.clone();
         let click_name = schema.to_string();
         let app = self.app.clone();
+        let menu_app = self.app.clone();
+        let menu_schema = schema.to_string();
 
         let row = div()
             .id(SharedString::from(schema_id))
@@ -601,6 +625,26 @@ impl TreePane {
                     app.toggle_schema(connection_index, database_index, name, cx);
                 });
             }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    this.selected = Some(format!(
+                        "schema-{connection_index}-{database_index}-{menu_schema}"
+                    ));
+                    let schema = menu_schema.clone();
+                    let _ = menu_app.update(cx, |app, cx| {
+                        app.context_menu = Some(ContextMenu {
+                            target: ContextTarget::Schema {
+                                connection_index,
+                                database_index,
+                                schema,
+                            },
+                            position: event.position,
+                        });
+                        cx.notify();
+                    });
+                }),
+            )
             .child(tree_chevron(expanded, theme.chevron))
             .child(tree_icon("icons/database.svg", theme.icon_database))
             .child(div().child(schema.to_string()));

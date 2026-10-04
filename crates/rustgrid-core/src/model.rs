@@ -76,6 +76,24 @@ pub struct DatabaseInfo {
     pub name: String,
 }
 
+/// Engine-agnostic editable settings of a database, shown by the New/Edit Database dialog. Fields
+/// an engine does not use stay empty and their controls are hidden (see
+/// [`crate::driver::DatabaseEditorSpec`]). Every field is a plain string because the dialog edits
+/// text and passes it through to the engine unchanged.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DatabaseOptions {
+    /// Default character set (MySQL/MariaDB). SQL Server selects it through the collation.
+    pub charset: String,
+    /// Default collation.
+    pub collation: String,
+    /// SQL Server owner (a server login).
+    pub owner: String,
+    /// SQL Server recovery model (`SIMPLE`, `FULL` or `BULK_LOGGED`).
+    pub recovery_model: String,
+    /// SQL Server compatibility level, e.g. `160`.
+    pub compatibility_level: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ObjectKind {

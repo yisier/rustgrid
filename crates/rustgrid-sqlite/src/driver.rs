@@ -1,7 +1,9 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rustgrid_core::{Connection, ConnectionConfig, Driver, DriverId, Error, Result};
+use rustgrid_core::{
+    Connection, ConnectionConfig, DatabaseEditorSpec, Driver, DriverId, Error, Result,
+};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
 use crate::connection::SqliteConnection;
@@ -45,6 +47,10 @@ impl Driver for SqliteDriver {
 
     fn supports_routines(&self) -> bool {
         false
+    }
+
+    fn database_editor(&self) -> DatabaseEditorSpec {
+        DatabaseEditorSpec::default()
     }
 
     async fn connect(&self, config: &ConnectionConfig) -> Result<Box<dyn Connection>> {

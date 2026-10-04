@@ -172,6 +172,11 @@ impl AppView {
                 name,
                 ..
             } => self.delete_view(connection_index, database_index, name, cx),
+            DeleteConfirm::Schema {
+                connection_index,
+                database_index,
+                schema,
+            } => self.delete_schema(connection_index, database_index, schema, cx),
         }
         cx.notify();
     }

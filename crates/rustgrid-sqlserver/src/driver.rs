@@ -1,7 +1,10 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rustgrid_core::{Connection, ConnectionConfig, Driver, DriverId, Error, Result, TlsMode};
+use rustgrid_core::{
+    Connection, ConnectionConfig, DatabaseEditorSpec, DatabaseEditorTab, Driver, DriverId, Error,
+    Result, TlsMode,
+};
 use tiberius::{AuthMethod, Config};
 
 use crate::connection::SqlServerConnection;
@@ -45,6 +48,36 @@ impl Driver for SqlServerDriver {
 
     fn supports_routines(&self) -> bool {
         true
+    }
+
+    fn supports_schemas(&self) -> bool {
+        true
+    }
+
+    fn database_editor(&self) -> DatabaseEditorSpec {
+        DatabaseEditorSpec {
+            charset: false,
+            collation: true,
+            owner: true,
+            recovery_model: true,
+            compatibility_level: true,
+            extra_tabs: vec![
+                DatabaseEditorTab::Filegroups,
+                DatabaseEditorTab::Files,
+                DatabaseEditorTab::Advanced,
+                DatabaseEditorTab::Comment,
+            ],
+        }
+    }
+
+    fn database_recovery_models(&self) -> Vec<&'static str> {
+        vec!["SIMPLE", "FULL", "BULK_LOGGED"]
+    }
+
+    fn database_compatibility_levels(&self) -> Vec<&'static str> {
+        vec![
+            "80", "90", "100", "110", "120", "130", "140", "150", "160", "170",
+        ]
     }
 
     async fn connect(&self, config: &ConnectionConfig) -> Result<Box<dyn Connection>> {

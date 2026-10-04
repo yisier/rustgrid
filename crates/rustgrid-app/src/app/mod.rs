@@ -20,12 +20,12 @@ use rustgrid_config::{
     AppSettings, ConfigStore, DEFAULT_EDITOR_FONT_SIZE, LanguageSetting, ThemeSetting,
 };
 use rustgrid_core::{
-    BackupObjectKind, CellValue, Connection, ConnectionConfig, DriverId, DriverRegistry, Error,
-    FilterCondition, FilterConjunction, FilterGroup, FilterNode, FilterOperator, ObjectGrant,
-    ObjectPrivilegeRow, PageRequest, Privilege, QueryResult, RoutineDetails, RoutineEdit,
-    RoutineInfo, RoutineKind, RowInsert, RowUpdate, SavedBackup, SavedQuery, TableStatus, TlsMode,
-    TunnelAuth, TunnelKind, TunnelLayer, UserAccount, UserDetails, UserEdit, UserEditSection,
-    ViewEdit,
+    BackupObjectKind, CellValue, Connection, ConnectionConfig, DatabaseEditorSpec,
+    DatabaseEditorTab, DatabaseOptions, DriverId, DriverRegistry, Error, FilterCondition,
+    FilterConjunction, FilterGroup, FilterNode, FilterOperator, ObjectGrant, ObjectPrivilegeRow,
+    PageRequest, Privilege, QueryResult, RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind,
+    RowInsert, RowUpdate, SavedBackup, SavedQuery, TableStatus, TlsMode, TunnelAuth, TunnelKind,
+    TunnelLayer, UserAccount, UserDetails, UserEdit, UserEditSection, ViewEdit,
 };
 use rustgrid_export::ExportFormat;
 
@@ -750,6 +750,35 @@ fn make_db_name_input(
     })
 }
 
+/// Build the name field of the "new schema" dialog.
+fn make_schema_name_input(
+    theme: Theme,
+    app: &WeakEntity<AppView>,
+    cx: &mut Context<'_, AppView>,
+) -> Entity<TextInput> {
+    let change = app.clone();
+    let submit = app.clone();
+    let options = TextInputOptions {
+        placeholder: t!("database.schema_name_placeholder").to_string().into(),
+        ..Default::default()
+    };
+    cx.new(move |cx| {
+        TextInput::new(theme, "", options, cx)
+            .on_change(Rc::new(move |text, _window, cx| {
+                let _ = change.update(cx, |app, cx| app.schema_name_changed(text, cx));
+            }))
+            .on_submit(Rc::new(move |_window, cx| {
+                let _ = submit.update(cx, |app, cx| app.schema_submit(cx));
+            }))
+            .on_cancel(Rc::new({
+                let cancel = app.clone();
+                move |_window, cx| {
+                    let _ = cancel.update(cx, |app, cx| app.schema_cancel(cx));
+                }
+            }))
+    })
+}
+
 /// Build the name field of the "new table" prompt, pre-filled with `initial`.
 fn make_create_table_input(
     theme: Theme,
@@ -818,6 +847,12 @@ enum ContextTarget {
         connection_index: usize,
         database_index: usize,
     },
+    /// A schema node under a database (SQL Server).
+    Schema {
+        connection_index: usize,
+        database_index: usize,
+        schema: String,
+    },
     /// A backup file in the Backup main tab's list.
     BackupFile {
         index: usize,
@@ -856,35 +891,80 @@ struct TabMenu {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DbTab {
     General,
+    /// Informational sub-tabs shown only by engines that declare them (SQL Server).
+    Extra(DatabaseEditorTab),
     Sql,
 }
 
 /// The editable fields shared by the "New Database" and "Edit Database" dialogs. `database_index`
 /// is `None` while creating (so the name field is editable) and `Some` while editing an existing
-/// database (name read-only, SQL preview shows the `ALTER`).
+/// database (name read-only, SQL preview shows the `ALTER`). The `original_*` fields hold the
+/// engine-loaded values, so the SQL preview and the apply path can diff.
 struct DatabaseForm {
     connection_index: usize,
     database_index: Option<usize>,
     name: String,
     original_charset: String,
     original_collation: String,
+    original_owner: String,
+    original_recovery_model: String,
+    original_compatibility_level: String,
     charset: String,
     collation: String,
+    owner: String,
+    recovery_model: String,
+    compatibility_level: String,
     charsets: Vec<String>,
     collations: Vec<String>,
+    owners: Vec<String>,
+    /// Which fields the engine's `DatabaseEditorSpec` enables for this dialog.
+    spec: DatabaseEditorSpec,
     tab: DbTab,
     loading: bool,
     error: Option<String>,
 }
 
+impl DatabaseForm {
+    /// The current editable options, as the engine-agnostic model.
+    fn options(&self) -> DatabaseOptions {
+        DatabaseOptions {
+            charset: self.charset.clone(),
+            collation: self.collation.clone(),
+            owner: self.owner.clone(),
+            recovery_model: self.recovery_model.clone(),
+            compatibility_level: self.compatibility_level.clone(),
+        }
+    }
+
+    /// The engine-loaded options, as the engine-agnostic model.
+    fn original_options(&self) -> DatabaseOptions {
+        DatabaseOptions {
+            charset: self.original_charset.clone(),
+            collation: self.original_collation.clone(),
+            owner: self.original_owner.clone(),
+            recovery_model: self.original_recovery_model.clone(),
+            compatibility_level: self.original_compatibility_level.clone(),
+        }
+    }
+}
+
 enum DbDialog {
-    Edit(DatabaseForm),
+    Edit(Box<DatabaseForm>),
     Delete {
         connection_index: usize,
         database_index: usize,
         name: String,
         error: Option<String>,
     },
+}
+
+/// The "New Schema" dialog (SQL Server): a name field over one (connection, database) scope.
+struct SchemaDialog {
+    connection_index: usize,
+    database_index: usize,
+    name: String,
+    submitting: bool,
+    error: Option<String>,
 }
 
 /// The Tables/Views object browser for one database. Owns its own list state and renders the
@@ -1122,6 +1202,12 @@ enum DeleteConfirm {
         name: String,
         label: String,
     },
+    /// Drop a schema from a database (SQL Server).
+    Schema {
+        connection_index: usize,
+        database_index: usize,
+        schema: String,
+    },
 }
 
 /// Which designer grid a [`DeleteConfirm::DesignRows`] confirmation applies to.
@@ -1147,6 +1233,7 @@ enum TableOperation {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DialogKind {
     DbDialog,
+    Schema,
     CreateTable,
     Password,
     SaveQuery,
@@ -1180,6 +1267,7 @@ enum DriverCapability {
     DatabaseManagement,
     Users,
     Routines,
+    Schemas,
 }
 
 /// Default and clamp widths of the drag-resizable side panes.
@@ -1366,7 +1454,19 @@ pub struct AppView {
     db_dialog: Option<DbDialog>,
     db_charset_combo: Option<Entity<ComboBox>>,
     db_collation_combo: Option<Entity<ComboBox>>,
+    /// SQL Server owner dropdown (server logins) in the database dialog.
+    db_owner_combo: Option<Entity<ComboBox>>,
+    /// SQL Server recovery-model dropdown in the database dialog.
+    db_recovery_combo: Option<Entity<ComboBox>>,
+    /// SQL Server compatibility-level dropdown in the database dialog.
+    db_compat_combo: Option<Entity<ComboBox>>,
     db_name_input: Option<Entity<TextInput>>,
+    /// The schema name typed in the "New Schema" dialog.
+    schema_name_input: Option<Entity<TextInput>>,
+    /// The pending "New Schema" dialog; `None` when it is closed.
+    schema_dialog: Option<SchemaDialog>,
+    /// Focus the schema name field on the next frame, once its inner state exists.
+    schema_focus_pending: bool,
     db_sql_focus: FocusHandle,
     db_sql_layout: RefCell<TextLayout>,
     db_sql_text: RefCell<String>,
@@ -1459,7 +1559,7 @@ pub struct AppView {
     /// The connected server's `(version, sessions)` for the connection info pane.
     info_server: Loadable<(String, u64)>,
     /// The selected database's `(charset, collation)` for the database info pane.
-    info_database: Loadable<(String, String)>,
+    info_database: Loadable<DatabaseOptions>,
     /// The selected table `(connection, database, name)` driving the table info pane, set by the
     /// connection tree and the object list.
     info_table_selected: Option<(usize, usize, String)>,
@@ -1786,7 +1886,13 @@ impl AppView {
             db_dialog: None,
             db_charset_combo: None,
             db_collation_combo: None,
+            db_owner_combo: None,
+            db_recovery_combo: None,
+            db_compat_combo: None,
             db_name_input: None,
+            schema_name_input: None,
+            schema_dialog: None,
+            schema_focus_pending: false,
             db_sql_focus: cx.focus_handle(),
             db_sql_layout: RefCell::new(TextLayout::default()),
             db_sql_text: RefCell::new(String::new()),
@@ -2090,7 +2196,36 @@ impl AppView {
             DriverCapability::DatabaseManagement => driver.supports_database_management(),
             DriverCapability::Users => driver.supports_users(),
             DriverCapability::Routines => driver.supports_routines(),
+            DriverCapability::Schemas => driver.supports_schemas(),
         }
+    }
+
+    /// The engine's database-dialog layout for `connection_index` (falls back to MySQL's
+    /// charset + collation).
+    fn database_editor_spec(&self, connection_index: usize) -> DatabaseEditorSpec {
+        self.connections
+            .get(connection_index)
+            .and_then(|node| self.registry.get(&node.profile.driver))
+            .map(|driver| driver.database_editor())
+            .unwrap_or_default()
+    }
+
+    /// The recovery models offered by the database dialog for `connection_index`.
+    fn database_recovery_models(&self, connection_index: usize) -> Vec<&'static str> {
+        self.connections
+            .get(connection_index)
+            .and_then(|node| self.registry.get(&node.profile.driver))
+            .map(|driver| driver.database_recovery_models())
+            .unwrap_or_default()
+    }
+
+    /// The compatibility levels offered by the database dialog for `connection_index`.
+    fn database_compatibility_levels(&self, connection_index: usize) -> Vec<&'static str> {
+        self.connections
+            .get(connection_index)
+            .and_then(|node| self.registry.get(&node.profile.driver))
+            .map(|driver| driver.database_compatibility_levels())
+            .unwrap_or_default()
     }
 
     /// The rename editor's row data for `pane`, or `None` while the editor belongs to the other
@@ -2291,6 +2426,9 @@ impl AppView {
         if let Some(input) = self.db_name_input.as_ref() {
             input.update(cx, |input, cx| input.set_theme(theme, cx));
         }
+        if let Some(input) = self.schema_name_input.as_ref() {
+            input.update(cx, |input, cx| input.set_theme(theme, cx));
+        }
         if let Some(prompt) = self.password_prompt.as_ref() {
             prompt
                 .input
@@ -2337,6 +2475,9 @@ impl AppView {
         for combo in [
             self.db_charset_combo.as_ref(),
             self.db_collation_combo.as_ref(),
+            self.db_owner_combo.as_ref(),
+            self.db_recovery_combo.as_ref(),
+            self.db_compat_combo.as_ref(),
             self.query_connection_combo.as_ref(),
             self.query_database_combo.as_ref(),
             self.save_connection_combo.as_ref(),
@@ -2485,17 +2626,6 @@ fn cached_style(build: impl FnOnce(Div) -> Div) -> gpui::StyleRefinement {
     std::mem::take(element.style())
 }
 
-fn db_error(error: &Option<String>, theme: Theme) -> AnyElement {
-    match error {
-        Some(message) => div()
-            .text_size(px(12.0))
-            .text_color(rgb(theme.danger))
-            .child(message.clone())
-            .into_any_element(),
-        None => div().into_any_element(),
-    }
-}
-
 fn is_valid_identifier(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
@@ -2579,6 +2709,7 @@ impl Render for AppView {
         self.sync_cached_children(cx);
         self.ensure_query_combos(cx);
         self.sync_db_combos(cx);
+        self.sync_db_option_combos(cx);
         self.sync_query_combos(cx);
         self.sync_save_dialog_combos(cx);
         self.sync_language_combo(cx);
@@ -2632,6 +2763,17 @@ impl Render for AppView {
             // The dialog opens on a later frame, so focus the field once more after that frame;
             // by then its lazily-created inner input state exists and will actually take input.
             if let Some(input) = self.query_name_input.clone() {
+                cx.on_next_frame(window, move |_this, window, cx| {
+                    input.update(cx, |input, cx| input.focus_state(window, cx));
+                });
+            }
+        }
+
+        if self.schema_focus_pending {
+            self.schema_focus_pending = false;
+            // Same as the save-query dialog: the field's inner gpui-kit state is created on the
+            // dialog's first render, so focus it again on the next frame.
+            if let Some(input) = self.schema_name_input.clone() {
                 cx.on_next_frame(window, move |_this, window, cx| {
                     input.update(cx, |input, cx| input.focus_state(window, cx));
                 });

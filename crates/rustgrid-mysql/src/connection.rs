@@ -2,12 +2,12 @@ use async_trait::async_trait;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use futures_util::TryStreamExt;
 use rustgrid_core::{
-    BackupObjectKind, CellValue, ColumnDef, ColumnInfo, Connection, DatabaseInfo, DriverId, Error,
-    FilterCondition, FilterConjunction, FilterNode, FilterOperator, ForeignKeyDef, IndexDef,
-    ObjectDump, ObjectKind, ObjectPrivilegeRow, PageRequest, QueryResult, Result, RoutineDetails,
-    RoutineEdit, RoutineInfo, RoutineKind, RowInsert, RowUpdate, TableInfo, TableOptions,
-    TablePage, TableSchema, TableStatus, TriggerDef, UserAccount, UserDetails, UserEdit,
-    ViewDetails, ViewEdit,
+    BackupObjectKind, CellValue, ColumnDef, ColumnInfo, Connection, DatabaseInfo, DatabaseOptions,
+    DriverId, Error, FilterCondition, FilterConjunction, FilterNode, FilterOperator, ForeignKeyDef,
+    IndexDef, ObjectDump, ObjectKind, ObjectPrivilegeRow, PageRequest, QueryResult, Result,
+    RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind, RowInsert, RowUpdate, TableInfo,
+    TableOptions, TablePage, TableSchema, TableStatus, TriggerDef, UserAccount, UserDetails,
+    UserEdit, ViewDetails, ViewEdit,
 };
 use sqlx::mysql::{MySqlColumn, MySqlRow};
 use sqlx::{
@@ -483,13 +483,8 @@ impl Connection for MysqlConnection {
         Ok(results)
     }
 
-    async fn create_database(
-        &self,
-        name: &str,
-        charset: Option<&str>,
-        collation: Option<&str>,
-    ) -> Result<()> {
-        let sql = self.create_database_sql(name, charset, collation);
+    async fn create_database(&self, name: &str, options: &DatabaseOptions) -> Result<()> {
+        let sql = self.create_database_sql(name, options);
         sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
             .execute(&self.pool)
             .await
@@ -497,20 +492,15 @@ impl Connection for MysqlConnection {
         Ok(())
     }
 
-    fn create_database_sql(
-        &self,
-        name: &str,
-        charset: Option<&str>,
-        collation: Option<&str>,
-    ) -> String {
+    fn create_database_sql(&self, name: &str, options: &DatabaseOptions) -> String {
         let mut sql = format!("CREATE DATABASE {}", quote_identifier(name));
-        if let Some(charset) = charset {
+        if !options.charset.trim().is_empty() {
             sql.push_str(" CHARACTER SET ");
-            sql.push_str(charset);
+            sql.push_str(options.charset.trim());
         }
-        if let Some(collation) = collation {
+        if !options.collation.trim().is_empty() {
             sql.push_str(" COLLATE ");
-            sql.push_str(collation);
+            sql.push_str(options.collation.trim());
         }
         sql.push(';');
         sql
@@ -561,7 +551,7 @@ impl Connection for MysqlConnection {
         Ok(())
     }
 
-    async fn database_defaults(&self, name: &str) -> Result<(String, String)> {
+    async fn database_options(&self, name: &str) -> Result<DatabaseOptions> {
         let row = sqlx::query(
             "SELECT default_character_set_name, default_collation_name \
              FROM information_schema.schemata \
@@ -574,7 +564,11 @@ impl Connection for MysqlConnection {
 
         let charset: String = row.try_get(0).map_err(map_query_error)?;
         let collation: String = row.try_get(1).map_err(map_query_error)?;
-        Ok((charset, collation))
+        Ok(DatabaseOptions {
+            charset,
+            collation,
+            ..Default::default()
+        })
     }
 
     async fn server_version(&self) -> Result<String> {
@@ -694,22 +688,16 @@ impl Connection for MysqlConnection {
             .collect()
     }
 
-    async fn alter_database_defaults(
+    async fn alter_database_options(
         &self,
         name: &str,
-        charset: Option<&str>,
-        collation: Option<&str>,
+        original: &DatabaseOptions,
+        modified: &DatabaseOptions,
     ) -> Result<()> {
-        let mut sql = format!("ALTER DATABASE {}", quote_identifier(name));
-        if let Some(charset) = charset {
-            sql.push_str(" CHARACTER SET ");
-            sql.push_str(charset);
+        let sql = alter_database_sql(name, original, modified);
+        if sql.is_empty() {
+            return Ok(());
         }
-        if let Some(collation) = collation {
-            sql.push_str(" COLLATE ");
-            sql.push_str(collation);
-        }
-
         sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
             .execute(&self.pool)
             .await
@@ -720,24 +708,10 @@ impl Connection for MysqlConnection {
     fn alter_database_sql(
         &self,
         name: &str,
-        charset: Option<&str>,
-        collation: Option<&str>,
+        original: &DatabaseOptions,
+        modified: &DatabaseOptions,
     ) -> String {
-        let mut clauses = Vec::new();
-        if let Some(charset) = charset {
-            clauses.push(format!("CHARACTER SET {charset}"));
-        }
-        if let Some(collation) = collation {
-            clauses.push(format!("COLLATE {collation}"));
-        }
-
-        let mut sql = format!("ALTER DATABASE {}", quote_identifier(name));
-        if !clauses.is_empty() {
-            sql.push(' ');
-            sql.push_str(&clauses.join(" "));
-        }
-        sql.push(';');
-        sql
+        alter_database_sql(name, original, modified)
     }
 
     fn column_types(&self) -> Vec<&'static str> {
@@ -1670,6 +1644,30 @@ fn quote_literal(value: &str) -> String {
 
 pub(crate) fn quote_identifier(identifier: &str) -> String {
     format!("`{}`", identifier.replace('`', "``"))
+}
+
+/// Build the `ALTER DATABASE` script for the charset/collation that changed between `original`
+/// and `modified`. Empty when neither changed (or the new value is blank).
+fn alter_database_sql(
+    name: &str,
+    original: &DatabaseOptions,
+    modified: &DatabaseOptions,
+) -> String {
+    let mut clauses = Vec::new();
+    if modified.charset != original.charset && !modified.charset.trim().is_empty() {
+        clauses.push(format!("CHARACTER SET {}", modified.charset.trim()));
+    }
+    if modified.collation != original.collation && !modified.collation.trim().is_empty() {
+        clauses.push(format!("COLLATE {}", modified.collation.trim()));
+    }
+    if clauses.is_empty() {
+        return String::new();
+    }
+    format!(
+        "ALTER DATABASE {} {};",
+        quote_identifier(name),
+        clauses.join(" ")
+    )
 }
 
 /// Read a text column by any of its candidate names (case-insensitive), tolerating a missing

@@ -7,6 +7,7 @@
 
 use super::*;
 use gpui_kit::component::text::TextView;
+use rustgrid_core::DatabaseOptions;
 
 /// What the info pane is currently describing.
 #[derive(Clone, PartialEq, Eq)]
@@ -430,7 +431,7 @@ impl AppView {
                 let runtime = self.runtime.clone();
                 cx.spawn(async move |this, cx| {
                     let result = runtime
-                        .spawn(async move { connection.database_defaults(&database).await })
+                        .spawn(async move { connection.database_options(&database).await })
                         .await;
                     let _ = this.update(cx, |app, cx| {
                         app.info_database = match result {
@@ -663,14 +664,32 @@ impl AppView {
                     .count()
             })
             .unwrap_or(0);
-        let (charset, collation) = match &self.info_database {
-            Loadable::Loaded((charset, collation)) => (charset.clone(), collation.clone()),
-            _ => ("--".to_string(), "--".to_string()),
+        let options = match &self.info_database {
+            Loadable::Loaded(options) => options.clone(),
+            _ => DatabaseOptions::default(),
         };
-        let fields = vec![
-            (t!("info.charset").to_string(), charset),
-            (t!("info.collation").to_string(), collation),
-        ];
+        let mut fields = Vec::new();
+        if !options.charset.is_empty() {
+            fields.push((t!("info.charset").to_string(), options.charset.clone()));
+        }
+        if !options.collation.is_empty() {
+            fields.push((t!("info.collation").to_string(), options.collation.clone()));
+        }
+        if !options.owner.is_empty() {
+            fields.push((t!("database.owner").to_string(), options.owner.clone()));
+        }
+        if !options.recovery_model.is_empty() {
+            fields.push((
+                t!("database.recovery_model").to_string(),
+                options.recovery_model.clone(),
+            ));
+        }
+        if !options.compatibility_level.is_empty() {
+            fields.push((
+                t!("database.compatibility_level").to_string(),
+                options.compatibility_level.clone(),
+            ));
+        }
         info_panel(
             "icons/database.svg",
             theme.icon_database_active,

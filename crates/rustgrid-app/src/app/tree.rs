@@ -380,6 +380,7 @@ impl AppView {
                                                 expanded: existing.expanded,
                                                 categories: existing.categories,
                                                 expanded_schemas: existing.expanded_schemas,
+                                                schemas: existing.schemas,
                                             }
                                         } else {
                                             DatabaseNode {
@@ -391,6 +392,7 @@ impl AppView {
                                                 expanded: false,
                                                 categories: Default::default(),
                                                 expanded_schemas: Default::default(),
+                                                schemas: None,
                                             }
                                         }
                                     })
@@ -417,8 +419,10 @@ impl AppView {
     ) {
         let mut should_load = false;
         let mut should_load_routines = false;
+        let mut should_load_schemas = false;
         let mut just_opened = false;
         let supports_routines = self.driver_supports(connection_index, DriverCapability::Routines);
+        let supports_schemas = self.driver_supports(connection_index, DriverCapability::Schemas);
         // Do not leave a stale Functions tab selected on an engine without routines.
         if !supports_routines && self.main_tab == MainTab::Functions {
             self.main_tab = MainTab::Tables;
@@ -443,6 +447,12 @@ impl AppView {
                 {
                     should_load_routines = true;
                 }
+                if supports_schemas
+                    && (database.schemas.is_none()
+                        || matches!(database.schemas, Some(Loadable::Idle | Loadable::Failed(_))))
+                {
+                    should_load_schemas = true;
+                }
             }
         }
 
@@ -464,6 +474,19 @@ impl AppView {
             && let Some(database_name) = self.database_name(connection_index, database_index)
         {
             self.load_routines(
+                connection_index,
+                database_index,
+                connection,
+                database_name,
+                cx,
+            );
+        }
+
+        if should_load_schemas
+            && let Some(connection) = self.connection_arc(connection_index)
+            && let Some(database_name) = self.database_name(connection_index, database_index)
+        {
+            self.load_schemas(
                 connection_index,
                 database_index,
                 connection,

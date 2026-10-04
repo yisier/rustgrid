@@ -1,7 +1,9 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rustgrid_core::{Connection, ConnectionConfig, Driver, DriverId, Error, Result, TlsMode};
+use rustgrid_core::{
+    Connection, ConnectionConfig, DatabaseEditorSpec, Driver, DriverId, Error, Result, TlsMode,
+};
 use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlSslMode};
 
 use crate::connection::MysqlConnection;
@@ -30,6 +32,14 @@ impl Driver for MysqlDriver {
 
     fn default_port(&self) -> u16 {
         3306
+    }
+
+    fn database_editor(&self) -> DatabaseEditorSpec {
+        DatabaseEditorSpec {
+            charset: true,
+            collation: true,
+            ..Default::default()
+        }
     }
 
     async fn connect(&self, config: &ConnectionConfig) -> Result<Box<dyn Connection>> {
@@ -61,6 +71,14 @@ impl Driver for MariaDbDriver {
 
     fn default_port(&self) -> u16 {
         3306
+    }
+
+    fn database_editor(&self) -> DatabaseEditorSpec {
+        DatabaseEditorSpec {
+            charset: true,
+            collation: true,
+            ..Default::default()
+        }
     }
 
     async fn connect(&self, config: &ConnectionConfig) -> Result<Box<dyn Connection>> {

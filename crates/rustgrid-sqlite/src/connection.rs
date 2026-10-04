@@ -2,10 +2,11 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use rustgrid_core::{
-    BackupObjectKind, CellValue, ColumnDef, ColumnInfo, Connection, DatabaseInfo, DriverId, Error,
-    FilterCondition, FilterConjunction, FilterNode, FilterOperator, ForeignKeyDef, IndexDef,
-    ObjectDump, ObjectKind, PageRequest, QueryResult, Result, RowInsert, RowUpdate, TableInfo,
-    TableOptions, TablePage, TableSchema, TableStatus, TriggerDef, ViewDetails, ViewEdit, ViewInfo,
+    BackupObjectKind, CellValue, ColumnDef, ColumnInfo, Connection, DatabaseInfo, DatabaseOptions,
+    DriverId, Error, FilterCondition, FilterConjunction, FilterNode, FilterOperator, ForeignKeyDef,
+    IndexDef, ObjectDump, ObjectKind, PageRequest, QueryResult, Result, RowInsert, RowUpdate,
+    TableInfo, TableOptions, TablePage, TableSchema, TableStatus, TriggerDef, ViewDetails,
+    ViewEdit, ViewInfo,
 };
 use sqlx::error::DatabaseError;
 use sqlx::sqlite::{SqliteColumn, SqliteRow};
@@ -385,23 +386,13 @@ impl Connection for SqliteConnection {
         Ok(results)
     }
 
-    async fn create_database(
-        &self,
-        _name: &str,
-        _charset: Option<&str>,
-        _collation: Option<&str>,
-    ) -> Result<()> {
+    async fn create_database(&self, _name: &str, _options: &DatabaseOptions) -> Result<()> {
         Err(Error::Query(
             "SQLite does not support creating databases; each database is a file".to_string(),
         ))
     }
 
-    fn create_database_sql(
-        &self,
-        _name: &str,
-        _charset: Option<&str>,
-        _collation: Option<&str>,
-    ) -> String {
+    fn create_database_sql(&self, _name: &str, _options: &DatabaseOptions) -> String {
         String::new()
     }
 
@@ -452,8 +443,12 @@ impl Connection for SqliteConnection {
         self.run_sql(&sql).await
     }
 
-    async fn database_defaults(&self, _name: &str) -> Result<(String, String)> {
-        Ok(("UTF-8".to_string(), "BINARY".to_string()))
+    async fn database_options(&self, _name: &str) -> Result<DatabaseOptions> {
+        Ok(DatabaseOptions {
+            charset: "UTF-8".to_string(),
+            collation: "BINARY".to_string(),
+            ..Default::default()
+        })
     }
 
     async fn server_version(&self) -> Result<String> {
@@ -519,11 +514,11 @@ impl Connection for SqliteConnection {
         Ok(collations)
     }
 
-    async fn alter_database_defaults(
+    async fn alter_database_options(
         &self,
         _name: &str,
-        _charset: Option<&str>,
-        _collation: Option<&str>,
+        _original: &DatabaseOptions,
+        _modified: &DatabaseOptions,
     ) -> Result<()> {
         Ok(())
     }
@@ -531,8 +526,8 @@ impl Connection for SqliteConnection {
     fn alter_database_sql(
         &self,
         _name: &str,
-        _charset: Option<&str>,
-        _collation: Option<&str>,
+        _original: &DatabaseOptions,
+        _modified: &DatabaseOptions,
     ) -> String {
         String::new()
     }
