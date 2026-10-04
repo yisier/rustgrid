@@ -456,6 +456,9 @@ pub struct QueryTab {
     pub saved_path: Option<std::path::PathBuf>,
     pub connection_index: Option<usize>,
     pub database: Option<String>,
+    /// The schema the editor is scoped to (SQL Server). `None` leaves unqualified objects to the
+    /// engine's default schema; it filters completion and resolves unqualified table references.
+    pub schema: Option<String>,
     pub sql: String,
     pub caret: usize,
     pub anchor: usize,
@@ -491,6 +494,7 @@ impl QueryTab {
             saved_path: None,
             connection_index: None,
             database: None,
+            schema: None,
             sql: String::new(),
             caret: 0,
             anchor: 0,

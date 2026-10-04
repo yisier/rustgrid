@@ -323,6 +323,7 @@ impl AppView {
                 let ci = *connection_index;
                 let di = *database_index;
                 let schema = schema.clone();
+                let new_query_schema = schema.clone();
                 items = items
                     .child(self.context_item(
                         "schema-new",
@@ -330,6 +331,14 @@ impl AppView {
                         cx.listener(move |this, _event, window, cx| {
                             this.context_menu = None;
                             this.open_new_schema(ci, di, window, cx);
+                        }),
+                    ))
+                    .child(self.context_item(
+                        "schema-new-query",
+                        t!("main.new_query").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.open_new_query_for_schema(ci, di, new_query_schema.clone(), cx);
                         }),
                     ))
                     .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))

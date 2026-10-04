@@ -21,20 +21,40 @@ impl AppView {
         let sql = tab.sql.clone();
         let connection_index = tab.connection_index;
         let database = tab.database.clone();
+        let schema = tab.schema.clone();
+        let supports_schemas = connection_index
+            .is_some_and(|index| self.driver_supports(index, DriverCapability::Schemas));
+        let driver = connection_index
+            .and_then(|index| self.connections.get(index))
+            .map(|node| node.profile.driver.as_str().to_string());
 
         if self.query_editors.len() <= index {
             self.query_editors.resize_with(index + 1, || None);
         }
         if let Some(editor) = self.query_editors[index].clone() {
-            // Keep the completion scope in step with the tab's connection/database.
+            // Keep the completion scope in step with the tab's connection/database/schema.
             editor.update(cx, |editor, cx| {
-                editor.set_scope(connection_index, database.clone(), cx)
+                editor.set_scope(
+                    connection_index,
+                    database.clone(),
+                    schema.clone(),
+                    supports_schemas,
+                    driver.clone(),
+                    cx,
+                )
             });
             return Some(editor);
         }
 
         let source = sql_completion::CompletionSource::new(self.completion_catalog.clone())
-            .with_scope(connection_index, database.clone());
+            .with_scope(
+                connection_index,
+                database.clone(),
+                schema.clone(),
+                supports_schemas,
+                driver,
+            );
+        let scope_handle = source.scope_handle();
         let provider: Rc<dyn gpui_kit::component::input::CompletionProvider> =
             Rc::new(sql_completion::SqlCompletionProvider::new(source));
         let options = ui::SqlEditorOptions {
@@ -49,6 +69,7 @@ impl AppView {
             ui::SqlEditor::new(cx)
                 .options(options)
                 .provider(provider)
+                .scope(scope_handle)
                 .on_change(Rc::new(move |text, cx| {
                     let _ = weak.update(cx, |app, cx| app.on_query_editor_changed(index, text, cx));
                 }))
@@ -62,20 +83,27 @@ impl AppView {
     fn on_query_editor_changed(&mut self, index: usize, text: &str, cx: &mut Context<'_, Self>) {
         let connection_index = self.queries.get(index).and_then(|tab| tab.connection_index);
         let database = self.queries.get(index).and_then(|tab| tab.database.clone());
+        let schema = self.queries.get(index).and_then(|tab| tab.schema.clone());
         if let Some(tab) = self.queries.get_mut(index) {
             tab.sql = text.to_string();
         }
         // Warm the completion catalog's columns for every table the statement now references, so
         // `alias.`/`table.` completion has types and comments ready.
         if let Some(connection_index) = connection_index {
+            let scope = sql_completion::CompletionScope {
+                connection_index: Some(connection_index),
+                database,
+                schema,
+                supports_schemas: self.driver_supports(connection_index, DriverCapability::Schemas),
+                driver: self
+                    .connections
+                    .get(connection_index)
+                    .map(|node| node.profile.driver.as_str().to_string()),
+            };
             let referenced = sql::referenced_tables(&sql::current_statement(text, text.len()));
             for table in referenced {
-                let target_database = table
-                    .database
-                    .filter(|name| !name.is_empty())
-                    .or_else(|| database.clone());
-                if let Some(target_database) = target_database {
-                    self.ensure_query_columns(cx, connection_index, &target_database, &table.name);
+                if let Some((database, table)) = sql_completion::catalog_target(&scope, &table) {
+                    self.ensure_query_columns(cx, connection_index, &database, &table);
                 }
             }
         }

@@ -422,6 +422,17 @@ impl Connection for SqlServerConnection {
                 .find(|result| result.has_result_set)
                 .unwrap_or_else(|| empty_result(sql.trim().to_string())));
         }
+        // A script the splitter could not break into several statements — e.g. several `SELECT`s
+        // without semicolons, which SQL Server runs as one batch — carries multiple result sets.
+        // The batch path returns them all and this keeps only the first, matching the single
+        // result `execute_query` promises (the query editor uses `execute_query_many`).
+        if statements.len() == 1 && returns_result_set(&statements[0]) {
+            let results = run_batch_sets(&mut client, sql).await?;
+            return Ok(results
+                .into_iter()
+                .find(|result| result.has_result_set)
+                .unwrap_or_else(|| empty_result(sql.trim().to_string())));
+        }
 
         let mut result_set: Option<QueryResult> = None;
         let mut rows_affected = 0u64;
@@ -462,6 +473,11 @@ impl Connection for SqlServerConnection {
         if needs_single_batch(&statements) {
             // A script that declares batch-scoped variables cannot be split across
             // round-trips; run it whole and return one result per result set.
+            return run_batch_sets(&mut client, sql).await;
+        }
+        // A single statement the splitter could not divide — several `SELECT`s without
+        // semicolons, which SQL Server runs as one batch — still carries every result set.
+        if statements.len() == 1 && returns_result_set(&statements[0]) {
             return run_batch_sets(&mut client, sql).await;
         }
         let mut results = Vec::with_capacity(statements.len());

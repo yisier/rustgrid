@@ -66,10 +66,59 @@ impl AppView {
         None
     }
 
+    /// The schema selected in the connection tree (`schema-…`), as
+    /// `(connection_index, database_index, schema)`. `None` when any other row is selected.
+    fn tree_selected_schema(&self, cx: &App) -> Option<(usize, usize, String)> {
+        let selected = self.tree_pane.read(cx).selected.clone()?;
+        let rest = selected.strip_prefix("schema-")?;
+        let mut parts = rest.splitn(3, '-');
+        let connection_index = parts.next()?.parse().ok()?;
+        let database_index = parts.next()?.parse().ok()?;
+        let schema = parts.next()?;
+        (!schema.is_empty()).then(|| (connection_index, database_index, schema.to_string()))
+    }
+
+    /// The schema a new query should start scoped to: the tree's selected schema node, else the
+    /// object pane's schema, when both match the query's connection and database.
+    pub(super) fn default_query_schema(
+        &self,
+        cx: &Context<'_, Self>,
+        connection_index: usize,
+        database: Option<&str>,
+    ) -> Option<String> {
+        if !self.driver_supports(connection_index, DriverCapability::Schemas) {
+            return None;
+        }
+        if let Some((selected_connection, database_index, schema)) = self.tree_selected_schema(cx)
+            && selected_connection == connection_index
+            && self
+                .database_name(connection_index, database_index)
+                .as_deref()
+                == database
+        {
+            return Some(schema);
+        }
+        if let Some(pane) = self.object_pane.as_ref() {
+            let pane = pane.read(cx);
+            if pane.connection_index == connection_index
+                && pane.schema.is_some()
+                && self
+                    .database_name(pane.connection_index, pane.database_index)
+                    .as_deref()
+                    == database
+            {
+                return pane.schema.clone();
+            }
+        }
+        None
+    }
+
     pub(super) fn open_new_query(&mut self, cx: &mut Context<'_, Self>) {
         let connection_index = self.default_query_connection(cx);
         let database = connection_index.and_then(|index| self.default_query_database(index, cx));
-        self.open_query_with(connection_index, database, cx);
+        let schema = connection_index
+            .and_then(|index| self.default_query_schema(cx, index, database.as_deref()));
+        self.open_query_with(connection_index, database, schema, cx);
     }
 
     /// Open a query tab bound to a specific connection, defaulting to its current database.
@@ -79,7 +128,8 @@ impl AppView {
         cx: &mut Context<'_, Self>,
     ) {
         let database = self.default_query_database(connection_index, cx);
-        self.open_query_with(Some(connection_index), database, cx);
+        let schema = self.default_query_schema(cx, connection_index, database.as_deref());
+        self.open_query_with(Some(connection_index), database, schema, cx);
     }
 
     /// Open a query tab for a specific database in the tree, selecting it up front.
@@ -90,13 +140,27 @@ impl AppView {
         cx: &mut Context<'_, Self>,
     ) {
         let database = self.database_name(connection_index, database_index);
-        self.open_query_with(Some(connection_index), database, cx);
+        let schema = self.default_query_schema(cx, connection_index, database.as_deref());
+        self.open_query_with(Some(connection_index), database, schema, cx);
+    }
+
+    /// Open a query tab scoped to a specific schema (the connection tree's schema context menu).
+    pub(super) fn open_new_query_for_schema(
+        &mut self,
+        connection_index: usize,
+        database_index: usize,
+        schema: String,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let database = self.database_name(connection_index, database_index);
+        self.open_query_with(Some(connection_index), database, Some(schema), cx);
     }
 
     fn open_query_with(
         &mut self,
         connection_index: Option<usize>,
         database: Option<String>,
+        schema: Option<String>,
         cx: &mut Context<'_, Self>,
     ) {
         let id = self.next_query_id;
@@ -104,6 +168,7 @@ impl AppView {
         let mut tab = QueryTab::new(id);
         tab.connection_index = connection_index;
         tab.database = database;
+        tab.schema = schema;
         self.queries.push(tab);
         self.active_query = Some(self.queries.len() - 1);
         self.active_grid = None;
@@ -304,6 +369,117 @@ impl AppView {
         }
     }
 
+    /// The schemas offered by the query toolbar for `database`: the database's loaded schema list
+    /// plus any schema prefixes among its loaded tables/routines. Empty for schema-less engines.
+    pub(super) fn query_schema_options(
+        &self,
+        connection_index: usize,
+        database: &str,
+    ) -> Vec<String> {
+        let Some(database) = self.database_node(connection_index, database) else {
+            return Vec::new();
+        };
+        let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        if let Some(Loadable::Loaded(schemas)) = &database.schemas {
+            names.extend(schemas.iter().cloned());
+        }
+        if let Loadable::Loaded(tables) = &database.tables {
+            for table in tables {
+                if let Some((schema, _)) = table.name.split_once('.')
+                    && !schema.is_empty()
+                {
+                    names.insert(schema.to_string());
+                }
+            }
+        }
+        if let Loadable::Loaded(routines) = &database.routines {
+            for routine in routines {
+                if let Some((schema, _)) = routine.name.split_once('.')
+                    && !schema.is_empty()
+                {
+                    names.insert(schema.to_string());
+                }
+            }
+        }
+        names.into_iter().collect()
+    }
+
+    /// The loaded [`DatabaseNode`] named `database`, if any.
+    fn database_node(&self, connection_index: usize, database: &str) -> Option<&DatabaseNode> {
+        let Loadable::Loaded(databases) = &self.connections.get(connection_index)?.databases else {
+            return None;
+        };
+        databases.iter().find(|node| node.name == database)
+    }
+
+    /// Kick off the database's schema load (once) so the query toolbar's schema combo has options
+    /// even when the database was never expanded in the connection tree.
+    fn ensure_query_schemas(
+        &mut self,
+        connection_index: usize,
+        database: &str,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(database_index) = self.database_index_by_name(connection_index, database) else {
+            return;
+        };
+        let needs_load = self
+            .connections
+            .get(connection_index)
+            .and_then(|node| match &node.databases {
+                Loadable::Loaded(databases) => databases.get(database_index),
+                _ => None,
+            })
+            .is_some_and(|node| matches!(&node.schemas, None | Some(Loadable::Idle)));
+        if !needs_load {
+            return;
+        }
+        let Some(connection) = self.connection_arc(connection_index) else {
+            return;
+        };
+        self.load_schemas(
+            connection_index,
+            database_index,
+            connection,
+            database.to_string(),
+            cx,
+        );
+    }
+
+    /// Kick off the database's table load (once) so the editor's completion has tables even when
+    /// the database was never expanded in the connection tree.
+    fn ensure_query_tables(
+        &mut self,
+        connection_index: usize,
+        database: &str,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(database_index) = self.database_index_by_name(connection_index, database) else {
+            return;
+        };
+        let needs_load = self
+            .connections
+            .get(connection_index)
+            .and_then(|node| match &node.databases {
+                Loadable::Loaded(databases) => databases.get(database_index),
+                _ => None,
+            })
+            .is_some_and(|node| matches!(&node.tables, Loadable::Idle));
+        if !needs_load {
+            return;
+        }
+        let Some(connection) = self.connection_arc(connection_index) else {
+            return;
+        };
+        self.load_tables(
+            connection_index,
+            database_index,
+            connection,
+            database.to_string(),
+            cx,
+        );
+    }
+
     pub(super) fn ensure_query_combos(&mut self, cx: &mut Context<'_, Self>) {
         let theme = self.theme;
         if self.query_connection_combo.is_none() {
@@ -334,6 +510,20 @@ impl AppView {
             });
             self.query_database_combo = Some(combo);
         }
+        if self.query_schema_combo.is_none() {
+            let weak = cx.weak_entity();
+            let combo = cx.new(|cx| {
+                ComboBox::new(theme, Vec::new(), String::new(), 240.0, cx).on_select(Rc::new(
+                    move |value, _window, cx| {
+                        let _ = weak.update(cx, |app, cx| app.query_schema_selected(value, cx));
+                    },
+                ))
+            });
+            combo.update(cx, |combo, cx| {
+                combo.set_icon("icons/database.svg", theme.icon_database, cx);
+            });
+            self.query_schema_combo = Some(combo);
+        }
     }
 
     pub(super) fn sync_query_combos(&mut self, cx: &mut Context<'_, Self>) {
@@ -343,26 +533,60 @@ impl AppView {
         let Some(tab) = self.queries.get(active) else {
             return;
         };
-        let has_connection = tab.connection_index.is_some();
-        let connection_selected = tab
-            .connection_index
+        let connection_index = tab.connection_index;
+        let database = tab.database.clone();
+        let schema = tab.schema.clone();
+        let has_connection = connection_index.is_some();
+        let connection_selected = connection_index
             .map(|index| index.to_string())
             .unwrap_or_default();
-        let database_selected = tab.database.clone().unwrap_or_default();
+        let database_selected = database.clone().unwrap_or_default();
+        let supports_schemas = connection_index
+            .is_some_and(|index| self.driver_supports(index, DriverCapability::Schemas));
         let connection_options: Vec<ComboOption> = self
             .query_connection_options()
             .into_iter()
             .map(|(value, label)| ComboOption::new(value, label))
             .collect();
-        let database_options: Vec<ComboOption> = tab
-            .connection_index
+        let database_options: Vec<ComboOption> = connection_index
             .map(|index| self.query_database_options(index))
             .unwrap_or_default()
             .into_iter()
             .map(|(value, label)| ComboOption::new(value, label))
             .collect();
+        let mut schema_options: Vec<ComboOption> = Vec::new();
+        if supports_schemas
+            && let (Some(connection_index), Some(database)) =
+                (connection_index, database.as_deref())
+        {
+            for name in self.query_schema_options(connection_index, database) {
+                schema_options.push(ComboOption::plain(name));
+            }
+        }
+        // Warm the database's catalog if it was never expanded in the tree, so both the schema
+        // combo and the editor's completion have something to draw on.
+        if let (Some(connection_index), Some(database)) = (connection_index, database.as_deref()) {
+            self.ensure_query_tables(connection_index, database, cx);
+            if supports_schemas {
+                self.ensure_query_schemas(connection_index, database, cx);
+            }
+        }
+        // Default to the database's first schema (as Navicat does) and persist it on the tab, so
+        // the completion filter and run/inference use it too.
+        let mut schema_selected = schema.clone();
+        if supports_schemas
+            && schema_selected.is_none()
+            && let Some(first) = schema_options.first().map(|option| option.value.clone())
+        {
+            schema_selected = Some(first.clone());
+            if let Some(tab) = self.queries.get_mut(active) {
+                tab.schema = Some(first);
+            }
+        }
         let not_connected = t!("query.not_connected").to_string();
         let database_placeholder = t!("database.name").to_string();
+        let schema_placeholder = t!("query.schema_name").to_string();
+        let schema_selected = schema_selected.unwrap_or_default();
         if let Some(combo) = self.query_connection_combo.clone() {
             combo.update(cx, |combo, cx| {
                 combo.set_options(connection_options, cx);
@@ -378,6 +602,14 @@ impl AppView {
                 combo.set_selected(database_selected, cx);
             });
         }
+        if let Some(combo) = self.query_schema_combo.clone() {
+            combo.update(cx, |combo, cx| {
+                combo.set_options(schema_options, cx);
+                combo.set_placeholder(schema_placeholder, cx);
+                combo.set_enabled(has_connection, cx);
+                combo.set_selected(schema_selected, cx);
+            });
+        }
     }
 
     pub(super) fn query_connection_selected(&mut self, value: &str, cx: &mut Context<'_, Self>) {
@@ -386,9 +618,12 @@ impl AppView {
         };
         let connection_index = value.parse::<usize>().ok();
         let database = connection_index.and_then(|index| self.default_query_database(index, cx));
+        let schema = connection_index
+            .and_then(|index| self.default_query_schema(cx, index, database.as_deref()));
         if let Some(tab) = self.queries.get_mut(index) {
             tab.connection_index = connection_index;
             tab.database = database;
+            tab.schema = schema;
         }
         if let Some(connection_index) = connection_index
             && !matches!(
@@ -408,8 +643,37 @@ impl AppView {
             && let Some(tab) = self.queries.get_mut(index)
         {
             tab.database = Some(value.to_string());
+            // The old schema may not exist in the new database.
+            tab.schema = None;
         }
         cx.notify();
+    }
+
+    pub(super) fn query_schema_selected(&mut self, value: &str, cx: &mut Context<'_, Self>) {
+        if let Some(index) = self.active_query
+            && let Some(tab) = self.queries.get_mut(index)
+        {
+            tab.schema = Some(value.to_string());
+        }
+        cx.notify();
+    }
+
+    /// Mirror the live editor selection into the tab, so the run button's label and selection
+    /// range agree with what the editor shows (gpui does not notify the app of selection changes,
+    /// so this runs on each app render and `run_query` also re-reads the editor directly).
+    pub(super) fn sync_query_selection(&mut self, index: usize, cx: &App) {
+        let Some(editor) = self
+            .query_editors
+            .get(index)
+            .and_then(|editor| editor.clone())
+        else {
+            return;
+        };
+        let (start, end) = editor.read(cx).selected_range(cx);
+        if let Some(tab) = self.queries.get_mut(index) {
+            tab.anchor = start;
+            tab.caret = end;
+        }
     }
 
     pub(super) fn run_query(&mut self, selected_only: bool, cx: &mut Context<'_, Self>) {
@@ -420,7 +684,18 @@ impl AppView {
             return;
         };
 
-        let (selection_start, selection_end) = tab.selection();
+        // The wrapped editor owns the real selection; `QueryTab::caret/anchor` is only a mirror
+        // that may lag behind (gpui does not notify the app of selection changes). Read the live
+        // range for "run selected", falling back to the mirror.
+        let live_selection = if selected_only {
+            self.query_editors
+                .get(index)
+                .and_then(|editor| editor.as_ref())
+                .map(|editor| editor.read(cx).selected_range(cx))
+        } else {
+            None
+        };
+        let (selection_start, selection_end) = live_selection.unwrap_or_else(|| tab.selection());
         let source = if selected_only && selection_start < selection_end {
             &tab.sql[selection_start..selection_end]
         } else {
@@ -432,6 +707,10 @@ impl AppView {
         }
         let executable = original.clone();
         let database = tab.database.clone();
+        let tab_schema = tab.schema.clone();
+        let supports_schemas = tab
+            .connection_index
+            .is_some_and(|index| self.driver_supports(index, DriverCapability::Schemas));
         let connection_name = tab
             .connection_index
             .and_then(|connection_index| self.connections.get(connection_index))
@@ -480,14 +759,32 @@ impl AppView {
                         let mut grid_database = database.clone().unwrap_or_default();
                         let mut grid_table = String::new();
                         if result.has_result_set
-                            && let Some((schema, table)) =
+                            && let Some((reference_schema, table)) =
                                 sql::infer_single_table(&result.statement)
                         {
-                            let target_database =
-                                schema.or_else(|| database.clone()).unwrap_or_default();
+                            // On schema engines the statement's first qualifier is a schema, so
+                            // the grid's object is `schema.table` inside the query's database;
+                            // elsewhere the qualifier is a database and the name stays bare.
+                            let (target_database, target_table) = if supports_schemas {
+                                let schema =
+                                    reference_schema.clone().or_else(|| tab_schema.clone());
+                                let table = match schema {
+                                    Some(schema) => format!("{schema}.{table}"),
+                                    None => table.clone(),
+                                };
+                                (database.clone().unwrap_or_default(), table)
+                            } else {
+                                (
+                                    reference_schema
+                                        .clone()
+                                        .or_else(|| database.clone())
+                                        .unwrap_or_default(),
+                                    table.clone(),
+                                )
+                            };
                             let column_connection = connection.clone();
                             let column_database = target_database.clone();
-                            let column_table = table.clone();
+                            let column_table = target_table.clone();
                             let columns = match runtime
                                 .spawn(async move {
                                     column_connection
@@ -512,7 +809,7 @@ impl AppView {
                             }
                             editable = true;
                             grid_database = target_database;
-                            grid_table = table;
+                            grid_table = target_table;
                         }
                         plans.push(QueryResultPlan {
                             result,
@@ -1399,7 +1696,10 @@ impl AppView {
             return;
         }
 
-        self.open_query_with(connection_index, database_option, cx);
+        let schema = connection_index
+            .and_then(|index| self.default_query_schema(cx, index, database_option.as_deref()));
+
+        self.open_query_with(connection_index, database_option, schema, cx);
         if let Some(active) = self.active_query
             && let Some(tab) = self.queries.get_mut(active)
         {

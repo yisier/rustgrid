@@ -34,31 +34,84 @@ pub(crate) struct CompletionCatalog {
     pub functions: HashMap<usize, Vec<String>>,
 }
 
-/// A shared catalog and the connection/database the active editor targets.
+/// The connection / database / schema the active editor's completion and column lookups target.
+#[derive(Clone, Default)]
+pub(crate) struct CompletionScope {
+    pub connection_index: Option<usize>,
+    pub database: Option<String>,
+    /// The selected schema (SQL Server); `None` leaves unqualified objects to the engine default.
+    pub schema: Option<String>,
+    /// Whether the target engine namespaces objects by schema (SQL Server). When true a referenced
+    /// table's first qualifier is a schema, not a database.
+    pub supports_schemas: bool,
+    /// The connection's driver id (e.g. `mysql`, `sqlserver`), used to pick the built-in function
+    /// list so an engine is not offered another's functions.
+    pub driver: Option<String>,
+}
+
+/// A shared catalog and the scope the active editor targets. The scope is behind an `Arc` so a
+/// live provider can be re-scoped when the toolbar's connection/database/schema changes.
 #[derive(Clone)]
 pub(crate) struct CompletionSource {
     catalog: Arc<std::sync::RwLock<CompletionCatalog>>,
-    connection_index: Option<usize>,
-    database: Option<String>,
+    scope: Arc<std::sync::RwLock<CompletionScope>>,
 }
 
 impl CompletionSource {
     pub(crate) fn new(catalog: Arc<std::sync::RwLock<CompletionCatalog>>) -> Self {
         Self {
             catalog,
-            connection_index: None,
-            database: None,
+            scope: Arc::new(std::sync::RwLock::new(CompletionScope::default())),
         }
     }
 
     pub(crate) fn with_scope(
-        mut self,
+        self,
         connection_index: Option<usize>,
         database: Option<String>,
+        schema: Option<String>,
+        supports_schemas: bool,
+        driver: Option<String>,
     ) -> Self {
-        self.connection_index = connection_index;
-        self.database = database;
+        *self.scope.write().expect("completion scope lock") = CompletionScope {
+            connection_index,
+            database,
+            schema,
+            supports_schemas,
+            driver,
+        };
         self
+    }
+
+    /// The shared scope, so the editor wrapper can re-scope a live provider.
+    pub(crate) fn scope_handle(&self) -> Arc<std::sync::RwLock<CompletionScope>> {
+        self.scope.clone()
+    }
+}
+
+/// Resolve a referenced table to the catalog's `(database, table-key)` coordinates. On schema
+/// engines the reference's first qualifier is a schema (not a database), and the catalog keys
+/// tables as `schema.table`; elsewhere the qualifier is a database and the key is the bare name.
+pub(crate) fn catalog_target(
+    scope: &CompletionScope,
+    table: &sql::SqlTableRef,
+) -> Option<(String, String)> {
+    let qualifier = table.database.as_deref().filter(|name| !name.is_empty());
+    if scope.supports_schemas {
+        let database = scope.database.clone()?;
+        let schema = qualifier
+            .map(str::to_string)
+            .or_else(|| scope.schema.clone());
+        let key = match schema {
+            Some(schema) => format!("{schema}.{}", table.name),
+            None => table.name.clone(),
+        };
+        Some((database, key))
+    } else {
+        let database = qualifier
+            .map(str::to_string)
+            .or_else(|| scope.database.clone())?;
+        Some((database, table.name.clone()))
     }
 }
 
@@ -110,7 +163,9 @@ impl CompletionProvider for SqlCompletionProvider {
 }
 
 /// Build the completion items for a caret context, ordering columns → tables → functions →
-/// keywords and de-duplicating by `(label, detail)`.
+/// keywords and de-duplicating by `(label, detail)`. Under a selected schema a table/function is
+/// offered by its bare name, so the typed prefix matches and accepting it does not append the
+/// schema.
 fn build_items(
     source: &CompletionSource,
     context: &sql::SqlCompletionContext,
@@ -119,6 +174,8 @@ fn build_items(
         return Vec::new();
     }
     let catalog = source.catalog.read().expect("completion catalog lock");
+    let scope = source.scope.read().expect("completion scope lock");
+    let connection = scope.connection_index;
     let qualifier = context.qualifier.last().map(String::as_str);
 
     let kind = if context.kind == sql::SqlCompletionKind::Table {
@@ -130,30 +187,24 @@ fn build_items(
     let mut items: Vec<(u8, CompletionItem)> = Vec::new();
 
     // 1. Columns: from the statement's referenced tables, or the qualifier's table.
-    let column_targets: Vec<(&str, &str)> = if let Some(qualifier) = qualifier {
+    let column_targets: Vec<(String, String)> = if let Some(qualifier) = qualifier {
         resolve_qualified_table(context, qualifier)
+            .and_then(|table| catalog_target(&scope, table))
             .into_iter()
             .collect()
     } else {
         context
             .tables
             .iter()
-            .filter_map(|table| {
-                let database = table
-                    .database
-                    .as_deref()
-                    .filter(|name| !name.is_empty())
-                    .or(source.database.as_deref())?;
-                Some((database, table.name.as_str()))
-            })
+            .filter_map(|table| catalog_target(&scope, table))
             .collect()
     };
-    if let Some(connection) = source.connection_index {
+    if let Some(connection) = connection {
         for (database, table) in &column_targets {
             if let Some(columns) =
                 catalog
                     .columns
-                    .get(&(connection, (*database).to_string(), (*table).to_string()))
+                    .get(&(connection, database.clone(), table.clone()))
             {
                 for (name, data_type, comment) in columns {
                     let detail = if comment.is_empty() {
@@ -167,9 +218,10 @@ fn build_items(
         }
     }
 
-    // 2. Tables: all loaded tables, or the qualifier database's tables.
+    // 2. Tables: all loaded tables, or the qualifier database's tables. With a schema selected,
+    // only that schema's tables are offered (the schema selector's filtering).
     let table_kind = CompletionItemKind::CLASS;
-    if let Some(connection) = source.connection_index {
+    if let Some(connection) = connection {
         let mut tables: Vec<(String, String)> = Vec::new();
         for ((conn, database), names) in &catalog.tables {
             if *conn != connection {
@@ -181,31 +233,44 @@ fn build_items(
                 continue;
             }
             for name in names {
+                if qualifier.is_none()
+                    && let Some(schema) = &scope.schema
+                    && !name_in_schema(name, schema)
+                {
+                    continue;
+                }
                 tables.push((name.clone(), database.clone()));
             }
         }
         tables.sort();
         tables.dedup();
         for (name, database) in tables {
-            items.push((1, completion_item(&name, &database, table_kind)));
+            let label = display_name(&name, scope.schema.as_deref());
+            items.push((1, completion_item(&label, &database, table_kind)));
         }
     }
 
     // 3. Functions: built-ins plus the connection's stored functions.
     if qualifier.is_none() {
-        for function in sql::functions().iter().copied() {
+        for function in sql::functions_for(scope.driver.as_deref()).iter().copied() {
             items.push((
                 2,
                 completion_item(function, "function", CompletionItemKind::FUNCTION),
             ));
         }
-        if let Some(connection) = source.connection_index
+        if let Some(connection) = connection
             && let Some(functions) = catalog.functions.get(&connection)
         {
             for function in functions {
+                if let Some(schema) = &scope.schema
+                    && !name_in_schema(function, schema)
+                {
+                    continue;
+                }
+                let label = display_name(function, scope.schema.as_deref());
                 items.push((
                     2,
-                    completion_item(function, "function", CompletionItemKind::FUNCTION),
+                    completion_item(&label, "function", CompletionItemKind::FUNCTION),
                 ));
             }
         }
@@ -231,32 +296,59 @@ fn build_items(
         })
         .collect();
     filtered.sort_by(|a, b| {
-        a.0.cmp(&b.0).then_with(|| {
-            if a.0 == 0 {
-                std::cmp::Ordering::Equal
-            } else {
-                a.1.label.to_lowercase().cmp(&b.1.label.to_lowercase())
-            }
-        })
+        let a_exact = a.1.label.eq_ignore_ascii_case(prefix);
+        let b_exact = b.1.label.eq_ignore_ascii_case(prefix);
+        // An item whose label is exactly what was typed is the most likely pick, so it sorts first
+        // regardless of category (the `FROM` keyword before `FROM_BASE64`, a table before
+        // keywords).
+        b_exact
+            .cmp(&a_exact)
+            .then_with(|| a.0.cmp(&b.0))
+            .then_with(|| {
+                if a.0 == 0 {
+                    std::cmp::Ordering::Equal
+                } else {
+                    a.1.label.to_lowercase().cmp(&b.1.label.to_lowercase())
+                }
+            })
     });
     filtered.truncate(64);
     filtered.into_iter().map(|(_, item)| item).collect()
 }
 
-/// Resolve a single-part qualifier (`alias` or `table` or `database`) to a `(database, table)`.
+/// The completion label for a possibly schema-qualified object name. Under a selected schema the
+/// bare name is shown (and inserted), so accepting a suggestion does not append the schema.
+fn display_name(name: &str, schema: Option<&str>) -> String {
+    if let Some(schema) = schema
+        && let Some((prefix, object)) = name.split_once('.')
+        && !prefix.is_empty()
+        && !object.is_empty()
+        && prefix.eq_ignore_ascii_case(schema)
+    {
+        return object.to_string();
+    }
+    name.to_string()
+}
+
+/// Resolve a single-part qualifier (`alias` or `table` or `database`) to its referenced table.
 fn resolve_qualified_table<'a>(
     context: &'a sql::SqlCompletionContext,
     qualifier: &str,
-) -> Option<(&'a str, &'a str)> {
-    let table = context.tables.iter().find(|table| {
+) -> Option<&'a sql::SqlTableRef> {
+    context.tables.iter().find(|table| {
         table
             .alias
             .as_deref()
             .is_some_and(|alias| alias.eq_ignore_ascii_case(qualifier))
             || table.name.eq_ignore_ascii_case(qualifier)
-    })?;
-    let database = table.database.as_deref().filter(|name| !name.is_empty())?;
-    Some((database, table.name.as_str()))
+    })
+}
+
+/// Whether a (possibly schema-qualified) catalog object name belongs to `schema`.
+fn name_in_schema(name: &str, schema: &str) -> bool {
+    name.split_once('.').is_some_and(|(prefix, object)| {
+        !prefix.is_empty() && !object.is_empty() && prefix.eq_ignore_ascii_case(schema)
+    })
 }
 
 fn completion_item(label: &str, detail: &str, kind: CompletionItemKind) -> CompletionItem {
@@ -299,5 +391,86 @@ mod tests {
         let range = replacement_range(&Rope::from(sql), &context, sql.len());
         assert_eq!(range.start, range.end);
         assert_eq!(range.end.character, sql.len() as u32);
+    }
+
+    fn schema_scope(schema: Option<&str>) -> CompletionScope {
+        CompletionScope {
+            connection_index: Some(0),
+            database: Some("appdb".into()),
+            schema: schema.map(str::to_string),
+            supports_schemas: true,
+            driver: None,
+        }
+    }
+
+    fn table(database: Option<&str>, name: &str) -> sql::SqlTableRef {
+        sql::SqlTableRef {
+            database: database.map(str::to_string),
+            name: name.to_string(),
+            alias: None,
+        }
+    }
+
+    #[test]
+    fn catalog_target_qualifies_unqualified_tables_on_schema_engines() {
+        let scope = schema_scope(Some("sales"));
+        assert_eq!(
+            catalog_target(&scope, &table(None, "orders")),
+            Some(("appdb".into(), "sales.orders".into()))
+        );
+    }
+
+    #[test]
+    fn catalog_target_prefers_the_reference_schema_over_the_selected_one() {
+        let scope = schema_scope(Some("sales"));
+        assert_eq!(
+            catalog_target(&scope, &table(Some("dbo"), "users")),
+            Some(("appdb".into(), "dbo.users".into()))
+        );
+    }
+
+    #[test]
+    fn catalog_target_leaves_unqualified_tables_bare_without_a_schema() {
+        let scope = schema_scope(None);
+        assert_eq!(
+            catalog_target(&scope, &table(None, "orders")),
+            Some(("appdb".into(), "orders".into()))
+        );
+    }
+
+    #[test]
+    fn catalog_target_keeps_database_qualifiers_on_schema_less_engines() {
+        let scope = CompletionScope {
+            connection_index: Some(0),
+            database: Some("default".into()),
+            schema: None,
+            supports_schemas: false,
+            driver: None,
+        };
+        assert_eq!(
+            catalog_target(&scope, &table(None, "orders")),
+            Some(("default".into(), "orders".into()))
+        );
+        assert_eq!(
+            catalog_target(&scope, &table(Some("other"), "orders")),
+            Some(("other".into(), "orders".into()))
+        );
+    }
+
+    #[test]
+    fn name_in_schema_matches_the_prefix() {
+        assert!(name_in_schema("dbo.users", "DBO"));
+        assert!(!name_in_schema("sales.users", "dbo"));
+        assert!(!name_in_schema("users", "dbo"));
+    }
+
+    #[test]
+    fn display_name_strips_the_selected_schema_prefix() {
+        assert_eq!(display_name("dbo.users", Some("DBO")), "users");
+        // A name outside the selected schema keeps its qualified label.
+        assert_eq!(display_name("sales.users", Some("dbo")), "sales.users");
+        // Without a selected schema (or for an unqualified name) the name is unchanged.
+        assert_eq!(display_name("dbo.users", None), "dbo.users");
+        assert_eq!(display_name("users", Some("dbo")), "users");
     }
 }

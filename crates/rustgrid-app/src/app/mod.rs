@@ -1423,6 +1423,7 @@ pub struct AppView {
     query_detail_columns: Rc<RefCell<DetailColumns>>,
     query_connection_combo: Option<Entity<ComboBox>>,
     query_database_combo: Option<Entity<ComboBox>>,
+    query_schema_combo: Option<Entity<ComboBox>>,
     /// The query page's bottom result-panel height, set by dragging the splitter between the
     /// editor and the 结果 tabs.
     query_result_height: f32,
@@ -1865,6 +1866,7 @@ impl AppView {
             query_detail_columns: Rc::new(RefCell::new(DetailColumns::default())),
             query_connection_combo: None,
             query_database_combo: None,
+            query_schema_combo: None,
             query_result_height: QUERY_RESULT_DEFAULT_HEIGHT,
             query_split_drag: None,
             query_column_cache: RefCell::new(std::collections::HashMap::new()),
@@ -2481,6 +2483,7 @@ impl AppView {
             self.db_compat_combo.as_ref(),
             self.query_connection_combo.as_ref(),
             self.query_database_combo.as_ref(),
+            self.query_schema_combo.as_ref(),
             self.save_connection_combo.as_ref(),
             self.save_database_combo.as_ref(),
             self.language_combo.as_ref(),

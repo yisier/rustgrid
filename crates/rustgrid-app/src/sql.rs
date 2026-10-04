@@ -340,10 +340,14 @@ pub fn completion_context(sql: &str, caret: usize) -> SqlCompletionContext {
     }
 }
 
-/// The built-in function names offered by completion. MySQL is the bundled engine; a second
-/// engine would add its own list behind the driver boundary.
-pub fn functions() -> &'static [&'static str] {
-    BUILTIN_FUNCTIONS
+/// The built-in function names offered by completion for `driver`. MySQL/MariaDB have a curated
+/// list; other engines contribute theirs through their driver as they are added, so they currently
+/// get none (their stored functions are still offered).
+pub fn functions_for(driver: Option<&str>) -> &'static [&'static str] {
+    match driver {
+        Some("mysql") | Some("mariadb") => BUILTIN_FUNCTIONS,
+        _ => &[],
+    }
 }
 
 fn is_identifier_char(character: char) -> bool {
@@ -1014,6 +1018,15 @@ mod tests {
     }
 
     #[test]
+    fn builtin_functions_are_offered_only_for_mysql_family_engines() {
+        assert!(!functions_for(Some("mysql")).is_empty());
+        assert!(!functions_for(Some("mariadb")).is_empty());
+        assert!(functions_for(Some("sqlserver")).is_empty());
+        assert!(functions_for(Some("sqlite")).is_empty());
+        assert!(functions_for(None).is_empty());
+    }
+
+    #[test]
     fn keyword_list_is_populated() {
         assert!(keywords().contains(&"SELECT"));
     }
@@ -1074,8 +1087,9 @@ mod tests {
 
     #[test]
     fn lists_builtin_functions() {
-        assert!(functions().contains(&"COUNT"));
-        assert!(functions().contains(&"JSON_EXTRACT"));
+        let functions = functions_for(Some("mysql"));
+        assert!(functions.contains(&"COUNT"));
+        assert!(functions.contains(&"JSON_EXTRACT"));
     }
 
     #[test]

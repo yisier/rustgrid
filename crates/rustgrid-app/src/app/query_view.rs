@@ -18,6 +18,7 @@ impl AppView {
         if is_view {
             return self.render_view_view(query_index, cx);
         }
+        self.sync_query_selection(query_index, cx);
         let theme = self.theme;
 
         let toolbar = div()
@@ -61,6 +62,7 @@ impl AppView {
             has_error,
             has_results,
             active_result,
+            supports_schemas,
         ) = {
             let Some(query) = self.queries.get(query_index) else {
                 return div().into_any_element();
@@ -76,6 +78,9 @@ impl AppView {
                 query.result_error.is_some(),
                 !query.results.is_empty(),
                 query.active_result,
+                query
+                    .connection_index
+                    .is_some_and(|index| self.driver_supports(index, DriverCapability::Schemas)),
             )
         };
         let run_enabled = has_connection && !running;
@@ -98,7 +103,13 @@ impl AppView {
             .border_b_1()
             .border_color(rgb(theme.border))
             .child(self.query_connection_combo_element())
-            .child(self.query_database_combo_element())
+            .child(self.query_database_combo_element());
+        let controls = if supports_schemas {
+            controls.child(self.query_schema_combo_element())
+        } else {
+            controls
+        };
+        let controls = controls
             .child(div().w(px(10.0)).flex_none())
             .child(self.query_tool_button(
                 "query-run",
@@ -107,7 +118,9 @@ impl AppView {
                 theme.text,
                 theme.icon_connection,
                 run_enabled,
-                cx.listener(move |this, _event, _window, cx| this.run_query(has_selection, cx)),
+                // The wrapped editor owns the real selection, so `run_query` re-reads it live and
+                // runs the selection when there is one, otherwise the whole editor.
+                cx.listener(move |this, _event, _window, cx| this.run_query(true, cx)),
             ))
             .child(self.query_tool_button(
                 "query-stop",
@@ -346,6 +359,13 @@ impl AppView {
 
     fn query_database_combo_element(&self) -> AnyElement {
         match self.query_database_combo.as_ref() {
+            Some(combo) => combo.clone().into_any_element(),
+            None => div().into_any_element(),
+        }
+    }
+
+    fn query_schema_combo_element(&self) -> AnyElement {
+        match self.query_schema_combo.as_ref() {
             Some(combo) => combo.clone().into_any_element(),
             None => div().into_any_element(),
         }

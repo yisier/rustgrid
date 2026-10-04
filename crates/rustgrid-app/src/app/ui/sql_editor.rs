@@ -6,6 +6,7 @@
 //! pending mutations are flushed there.
 
 use std::rc::Rc;
+use std::sync::{Arc, RwLock};
 
 use gpui::{
     App, AppContext, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render,
@@ -16,6 +17,8 @@ use gpui_kit::component::input::{
     Copy, Cut, Editor, EditorState, InputEvent, Paste, Redo, SelectAll, Undo,
 };
 use gpui_kit::component::native_menu::NativeMenu;
+
+use crate::app::sql_completion::CompletionScope;
 
 /// Options applied when the editor is first built.
 #[derive(Clone)]
@@ -49,6 +52,9 @@ pub(crate) struct SqlEditor {
     on_change: Option<SqlEditorChange>,
     /// The provider, or a factory that builds it with the inner state's context.
     provider: Option<Rc<dyn gpui_kit::component::input::CompletionProvider>>,
+    /// The provider's live connection/database/schema scope, so re-scoping does not need to
+    /// rebuild the editor.
+    scope: Option<Arc<RwLock<CompletionScope>>>,
     state: Option<Entity<EditorState>>,
     subscriptions: Vec<Subscription>,
     /// A `set_text` requested before the state existed (or that still needs applying).
@@ -68,6 +74,7 @@ impl SqlEditor {
             options: SqlEditorOptions::default(),
             on_change: None,
             provider: None,
+            scope: None,
             state: None,
             subscriptions: Vec::new(),
             pending_text: None,
@@ -94,19 +101,44 @@ impl SqlEditor {
         self
     }
 
-    /// Re-scope the completion provider after the tab's connection/database changes.
+    /// Share the completion scope with the provider, so [`SqlEditor::set_scope`] can re-scope it.
+    pub(crate) fn scope(mut self, scope: Arc<RwLock<CompletionScope>>) -> Self {
+        self.scope = Some(scope);
+        self
+    }
+
+    /// Re-scope the completion provider after the tab's connection/database/schema changes.
     pub(crate) fn set_scope(
         &mut self,
-        _connection_index: Option<usize>,
-        _database: Option<String>,
+        connection_index: Option<usize>,
+        database: Option<String>,
+        schema: Option<String>,
+        supports_schemas: bool,
+        driver: Option<String>,
         _cx: &mut Context<Self>,
     ) {
-        // The provider is created with its scope baked in by `AppView::ensure_query_editor`; a
-        // change of scope is handled there by reading the live tab, so nothing to do here yet.
+        if let Some(scope) = &self.scope
+            && let Ok(mut scope) = scope.write()
+        {
+            scope.connection_index = connection_index;
+            scope.database = database;
+            scope.schema = schema;
+            scope.supports_schemas = supports_schemas;
+            scope.driver = driver;
+        }
     }
 
     pub(crate) fn text(&self) -> &str {
         &self.text
+    }
+
+    /// The active selection as byte offsets (`start == end` when nothing is selected).
+    pub(crate) fn selected_range(&self, cx: &App) -> (usize, usize) {
+        let Some(state) = self.state.as_ref() else {
+            return (0, 0);
+        };
+        let range = state.read(cx).selected_range();
+        (range.start, range.end)
     }
 
     /// Replace the whole document. Before the first render (and whenever no window is at hand) the
