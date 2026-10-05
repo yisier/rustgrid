@@ -255,8 +255,8 @@ impl GridView {
             .flex_none()
             .border_t_1()
             .border_color(rgb(theme.border))
-            .child(self.sort_arrow_button("sort-move-up", "icons/arrow-up.svg", 1, cx))
-            .child(self.sort_arrow_button("sort-move-down", "icons/arrow-down.svg", -1, cx))
+            .child(self.sort_arrow_button("sort-move-up", "icons/arrow-up.svg", -1, cx))
+            .child(self.sort_arrow_button("sort-move-down", "icons/arrow-down.svg", 1, cx))
             .child(div().w(px(14.0)).flex_none())
             .child(self.sort_apply_button(cx));
 

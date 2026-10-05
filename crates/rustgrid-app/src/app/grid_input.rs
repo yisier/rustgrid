@@ -366,6 +366,24 @@ impl GridView {
                 cx.stop_propagation();
             } else if self.cell_editor.is_none()
                 && self.date_picker.is_none()
+                && keystroke.key.eq_ignore_ascii_case("a")
+            {
+                self.select_all_cells(cx);
+                cx.stop_propagation();
+            } else if self.cell_editor.is_none()
+                && self.date_picker.is_none()
+                && keystroke.key.eq_ignore_ascii_case("c")
+            {
+                self.copy_selection(cx);
+                cx.stop_propagation();
+            } else if self.cell_editor.is_none()
+                && self.date_picker.is_none()
+                && keystroke.key.eq_ignore_ascii_case("v")
+            {
+                self.paste_clipboard(cx);
+                cx.stop_propagation();
+            } else if self.cell_editor.is_none()
+                && self.date_picker.is_none()
                 && keystroke.key.eq_ignore_ascii_case("z")
             {
                 self.undo_edit(cx);
@@ -439,6 +457,19 @@ impl GridView {
                 }
             }
         }
+        cx.notify();
+    }
+
+    /// Select every displayed cell (Ctrl+A), like Navicat's "select all records".
+    pub(super) fn select_all_cells(&mut self, cx: &mut Context<'_, Self>) {
+        let rows = self.display_row_count();
+        let cols = self.state.columns.len();
+        if rows == 0 || cols == 0 {
+            return;
+        }
+        self.state.selection = Some(CellSelection::single((0, 0), (rows - 1, cols - 1)));
+        self.cell_press = None;
+        self.selecting_cells = false;
         cx.notify();
     }
 

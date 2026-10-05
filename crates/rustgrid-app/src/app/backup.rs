@@ -5,6 +5,7 @@
 //! [`rustgrid_core::Connection`] trait. Files are written under the app config dir's
 //! `backups/<connection-id>/<database>/` tree.
 
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Mutex;
@@ -475,7 +476,10 @@ impl AppView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    // Clicking the list background commits an in-place rename (see the query list).
                     if this.backup_rename.is_some() {
+                        this.submit_backup_rename(cx);
+                        window.focus(&this.backup_focus, cx);
                         return;
                     }
                     window.focus(&this.backup_focus, cx);
@@ -839,6 +843,32 @@ impl AppView {
             let selected = self.backups_selection.contains(&key);
             let click_key = key.clone();
             let menu_key = key.clone();
+            // The row being renamed draws the in-place editor instead of its label (the 详细列表
+            // does this too; the 平铺网格 must as well, or F2/context-menu rename looks inert).
+            let rename = match entry {
+                BackupEntry::File(index) => self
+                    .backup_rename
+                    .as_ref()
+                    .filter(|edit| edit.index == index)
+                    .map(|edit| edit.input.clone()),
+                BackupEntry::Config(_) => None,
+            };
+            let title: AnyElement = match rename {
+                Some(input) => div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .h(px(20.0))
+                    .child(ui::rename_field(theme, input))
+                    .into_any_element(),
+                None => div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_color(rgb(theme.text))
+                    .child(name)
+                    .into_any_element(),
+            };
             let tile = ui::grid_item_sized(
                 SharedString::from(format!("backup-tile-{key}")),
                 selected,
@@ -873,15 +903,7 @@ impl AppView {
                 }),
             )
             .child(ui::leading_icon_badge(icon, color, 16.0))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_color(rgb(theme.text))
-                    .child(name),
-            );
+            .child(title);
             column = column.child(backup_row_with_rect(
                 cx.weak_entity(),
                 tile,
@@ -933,7 +955,7 @@ impl AppView {
 
     fn extract_selected_backup(&mut self, cx: &mut Context<'_, Self>) {
         if let Some(BackupSelection::File(index)) = self.backup_selected {
-            self.extract_backup_sql(index, cx);
+            self.open_extract_sql(index, cx);
         }
     }
 
@@ -1174,60 +1196,334 @@ impl AppView {
         cx.notify();
     }
 
-    /// Extract a backup's objects into a `.sql` file beside it and open it in a query tab.
-    pub(super) fn extract_backup_sql(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+    /// Open the "Extract SQL" dialog for a backup file. Mirrors the Restore window: pick the
+    /// objects, choose an output file, then watch the extraction log and progress.
+    pub(super) fn open_extract_sql(&mut self, index: usize, cx: &mut Context<'_, Self>) {
         let Some(file) = self.backup_files.get(index) else {
             return;
         };
-        let path = file.path.clone();
-        let connection_index = self
-            .connections
+        let objects: Vec<BackupObjectEntry> = file
+            .manifest
+            .objects
             .iter()
-            .position(|node| node.profile.id == file.connection_id);
-        let database = if file.database.is_empty() {
-            file.manifest.schema.clone()
-        } else {
-            file.database.clone()
-        };
-        match rustgrid_backup::read_backup(&path) {
-            Ok(archive) => {
-                let mut sql = String::new();
-                for object in &archive.objects {
-                    sql.push_str(&rustgrid_backup::object_sql(object));
-                    sql.push('\n');
-                }
-                let sql_path = path.with_extension("sql");
-                let _ = std::fs::write(&sql_path, &sql);
-                self.open_extracted_sql(connection_index, database, sql, cx);
-            }
-            Err(error) => {
-                self.error_dialog = Some(error.to_string());
-                cx.notify();
-            }
-        }
+            .map(|object| BackupObjectEntry {
+                kind: object.kind,
+                name: object.name.clone(),
+                selected: true,
+            })
+            .collect();
+        self.new_backup_dialog = None;
+        self.restore_dialog = None;
+        self.extract_dialog = Some(ExtractSqlDialog {
+            file_index: index,
+            tab: BackupDialogTab::Objects,
+            objects,
+            output_path: None,
+            running: false,
+            log: Vec::new(),
+            log_scroll: ScrollHandle::new(),
+            total: 0,
+            success: 0,
+            failed: 0,
+            rows_total: 0,
+            rows_done: 0,
+            started: None,
+            elapsed: None,
+            error: None,
+        });
+        let name = self
+            .backup_files
+            .get(index)
+            .map(|file| file.name.clone())
+            .unwrap_or_default();
+        self.open_backup_window(format!("{} - {}", name, t!("backup.extract_sql")), cx);
+        cx.notify();
     }
 
-    fn open_extracted_sql(
+    pub(super) fn extract_toggle_object(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        if let Some(dialog) = self.extract_dialog.as_mut()
+            && let Some(entry) = dialog.objects.get_mut(index)
+        {
+            entry.selected = !entry.selected;
+        }
+        cx.notify();
+    }
+
+    pub(super) fn extract_toggle_kind(
         &mut self,
-        connection_index: Option<usize>,
-        database: String,
-        sql: String,
+        kind: BackupObjectKind,
         cx: &mut Context<'_, Self>,
     ) {
-        let id = self.next_query_id;
-        self.next_query_id += 1;
-        let mut tab = QueryTab::new(id);
-        tab.connection_index = connection_index;
-        tab.database = (!database.is_empty()).then_some(database);
-        tab.caret = sql.len();
-        tab.anchor = sql.len();
-        tab.sql = sql;
-        self.queries.push(tab);
-        self.active_query = Some(self.queries.len() - 1);
-        self.active_grid = None;
-        self.active_design = None;
-        self.query_focus_pending = true;
-        self.main_tab = MainTab::Queries;
+        if let Some(dialog) = self.extract_dialog.as_mut() {
+            let all = dialog
+                .objects
+                .iter()
+                .filter(|entry| entry.kind == kind)
+                .all(|entry| entry.selected);
+            for entry in dialog.objects.iter_mut().filter(|entry| entry.kind == kind) {
+                entry.selected = !all;
+            }
+        }
+        cx.notify();
+    }
+
+    pub(super) fn extract_set_all(&mut self, selected: bool, cx: &mut Context<'_, Self>) {
+        if let Some(dialog) = self.extract_dialog.as_mut() {
+            for entry in dialog.objects.iter_mut() {
+                entry.selected = selected;
+            }
+        }
+        cx.notify();
+    }
+
+    /// Run the extraction: choose the output `.sql` file through the system dialog, then stream
+    /// each selected object's SQL into it while updating the log and progress live.
+    pub(super) fn run_extract(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(dialog) = self.extract_dialog.as_ref() else {
+            return;
+        };
+        if dialog.running {
+            return;
+        }
+        let selected: Vec<(BackupObjectKind, String)> = dialog
+            .objects
+            .iter()
+            .filter(|entry| entry.selected)
+            .map(|entry| (entry.kind, entry.name.clone()))
+            .collect();
+        let file_index = dialog.file_index;
+        if selected.is_empty() {
+            if let Some(dialog) = self.extract_dialog.as_mut() {
+                dialog.error = Some(t!("backup.no_objects").to_string());
+            }
+            cx.notify();
+            return;
+        }
+        let Some(file) = self.backup_files.get(file_index) else {
+            return;
+        };
+        let path = file.path.clone();
+        let rows_total: usize = file
+            .manifest
+            .objects
+            .iter()
+            .filter(|object| {
+                selected
+                    .iter()
+                    .any(|(kind, name)| *kind == object.kind && *name == object.name)
+            })
+            .map(|object| object.row_count)
+            .sum();
+        let default_name = path
+            .file_stem()
+            .map(|stem| format!("{}.sql", stem.to_string_lossy()))
+            .unwrap_or_else(|| "backup.sql".to_string());
+        let default_dir = path.parent().map(|parent| parent.to_path_buf());
+        let title = t!("backup.extract_sql").to_string();
+        let runtime = self.runtime.clone();
+
+        cx.spawn(async move |this, cx| {
+            // Choose the output file first (system dialog on rfd's own thread).
+            let mut dialog = rfd::AsyncFileDialog::new()
+                .set_title(title)
+                .add_filter("SQL", &["sql"])
+                .set_file_name(default_name);
+            if let Some(parent) = &default_dir {
+                dialog = dialog.set_directory(parent);
+            }
+            let Some(handle) = dialog.save_file().await else {
+                return;
+            };
+            let sql_path = handle.path().to_path_buf();
+
+            let count = selected.len();
+            let _ = this.update(cx, |app, cx| {
+                if let Some(dialog) = app.extract_dialog.as_mut() {
+                    dialog.output_path = Some(sql_path.clone());
+                    dialog.running = true;
+                    dialog.error = None;
+                    dialog.tab = BackupDialogTab::Log;
+                    dialog.log.clear();
+                    dialog.total = count;
+                    dialog.success = 0;
+                    dialog.failed = 0;
+                    dialog.rows_total = rows_total;
+                    dialog.rows_done = 0;
+                    dialog.elapsed = None;
+                    dialog.started = Some(std::time::Instant::now());
+                    dialog
+                        .log
+                        .push(t!("backup.log.started", time = now_timestamp()).to_string());
+                    dialog
+                        .log
+                        .push(t!("backup.log.extract_start", count = count).to_string());
+                    dialog.log_scroll.scroll_to_bottom();
+                }
+                cx.notify();
+            });
+
+            // Open the archive once; each object is read on demand so peak memory stays bounded.
+            let reader_path = path.clone();
+            let reader = match runtime
+                .spawn(async move { rustgrid_backup::BackupReader::open(&reader_path) })
+                .await
+            {
+                Ok(Ok(reader)) => Arc::new(reader),
+                Ok(Err(error)) => {
+                    let _ = this.update(cx, |app, cx| {
+                        app.finish_extract(Some(error.to_string()), cx)
+                    });
+                    return;
+                }
+                Err(error) => {
+                    let _ = this.update(cx, |app, cx| {
+                        app.finish_extract(Some(error.to_string()), cx)
+                    });
+                    return;
+                }
+            };
+
+            let mut output = match std::fs::File::create(&sql_path) {
+                Ok(file) => file,
+                Err(error) => {
+                    let _ = this.update(cx, |app, cx| {
+                        app.finish_extract(Some(error.to_string()), cx)
+                    });
+                    return;
+                }
+            };
+
+            for (kind, name) in selected {
+                let reader = Arc::clone(&reader);
+                let read_name = name.clone();
+                let object = match runtime
+                    .spawn(async move { reader.read_object(kind, &read_name) })
+                    .await
+                {
+                    Ok(Ok(Some(object))) => object,
+                    Ok(Ok(None)) => {
+                        let message = t!(
+                            "backup.log.object_extract_failed",
+                            name = name.clone(),
+                            error = t!("backup.log.missing").to_string()
+                        )
+                        .to_string();
+                        let _ = this.update(cx, |app, cx| {
+                            app.record_extract_result(false, message, 0, cx)
+                        });
+                        continue;
+                    }
+                    Ok(Err(error)) => {
+                        let message = t!(
+                            "backup.log.object_extract_failed",
+                            name = name.clone(),
+                            error = error.to_string()
+                        )
+                        .to_string();
+                        let _ = this.update(cx, |app, cx| {
+                            app.record_extract_result(false, message, 0, cx)
+                        });
+                        continue;
+                    }
+                    Err(error) => {
+                        let message = t!(
+                            "backup.log.object_extract_failed",
+                            name = name.clone(),
+                            error = error.to_string()
+                        )
+                        .to_string();
+                        let _ = this.update(cx, |app, cx| {
+                            app.record_extract_result(false, message, 0, cx)
+                        });
+                        continue;
+                    }
+                };
+                let rows = object.data.lines().count();
+                let sql = rustgrid_backup::object_sql(&object);
+                if let Err(error) = output.write_all(sql.as_bytes()) {
+                    let _ = this.update(cx, |app, cx| {
+                        app.finish_extract(Some(error.to_string()), cx)
+                    });
+                    return;
+                }
+                let message = t!("backup.log.extracted", name = name.clone()).to_string();
+                let _ = this.update(cx, |app, cx| {
+                    app.record_extract_result(true, message, rows, cx)
+                });
+            }
+            let _ = output.flush();
+            let _ = this.update(cx, |app, cx| app.finish_extract(None, cx));
+        })
+        .detach();
+    }
+
+    /// Record one object's outcome for the running extract and keep its log scrolled.
+    fn record_extract_result(
+        &mut self,
+        ok: bool,
+        message: String,
+        rows: usize,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(dialog) = self.extract_dialog.as_mut() {
+            if ok {
+                dialog.success += 1;
+                dialog.rows_done += rows;
+            } else {
+                dialog.failed += 1;
+            }
+            dialog.log.push(message);
+            dialog.log_scroll.scroll_to_bottom();
+        }
+        cx.notify();
+    }
+
+    fn finish_extract(&mut self, fatal: Option<String>, cx: &mut Context<'_, Self>) {
+        if let Some(dialog) = self.extract_dialog.as_mut() {
+            dialog.running = false;
+            if let Some(error) = &fatal {
+                dialog.error = Some(error.clone());
+                dialog.log.push(error.clone());
+            }
+            if let Some(started) = dialog.started.take() {
+                let elapsed = started.elapsed();
+                dialog.elapsed = Some(elapsed);
+                dialog
+                    .log
+                    .push(t!("backup.log.elapsed", time = format_hms(elapsed)).to_string());
+            }
+            dialog.log.push(
+                t!(
+                    "backup.log.summary",
+                    total = dialog.total,
+                    success = dialog.success,
+                    failed = dialog.failed
+                )
+                .to_string(),
+            );
+            dialog.log_scroll.scroll_to_bottom();
+        }
+        cx.notify();
+    }
+
+    /// Close the Extract window.
+    pub(super) fn close_extract(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.extract_dialog = None;
+        self.backup_window = None;
+        window.remove_window();
+        cx.notify();
+    }
+
+    /// Open the extracted `.sql` file with the OS default application (the 打开 button).
+    pub(super) fn open_extract_output(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(path) = self
+            .extract_dialog
+            .as_ref()
+            .and_then(|dialog| dialog.output_path.clone())
+        else {
+            return;
+        };
+        open_with_default_app(&path);
         cx.notify();
     }
 
@@ -2183,6 +2479,13 @@ impl AppView {
             .map(|file| file.name.clone())
         {
             format!("{} - {}", name, t!("backup.restore_title"))
+        } else if let Some(name) = self
+            .extract_dialog
+            .as_ref()
+            .and_then(|dialog| self.backup_files.get(dialog.file_index))
+            .map(|file| file.name.clone())
+        {
+            format!("{} - {}", name, t!("backup.extract_sql"))
         } else {
             return div().into_any_element();
         };
@@ -2195,6 +2498,11 @@ impl AppView {
             (
                 self.restore_dialog_body(cx),
                 self.restore_dialog_footer(cx).into_any_element(),
+            )
+        } else if self.extract_dialog.is_some() {
+            (
+                self.extract_dialog_body(cx),
+                self.extract_dialog_footer(cx).into_any_element(),
             )
         } else {
             return div().into_any_element();
@@ -2209,6 +2517,11 @@ impl AppView {
                 self.restore_dialog
                     .as_ref()
                     .and_then(|dialog| dialog.error.clone())
+            })
+            .or_else(|| {
+                self.extract_dialog
+                    .as_ref()
+                    .and_then(|dialog| dialog.error.clone())
             });
         let mut root = div()
             .flex()
@@ -2216,6 +2529,18 @@ impl AppView {
             .size_full()
             .bg(rgb(theme.dialog_face))
             .text_color(rgb(theme.text))
+            .track_focus(&self.backup_window_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" {
+                    if this.new_backup_dialog.is_some() {
+                        this.close_new_backup(window, cx);
+                    } else if this.extract_dialog.is_some() {
+                        this.close_extract(window, cx);
+                    } else {
+                        this.close_restore(window, cx);
+                    }
+                }
+            }))
             .child(backup_window_titlebar(title, theme))
             .child(body);
         if let Some(error) = error {
@@ -2235,6 +2560,7 @@ impl AppView {
         }
         let weak = cx.weak_entity();
         let app_entity = cx.entity();
+        let focus = self.backup_window_focus.clone();
         cx.defer(move |cx: &mut App| {
             let Some(app) = weak.upgrade() else {
                 return;
@@ -2258,7 +2584,10 @@ impl AppView {
                     // appear behind the main one.
                     window.activate_window();
                     let view = cx.new(|cx| BackupWindow::new(view_weak.clone(), &app_entity, cx));
-                    cx.new(|cx| gpui_kit::component::Root::new(view, window, cx))
+                    let root = cx.new(|cx| gpui_kit::component::Root::new(view, window, cx));
+                    // Focus the window root so ESC closes it before any control is focused.
+                    window.focus(&focus, cx);
+                    root
                 },
             );
             match opened {
@@ -2286,6 +2615,7 @@ impl AppView {
             self.new_backup_dialog = None;
             self.backup_name_input = None;
             self.restore_dialog = None;
+            self.extract_dialog = None;
             self.export_window = None;
             self.export_wizard = None;
             self.import_window = None;
@@ -2308,6 +2638,7 @@ impl AppView {
             self.new_backup_dialog = None;
             self.backup_name_input = None;
             self.restore_dialog = None;
+            self.extract_dialog = None;
             cx.notify();
             return;
         }
@@ -2511,7 +2842,13 @@ impl AppView {
                     )),
             );
 
-        let picker = render_object_picker(&dialog.objects, dialog.loading, theme, false, cx);
+        let picker = render_object_picker(
+            &dialog.objects,
+            dialog.loading,
+            theme,
+            ObjectPickerAction::Backup,
+            cx,
+        );
 
         let body = div()
             .flex()
@@ -2779,7 +3116,13 @@ impl AppView {
                     )),
             );
 
-        let picker = render_object_picker(&dialog.objects, false, theme, true, cx);
+        let picker = render_object_picker(
+            &dialog.objects,
+            false,
+            theme,
+            ObjectPickerAction::Restore,
+            cx,
+        );
 
         let body = div()
             .flex()
@@ -2823,6 +3166,235 @@ impl AppView {
                 cx.listener(|this, _event, window, cx| this.close_restore(window, cx)),
             ))
             .into_any_element()
+    }
+
+    fn extract_dialog_body(&mut self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let active = self
+            .extract_dialog
+            .as_ref()
+            .map(|dialog| dialog.tab)
+            .unwrap_or(BackupDialogTab::Objects);
+        let output = self
+            .extract_dialog
+            .as_ref()
+            .and_then(|dialog| dialog.output_path.clone())
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| t!("backup.extract_no_output").to_string());
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .w_full()
+            .px_4()
+            .pt_3()
+            .pb_2()
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(t!("backup.extract_to").to_string()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_size(px(12.5))
+                    .text_color(rgb(theme.text))
+                    .child(output),
+            );
+        let tabs = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_4()
+            .w_full()
+            .px_4()
+            .border_b_1()
+            .border_color(rgb(theme.border))
+            .child(self.backup_tab_button(
+                "extract-tab-objects",
+                t!("backup.tab.objects").to_string(),
+                active == BackupDialogTab::Objects,
+                cx.listener(|this, _event, _window, cx| {
+                    this.set_extract_tab(BackupDialogTab::Objects, cx)
+                }),
+            ))
+            .child(self.backup_tab_button(
+                "extract-tab-log",
+                t!("backup.tab.log").to_string(),
+                active == BackupDialogTab::Log,
+                cx.listener(|this, _event, _window, cx| {
+                    this.set_extract_tab(BackupDialogTab::Log, cx)
+                }),
+            ));
+
+        let content = match active {
+            BackupDialogTab::Objects => self.render_extract_picker_body(cx),
+            BackupDialogTab::Log => {
+                let scroll = self
+                    .extract_dialog
+                    .as_ref()
+                    .map(|dialog| dialog.log_scroll.clone())
+                    .unwrap_or_default();
+                let stats = self
+                    .extract_dialog
+                    .as_ref()
+                    .map(|dialog| {
+                        log_stats(
+                            dialog.total,
+                            dialog.success,
+                            dialog.failed,
+                            dialog.rows_total,
+                            dialog.rows_done,
+                            dialog.running,
+                            dialog.started,
+                            dialog.elapsed,
+                        )
+                    })
+                    .unwrap_or_else(|| log_stats(0, 0, 0, 0, 0, false, None, None));
+                render_backup_log(
+                    self.extract_dialog
+                        .as_ref()
+                        .map(|dialog| dialog.log.as_slice())
+                        .unwrap_or(&[]),
+                    &scroll,
+                    &stats,
+                    theme,
+                )
+            }
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .w_full()
+            .child(header)
+            .child(tabs)
+            .child(content)
+            .into_any_element()
+    }
+
+    fn render_extract_picker_body(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let Some(dialog) = self.extract_dialog.as_ref() else {
+            return div().into_any_element();
+        };
+        let total = dialog.objects.len();
+        let selected = dialog.objects.iter().filter(|entry| entry.selected).count();
+        let summary = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .w_full()
+            .px_4()
+            .pt_2()
+            .pb_1()
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(
+                        t!("backup.selected_count", selected = selected, total = total).to_string(),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .child(backup_link_button(
+                        "extract-select-all",
+                        t!("backup.select_all").to_string(),
+                        theme,
+                        cx.listener(|this, _event, _window, cx| this.extract_set_all(true, cx)),
+                    ))
+                    .child(backup_link_button(
+                        "extract-select-none",
+                        t!("backup.select_none").to_string(),
+                        theme,
+                        cx.listener(|this, _event, _window, cx| this.extract_set_all(false, cx)),
+                    )),
+            );
+
+        let picker = render_object_picker(
+            &dialog.objects,
+            false,
+            theme,
+            ObjectPickerAction::Extract,
+            cx,
+        );
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .w_full()
+            .child(summary)
+            .child(picker)
+            .into_any_element()
+    }
+
+    fn extract_dialog_footer(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .w_full()
+            .h(px(46.0))
+            .px_4()
+            .child(self.dialog_button(
+                "extract-open",
+                t!("backup.open").to_string(),
+                false,
+                cx.listener(|this, _event, _window, cx| this.open_extract_output(cx)),
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(self.dialog_button(
+                        "extract-run",
+                        t!("backup.extract_button").to_string(),
+                        true,
+                        cx.listener(|this, _event, _window, cx| {
+                            if !this
+                                .extract_dialog
+                                .as_ref()
+                                .map(|dialog| dialog.running)
+                                .unwrap_or(false)
+                            {
+                                this.run_extract(cx);
+                            }
+                        }),
+                    ))
+                    .child(self.dialog_button(
+                        "extract-close",
+                        t!("backup.close").to_string(),
+                        false,
+                        cx.listener(|this, _event, window, cx| this.close_extract(window, cx)),
+                    )),
+            )
+            .into_any_element()
+    }
+
+    pub(super) fn set_extract_tab(&mut self, tab: BackupDialogTab, cx: &mut Context<'_, Self>) {
+        if let Some(dialog) = self.extract_dialog.as_mut() {
+            dialog.tab = tab;
+        }
+        cx.notify();
     }
 
     pub(super) fn set_backup_tab(&mut self, tab: BackupDialogTab, cx: &mut Context<'_, Self>) {
@@ -3191,11 +3763,19 @@ fn backup_row_with_rect(
 }
 
 /// The shared object-selection tree of the New Backup and Restore dialogs.
+/// Which dialog a shared object picker belongs to, so its rows toggle the right dialog's selection.
+#[derive(Clone, Copy)]
+enum ObjectPickerAction {
+    Backup,
+    Restore,
+    Extract,
+}
+
 fn render_object_picker(
     objects: &[BackupObjectEntry],
     loading: bool,
     theme: Theme,
-    restore: bool,
+    action: ObjectPickerAction,
     cx: &mut Context<'_, AppView>,
 ) -> AnyElement {
     let mut list = div().flex().flex_col().py_1();
@@ -3233,12 +3813,10 @@ fn render_object_picker(
                     .rounded_sm()
                     .cursor_pointer()
                     .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        if restore {
-                            this.restore_toggle_kind(kind, cx);
-                        } else {
-                            this.backup_toggle_kind(kind, cx);
-                        }
+                    .on_click(cx.listener(move |this, _event, _window, cx| match action {
+                        ObjectPickerAction::Backup => this.backup_toggle_kind(kind, cx),
+                        ObjectPickerAction::Restore => this.restore_toggle_kind(kind, cx),
+                        ObjectPickerAction::Extract => this.extract_toggle_kind(kind, cx),
                     }))
                     .child(checkbox_box(all, theme))
                     .child(tree_icon(
@@ -3271,12 +3849,10 @@ fn render_object_picker(
                         .cursor_pointer()
                         .when(selected, move |style| style.bg(rgb(theme.tree_hover_bg)))
                         .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-                        .on_click(cx.listener(move |this, _event, _window, cx| {
-                            if restore {
-                                this.restore_toggle_object(index, cx);
-                            } else {
-                                this.backup_toggle_object(index, cx);
-                            }
+                        .on_click(cx.listener(move |this, _event, _window, cx| match action {
+                            ObjectPickerAction::Backup => this.backup_toggle_object(index, cx),
+                            ObjectPickerAction::Restore => this.restore_toggle_object(index, cx),
+                            ObjectPickerAction::Extract => this.extract_toggle_object(index, cx),
                         }))
                         .child(checkbox_box(selected, theme))
                         .child(tree_icon(
@@ -3684,6 +4260,30 @@ pub(super) fn reveal_in_file_manager(path: &std::path::Path) {
     {
         let target = path.parent().unwrap_or(path);
         let _ = std::process::Command::new("xdg-open").arg(target).spawn();
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
+    {
+        let _ = path;
+    }
+}
+
+/// Open `path` with the OS default application (the Extract window's 打开 button).
+pub(super) fn open_with_default_app(path: &std::path::Path) {
+    #[cfg(target_os = "windows")]
+    {
+        // `start` is a cmd builtin; the empty "" fills its window-title slot.
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", ""])
+            .arg(path)
+            .spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(path).spawn();
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(path).spawn();
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
     {

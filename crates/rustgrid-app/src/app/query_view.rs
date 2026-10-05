@@ -405,7 +405,12 @@ impl AppView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    // A click on the list background is "outside" the in-place rename editor, so it
+                    // commits the rename (clicking a non-focusable area does not move focus, so the
+                    // blur subscription alone would not end the edit).
                     if this.query_rename.is_some() {
+                        this.submit_query_rename(cx);
+                        window.focus(&this.query_list_focus, cx);
                         return;
                     }
                     window.focus(&this.query_list_focus, cx);

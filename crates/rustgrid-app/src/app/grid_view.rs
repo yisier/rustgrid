@@ -32,6 +32,7 @@ impl GridView {
             column_resize: None,
             sort_hover: None,
             sort_field_combos: BTreeMap::new(),
+            clipboard: None,
             filter_value_focus: Vec::new(),
             filter_value2_focus: Vec::new(),
             filter_active: None,
@@ -177,7 +178,9 @@ impl Render for GridView {
             let hovered = self.sort_hover == Some(index);
             let revealed = hovered || selected_column;
             let sort_column = column.name.clone();
-            let show_badge = revealed || sort_descending.is_some();
+            // A query-result grid cannot be sorted (the ad-hoc SQL owns the order), so its
+            // headers do not offer the sort badge.
+            let show_badge = self.state.sql.is_none() && (revealed || sort_descending.is_some());
             let (sort_icon, sort_color) = match sort_descending {
                 Some(true) => ("icons/arrow-down.svg", theme.primary),
                 Some(false) => ("icons/arrow-up.svg", theme.primary),
@@ -544,6 +547,12 @@ impl Render for GridView {
             MouseButton::Left,
             cx.listener(|this, event: &MouseDownEvent, window, cx| {
                 this.grid_mouse_down(event, window, cx);
+            }),
+        )
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                this.grid_right_mouse_down(event, window, cx);
             }),
         )
         .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {

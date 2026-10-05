@@ -534,6 +534,54 @@ impl AppView {
                         ));
                 }
             }
+            ContextTarget::TableCategory {
+                connection_index,
+                database_index,
+                schema,
+            } => {
+                let ci = *connection_index;
+                let di = *database_index;
+                let _ = schema;
+                let new_database = self.database_name(ci, di);
+                items = items
+                    .child(self.context_item(
+                        "tablecat-new",
+                        t!("object.new_table").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            let Some(database) = new_database.clone() else {
+                                return;
+                            };
+                            this.open_new_table(ci, database, cx);
+                        }),
+                    ))
+                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(self.context_item(
+                        "tablecat-import",
+                        t!("object.import_wizard").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.open_import_wizard(ci, di, None, cx);
+                        }),
+                    ))
+                    .child(self.context_item(
+                        "tablecat-export",
+                        t!("object.export_wizard").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.open_export_wizard(ci, di, &[], cx);
+                        }),
+                    ))
+                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(self.context_item(
+                        "tablecat-refresh",
+                        t!("connection.refresh").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.reload_tables(ci, di, cx);
+                        }),
+                    ));
+            }
             ContextTarget::Routine {
                 connection_index,
                 database_index,
@@ -643,7 +691,7 @@ impl AppView {
                         t!("backup.extract_sql").to_string(),
                         cx.listener(move |this, _event, _window, cx| {
                             this.context_menu = None;
-                            this.extract_backup_sql(index, cx);
+                            this.open_extract_sql(index, cx);
                         }),
                     ))
                     .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
@@ -846,6 +894,107 @@ impl AppView {
                             this.refresh_selected_query(cx);
                         }),
                     ));
+            }
+            ContextTarget::Grid { grid_id } => {
+                let grid = self
+                    .grids
+                    .iter()
+                    .find(|grid| grid.read(cx).state.id == *grid_id)
+                    .cloned();
+                if let Some(grid) = grid {
+                    let (has_selection, editable, deletable) = {
+                        let g = grid.read(cx);
+                        (
+                            g.state.selection.is_some(),
+                            g.state.editable,
+                            g.state.sql.is_none()
+                                && g.state.selection.is_some()
+                                && !g.state.rows.is_empty(),
+                        )
+                    };
+                    let for_delete = grid.clone();
+                    let for_copy = grid.clone();
+                    let for_insert = grid.clone();
+                    let for_paste = grid.clone();
+                    let for_refresh = grid.clone();
+                    items = items.child(if deletable {
+                        self.context_item(
+                            "grid-ctx-delete",
+                            t!("grid.delete_rows").to_string(),
+                            cx.listener(move |this, _event, _window, cx| {
+                                this.context_menu = None;
+                                for_delete.update(cx, |grid, cx| grid.open_delete_confirm(cx));
+                                cx.notify();
+                            }),
+                        )
+                        .into_any_element()
+                    } else {
+                        self.context_item_disabled(
+                            "grid-ctx-delete",
+                            t!("grid.delete_rows").to_string(),
+                        )
+                        .into_any_element()
+                    });
+                    items = items.child(if has_selection {
+                        self.context_item(
+                            "grid-ctx-copy",
+                            t!("grid.copy").to_string(),
+                            cx.listener(move |this, _event, _window, cx| {
+                                this.context_menu = None;
+                                for_copy.update(cx, |grid, cx| grid.copy_selection(cx));
+                                cx.notify();
+                            }),
+                        )
+                        .into_any_element()
+                    } else {
+                        self.context_item_disabled("grid-ctx-copy", t!("grid.copy").to_string())
+                            .into_any_element()
+                    });
+                    items = items.child(if has_selection {
+                        self.context_item(
+                            "grid-ctx-copy-insert",
+                            t!("grid.copy_insert").to_string(),
+                            cx.listener(move |this, _event, _window, cx| {
+                                this.context_menu = None;
+                                for_insert.update(cx, |grid, cx| grid.copy_selection_as_insert(cx));
+                                cx.notify();
+                            }),
+                        )
+                        .into_any_element()
+                    } else {
+                        self.context_item_disabled(
+                            "grid-ctx-copy-insert",
+                            t!("grid.copy_insert").to_string(),
+                        )
+                        .into_any_element()
+                    });
+                    items = items.child(if editable {
+                        self.context_item(
+                            "grid-ctx-paste",
+                            t!("grid.paste").to_string(),
+                            cx.listener(move |this, _event, _window, cx| {
+                                this.context_menu = None;
+                                for_paste.update(cx, |grid, cx| grid.paste_clipboard(cx));
+                                cx.notify();
+                            }),
+                        )
+                        .into_any_element()
+                    } else {
+                        self.context_item_disabled("grid-ctx-paste", t!("grid.paste").to_string())
+                            .into_any_element()
+                    });
+                    items = items
+                        .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                        .child(self.context_item(
+                            "grid-ctx-refresh",
+                            t!("grid.refresh").to_string(),
+                            cx.listener(move |this, _event, _window, cx| {
+                                this.context_menu = None;
+                                for_refresh.update(cx, |grid, cx| grid.refresh(cx));
+                                cx.notify();
+                            }),
+                        ));
+                }
             }
         }
 

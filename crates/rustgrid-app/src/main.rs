@@ -11,6 +11,7 @@ mod form;
 mod list_select;
 mod runtime;
 mod session;
+mod single_instance;
 mod sql;
 mod theme;
 #[cfg(target_os = "windows")]
@@ -26,6 +27,14 @@ use crate::assets::Assets;
 use crate::runtime::Runtime;
 
 fn main() {
+    // Double-clicking the executable must not open a second copy: the first instance owns the
+    // single-instance lock and every later launch exits immediately. The guard is held for the
+    // whole of `main`, so the lock lives as long as the app runs.
+    let _instance = match single_instance::acquire() {
+        Some(guard) => guard,
+        None => return,
+    };
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

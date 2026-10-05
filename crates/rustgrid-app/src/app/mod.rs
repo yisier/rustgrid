@@ -370,6 +370,31 @@ struct RestoreBackupDialog {
     error: Option<String>,
 }
 
+/// State of the "Extract SQL" dialog (mirrors the restore dialog, plus the chosen output file).
+struct ExtractSqlDialog {
+    /// Index into `AppView::backup_files`.
+    file_index: usize,
+    tab: BackupDialogTab,
+    objects: Vec<BackupObjectEntry>,
+    /// The `.sql` file the extract writes to, chosen through the system save dialog.
+    output_path: Option<std::path::PathBuf>,
+    running: bool,
+    log: Vec<String>,
+    /// Keeps the info log scrolled to the newest line while the operation runs.
+    log_scroll: ScrollHandle,
+    /// Progress counters for the run's summary.
+    total: usize,
+    success: usize,
+    failed: usize,
+    /// Records: the planned total (sum of the manifest's row counts) and processed so far.
+    rows_total: usize,
+    rows_done: usize,
+    /// When the run started, and its final elapsed time.
+    started: Option<std::time::Instant>,
+    elapsed: Option<std::time::Duration>,
+    error: Option<String>,
+}
+
 /// Which page of the export wizard (P1..P4) is showing. P4 merges Navicat's options page with the
 /// run/log page, so the wizard is four steps.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -842,6 +867,12 @@ enum ContextTarget {
         /// Which pane the row was right-clicked in, so Rename edits the name in place there.
         pane: RowPane,
     },
+    /// The Tables category node in the connection tree (新建表 / 导入向导 / 导出向导 / 刷新).
+    TableCategory {
+        connection_index: usize,
+        database_index: usize,
+        schema: Option<String>,
+    },
     /// A stored routine in the connection tree's Functions category.
     Routine {
         connection_index: usize,
@@ -876,6 +907,10 @@ enum ContextTarget {
     BackupList,
     /// The blank area of the Queries main tab's list.
     QueryList,
+    /// A data/result grid (right-click → 删除记录 / 复制 / 复制为 INSERT / 粘贴 / 刷新).
+    Grid {
+        grid_id: u64,
+    },
 }
 
 struct ContextMenu {
@@ -1079,6 +1114,9 @@ struct GridView {
     sort_hover: Option<usize>,
     /// The shared column dropdowns of the sort panel, keyed by draft rule index.
     sort_field_combos: BTreeMap<usize, Entity<ComboBox>>,
+    /// Rows copied with Ctrl+C / the context menu's 复制, for 粘贴 to write into the selected
+    /// records. Each cell is `None` for SQL `NULL`.
+    clipboard: Option<Vec<Vec<Option<String>>>>,
 
     filter_value_focus: Vec<(Vec<usize>, FocusHandle)>,
     filter_value2_focus: Vec<(Vec<usize>, FocusHandle)>,
@@ -1369,6 +1407,8 @@ pub struct AppView {
     new_backup_dialog: Option<NewBackupDialog>,
     /// The open "restore backup" dialog, if any.
     restore_dialog: Option<RestoreBackupDialog>,
+    /// The open "extract SQL" dialog, if any.
+    extract_dialog: Option<ExtractSqlDialog>,
     /// The configuration-name field of the "new backup" dialog.
     backup_name_input: Option<Entity<TextInput>>,
     backup_name_focus_pending: bool,
@@ -1649,6 +1689,10 @@ pub struct AppView {
     import_wizard: Option<ImportWizard>,
     /// The OS window hosting the import wizard, if open.
     import_window: Option<WindowHandle<gpui_kit::component::Root>>,
+    /// Focus targets for the child windows, so ESC closes them before any control is focused.
+    export_focus: FocusHandle,
+    import_focus: FocusHandle,
+    backup_window_focus: FocusHandle,
     /// The main window's id, so closing it also closes the Backup/Restore window.
     main_window_id: Option<WindowId>,
     /// Keeps the window-closed listener alive, so closing the OS window clears the dialog state.
@@ -1669,6 +1713,7 @@ mod grid_cell;
 mod grid_commit;
 mod grid_ime;
 mod grid_input;
+mod grid_menu;
 mod grid_scroll;
 mod grid_toolbar;
 mod grid_view;
@@ -1817,6 +1862,7 @@ impl AppView {
             backup_selected: None,
             new_backup_dialog: None,
             restore_dialog: None,
+            extract_dialog: None,
             backup_name_input: None,
             backup_name_focus_pending: false,
             backup_clipboard: None,
@@ -2083,6 +2129,9 @@ impl AppView {
             export_window: None,
             import_wizard: None,
             import_window: None,
+            export_focus: cx.focus_handle(),
+            import_focus: cx.focus_handle(),
+            backup_window_focus: cx.focus_handle(),
             main_window_id: None,
             _window_closed: window_closed,
         }
@@ -2688,6 +2737,70 @@ fn offset_to_utf16(text: &str, offset: usize) -> usize {
     utf16
 }
 
+/// Install the app's SQL palette into gpui-kit's editor highlight theme. The wrapped SQL editor
+/// (gpui-kit's `Editor`) takes its syntax colors and its line-number gutter from the global
+/// `highlight_theme`, so overriding it here keeps the query editor in step with the 选项 preview
+/// (which uses the same `Theme::sql_*` colors) and gives the gutter a visible background.
+fn install_editor_highlight_theme(theme: Theme, cx: &mut App) {
+    use gpui::Hsla;
+    use gpui_kit::component::ThemeMode;
+    use gpui_kit::component::highlighter::{HighlightTheme, ThemeStyle};
+
+    // `ThemeStyle`'s fields are private, but it is `Deserialize`, so build one from JSON.
+    let style = |color: u32| -> Option<ThemeStyle> {
+        serde_json::from_str(&format!("{{\"color\":\"#{color:06x}\"}}")).ok()
+    };
+
+    let dark = theme.is_dark();
+    let base = if dark {
+        HighlightTheme::default_dark()
+    } else {
+        HighlightTheme::default_light()
+    };
+    let mut style_set = base.style.clone();
+    style_set.editor_background = Some(Hsla::from(rgb(theme.editor_bg)));
+    style_set.editor_foreground = Some(Hsla::from(rgb(theme.text)));
+    style_set.editor_line_number = Some(Hsla::from(rgb(theme.text_muted)));
+    style_set.editor_active_line_number = Some(Hsla::from(rgb(theme.text)));
+    style_set.editor_active_line = Some(Hsla::from(rgb(theme.row_alt_bg)));
+    // The gutter (line-number column) background, so it reads as a distinct column.
+    style_set.editor_gutter_background = Some(Hsla::from(rgb(theme.header_bg)));
+    style_set.syntax.keyword = style(theme.sql_keyword);
+    style_set.syntax.boolean = style(theme.sql_keyword);
+    style_set.syntax.constant = style(theme.sql_number);
+    style_set.syntax.number = style(theme.sql_number);
+    style_set.syntax.string = style(theme.sql_string);
+    style_set.syntax.string_escape = style(theme.sql_string);
+    style_set.syntax.string_regex = style(theme.sql_string);
+    style_set.syntax.comment = style(theme.sql_comment);
+    style_set.syntax.comment_doc = style(theme.sql_comment);
+    style_set.syntax.function = style(theme.sql_keyword);
+    style_set.syntax.constructor = style(theme.sql_keyword);
+    style_set.syntax.type_ = style(theme.sql_keyword);
+    style_set.syntax.operator = style(theme.text);
+    style_set.syntax.punctuation = style(theme.text_muted);
+    style_set.syntax.punctuation_bracket = style(theme.text_muted);
+    style_set.syntax.punctuation_delimiter = style(theme.text_muted);
+    style_set.syntax.variable = style(theme.text);
+    style_set.syntax.property = style(theme.text);
+    style_set.syntax.attribute = style(theme.text);
+
+    gpui_kit::component::Theme::global_mut(cx).highlight_theme = Arc::new(HighlightTheme {
+        name: if dark {
+            "RustGrid Dark"
+        } else {
+            "RustGrid Light"
+        }
+        .to_string(),
+        appearance: if dark {
+            ThemeMode::Dark
+        } else {
+            ThemeMode::Light
+        },
+        style: style_set,
+    });
+}
+
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         self.theme = Theme::resolve(self.theme_setting, window.appearance());
@@ -2709,6 +2822,9 @@ impl Render for AppView {
             self.sync_input_themes(cx);
             // Cached grids/designers don't see a parent re-render, so push the new theme to them.
             self.notify_grids(cx);
+            // The editor's syntax colors and line-number gutter are owned by gpui-kit's highlight
+            // theme, so install the app's palette over the kit default (see the helper).
+            install_editor_highlight_theme(self.theme, cx);
             self.synced_input_theme = Some(self.theme);
         }
         self.sync_cached_children(cx);

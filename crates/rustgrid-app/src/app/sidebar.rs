@@ -717,6 +717,8 @@ impl TreePane {
         let click_id = cat_id.clone();
         let click_schema = schema.map(str::to_string);
         let app = self.app.clone();
+        let menu_app = self.app.clone();
+        let menu_schema = schema.map(str::to_string);
 
         let row = div()
             .id(SharedString::from(cat_id))
@@ -746,12 +748,39 @@ impl TreePane {
                     app.toggle_category(connection_index, database_index, schema, category, cx);
                 });
             }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    // Only the Tables category offers New Table / Import / Export / Refresh.
+                    if category != Category::Tables {
+                        return;
+                    }
+                    window.focus(&this.focus, cx);
+                    this.selected_table = None;
+                    this.selected = Some(format!(
+                        "cat-{connection_index}-{database_index}-{}-{}",
+                        menu_schema.clone().unwrap_or_default(),
+                        category.id()
+                    ));
+                    let _ = menu_app.update(cx, |app, cx| {
+                        app.context_menu = Some(ContextMenu {
+                            target: ContextTarget::TableCategory {
+                                connection_index,
+                                database_index,
+                                schema: menu_schema.clone(),
+                            },
+                            position: event.position,
+                        });
+                        cx.notify();
+                    });
+                    cx.notify();
+                }),
+            )
             .child(tree_chevron(expanded, theme.chevron))
             .child(tree_icon(category.icon_path(), icon_color))
             .child(div().child(label));
 
         let mut sub = div().flex().flex_col().w_full();
-
         if expanded {
             match category {
                 Category::Tables | Category::Views => {

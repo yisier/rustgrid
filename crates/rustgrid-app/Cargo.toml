@@ -26,6 +26,7 @@ gpui-kit.workspace = true
 lsp-types.workspace = true
 ropey.workspace = true
 anyhow.workspace = true
+serde_json.workspace = true
 rust-i18n.workspace = true
 sqlparser.workspace = true
 sqlformat.workspace = true
@@ -50,6 +51,9 @@ embed-resource.workspace = true
 [target.'cfg(target_os = "windows")'.dependencies]
 raw-window-handle.workspace = true
 windows.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 # UI tests render the SQL editor in a real (headless) gpui-kit window.

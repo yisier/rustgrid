@@ -90,6 +90,7 @@ impl AppView {
         let weak = cx.weak_entity();
         let app_entity = cx.entity();
         let title = t!("import.title").to_string();
+        let focus = self.import_focus.clone();
         cx.defer(move |cx: &mut App| {
             let Some(app) = weak.upgrade() else {
                 return;
@@ -113,7 +114,10 @@ impl AppView {
                     // appear behind the main window.
                     window.activate_window();
                     let view = cx.new(|cx| ImportWindow::new(view_weak.clone(), &app_entity, cx));
-                    cx.new(|cx| gpui_kit::component::Root::new(view, window, cx))
+                    let root = cx.new(|cx| gpui_kit::component::Root::new(view, window, cx));
+                    // Focus the window root so ESC closes it before any control is focused.
+                    window.focus(&focus, cx);
+                    root
                 },
             );
             match opened {
@@ -1104,6 +1108,12 @@ impl AppView {
             .size_full()
             .bg(rgb(theme.dialog_face))
             .text_color(rgb(theme.text))
+            .track_focus(&self.import_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" {
+                    this.import_close(window, cx);
+                }
+            }))
             .child(child_window_titlebar(t!("import.title").to_string(), theme))
             .child(heading)
             .child(content)
