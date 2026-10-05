@@ -382,6 +382,7 @@ impl TreePane {
                 connection.icon_style,
                 icon_color,
                 badge,
+                connected,
             ))
             .child(
                 div()
@@ -977,7 +978,7 @@ impl TreePane {
                 .flex_1()
                 .min_w(px(0.0))
                 .h(px(20.0))
-                .child(row.input.clone())
+                .child(ui::rename_field(theme, row.input.clone()))
                 .into_any_element(),
             None => div()
                 .overflow_hidden()
@@ -1192,15 +1193,10 @@ impl Render for TreePane {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseDownEvent, window, cx| {
-                    // Clicking the tree background takes focus so F2 works. While the rename
-                    // editor is open the input owns the keyboard; its blur subscription commits.
-                    if !this
-                        .app
-                        .upgrade()
-                        .is_some_and(|app| app.read(cx).rename_edit.is_some())
-                    {
-                        window.focus(&this.focus, cx);
-                    }
+                    // Clicking outside the in-place rename commits it (the editor swallows clicks
+                    // on itself), then the tree takes focus so F2 works.
+                    this.commit_pending_rename(cx);
+                    window.focus(&this.focus, cx);
                 }),
             )
             .child(list)

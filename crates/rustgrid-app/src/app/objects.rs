@@ -1050,7 +1050,7 @@ impl ObjectPane {
                 .flex_1()
                 .min_w(px(0.0))
                 .h(px(22.0))
-                .child(row.input.clone())
+                .child(ui::rename_field(theme, row.input.clone()))
                 .into_any_element(),
             None => div()
                 .min_w(px(0.0))
@@ -1254,8 +1254,8 @@ impl ObjectPane {
             Some(row) => div()
                 .flex_1()
                 .min_w(px(0.0))
-                .h(px(22.0))
-                .child(row.input.clone())
+                .h(px(20.0))
+                .child(ui::rename_field(theme, row.input.clone()))
                 .into_any_element(),
             None => div()
                 .flex_1()
@@ -1933,15 +1933,10 @@ impl Render for ObjectPane {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    // Clicking the list background takes focus so F2 works. While the rename
-                    // editor is open the input owns the keyboard; its blur subscription commits.
-                    if this
-                        .app
-                        .upgrade()
-                        .is_some_and(|app| app.read(cx).rename_edit.is_some())
-                    {
-                        return;
-                    }
+                    // Clicking outside the in-place rename commits it (the editor swallows clicks
+                    // on itself, so this only sees the row/background), then the list takes focus
+                    // so F2 works.
+                    this.commit_pending_rename(cx);
                     window.focus(&this.focus, cx);
                     if let Some(app) = this.app.upgrade() {
                         app.update(cx, |app, cx| {

@@ -29,8 +29,8 @@ pub(super) use views::{
     ColumnGrid, DetailColumns, DetailList, DetailScroll, ViewMode, approx_text_width,
     detail_cell_text, detail_column_width, detail_content_width, detail_header_cell,
     detail_header_cell_plain, detail_header_column, detail_header_row, detail_row, grid_column,
-    grid_columns, grid_item_sized, grid_item_width, leading_icon_badge, marquee_rect, tag_chip,
-    view_mode_toggle,
+    grid_columns, grid_item_sized, grid_item_width, leading_icon_badge, marquee_rect, rename_field,
+    tag_chip, view_mode_toggle,
 };
 
 /// The variant of a push button. See `win_button` / `dialog_button`.

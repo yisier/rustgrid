@@ -1046,6 +1046,30 @@ pub(crate) fn leading_icon_badge(icon: &'static str, color: u32, size: f32) -> i
         )
 }
 
+/// Frames a row's in-place rename editor. The editor itself is a bare (transparent) text field so
+/// it lines up with the row's text, but on its own that leaves no hint that the row is editable;
+/// this draws an input-like box around it (the way Navicat boxes a name being renamed). The caller
+/// sizes the surrounding row to the row height, so the box fits it exactly and never bleeds into
+/// the neighbouring rows.
+pub(crate) fn rename_field(theme: Theme, input: impl IntoElement + 'static) -> impl IntoElement {
+    div()
+        .id("rename-field")
+        .flex()
+        .items_center()
+        .w_full()
+        .h_full()
+        .px_1()
+        .rounded(px(3.0))
+        .bg(rgb(theme.input_bg))
+        .border_1()
+        .border_color(rgb(theme.brand))
+        .overflow_hidden()
+        // A mouse-down inside the editor must not reach the list/tree background handler, which
+        // commits the rename; only a click *outside* the field should end editing.
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(div().flex_1().min_w(px(0.0)).h_full().child(input))
+}
+
 /// A small muted chip, e.g. the `SQL` tag beside a saved query's name.
 pub(crate) fn tag_chip(label: String, theme: Theme) -> impl IntoElement {
     div()

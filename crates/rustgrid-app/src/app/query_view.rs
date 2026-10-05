@@ -570,7 +570,7 @@ impl AppView {
                 .w(px(widths[0]))
                 .flex_none()
                 .h(px(22.0))
-                .child(input)
+                .child(ui::rename_field(theme, input))
                 .into_any_element(),
             None => div()
                 .flex()
@@ -716,7 +716,7 @@ impl AppView {
                 .flex_1()
                 .min_w(px(0.0))
                 .h(px(20.0))
-                .child(input)
+                .child(ui::rename_field(theme, input))
                 .into_any_element(),
             None => div()
                 .flex_1()

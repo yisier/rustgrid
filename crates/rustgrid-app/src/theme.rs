@@ -48,7 +48,10 @@ pub struct Theme {
     pub icon_queries: u32,
     pub icon_backups: u32,
     pub icon_users: u32,
+    /// A single table object (object list, table tabs, info pane). Kept in step with the
+    /// connection tree's [`Theme::icon_tables`] so the same table keeps one colour everywhere.
     pub icon_table: u32,
+    /// A single view object; kept in step with the connection tree's [`Theme::icon_views`].
     pub icon_view: u32,
     pub warning: u32,
     pub danger: u32,
@@ -105,7 +108,7 @@ impl Theme {
             icon_queries: 0x0d9488,
             icon_backups: 0xca8a04,
             icon_users: 0xd97706,
-            icon_table: 0x3b82f6,
+            icon_table: 0x16a34a,
             icon_view: 0x3b82f6,
             warning: 0xd97706,
             danger: 0xef4444,
@@ -162,7 +165,7 @@ impl Theme {
             icon_queries: 0x2dd4bf,
             icon_backups: 0xfacc15,
             icon_users: 0xfbbf24,
-            icon_table: 0x60a5fa,
+            icon_table: 0x4ade80,
             icon_view: 0x60a5fa,
             warning: 0xfbbf24,
             danger: 0xef4444,

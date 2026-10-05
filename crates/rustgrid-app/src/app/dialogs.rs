@@ -597,6 +597,8 @@ impl AppView {
                 TextInputOptions {
                     bare: true,
                     text_size: Some(12.0),
+                    // 20px, matching the object row so the framed editor never outgrows it.
+                    size: Some(gpui_kit::component::Size::XSmall),
                     ..Default::default()
                 },
                 cx,

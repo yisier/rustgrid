@@ -608,7 +608,7 @@ impl AppView {
                     .w(px(widths[0]))
                     .flex_none()
                     .h(px(22.0))
-                    .child(input)
+                    .child(ui::rename_field(theme, input))
                     .into_any_element(),
                 None => div()
                     .flex()
@@ -1013,6 +1013,8 @@ impl AppView {
                 TextInputOptions {
                     bare: true,
                     text_size: Some(12.0),
+                    // 20px, matching the list row so the framed editor never outgrows it.
+                    size: Some(gpui_kit::component::Size::XSmall),
                     ..Default::default()
                 },
                 cx,

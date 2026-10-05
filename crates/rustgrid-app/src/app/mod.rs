@@ -2909,9 +2909,14 @@ fn tree_driver_icon(
     style: DriverIconStyle,
     color: u32,
     badge: u32,
+    connected: bool,
 ) -> AnyElement {
     match style {
-        DriverIconStyle::Brand(brand) => tree_icon(icon, brand).into_any_element(),
+        // Brand marks keep the engine colour only while the connection is open; a closed one is
+        // greyed out (like the badge/plain styles) instead of staying colourful.
+        DriverIconStyle::Brand(brand) => {
+            tree_icon(icon, if connected { brand } else { color }).into_any_element()
+        }
         DriverIconStyle::SolidBadge => div()
             .flex()
             .items_center()
