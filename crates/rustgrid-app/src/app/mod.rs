@@ -2188,7 +2188,7 @@ impl AppView {
     /// The SQL editor's font family (the built-in default when the setting is empty).
     pub(super) fn editor_font(&self) -> String {
         if self.editor_font_family.is_empty() {
-            "Consolas".to_string()
+            default_editor_font().to_string()
         } else {
             self.editor_font_family.clone()
         }
@@ -2737,6 +2737,26 @@ fn offset_to_utf16(text: &str, offset: usize) -> usize {
     utf16
 }
 
+/// The built-in SQL editor font, matching VS Code's default monospace family for the platform.
+pub(super) fn default_editor_font() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "Consolas"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "Menlo"
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        "Droid Sans Mono"
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
+    {
+        "Consolas"
+    }
+}
+
 /// Install the app's SQL palette into gpui-kit's editor highlight theme. The wrapped SQL editor
 /// (gpui-kit's `Editor`) takes its syntax colors and its line-number gutter from the global
 /// `highlight_theme`, so overriding it here keeps the query editor in step with the 选项 preview
@@ -2765,8 +2785,13 @@ fn install_editor_highlight_theme(theme: Theme, cx: &mut App) {
     style_set.editor_active_line = Some(Hsla::from(rgb(theme.row_alt_bg)));
     // The gutter (line-number column) background, so it reads as a distinct column.
     style_set.editor_gutter_background = Some(Hsla::from(rgb(theme.header_bg)));
+    // The SQL grammar (tree-sitter-sequel) captures keywords as `@keyword`, calls as
+    // `@function.call`, and table/column references as `@type`/`@variable`. Give each a distinct
+    // color (identifiers fall back to the plain foreground) so the editor is not one flat color.
+    let plain = theme.text;
+    let function = theme.icon_functions;
     style_set.syntax.keyword = style(theme.sql_keyword);
-    style_set.syntax.boolean = style(theme.sql_keyword);
+    style_set.syntax.boolean = style(theme.sql_number);
     style_set.syntax.constant = style(theme.sql_number);
     style_set.syntax.number = style(theme.sql_number);
     style_set.syntax.string = style(theme.sql_string);
@@ -2774,16 +2799,18 @@ fn install_editor_highlight_theme(theme: Theme, cx: &mut App) {
     style_set.syntax.string_regex = style(theme.sql_string);
     style_set.syntax.comment = style(theme.sql_comment);
     style_set.syntax.comment_doc = style(theme.sql_comment);
-    style_set.syntax.function = style(theme.sql_keyword);
-    style_set.syntax.constructor = style(theme.sql_keyword);
-    style_set.syntax.type_ = style(theme.sql_keyword);
-    style_set.syntax.operator = style(theme.text);
+    // Built-in functions/invocations read as "function calls".
+    style_set.syntax.function = style(function);
+    style_set.syntax.constructor = style(function);
+    // Object references (table/column names), aliases and fields keep the normal foreground.
+    style_set.syntax.type_ = style(plain);
+    style_set.syntax.variable = style(plain);
+    style_set.syntax.property = style(plain);
+    style_set.syntax.attribute = style(plain);
+    style_set.syntax.operator = style(plain);
     style_set.syntax.punctuation = style(theme.text_muted);
     style_set.syntax.punctuation_bracket = style(theme.text_muted);
     style_set.syntax.punctuation_delimiter = style(theme.text_muted);
-    style_set.syntax.variable = style(theme.text);
-    style_set.syntax.property = style(theme.text);
-    style_set.syntax.attribute = style(theme.text);
 
     gpui_kit::component::Theme::global_mut(cx).highlight_theme = Arc::new(HighlightTheme {
         name: if dark {

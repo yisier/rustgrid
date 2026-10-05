@@ -112,8 +112,8 @@ struct SettingsFile {
     editor_word_wrap: bool,
 }
 
-/// The default SQL editor font size, in px.
-pub const DEFAULT_EDITOR_FONT_SIZE: u32 = 13;
+/// The default SQL editor font size, in px (VS Code's default `editor.fontSize`).
+pub const DEFAULT_EDITOR_FONT_SIZE: u32 = 14;
 
 fn default_editor_font_size() -> u32 {
     DEFAULT_EDITOR_FONT_SIZE

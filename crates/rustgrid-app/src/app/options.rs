@@ -97,7 +97,7 @@ fn editor_size_options() -> Vec<ComboOption> {
 
 fn resolve_editor_font(family: &str) -> String {
     if family.is_empty() {
-        "Consolas".to_string()
+        super::default_editor_font().to_string()
     } else {
         family.to_string()
     }
