@@ -1,3 +1,6 @@
+pub mod capability;
+pub mod descriptor;
+pub mod dialect;
 pub mod driver;
 pub mod error;
 pub mod model;
@@ -7,6 +10,9 @@ pub mod routine;
 pub mod user;
 pub mod view;
 
+pub use capability::{DriverCapabilities, DriverCapability};
+pub use descriptor::{ConnectionFormSpec, DriverDescriptor, DriverIconStyle};
+pub use dialect::DriverDialect;
 pub use driver::{Connection, DatabaseEditorSpec, DatabaseEditorTab, Driver};
 pub use error::{Error, Result};
 pub use model::{
@@ -17,7 +23,7 @@ pub use model::{
     TableInfo, TableOptions, TablePage, TableSchema, TableStatus, TriggerDef,
 };
 pub use options::{ConnectionOptions, TlsMode, TlsOptions, TunnelAuth, TunnelKind, TunnelLayer};
-pub use registry::{DriverRegistry, DriverSource};
+pub use registry::{BuiltinDriverSource, DriverRegistry, DriverSource};
 pub use routine::{RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind};
 pub use user::{
     ObjectGrant, ObjectPrivilegeRow, Privilege, RoleMembership, UserAccount, UserDetails, UserEdit,

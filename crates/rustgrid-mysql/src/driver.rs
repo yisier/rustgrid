@@ -2,7 +2,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rustgrid_core::{
-    Connection, ConnectionConfig, DatabaseEditorSpec, Driver, DriverId, Error, Result, TlsMode,
+    Connection, ConnectionConfig, DatabaseEditorSpec, Driver, DriverCapabilities, DriverCapability,
+    DriverDescriptor, DriverDialect, DriverIconStyle, DriverId, Error, Result, TlsMode,
 };
 use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlSslMode};
 
@@ -42,6 +43,28 @@ impl Driver for MysqlDriver {
         }
     }
 
+    fn descriptor(&self) -> DriverDescriptor {
+        DriverDescriptor {
+            id: DriverId::new("mysql"),
+            display_name: "MySQL".to_string(),
+            default_port: 3306,
+            is_file_based: false,
+            icon: "icons/mysql.svg",
+            icon_style: DriverIconStyle::SolidBadge,
+            capabilities: DriverCapabilities::none()
+                .with(DriverCapability::DatabaseManagement)
+                .with(DriverCapability::Users)
+                .with(DriverCapability::Routines),
+            database_editor: self.database_editor(),
+            connection_form: Default::default(),
+            order: 10,
+        }
+    }
+
+    fn dialect(&self) -> DriverDialect {
+        DriverDialect::Mysql
+    }
+
     async fn connect(&self, config: &ConnectionConfig) -> Result<Box<dyn Connection>> {
         connect(config, Engine::MySql).await
     }
@@ -79,6 +102,28 @@ impl Driver for MariaDbDriver {
             collation: true,
             ..Default::default()
         }
+    }
+
+    fn descriptor(&self) -> DriverDescriptor {
+        DriverDescriptor {
+            id: DriverId::new("mariadb"),
+            display_name: "MariaDB".to_string(),
+            default_port: 3306,
+            is_file_based: false,
+            icon: "icons/mariadb.svg",
+            icon_style: DriverIconStyle::SolidBadge,
+            capabilities: DriverCapabilities::none()
+                .with(DriverCapability::DatabaseManagement)
+                .with(DriverCapability::Users)
+                .with(DriverCapability::Routines),
+            database_editor: self.database_editor(),
+            connection_form: Default::default(),
+            order: 60,
+        }
+    }
+
+    fn dialect(&self) -> DriverDialect {
+        DriverDialect::Mysql
     }
 
     async fn connect(&self, config: &ConnectionConfig) -> Result<Box<dyn Connection>> {

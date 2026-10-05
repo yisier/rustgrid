@@ -36,6 +36,14 @@ not a later refactor.
   onto the account model (database/object privilege management is still partial). Statements use the
   text/batch path for DDL and `CREATE PROCEDURE`, and the parameterized RPC path for `SELECT`/DML so
   row counts are available.
+- `crates/rustgrid-odbc` — the **generic ODBC driver** (app feature `driver-odbc`, on by default).
+  It connects through a user-installed ODBC driver or a raw connection string and speaks the engine's
+  SQL, as the fallback for engines without a native Rust driver (Oracle, DB2, 达梦, ...). The ODBC
+  driver manager (`odbc32.dll` / `libodbc.so`) is loaded **at runtime** via `libloading` (`api.rs`),
+  so the build carries no link-time dependency and a machine without ODBC still runs normally;
+  `driver.rs`/`connection.rs` implement the trait on top of that. It is synchronous and implements
+  catalog listing, `execute_query` and paging; other `Connection` methods report "not supported yet".
+  See `docs/odbc-driver.md`.
 - `crates/rustgrid-config` — versioned settings/profiles plus encrypted secret storage in the
   OS config dir (`connections.json`, `settings.json`, `secrets.json`).
 - `crates/rustgrid-app` — GPUI binary `RustGrid`: `src/app/` is the view/render layer, split
@@ -96,6 +104,9 @@ not a later refactor.
   iterating; finish with `cargo build`. Debug builds do not need the shader toolchain below.
 - `cargo check --workspace` / `cargo build`
 - `cargo run -p rustgrid-app` (produced binary is `RustGrid`)
+- The generic ODBC driver is a **default feature** (see `docs/odbc-driver.md`); disable it with
+  `--no-default-features`. Either way there is no build dependency: the ODBC driver manager is loaded
+  at runtime and is only needed if a user actually connects through ODBC.
 - Release build (`cargo build --release -p rustgrid-app`) needs an HLSL compiler on Windows: on
   this machine the Windows SDK `fxc.exe` is absent, so build the fallback shim once
   (`gcc -O2 -o fxc.exe tools/fxc-shim/fxc.c -lkernel32`) and run cargo with
@@ -111,6 +122,10 @@ not a later refactor.
   `cargo test -p rustgrid-sqlserver -- --ignored`. It exercises connect, catalog listing, paging,
   editing, arbitrary SQL, schema introspection, backup/restore and views against a real server
   (e.g. Docker `mcr.microsoft.com/mssql/server`).
+- Live ODBC integration test (ignored by default): set `RUSTGRID_ODBC_CONNECTION_STRING` (e.g.
+  `Driver={ODBC Driver 17 for SQL Server};Server=localhost,1433;UID=sa;PWD=...;TrustServerCertificate=yes;`),
+  then `cargo test -p rustgrid-odbc -- --ignored`. It exercises driver enumeration, catalog listing,
+  query, paging, insert/update/delete and table management against the real driver manager.
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo fmt --all`
 - No `DATABASE_URL` or sqlx offline cache: queries use the **runtime** API (`sqlx::query`,

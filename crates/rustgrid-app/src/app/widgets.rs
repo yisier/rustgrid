@@ -1,4 +1,5 @@
 use super::*;
+use gpui::ElementId;
 use gpui_kit::base::SelectableText;
 
 impl AppView {
@@ -898,7 +899,7 @@ impl AppView {
 
     pub(super) fn context_item(
         &self,
-        id: &'static str,
+        id: impl Into<ElementId>,
         label: String,
         on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> impl IntoElement {
@@ -925,7 +926,7 @@ impl AppView {
     /// actions that need a live connection the menu was opened on.
     pub(super) fn context_item_disabled(
         &self,
-        id: &'static str,
+        id: impl Into<ElementId>,
         label: String,
     ) -> impl IntoElement {
         let theme = self.theme;

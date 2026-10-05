@@ -24,9 +24,11 @@ impl AppView {
         let schema = tab.schema.clone();
         let supports_schemas = connection_index
             .is_some_and(|index| self.driver_supports(index, DriverCapability::Schemas));
-        let driver = connection_index
+        let dialect = connection_index
             .and_then(|index| self.connections.get(index))
-            .map(|node| node.profile.driver.as_str().to_string());
+            .and_then(|node| self.registry.get(&node.profile.driver))
+            .map(|driver| driver.dialect())
+            .unwrap_or_default();
 
         if self.query_editors.len() <= index {
             self.query_editors.resize_with(index + 1, || None);
@@ -39,7 +41,7 @@ impl AppView {
                     database.clone(),
                     schema.clone(),
                     supports_schemas,
-                    driver.clone(),
+                    dialect,
                     cx,
                 )
             });
@@ -52,7 +54,7 @@ impl AppView {
                 database.clone(),
                 schema.clone(),
                 supports_schemas,
-                driver,
+                dialect,
             );
         let scope_handle = source.scope_handle();
         let provider: Rc<dyn gpui_kit::component::input::CompletionProvider> =
@@ -95,10 +97,12 @@ impl AppView {
                 database,
                 schema,
                 supports_schemas: self.driver_supports(connection_index, DriverCapability::Schemas),
-                driver: self
+                dialect: self
                     .connections
                     .get(connection_index)
-                    .map(|node| node.profile.driver.as_str().to_string()),
+                    .and_then(|node| self.registry.get(&node.profile.driver))
+                    .map(|driver| driver.dialect())
+                    .unwrap_or_default(),
             };
             let referenced = sql::referenced_tables(&sql::current_statement(text, text.len()));
             for table in referenced {

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rustgrid_core::{ConnectionOptions, ConnectionProfile, DriverId};
@@ -10,15 +11,23 @@ pub enum FormField {
     Username,
     Password,
     Database,
+    OdbcDriver,
+    OdbcDsn,
+    OdbcConnectionString,
+    OdbcEngine,
 }
 
-pub const FORM_FIELDS: [FormField; 6] = [
+pub const FORM_FIELDS: [FormField; 10] = [
     FormField::Name,
     FormField::Host,
     FormField::Port,
     FormField::Username,
     FormField::Password,
     FormField::Database,
+    FormField::OdbcDriver,
+    FormField::OdbcDsn,
+    FormField::OdbcConnectionString,
+    FormField::OdbcEngine,
 ];
 
 /// Default query timeout (seconds) pre-filled on the 高级 page.
@@ -68,6 +77,12 @@ pub struct ConnectionForm {
     pub password: String,
     pub save_password: bool,
     pub database: String,
+    /// Whether the engine uses the ODBC fields below (resolved from the driver registry).
+    pub odbc: bool,
+    pub odbc_driver: String,
+    pub odbc_dsn: String,
+    pub odbc_connection_string: String,
+    pub odbc_engine: String,
     /// The TLS / tunnel / timeout / read-only settings edited on the other tabs.
     pub settings: ConnectionOptions,
     /// The page currently shown.
@@ -86,6 +101,11 @@ impl Default for ConnectionForm {
             password: String::new(),
             save_password: true,
             database: String::new(),
+            odbc: false,
+            odbc_driver: String::new(),
+            odbc_dsn: String::new(),
+            odbc_connection_string: String::new(),
+            odbc_engine: String::new(),
             // Pre-fill the 高级 page with sensible defaults so a new connection is not blank there.
             settings: ConnectionOptions {
                 connect_timeout: Some(30),
@@ -103,7 +123,11 @@ impl ConnectionForm {
     pub fn for_driver(driver: DriverId, default_port: u16) -> Self {
         Self {
             driver,
-            port: default_port.to_string(),
+            port: if default_port == 0 {
+                String::new()
+            } else {
+                default_port.to_string()
+            },
             ..Self::default()
         }
     }
@@ -129,6 +153,23 @@ impl ConnectionForm {
             password: password.unwrap_or_default(),
             save_password: password_saved,
             database: profile.database.clone().unwrap_or_default(),
+            odbc: false,
+            odbc_driver: profile
+                .options
+                .get("odbc.driver")
+                .cloned()
+                .unwrap_or_default(),
+            odbc_dsn: profile.options.get("odbc.dsn").cloned().unwrap_or_default(),
+            odbc_connection_string: profile
+                .options
+                .get("odbc.connection_string")
+                .cloned()
+                .unwrap_or_default(),
+            odbc_engine: profile
+                .options
+                .get("odbc.engine")
+                .cloned()
+                .unwrap_or_default(),
             settings,
             tab: FormTab::General,
         }
@@ -142,6 +183,10 @@ impl ConnectionForm {
             FormField::Username => &mut self.username,
             FormField::Password => &mut self.password,
             FormField::Database => &mut self.database,
+            FormField::OdbcDriver => &mut self.odbc_driver,
+            FormField::OdbcDsn => &mut self.odbc_dsn,
+            FormField::OdbcConnectionString => &mut self.odbc_connection_string,
+            FormField::OdbcEngine => &mut self.odbc_engine,
         } = value;
     }
 
@@ -154,6 +199,10 @@ impl ConnectionForm {
             FormField::Username => &self.username,
             FormField::Password => &self.password,
             FormField::Database => &self.database,
+            FormField::OdbcDriver => &self.odbc_driver,
+            FormField::OdbcDsn => &self.odbc_dsn,
+            FormField::OdbcConnectionString => &self.odbc_connection_string,
+            FormField::OdbcEngine => &self.odbc_engine,
         }
     }
 
@@ -168,6 +217,14 @@ impl ConnectionForm {
         if self.file_based {
             if self.database.trim().is_empty() {
                 missing.push(FormField::Database);
+            }
+        } else if self.odbc {
+            // An ODBC connection needs a driver name, a DSN or a raw connection string.
+            if self.odbc_driver.trim().is_empty()
+                && self.odbc_dsn.trim().is_empty()
+                && self.odbc_connection_string.trim().is_empty()
+            {
+                missing.push(FormField::OdbcDriver);
             }
         } else {
             if self.host.trim().is_empty() {
@@ -197,10 +254,38 @@ impl ConnectionForm {
         } else {
             (
                 self.host.trim().to_string(),
-                self.port.trim().parse().unwrap_or(3306),
+                self.port
+                    .trim()
+                    .parse()
+                    .unwrap_or(if self.odbc { 0 } else { 3306 }),
                 self.username.trim().to_string(),
             )
         };
+
+        let mut options = BTreeMap::new();
+        if self.odbc {
+            if !self.odbc_driver.trim().is_empty() {
+                options.insert(
+                    "odbc.driver".to_string(),
+                    self.odbc_driver.trim().to_string(),
+                );
+            }
+            if !self.odbc_dsn.trim().is_empty() {
+                options.insert("odbc.dsn".to_string(), self.odbc_dsn.trim().to_string());
+            }
+            if !self.odbc_connection_string.trim().is_empty() {
+                options.insert(
+                    "odbc.connection_string".to_string(),
+                    self.odbc_connection_string.trim().to_string(),
+                );
+            }
+            if !self.odbc_engine.trim().is_empty() {
+                options.insert(
+                    "odbc.engine".to_string(),
+                    self.odbc_engine.trim().to_string(),
+                );
+            }
+        }
 
         ConnectionProfile {
             id: format!("conn-{}", now_nanos()),
@@ -219,7 +304,7 @@ impl ConnectionForm {
             port,
             username,
             database,
-            options: Default::default(),
+            options,
             settings: self.settings.clone(),
         }
     }

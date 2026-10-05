@@ -19,6 +19,7 @@ rustgrid-import.workspace = true
 rustgrid-mysql.workspace = true
 rustgrid-sqlite.workspace = true
 rustgrid-sqlserver.workspace = true
+rustgrid-odbc = { workspace = true, optional = true }
 rustgrid-config.workspace = true
 gpui.workspace = true
 gpui-kit.workspace = true
@@ -36,6 +37,12 @@ tracing-subscriber.workspace = true
 rfd.workspace = true
 directories.workspace = true
 sys-locale.workspace = true
+
+[features]
+# The generic ODBC driver is on by default: it loads the ODBC driver manager at runtime, so it
+# adds no link-time or hard runtime dependency and a machine without ODBC still runs normally.
+default = ["driver-odbc"]
+driver-odbc = ["dep:rustgrid-odbc"]
 
 [build-dependencies]
 embed-resource.workspace = true

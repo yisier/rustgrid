@@ -7000,6 +7000,7 @@ dependencies = [
  "rustgrid-export",
  "rustgrid-import",
  "rustgrid-mysql",
+ "rustgrid-odbc",
  "rustgrid-sqlite",
  "rustgrid-sqlserver",
  "sqlformat",
@@ -7076,6 +7077,16 @@ dependencies = [
  "russh",
  "rustgrid-core",
  "sqlx",
+ "tokio",
+]
+
+[[package]]
+name = "rustgrid-odbc"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "libloading",
+ "rustgrid-core",
  "tokio",
 ]
 

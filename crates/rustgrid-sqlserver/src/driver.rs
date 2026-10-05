@@ -2,8 +2,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rustgrid_core::{
-    Connection, ConnectionConfig, DatabaseEditorSpec, DatabaseEditorTab, Driver, DriverId, Error,
-    Result, TlsMode,
+    Connection, ConnectionConfig, DatabaseEditorSpec, DatabaseEditorTab, Driver,
+    DriverCapabilities, DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle,
+    DriverId, Error, Result, TlsMode,
 };
 use tiberius::{AuthMethod, Config};
 
@@ -78,6 +79,29 @@ impl Driver for SqlServerDriver {
         vec![
             "80", "90", "100", "110", "120", "130", "140", "150", "160", "170",
         ]
+    }
+
+    fn descriptor(&self) -> DriverDescriptor {
+        DriverDescriptor {
+            id: DriverId::new("sqlserver"),
+            display_name: "SQL Server".to_string(),
+            default_port: 1433,
+            is_file_based: false,
+            icon: "icons/sqlserver.svg",
+            icon_style: DriverIconStyle::Brand(0xcc2927),
+            capabilities: DriverCapabilities::none()
+                .with(DriverCapability::DatabaseManagement)
+                .with(DriverCapability::Users)
+                .with(DriverCapability::Routines)
+                .with(DriverCapability::Schemas),
+            database_editor: self.database_editor(),
+            connection_form: Default::default(),
+            order: 50,
+        }
+    }
+
+    fn dialect(&self) -> DriverDialect {
+        DriverDialect::SqlServer
     }
 
     async fn connect(&self, config: &ConnectionConfig) -> Result<Box<dyn Connection>> {

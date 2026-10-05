@@ -2,7 +2,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rustgrid_core::{
-    Connection, ConnectionConfig, DatabaseEditorSpec, Driver, DriverId, Error, Result,
+    Connection, ConnectionConfig, DatabaseEditorSpec, Driver, DriverCapabilities, DriverDescriptor,
+    DriverDialect, DriverIconStyle, DriverId, Error, Result,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
@@ -51,6 +52,27 @@ impl Driver for SqliteDriver {
 
     fn database_editor(&self) -> DatabaseEditorSpec {
         DatabaseEditorSpec::default()
+    }
+
+    fn descriptor(&self) -> DriverDescriptor {
+        DriverDescriptor {
+            id: DriverId::new("sqlite"),
+            display_name: "SQLite".to_string(),
+            default_port: 0,
+            is_file_based: true,
+            icon: "icons/sqlite.svg",
+            // A slightly brighter blue than the logo's #003b57 so it stays legible on dark themes.
+            icon_style: DriverIconStyle::Brand(0x0f80cc),
+            // SQLite has no databases, server accounts, routines or schemas of its own.
+            capabilities: DriverCapabilities::none(),
+            database_editor: DatabaseEditorSpec::default(),
+            connection_form: Default::default(),
+            order: 40,
+        }
+    }
+
+    fn dialect(&self) -> DriverDialect {
+        DriverDialect::Sqlite
     }
 
     async fn connect(&self, config: &ConnectionConfig) -> Result<Box<dyn Connection>> {

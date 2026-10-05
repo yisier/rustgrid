@@ -21,11 +21,12 @@ use rustgrid_config::{
 };
 use rustgrid_core::{
     BackupObjectKind, CellValue, Connection, ConnectionConfig, DatabaseEditorSpec,
-    DatabaseEditorTab, DatabaseOptions, DriverId, DriverRegistry, Error, FilterCondition,
-    FilterConjunction, FilterGroup, FilterNode, FilterOperator, ObjectGrant, ObjectPrivilegeRow,
-    PageRequest, Privilege, QueryResult, RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind,
-    RowInsert, RowUpdate, SavedBackup, SavedQuery, TableStatus, TlsMode, TunnelAuth, TunnelKind,
-    TunnelLayer, UserAccount, UserDetails, UserEdit, UserEditSection, ViewEdit,
+    DatabaseEditorTab, DatabaseOptions, DriverCapability, DriverIconStyle, DriverId,
+    DriverRegistry, Error, FilterCondition, FilterConjunction, FilterGroup, FilterNode,
+    FilterOperator, ObjectGrant, ObjectPrivilegeRow, PageRequest, Privilege, QueryResult,
+    RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind, RowInsert, RowUpdate, SavedBackup,
+    SavedQuery, TableStatus, TlsMode, TunnelAuth, TunnelKind, TunnelLayer, UserAccount,
+    UserDetails, UserEdit, UserEditSection, ViewEdit,
 };
 use rustgrid_export::ExportFormat;
 
@@ -105,10 +106,10 @@ pub(super) const VIEW_PAGE_VIEWS: &str = "views";
 /// The stable settings key for the Functions object list's remembered layout.
 pub(super) const VIEW_PAGE_FUNCTIONS: &str = "functions";
 
-/// The six text inputs of the connection form, created when the form opens. Order follows
+/// The ten text inputs of the connection form, created when the form opens. Order follows
 /// [`FORM_FIELDS`] so `FormField as usize` indexes the array.
 struct FormInputs {
-    fields: [Entity<TextInput>; 6],
+    fields: [Entity<TextInput>; 10],
 }
 
 impl FormInputs {
@@ -167,7 +168,13 @@ fn form_field_placeholder(field: FormField) -> String {
         FormField::Name => t!("form.alias_placeholder").to_string(),
         FormField::Password => t!("form.password_placeholder").to_string(),
         FormField::Database => t!("form.database_placeholder").to_string(),
-        FormField::Host | FormField::Port | FormField::Username => String::new(),
+        FormField::Host
+        | FormField::Port
+        | FormField::Username
+        | FormField::OdbcDriver
+        | FormField::OdbcDsn
+        | FormField::OdbcConnectionString
+        | FormField::OdbcEngine => String::new(),
     }
 }
 
@@ -1261,16 +1268,6 @@ const MAIN_TABS: [(MainTab, &str, &str); 6] = [
     (MainTab::Backups, "icons/backups.svg", "main.backups"),
 ];
 
-/// An engine capability that some drivers lack. The UI hides or disables actions that would only
-/// fail on a driver without it (SQLite has no databases/users/routines of its own).
-#[derive(Clone, Copy)]
-enum DriverCapability {
-    DatabaseManagement,
-    Users,
-    Routines,
-    Schemas,
-}
-
 /// Default and clamp widths of the drag-resizable side panes.
 pub(super) const SIDEBAR_DEFAULT_WIDTH: f32 = 260.0;
 pub(super) const SIDEBAR_MIN_WIDTH: f32 = 150.0;
@@ -1476,6 +1473,8 @@ pub struct AppView {
     db_sql_cursor: usize,
     db_sql_selecting: bool,
     form_inputs: Option<FormInputs>,
+    /// The ODBC driver dropdown, built when the form opens for an ODBC connection.
+    form_odbc_driver: Option<Entity<ComboBox>>,
     /// The required general-page fields that were empty the last time 测试连接 / 保存并连接 ran, so
     /// the form can flag them inline. Cleared as soon as the user edits the offending field.
     form_errors: BTreeSet<FormField>,
@@ -1907,6 +1906,7 @@ impl AppView {
             db_sql_cursor: 0,
             db_sql_selecting: false,
             form_inputs: None,
+            form_odbc_driver: None,
             form_errors: BTreeSet::new(),
             form_tunnel_errors: BTreeSet::new(),
             form_extra_inputs: BTreeMap::new(),
@@ -2201,12 +2201,7 @@ impl AppView {
         let Some(driver) = self.registry.get(&node.profile.driver) else {
             return true;
         };
-        match capability {
-            DriverCapability::DatabaseManagement => driver.supports_database_management(),
-            DriverCapability::Users => driver.supports_users(),
-            DriverCapability::Routines => driver.supports_routines(),
-            DriverCapability::Schemas => driver.supports_schemas(),
-        }
+        driver.descriptor().capabilities.has(capability)
     }
 
     /// The engine's database-dialog layout for `connection_index` (falls back to MySQL's
@@ -2907,31 +2902,17 @@ fn chevron_spacer() -> AnyElement {
     div().w(px(14.0)).flex_none().into_any_element()
 }
 
-/// The icon that represents a connection, keyed by its engine id.
-fn driver_icon(driver: &str) -> &'static str {
-    match driver {
-        "mysql" => "icons/mysql.svg",
-        "mariadb" => "icons/mariadb.svg",
-        "sqlite" => "icons/sqlite.svg",
-        "sqlserver" => "icons/sqlserver.svg",
-        _ => "icons/connection.svg",
-    }
-}
-
-/// A connection icon. SQL Server and SQLite use their own brand marks (red / blue) so they are
-/// recognisable at a glance; the detailed MySQL/MariaDB glyphs are drawn white on a solid badge
-/// (whose colour also carries the connection status), and anything else falls back to the plain
-/// status-coloured icon.
-fn tree_driver_icon(driver: &str, color: u32, badge: u32) -> AnyElement {
-    match driver {
-        "sqlserver" => return tree_icon("icons/sqlserver.svg", 0xcc2927).into_any_element(),
-        // A slightly brighter blue than the logo's #003b57 so it stays legible on dark themes.
-        "sqlite" => return tree_icon("icons/sqlite.svg", 0x0f80cc).into_any_element(),
-        _ => {}
-    }
-    let path = driver_icon(driver);
-    if matches!(driver, "mysql" | "mariadb") {
-        return div()
+/// A connection icon, drawn from the driver's descriptor: an engine brand mark, a white glyph on a
+/// solid badge (whose colour carries the connection status), or a plain status-tinted glyph.
+fn tree_driver_icon(
+    icon: &'static str,
+    style: DriverIconStyle,
+    color: u32,
+    badge: u32,
+) -> AnyElement {
+    match style {
+        DriverIconStyle::Brand(brand) => tree_icon(icon, brand).into_any_element(),
+        DriverIconStyle::SolidBadge => div()
             .flex()
             .items_center()
             .justify_center()
@@ -2941,15 +2922,15 @@ fn tree_driver_icon(driver: &str, color: u32, badge: u32) -> AnyElement {
             .bg(rgb(badge))
             .child(
                 svg()
-                    .path(path)
+                    .path(icon)
                     .w(px(12.0))
                     .h(px(12.0))
                     .flex_none()
                     .text_color(rgb(0xffffff)),
             )
-            .into_any_element();
+            .into_any_element(),
+        DriverIconStyle::Plain => tree_icon(icon, color).into_any_element(),
     }
-    tree_icon(path, color).into_any_element()
 }
 
 /// A compact human-readable byte size for list columns, e.g. `512 B`, `2 KB`, `1.5 MB`.

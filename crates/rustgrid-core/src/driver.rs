@@ -1,5 +1,8 @@
 use async_trait::async_trait;
 
+use crate::capability::DriverCapabilities;
+use crate::descriptor::{ConnectionFormSpec, DriverDescriptor, DriverIconStyle};
+use crate::dialect::DriverDialect;
 use crate::error::{Error, Result};
 use crate::model::{
     BackupObjectKind, ColumnInfo, ConnectionConfig, DatabaseInfo, DatabaseOptions, DriverId,
@@ -18,11 +21,48 @@ pub trait Driver: Send + Sync {
 
     fn default_port(&self) -> u16;
 
+    /// Presentation/capability metadata for this driver, used by the New Connection menu, the
+    /// connection-tree icon and the UI's capability checks.
+    ///
+    /// The default reproduces the historical trait methods, so a driver gains the descriptor
+    /// without changing behavior; engines override it as they are migrated.
+    fn descriptor(&self) -> DriverDescriptor {
+        DriverDescriptor {
+            id: self.id(),
+            display_name: self.display_name(),
+            default_port: self.default_port(),
+            is_file_based: self.is_file_based(),
+            icon: "icons/connection.svg",
+            icon_style: DriverIconStyle::Plain,
+            capabilities: DriverCapabilities::from_flags(
+                self.supports_database_management(),
+                self.supports_users(),
+                self.supports_routines(),
+                self.supports_schemas(),
+            ),
+            database_editor: self.database_editor(),
+            connection_form: ConnectionFormSpec::default(),
+            order: 1000,
+        }
+    }
+
     /// Whether this engine connects to a database file rather than a network server. File-based
     /// engines ignore host/port/username/password and take the file path as the profile's
     /// `database`.
     fn is_file_based(&self) -> bool {
         false
+    }
+
+    /// The SQL dialect the engine speaks, used by the UI to pick engine-specific data (today the
+    /// built-in function list offered by completion) without matching on the engine id.
+    fn dialect(&self) -> DriverDialect {
+        DriverDialect::Generic
+    }
+
+    /// The system drivers offered by the connection form's driver dropdown (ODBC). Engines without
+    /// such a list return an empty one, and the form falls back to a free-text field.
+    fn connection_drivers(&self) -> Vec<String> {
+        Vec::new()
     }
 
     /// Whether the engine can create/alter/drop databases. SQLite cannot (a database is a file),

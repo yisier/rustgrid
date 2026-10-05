@@ -106,11 +106,16 @@ impl AppView {
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        form.file_based = self
+        let descriptor = self
             .registry
             .get(&form.driver)
-            .map(|driver| driver.is_file_based())
-            .unwrap_or(false);
+            .map(|driver| driver.descriptor());
+        form.file_based = descriptor
+            .as_ref()
+            .is_some_and(|driver| driver.is_file_based);
+        form.odbc = descriptor
+            .as_ref()
+            .is_some_and(|driver| driver.connection_form.odbc);
         let weak = cx.weak_entity();
         let theme = self.theme;
         let inputs = FormInputs {
@@ -142,9 +147,65 @@ impl AppView {
                     &weak,
                     cx,
                 ),
+                make_form_input(
+                    theme,
+                    form.odbc_driver.clone(),
+                    false,
+                    FormField::OdbcDriver,
+                    &weak,
+                    cx,
+                ),
+                make_form_input(
+                    theme,
+                    form.odbc_dsn.clone(),
+                    false,
+                    FormField::OdbcDsn,
+                    &weak,
+                    cx,
+                ),
+                make_form_input(
+                    theme,
+                    form.odbc_connection_string.clone(),
+                    false,
+                    FormField::OdbcConnectionString,
+                    &weak,
+                    cx,
+                ),
+                make_form_input(
+                    theme,
+                    form.odbc_engine.clone(),
+                    false,
+                    FormField::OdbcEngine,
+                    &weak,
+                    cx,
+                ),
             ],
         };
         let name_focus = inputs.get(FormField::Name).read(cx).focus_handle();
+        let odbc_driver = if form.odbc {
+            let options: Vec<ComboOption> = self
+                .registry
+                .get(&form.driver)
+                .map(|driver| driver.connection_drivers())
+                .unwrap_or_default()
+                .into_iter()
+                .map(ComboOption::plain)
+                .collect();
+            let selected = form.odbc_driver.clone();
+            let app = weak.clone();
+            Some(cx.new(|cx| {
+                ComboBox::new(theme, options, selected, 260.0, cx)
+                    .full_width()
+                    .on_select(Rc::new(move |value, _window, cx| {
+                        let _ = app.update(cx, |app, cx| {
+                            app.set_form_field(FormField::OdbcDriver, value, cx)
+                        });
+                    }))
+            }))
+        } else {
+            None
+        };
+        self.form_odbc_driver = odbc_driver;
         self.form_initial = Some(form.clone());
         self.form_inputs = Some(inputs);
         self.form = Some(form);

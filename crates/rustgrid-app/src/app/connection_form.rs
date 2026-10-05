@@ -151,6 +151,7 @@ impl AppView {
         self.form = None;
         self.form_initial = None;
         self.form_inputs = None;
+        self.form_odbc_driver = None;
         self.form_errors.clear();
         self.form_tunnel_errors.clear();
         self.form_extra_inputs.clear();
@@ -567,6 +568,39 @@ impl AppView {
                 input(FormField::Name),
                 theme,
             ))
+            .when(form.odbc, |page| {
+                page.child(form_field(
+                    t!("form.odbc.driver").to_string(),
+                    false,
+                    error_hint(FormField::OdbcDriver),
+                    match self.form_odbc_driver.clone() {
+                        Some(combo) => div().w_full().child(combo).into_any_element(),
+                        None => div().into_any_element(),
+                    },
+                    theme,
+                ))
+                .child(form_field(
+                    t!("form.odbc.connection_string").to_string(),
+                    false,
+                    None,
+                    input(FormField::OdbcConnectionString),
+                    theme,
+                ))
+                .child(form_field(
+                    t!("form.odbc.dsn").to_string(),
+                    false,
+                    None,
+                    input(FormField::OdbcDsn),
+                    theme,
+                ))
+                .child(form_field(
+                    t!("form.odbc.engine").to_string(),
+                    false,
+                    None,
+                    input(FormField::OdbcEngine),
+                    theme,
+                ))
+            })
             .child(
                 div()
                     .flex()
@@ -1640,6 +1674,14 @@ impl AppView {
             {
                 input.update(cx, |input, cx| input.set_text(value, cx));
             }
+        }
+        if let Some(combo) = self.form_odbc_driver.clone() {
+            let selected = self
+                .form
+                .as_ref()
+                .map(|form| form.odbc_driver.clone())
+                .unwrap_or_default();
+            combo.update(cx, |combo, cx| combo.set_selected(selected, cx));
         }
         cx.notify();
     }

@@ -16,6 +16,7 @@ use lsp_types::{
     Range, TextEdit,
 };
 use ropey::Rope;
+use rustgrid_core::DriverDialect;
 
 use crate::sql;
 
@@ -44,9 +45,9 @@ pub(crate) struct CompletionScope {
     /// Whether the target engine namespaces objects by schema (SQL Server). When true a referenced
     /// table's first qualifier is a schema, not a database.
     pub supports_schemas: bool,
-    /// The connection's driver id (e.g. `mysql`, `sqlserver`), used to pick the built-in function
-    /// list so an engine is not offered another's functions.
-    pub driver: Option<String>,
+    /// The connection's SQL dialect, used to pick the built-in function list so an engine is not
+    /// offered another's functions.
+    pub dialect: DriverDialect,
 }
 
 /// A shared catalog and the scope the active editor targets. The scope is behind an `Arc` so a
@@ -71,14 +72,14 @@ impl CompletionSource {
         database: Option<String>,
         schema: Option<String>,
         supports_schemas: bool,
-        driver: Option<String>,
+        dialect: DriverDialect,
     ) -> Self {
         *self.scope.write().expect("completion scope lock") = CompletionScope {
             connection_index,
             database,
             schema,
             supports_schemas,
-            driver,
+            dialect,
         };
         self
     }
@@ -252,7 +253,7 @@ fn build_items(
 
     // 3. Functions: built-ins plus the connection's stored functions.
     if qualifier.is_none() {
-        for function in sql::functions_for(scope.driver.as_deref()).iter().copied() {
+        for function in sql::functions_for(scope.dialect).iter().copied() {
             items.push((
                 2,
                 completion_item(function, "function", CompletionItemKind::FUNCTION),
@@ -399,7 +400,7 @@ mod tests {
             database: Some("appdb".into()),
             schema: schema.map(str::to_string),
             supports_schemas: true,
-            driver: None,
+            dialect: DriverDialect::Generic,
         }
     }
 
@@ -445,7 +446,7 @@ mod tests {
             database: Some("default".into()),
             schema: None,
             supports_schemas: false,
-            driver: None,
+            dialect: DriverDialect::Generic,
         };
         assert_eq!(
             catalog_target(&scope, &table(None, "orders")),

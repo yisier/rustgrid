@@ -19,6 +19,7 @@ use gpui_kit::component::input::{
 use gpui_kit::component::native_menu::NativeMenu;
 
 use crate::app::sql_completion::CompletionScope;
+use rustgrid_core::DriverDialect;
 
 /// Options applied when the editor is first built.
 #[derive(Clone)]
@@ -114,7 +115,7 @@ impl SqlEditor {
         database: Option<String>,
         schema: Option<String>,
         supports_schemas: bool,
-        driver: Option<String>,
+        dialect: DriverDialect,
         _cx: &mut Context<Self>,
     ) {
         if let Some(scope) = &self.scope
@@ -124,7 +125,7 @@ impl SqlEditor {
             scope.database = database;
             scope.schema = schema;
             scope.supports_schemas = supports_schemas;
-            scope.driver = driver;
+            scope.dialect = dialect;
         }
     }
 

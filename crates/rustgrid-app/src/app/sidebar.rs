@@ -14,7 +14,9 @@ enum TreeStatus {
 struct TreeConnection {
     index: usize,
     name: String,
-    driver: String,
+    /// The engine's icon asset path and how it is drawn, from the driver's descriptor.
+    icon: &'static str,
+    icon_style: DriverIconStyle,
     /// Whether the engine has stored routines; when false the Functions category is hidden.
     supports_routines: bool,
     /// Whether the engine has schemas; when false the flat category tree is used and the
@@ -186,20 +188,25 @@ fn snapshot_connections(app: &AppView) -> Vec<TreeConnection> {
                         .collect(),
                 ),
             };
+            let descriptor = app
+                .registry
+                .get(&node.profile.driver)
+                .map(|driver| driver.descriptor());
             TreeConnection {
                 index,
                 name: node.profile.name.clone(),
-                driver: node.profile.driver.as_str().to_string(),
-                supports_routines: app
-                    .registry
-                    .get(&node.profile.driver)
-                    .map(|driver| driver.supports_routines())
-                    .unwrap_or(true),
-                supports_schemas: app
-                    .registry
-                    .get(&node.profile.driver)
-                    .map(|driver| driver.supports_schemas())
-                    .unwrap_or(false),
+                icon: descriptor
+                    .as_ref()
+                    .map_or("icons/connection.svg", |descriptor| descriptor.icon),
+                icon_style: descriptor
+                    .as_ref()
+                    .map_or(DriverIconStyle::Plain, |descriptor| descriptor.icon_style),
+                supports_routines: descriptor.as_ref().is_none_or(|descriptor| {
+                    descriptor.capabilities.has(DriverCapability::Routines)
+                }),
+                supports_schemas: descriptor.as_ref().is_some_and(|descriptor| {
+                    descriptor.capabilities.has(DriverCapability::Schemas)
+                }),
                 status,
                 expanded: node.expanded,
                 databases,
@@ -370,7 +377,12 @@ impl TreePane {
             } else {
                 chevron_spacer()
             })
-            .child(tree_driver_icon(&connection.driver, icon_color, badge))
+            .child(tree_driver_icon(
+                connection.icon,
+                connection.icon_style,
+                icon_color,
+                badge,
+            ))
             .child(
                 div()
                     .flex_1()

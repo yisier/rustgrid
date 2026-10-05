@@ -19,7 +19,7 @@ mod win_resize;
 use std::sync::Arc;
 
 use gpui::{AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
-use rustgrid_core::DriverRegistry;
+use rustgrid_core::{BuiltinDriverSource, DriverRegistry};
 
 use crate::app::AppView;
 use crate::assets::Assets;
@@ -34,10 +34,14 @@ fn main() {
         .init();
 
     let mut registry = DriverRegistry::new();
-    registry.register(Arc::new(rustgrid_mysql::MysqlDriver::new()));
-    registry.register(Arc::new(rustgrid_mysql::MariaDbDriver::new()));
-    registry.register(Arc::new(rustgrid_sqlite::SqliteDriver::new()));
-    registry.register(Arc::new(rustgrid_sqlserver::SqlServerDriver::new()));
+    let drivers = BuiltinDriverSource::new()
+        .with(Arc::new(rustgrid_mysql::MysqlDriver::new()))
+        .with(Arc::new(rustgrid_mysql::MariaDbDriver::new()))
+        .with(Arc::new(rustgrid_sqlite::SqliteDriver::new()))
+        .with(Arc::new(rustgrid_sqlserver::SqlServerDriver::new()));
+    #[cfg(feature = "driver-odbc")]
+    let drivers = drivers.with(Arc::new(rustgrid_odbc::OdbcDriver::new()));
+    registry.register_source(&drivers);
     let registry = Arc::new(registry);
 
     let config = Arc::new(

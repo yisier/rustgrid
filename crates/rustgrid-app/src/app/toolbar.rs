@@ -6,16 +6,13 @@ const TITLEBAR_ICON_BUTTON: f32 = 34.0;
 const THEME_MENU_WIDTH: f32 = 168.0;
 /// The project's public repository, opened by the titlebar GitHub button.
 const GITHUB_URL: &str = "https://github.com/yisier/rustgrid";
-/// The connection types Navicat's New Connection menu lists. Only the engines present in the
-/// driver registry are selectable (today MySQL and MariaDB); the rest are shown greyed out.
-const CONNECTION_TYPES: [(&str, &str); 7] = [
-    ("mysql", "MySQL..."),
-    ("postgresql", "PostgreSQL..."),
-    ("oracle", "Oracle..."),
-    ("sqlite", "SQLite..."),
-    ("sqlserver", "SQL Server..."),
-    ("mariadb", "MariaDB..."),
-    ("mongodb", "MongoDB..."),
+/// Engines shown greyed out in the New Connection menu: listed in Navicat's order, but not yet
+/// implemented. Registered drivers are added from the registry and ordered by their descriptor's
+/// `order`; these placeholders occupy their slots until an engine ships.
+const PLANNED_ENGINES: [(&str, &str, u16); 3] = [
+    ("postgresql", "PostgreSQL", 20),
+    ("oracle", "Oracle", 30),
+    ("mongodb", "MongoDB", 70),
 ];
 
 /// The visual state of one main-toolbar button: `active` fills it with the brand tint, `enabled`
@@ -298,26 +295,52 @@ impl AppView {
         bar
     }
 
-    /// The New Connection engine dropdown. Only engines present in the driver registry are
-    /// selectable (today MySQL and MariaDB); the rest are listed greyed out, like Navicat's menu.
+    /// The New Connection engine dropdown. Registered drivers come from the registry (ordered by
+    /// their descriptor's `order`); the not-yet-implemented engines are listed greyed out, like
+    /// Navicat's menu.
     pub(super) fn render_connect_menu(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
         let anchor = *self.connect_menu_anchor.borrow();
 
+        // Merge registered drivers with the planned placeholders, then sort once by `order`, so the
+        // menu keeps a single stable, engine-driven order.
+        let mut entries: Vec<(u16, DriverId, String, bool)> = self
+            .registry
+            .drivers_sorted()
+            .into_iter()
+            .map(|driver| {
+                let descriptor = driver.descriptor();
+                (
+                    descriptor.order,
+                    descriptor.id.clone(),
+                    descriptor.display_name,
+                    true,
+                )
+            })
+            .collect();
+        for (id, name, order) in PLANNED_ENGINES {
+            let driver = DriverId::new(id);
+            if self.registry.get(&driver).is_none() {
+                entries.push((order, driver, name.to_string(), false));
+            }
+        }
+        entries.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.cmp(&b.2)));
+
         let mut items = div().flex().flex_col().w(px(150.0)).p_0p5();
-        for (id, label) in CONNECTION_TYPES {
-            if self.registry.get(&DriverId::new(id)).is_some() {
-                let driver = DriverId::new(id);
+        for (_, id, name, enabled) in entries {
+            let label = format!("{name}...");
+            if enabled {
+                let driver = id.clone();
                 items = items.child(self.context_item(
-                    id,
-                    label.to_string(),
+                    id.as_str().to_string(),
+                    label,
                     cx.listener(move |this, _event, window, cx| {
                         this.connect_menu_open = false;
                         this.open_new_form(driver.clone(), window, cx);
                     }),
                 ));
             } else {
-                items = items.child(self.context_item_disabled(id, label.to_string()));
+                items = items.child(self.context_item_disabled(id.as_str().to_string(), label));
             }
         }
 
