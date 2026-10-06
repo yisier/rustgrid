@@ -109,8 +109,10 @@ not a later refactor.
   at runtime and is only needed if a user actually connects through ODBC.
 - Release build (`cargo build --release -p rustgrid-app`) needs an HLSL compiler on Windows: on
   this machine the Windows SDK `fxc.exe` is absent, so build the fallback shim once
-  (`gcc -O2 -o fxc.exe tools/fxc-shim/fxc.c -lkernel32`) and run cargo with
-  `GPUI_FXC_PATH=<abs path to fxc.exe>` (plus the GNU toolchain env vars below). See Gotchas.
+  (`gcc -O2 -o fxc.exe tools/fxc-shim/fxc.c -lkernel32`). The gitignored `.cargo/config.toml`
+  then points `GPUI_FXC_PATH` at it via `[env]`, so a plain `cargo build --release` just works;
+  `GPUI_FXC_PATH=<abs path to fxc.exe>` on the command line is only needed on a machine whose
+  `.cargo/config.toml` lacks that entry. See Gotchas.
   The shim binary is gitignored; only `tools/fxc-shim/fxc.c` is tracked.
 - `cargo test --workspace`
 - Live MySQL integration test (ignored by default): set `RUSTGRID_MYSQL_PASSWORD` (and
@@ -568,8 +570,18 @@ make more engines cheap later — do not build those features early.
   On this machine the Windows SDK `fxc.exe` is absent, so a plain `cargo build --release` panics
   in `gpui-pre-windows/build.rs` with `Failed to find fxc.exe`. The fallback is `tools/fxc-shim`
   (speaks the fxc subset gpui invokes; drives the system `d3dcompiler_47.dll`) built once with
-  `gcc -O2 -o fxc.exe tools/fxc-shim/fxc.c -lkernel32` and passed via
-  `GPUI_FXC_PATH=<abs path to fxc.exe>`. The binary is gitignored. Debug builds are unaffected.
+  `gcc -O2 -o fxc.exe tools/fxc-shim/fxc.c -lkernel32`. The shim binary is gitignored, and the
+  gitignored `.cargo/config.toml` wires it up automatically:
+  ```toml
+  [env]
+  GPUI_FXC_PATH = { value = "fxc.exe", relative = true }
+  ```
+  `relative = true` resolves against the **parent of `.cargo/`** (the repo root), *not* the
+  `.cargo/` directory itself — `"../fxc.exe"` would therefore point one level too high and the
+  build script silently falls through to the `Failed to find fxc.exe` panic. Debug builds are
+  unaffected. The build script reads `GPUI_FXC_PATH` only at compile time and declares no
+  `cargo:rerun-if-env-changed`, so after editing the entry run `cargo clean -p gpui-pre-windows
+  --release` to force it to be re-read.
 - **Cross-platform** (Windows/macOS/Linux). Avoid OS-only APIs; gate platform-specific code
   behind `#[cfg(target_os = ...)]`; watch per-OS native deps (e.g. Linux system libraries).
 - **Small install size is a hard requirement.** The release profile already sets `lto`,

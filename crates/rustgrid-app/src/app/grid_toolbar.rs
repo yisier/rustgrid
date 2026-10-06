@@ -1373,6 +1373,75 @@ impl GridView {
             .into_any_element()
     }
 
+    /// The numeric value of a cell as the user currently sees it: a staged edit or pending
+    /// insert wins over the loaded row, so the sum tracks in-flight typing. `None` for `NULL`,
+    /// text, binary and boolean cells.
+    fn numeric_cell(&self, row: usize, col: usize) -> Option<NumericCell> {
+        if let Some(staged) = self.staged_value(row, col) {
+            return staged.as_deref().and_then(parse_numeric_text);
+        }
+        match self.state.rows.get(row)?.get(col)? {
+            CellValue::Int(value) => Some(NumericCell::Int(i128::from(*value))),
+            CellValue::Uint(value) => Some(NumericCell::Int(i128::from(*value))),
+            CellValue::Float(value) if value.is_finite() => Some(NumericCell::Float(*value)),
+            _ => None,
+        }
+    }
+
+    /// The Excel-style 求和 of the current selection: the sum of every numeric cell it covers.
+    /// `None` unless the selection spans more than one cell and holds at least one number, so a
+    /// single click keeps the status bar's plain selection text. Both table pages and ad-hoc
+    /// query results go through here, so the two read the same.
+    ///
+    /// Called from `render`, so it stays linear in the selected cell count: a page may hold up to
+    /// a million rows and a whole-column selection must not turn into a quadratic scan.
+    fn selection_sum(&self) -> Option<String> {
+        let selection = self.state.selection.as_ref()?;
+        let cell_count: usize = selection
+            .ranges
+            .iter()
+            .map(|range| {
+                let (start_row, end_row) = range.rows();
+                let (start_col, end_col) = range.cols();
+                (end_row - start_row + 1) * (end_col - start_col + 1)
+            })
+            .sum();
+        if cell_count < 2 {
+            return None;
+        }
+
+        let mut total = NumericSum::default();
+        match selection.ranges.as_slice() {
+            // One rectangle cannot repeat a cell, so it needs no de-duplication.
+            [range] => {
+                let (start_row, end_row) = range.rows();
+                let (start_col, end_col) = range.cols();
+                for row in start_row..=end_row {
+                    for col in start_col..=end_col {
+                        total.add(self.numeric_cell(row, col));
+                    }
+                }
+            }
+            // Ctrl-dragged ranges may overlap; a set keeps a shared cell from counting twice.
+            ranges => {
+                let mut seen = std::collections::HashSet::new();
+                for range in ranges {
+                    let (start_row, end_row) = range.rows();
+                    let (start_col, end_col) = range.cols();
+                    for row in start_row..=end_row {
+                        for col in start_col..=end_col {
+                            if seen.insert((row, col)) {
+                                total.add(self.numeric_cell(row, col));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        total.render()
+    }
+
     pub(super) fn render_grid_status(&self) -> impl IntoElement {
         let theme = self.theme;
         let total = self.state.total_rows.unwrap_or(0);
@@ -1417,6 +1486,9 @@ impl GridView {
             }
             None => flatten_status_sql(&self.state.sql()),
         };
+        // Excel-style aggregate: a multi-cell selection that holds numbers also reports their
+        // sum, right after the selection text.
+        let sum = self.selection_sum();
 
         div()
             .flex()
@@ -1435,9 +1507,21 @@ impl GridView {
                 div()
                     .flex_1()
                     .min_w(px(0.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .child(message),
+                    .child(message)
+                    .when_some(sum, |row, sum| {
+                        row.child(
+                            div()
+                                .flex_none()
+                                .text_color(rgb(theme.danger))
+                                .child(t!("grid.selection_sum", sum = sum).to_string()),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -1470,9 +1554,94 @@ pub(super) fn flatten_status_sql(sql: &str) -> String {
     sql.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// One numeric value lifted out of a cell for the status bar's aggregate. Integers keep their
+/// exact value (a `BIGINT` column can exceed what `f64` represents), floats fall back to `f64`.
+enum NumericCell {
+    Int(i128),
+    Float(f64),
+}
+
+/// Running total of the selected numeric cells. Integers are summed exactly and only folded into
+/// `f64` at the end, so a column of `BIGINT`s stays exact as long as it holds no decimal.
+#[derive(Default)]
+struct NumericSum {
+    int: i128,
+    float: f64,
+    has_float: bool,
+    count: usize,
+}
+
+impl NumericSum {
+    fn add(&mut self, value: Option<NumericCell>) {
+        match value {
+            Some(NumericCell::Int(value)) => {
+                self.int += value;
+                self.count += 1;
+            }
+            Some(NumericCell::Float(value)) => {
+                self.has_float = true;
+                self.float += value;
+                self.count += 1;
+            }
+            None => {}
+        }
+    }
+
+    /// The formatted sum, or `None` when the selection held no numbers at all (text, `NULL` and
+    /// binary cells only) — the status bar then shows just the selection text.
+    fn render(&self) -> Option<String> {
+        if self.count == 0 {
+            return None;
+        }
+        Some(if self.has_float {
+            format_numeric_sum(self.int as f64 + self.float)
+        } else {
+            self.int.to_string()
+        })
+    }
+}
+
+/// Read a staged cell string (a pending edit or a pending insert row) as a number. `"(Null)"`,
+/// blank text and non-numeric text all fail to parse, which is the "not a number" answer we
+/// want; non-finite spellings (`NaN`, `inf`) are rejected too so they cannot poison the sum.
+fn parse_numeric_text(text: &str) -> Option<NumericCell> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if let Ok(value) = text.parse::<i128>() {
+        return Some(NumericCell::Int(value));
+    }
+    text.parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+        .map(NumericCell::Float)
+}
+
+/// Render a summed `f64` for the status bar: no trailing `.0`, no float noise (`0.1 + 0.2`
+/// prints as `0.3`).
+fn format_numeric_sum(value: f64) -> String {
+    if !value.is_finite() {
+        return value.to_string();
+    }
+    if value == value.trunc() && value.abs() < 1e15 {
+        return format!("{}", value as i64);
+    }
+    let mut text = format!("{value:.6}");
+    while text.ends_with('0') {
+        text.pop();
+    }
+    if text.ends_with('.') {
+        text.pop();
+    }
+    text
+}
+
 #[cfg(test)]
 mod tests {
-    use super::flatten_status_sql;
+    use super::{
+        NumericCell, NumericSum, flatten_status_sql, format_numeric_sum, parse_numeric_text,
+    };
 
     #[test]
     fn status_sql_flattens_newlines_and_indentation() {
@@ -1484,5 +1653,59 @@ mod tests {
         );
         assert_eq!(flatten_status_sql("  "), "");
         assert_eq!(flatten_status_sql(""), "");
+    }
+
+    #[test]
+    fn numeric_text_accepts_numbers_only() {
+        assert!(matches!(
+            parse_numeric_text(" 55239 "),
+            Some(NumericCell::Int(55239))
+        ));
+        assert!(matches!(
+            parse_numeric_text("-7"),
+            Some(NumericCell::Int(-7))
+        ));
+        assert!(matches!(
+            parse_numeric_text("12.5"),
+            Some(NumericCell::Float(value)) if value == 12.5
+        ));
+        // A staged NULL, blank input and plain text are all "not a number".
+        assert!(parse_numeric_text("(Null)").is_none());
+        assert!(parse_numeric_text("").is_none());
+        assert!(parse_numeric_text("abc").is_none());
+        // Non-finite spellings must not slip into the sum.
+        assert!(parse_numeric_text("NaN").is_none());
+        assert!(parse_numeric_text("inf").is_none());
+    }
+
+    #[test]
+    fn numeric_sum_drops_trailing_zeroes() {
+        assert_eq!(format_numeric_sum(55239.0), "55239");
+        assert_eq!(format_numeric_sum(-1400.0), "-1400");
+        assert_eq!(format_numeric_sum(12.5), "12.5");
+        // Float noise from summing decimals is trimmed to something readable.
+        assert_eq!(format_numeric_sum(0.1 + 0.2), "0.3");
+    }
+
+    #[test]
+    fn numeric_sum_keeps_integers_exact_and_skips_non_numbers() {
+        let mut sum = NumericSum::default();
+        // A BIGINT beyond `f64`'s exact range still sums exactly.
+        sum.add(Some(NumericCell::Int(9_007_199_254_740_993)));
+        sum.add(Some(NumericCell::Int(1)));
+        sum.add(None); // NULL / text / binary cells contribute nothing.
+        assert_eq!(sum.render().as_deref(), Some("9007199254740994"));
+
+        // One float switches the total to float arithmetic.
+        let mut mixed = NumericSum::default();
+        mixed.add(Some(NumericCell::Int(3)));
+        mixed.add(Some(NumericCell::Float(0.5)));
+        assert_eq!(mixed.render().as_deref(), Some("3.5"));
+    }
+
+    #[test]
+    fn numeric_sum_of_nothing_is_none() {
+        let sum = NumericSum::default();
+        assert!(sum.render().is_none());
     }
 }
