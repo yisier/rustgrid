@@ -56,6 +56,7 @@ impl OdbcConnection {
 
     /// Run one statement, returning `(columns, rows, rows_affected)`. `columns` is non-empty only
     /// when the statement produced a result set.
+    #[allow(clippy::type_complexity)]
     fn run(&self, sql: &str) -> Result<(Vec<ColumnInfo>, Vec<Vec<CellValue>>, Option<u64>)> {
         let api = api::api().map_err(Error::Connection)?;
         let dbc = self.handle()?.0;

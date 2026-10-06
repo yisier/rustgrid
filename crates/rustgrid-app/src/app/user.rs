@@ -5,7 +5,7 @@ use super::*;
 
 /// The window-space key of one account, used by the Users list's multi-selection.
 fn user_key(account: &UserAccount) -> String {
-    format!("{}@{}", account.user, account.host)
+    account.label()
 }
 
 impl AppView {

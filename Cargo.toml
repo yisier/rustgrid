@@ -8,6 +8,8 @@ members = [
     "crates/rustgrid-mysql",
     "crates/rustgrid-sqlite",
     "crates/rustgrid-sqlserver",
+    "crates/rustgrid-postgresql",
+    "crates/rustgrid-tunnel",
     "crates/rustgrid-odbc",
     "crates/rustgrid-config",
     "crates/rustgrid-app",
@@ -29,6 +31,8 @@ rustgrid-import = { path = "crates/rustgrid-import" }
 rustgrid-mysql = { path = "crates/rustgrid-mysql" }
 rustgrid-sqlite = { path = "crates/rustgrid-sqlite" }
 rustgrid-sqlserver = { path = "crates/rustgrid-sqlserver" }
+rustgrid-postgresql = { path = "crates/rustgrid-postgresql" }
+rustgrid-tunnel = { path = "crates/rustgrid-tunnel" }
 rustgrid-odbc = { path = "crates/rustgrid-odbc" }
 rustgrid-config = { path = "crates/rustgrid-config" }
 

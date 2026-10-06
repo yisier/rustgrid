@@ -22,8 +22,8 @@ the connection tree, object lists, toolbars and dialogs all behave the way you a
 | MySQL / MariaDB            | Supported        |
 | SQLite                     | Supported        |
 | SQL Server                 | Supported        |
+| PostgreSQL                 | Supported        |
 | Oracle, DB2, Dameng, ...   | via generic ODBC |
-| PostgreSQL                 | Planned          |
 
 ## Features
 
@@ -67,6 +67,8 @@ cargo run -p rustgrid-app
 - `crates/rustgrid-mysql` — MySQL and MariaDB drivers.
 - `crates/rustgrid-sqlite` — SQLite driver.
 - `crates/rustgrid-sqlserver` — SQL Server driver.
+- `crates/rustgrid-postgresql` — PostgreSQL driver.
+- `crates/rustgrid-tunnel` — shared SSH / SOCKS5 / HTTP tunnel used by the network drivers.
 - `crates/rustgrid-odbc` — generic ODBC driver (Oracle, DB2, Dameng, ...).
 - `crates/rustgrid-backup` — the `.rgbak` backup container.
 - `crates/rustgrid-export` — table-data exporters (`.xlsx` / `.csv` / `.sql` / `.txt`).

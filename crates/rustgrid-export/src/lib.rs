@@ -93,12 +93,14 @@ impl Default for ExportOptions {
 pub enum SqlDialect {
     #[default]
     MySql,
+    Postgres,
 }
 
 impl SqlDialect {
     fn quote_identifier(self, name: &str) -> String {
         match self {
             SqlDialect::MySql => format!("`{}`", name.replace('`', "``")),
+            SqlDialect::Postgres => format!("\"{}\"", name.replace('"', "\"\"")),
         }
     }
 
@@ -127,8 +129,42 @@ impl SqlDialect {
                     hex
                 }
             },
+            SqlDialect::Postgres => match value {
+                CellValue::Null => "NULL".to_string(),
+                CellValue::Bool(value) => {
+                    if *value {
+                        "true".to_string()
+                    } else {
+                        "false".to_string()
+                    }
+                }
+                CellValue::Int(value) => value.to_string(),
+                CellValue::Uint(value) => value.to_string(),
+                CellValue::Float(value) => {
+                    if value.is_finite() {
+                        value.to_string()
+                    } else {
+                        "NULL".to_string()
+                    }
+                }
+                CellValue::Text(text) => quote_postgres_string(text),
+                CellValue::Bytes(bytes) => {
+                    let mut hex = String::with_capacity(bytes.len() * 2 + 3);
+                    hex.push_str("'\\x");
+                    for byte in bytes {
+                        hex.push_str(&format!("{byte:02x}"));
+                    }
+                    hex.push('\'');
+                    hex
+                }
+            },
         }
     }
+}
+
+/// Escape a string as a PostgreSQL standard-conforming single-quoted literal.
+fn quote_postgres_string(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 /// Escape a string as a MySQL single-quoted literal.

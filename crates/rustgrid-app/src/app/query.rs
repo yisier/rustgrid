@@ -711,6 +711,10 @@ impl AppView {
         let supports_schemas = tab
             .connection_index
             .is_some_and(|index| self.driver_supports(index, DriverCapability::Schemas));
+        let dialect = tab
+            .connection_index
+            .map(|index| self.driver_dialect(index))
+            .unwrap_or_default();
         let connection_name = tab
             .connection_index
             .and_then(|connection_index| self.connections.get(connection_index))
@@ -760,7 +764,7 @@ impl AppView {
                         let mut grid_table = String::new();
                         if result.has_result_set
                             && let Some((reference_schema, table)) =
-                                sql::infer_single_table(&result.statement)
+                                sql::infer_single_table_for(&result.statement, dialect)
                         {
                             // On schema engines the statement's first qualifier is a schema, so
                             // the grid's object is `schema.table` inside the query's database;

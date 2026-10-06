@@ -22,8 +22,8 @@ RustGrid 是一款使用 **Rust + GPUI** 构建的跨平台（Windows / macOS / 
 | MySQL / MariaDB            | 已支持         |
 | SQLite                     | 已支持         |
 | SQL Server                 | 已支持         |
+| PostgreSQL                 | 已支持         |
 | Oracle、DB2、达梦 等       | 通过通用 ODBC  |
-| PostgreSQL                 | 计划中         |
 
 ## 功能
 
@@ -65,6 +65,8 @@ cargo run -p rustgrid-app
 - `crates/rustgrid-mysql` —— MySQL 与 MariaDB 驱动。
 - `crates/rustgrid-sqlite` —— SQLite 驱动。
 - `crates/rustgrid-sqlserver` —— SQL Server 驱动。
+- `crates/rustgrid-postgresql` —— PostgreSQL 驱动。
+- `crates/rustgrid-tunnel` —— 共享的 SSH / SOCKS5 / HTTP 隧道，供网络驱动复用。
 - `crates/rustgrid-odbc` —— 通用 ODBC 驱动（Oracle、DB2、达梦 等）。
 - `crates/rustgrid-backup` —— `.rgbak` 备份容器。
 - `crates/rustgrid-export` —— 表数据导出器（`.xlsx` / `.csv` / `.sql` / `.txt`）。

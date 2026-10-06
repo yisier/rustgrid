@@ -47,7 +47,8 @@ fn main() {
         .with(Arc::new(rustgrid_mysql::MysqlDriver::new()))
         .with(Arc::new(rustgrid_mysql::MariaDbDriver::new()))
         .with(Arc::new(rustgrid_sqlite::SqliteDriver::new()))
-        .with(Arc::new(rustgrid_sqlserver::SqlServerDriver::new()));
+        .with(Arc::new(rustgrid_sqlserver::SqlServerDriver::new()))
+        .with(Arc::new(rustgrid_postgresql::PostgresDriver::new()));
     #[cfg(feature = "driver-odbc")]
     let drivers = drivers.with(Arc::new(rustgrid_odbc::OdbcDriver::new()));
     registry.register_source(&drivers);

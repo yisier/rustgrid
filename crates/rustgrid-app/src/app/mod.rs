@@ -2253,6 +2253,15 @@ impl AppView {
         driver.descriptor().capabilities.has(capability)
     }
 
+    /// The SQL dialect of the driver behind `connection_index` (generic when unknown).
+    fn driver_dialect(&self, connection_index: usize) -> rustgrid_core::DriverDialect {
+        self.connections
+            .get(connection_index)
+            .and_then(|node| self.registry.get(&node.profile.driver))
+            .map(|driver| driver.dialect())
+            .unwrap_or_default()
+    }
+
     /// The engine's database-dialog layout for `connection_index` (falls back to MySQL's
     /// charset + collation).
     fn database_editor_spec(&self, connection_index: usize) -> DatabaseEditorSpec {

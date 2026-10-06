@@ -93,7 +93,7 @@ impl AppView {
             return;
         }
         let name = self.unique_routine_name(connection_index, &database, kind);
-        let template = routine_template(kind, &name);
+        let template = routine_template_for(kind, &name, self.driver_dialect(connection_index));
         let id = self.next_query_id;
         self.next_query_id += 1;
         let mut tab = QueryTab::new(id);
@@ -315,8 +315,12 @@ impl AppView {
         let routine = tab.routine.as_ref()?;
         let connection = tab.connection_index.and_then(|i| self.connection_arc(i))?;
         let database = tab.database.clone().unwrap_or_default();
-        let (kind, name) =
-            sql::routine_identity(&tab.sql).unwrap_or_else(|| (routine.kind, routine.name.clone()));
+        let dialect = tab
+            .connection_index
+            .map(|index| self.driver_dialect(index))
+            .unwrap_or_default();
+        let (kind, name) = sql::routine_identity_for(&tab.sql, dialect)
+            .unwrap_or_else(|| (routine.kind, routine.name.clone()));
         let edit = RoutineEdit {
             kind,
             name,
@@ -347,7 +351,11 @@ impl AppView {
         };
         let database = tab.database.clone().unwrap_or_default();
         let definition = tab.sql.clone();
-        let (kind, name) = sql::routine_identity(&definition)
+        let dialect = tab
+            .connection_index
+            .map(|index| self.driver_dialect(index))
+            .unwrap_or_default();
+        let (kind, name) = sql::routine_identity_for(&definition, dialect)
             .unwrap_or_else(|| (routine.kind, routine.name.clone()));
         let original = routine.original_name.clone().zip(routine.original_kind);
         let edit = RoutineEdit {
@@ -428,9 +436,13 @@ impl AppView {
         };
         let database = tab.database.clone().unwrap_or_default();
         let definition = tab.sql.clone();
-        let (kind, name) = sql::routine_identity(&definition)
+        let dialect = tab
+            .connection_index
+            .map(|index| self.driver_dialect(index))
+            .unwrap_or_default();
+        let (kind, name) = sql::routine_identity_for(&definition, dialect)
             .unwrap_or_else(|| (routine.kind, routine.name.clone()));
-        let parameters = sql::routine_parameters(&definition);
+        let parameters = sql::routine_parameters_for(&definition, dialect);
         self.run_routine_call(connection_index, database, kind, name, &parameters, cx);
     }
 
@@ -456,7 +468,13 @@ impl AppView {
         parameters: &[String],
         cx: &mut Context<'_, Self>,
     ) {
-        let call = routine_call_sql(&database, kind, &name, parameters);
+        let call = routine_call_sql_for(
+            &database,
+            kind,
+            &name,
+            parameters,
+            self.driver_dialect(connection_index),
+        );
         let id = self.next_query_id;
         self.next_query_id += 1;
         let mut tab = QueryTab::new(id);
@@ -553,8 +571,23 @@ impl AppView {
     }
 }
 
-/// The default body template for a brand-new routine.
-pub(super) fn routine_template(kind: RoutineKind, name: &str) -> String {
+/// The default body template for a brand-new routine, in the engine's dialect.
+pub(super) fn routine_template_for(
+    kind: RoutineKind,
+    name: &str,
+    dialect: rustgrid_core::DriverDialect,
+) -> String {
+    if dialect == rustgrid_core::DriverDialect::Postgres {
+        let quoted = format!("\"{}\"", name.replace('"', "\"\""));
+        return match kind {
+            RoutineKind::Function => format!(
+                "CREATE OR REPLACE FUNCTION {quoted}(p1 integer)\nRETURNS integer\nLANGUAGE plpgsql\nAS $$\nBEGIN\n    RETURN 0;\nEND;\n$$"
+            ),
+            RoutineKind::Procedure => format!(
+                "CREATE OR REPLACE PROCEDURE {quoted}()\nLANGUAGE plpgsql\nAS $$\nBEGIN\n    -- Routine body goes here...\nEND;\n$$"
+            ),
+        };
+    }
     match kind {
         RoutineKind::Function => format!(
             "CREATE FUNCTION {}(p1 int)\nRETURNS int\nBEGIN\n    RETURN 0;\nEND",
@@ -569,22 +602,44 @@ pub(super) fn routine_template(kind: RoutineKind, name: &str) -> String {
 
 /// The statement that runs a routine: `SELECT` for a function, `CALL` for a procedure. Parameters
 /// are emitted as comments the user fills in.
-fn routine_call_sql(
+fn routine_call_sql_for(
     database: &str,
     kind: RoutineKind,
     name: &str,
     parameters: &[String],
+    dialect: rustgrid_core::DriverDialect,
 ) -> String {
-    let qualified = format!("{}.{}", quote_identifier(database), quote_identifier(name));
     let arguments = parameters
         .iter()
         .map(|parameter| format!("/* {parameter} */"))
         .collect::<Vec<_>>()
         .join(", ");
-    if kind.is_procedure() {
-        format!("CALL {qualified}({arguments});")
+    if dialect == rustgrid_core::DriverDialect::Postgres {
+        // PostgreSQL object names are `schema.name`; a database prefix is never valid, and the
+        // `(argtypes)` signature the Functions list carries must not be part of a call.
+        let target = routine_pg_name(name);
+        if kind.is_procedure() {
+            format!("CALL {target}({arguments});")
+        } else {
+            format!("SELECT {target}({arguments});")
+        }
     } else {
-        format!("SELECT {qualified}({arguments});")
+        let qualified = format!("{}.{}", quote_identifier(database), quote_identifier(name));
+        if kind.is_procedure() {
+            format!("CALL {qualified}({arguments});")
+        } else {
+            format!("SELECT {qualified}({arguments});")
+        }
+    }
+}
+
+/// The quoted `"schema"."name"` (or `"name"`) of a PostgreSQL routine, dropping any `(argtypes)`.
+fn routine_pg_name(name: &str) -> String {
+    let head = name.split('(').next().unwrap_or(name).trim();
+    let quoted = |part: &str| format!("\"{}\"", part.replace('"', "\"\""));
+    match head.rsplit_once('.') {
+        Some((schema, bare)) => format!("{}.{}", quoted(schema), quoted(bare)),
+        None => quoted(head),
     }
 }
 

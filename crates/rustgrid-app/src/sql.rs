@@ -1,11 +1,23 @@
 //! SQL language helpers built on mature third-party crates: `sqlparser` for tokenizing /
 //! keyword metadata and `sqlformat` for beautifying, so the app does not hand-roll a SQL lexer.
 
-use sqlparser::dialect::MySqlDialect;
+use sqlparser::dialect::{Dialect, GenericDialect, MySqlDialect, PostgreSqlDialect};
 use sqlparser::keywords::Keyword;
 use sqlparser::tokenizer::{Location, Token, TokenWithSpan, Tokenizer, Whitespace};
 
 use rustgrid_core::{DriverDialect, RoutineKind};
+
+/// The `sqlparser` dialect family for an engine. Engines without a dedicated mapping fall back to
+/// the permissive generic dialect (which at least understands `"`-quoted identifiers).
+pub fn sqlparser_dialect(dialect: DriverDialect) -> Box<dyn Dialect> {
+    match dialect {
+        DriverDialect::Mysql => Box::new(MySqlDialect {}),
+        DriverDialect::Postgres => Box::new(PostgreSqlDialect {}),
+        DriverDialect::SqlServer | DriverDialect::Sqlite | DriverDialect::Generic => {
+            Box::new(GenericDialect {})
+        }
+    }
+}
 
 /// A coarse token category used only for syntax coloring.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -27,12 +39,16 @@ pub struct SqlSpan {
 
 /// Tokenize `sql` with the MySQL dialect and return the colorable spans.
 pub fn highlight(sql: &str) -> Vec<SqlSpan> {
+    highlight_for(sql, &MySqlDialect {})
+}
+
+/// Tokenize `sql` with `dialect` and return the colorable spans.
+pub fn highlight_for(sql: &str, dialect: &dyn Dialect) -> Vec<SqlSpan> {
     if sql.is_empty() {
         return Vec::new();
     }
 
-    let dialect = MySqlDialect {};
-    let mut tokenizer = Tokenizer::new(&dialect, sql);
+    let mut tokenizer = Tokenizer::new(dialect, sql);
     let Ok(tokens) = tokenizer.tokenize_with_location() else {
         return Vec::new();
     };
@@ -75,9 +91,12 @@ pub fn keywords() -> &'static [&'static str] {
 
 /// If `sql` is a simple `SELECT ... FROM <one table>` with no joins, return the table's
 /// optional schema and name. Used to decide whether a query result can be edited in place.
-pub fn infer_single_table(sql: &str) -> Option<(Option<String>, String)> {
-    let dialect = MySqlDialect {};
-    let mut tokenizer = Tokenizer::new(&dialect, sql);
+pub fn infer_single_table_for(
+    sql: &str,
+    dialect: DriverDialect,
+) -> Option<(Option<String>, String)> {
+    let boxed = sqlparser_dialect(dialect);
+    let mut tokenizer = Tokenizer::new(boxed.as_ref(), sql);
     let tokens = tokenizer.tokenize().ok()?;
     let meaningful: Vec<&Token> = tokens
         .iter()
@@ -132,8 +151,12 @@ fn is_keyword(token: &Token, keyword: &str) -> bool {
 
 /// The significant (non-whitespace, non-EOF) tokens of `sql`, in order.
 fn meaningful_tokens(sql: &str) -> Vec<Token> {
-    let dialect = MySqlDialect {};
-    let mut tokenizer = Tokenizer::new(&dialect, sql);
+    meaningful_tokens_for(sql, &MySqlDialect {})
+}
+
+/// The significant tokens of `sql`, tokenized with `dialect`.
+fn meaningful_tokens_for(sql: &str, dialect: &dyn Dialect) -> Vec<Token> {
+    let mut tokenizer = Tokenizer::new(dialect, sql);
     match tokenizer.tokenize() {
         Ok(tokens) => tokens
             .into_iter()
@@ -153,9 +176,10 @@ fn routine_kind_of(word: &sqlparser::tokenizer::Word) -> Option<RoutineKind> {
 }
 
 /// Parse a routine's kind and name from its `CREATE ... FUNCTION|PROCEDURE name(...)` statement.
-/// Returns `None` when the statement does not name a routine.
-pub fn routine_identity(sql: &str) -> Option<(RoutineKind, String)> {
-    let tokens = meaningful_tokens(sql);
+/// On schema engines (PostgreSQL) the name is returned schema-qualified (`public.get_user`), after
+/// skipping the qualifier.
+pub fn routine_identity_for(sql: &str, dialect: DriverDialect) -> Option<(RoutineKind, String)> {
+    let tokens = meaningful_tokens_for(sql, sqlparser_dialect(dialect).as_ref());
     let position = tokens
         .iter()
         .position(|token| matches!(token, Token::Word(word) if routine_kind_of(word).is_some()))?;
@@ -163,20 +187,30 @@ pub fn routine_identity(sql: &str) -> Option<(RoutineKind, String)> {
         Token::Word(word) => routine_kind_of(word)?,
         _ => return None,
     };
-    let name = tokens[position + 1..]
-        .iter()
-        .find_map(|token| match token {
-            Token::Word(word) => Some(word.value.clone()),
-            _ => None,
-        })?;
+    let mut parts: Vec<String> = Vec::new();
+    let mut index = position + 1;
+    while let Some(Token::Word(word)) = tokens.get(index) {
+        parts.push(word.value.clone());
+        if matches!(tokens.get(index + 1), Some(Token::Period)) {
+            index += 2;
+        } else {
+            break;
+        }
+    }
+    let name = parts.pop()?;
+    if dialect == DriverDialect::Postgres
+        && let Some(schema) = parts.pop()
+    {
+        return Some((kind, format!("{schema}.{name}")));
+    }
     Some((kind, name))
 }
 
 /// Parse a routine's parameter names from its `CREATE ... name(...)` statement, in order. The
 /// parameter list is the first parenthesized group after the routine name; a leading mode keyword
 /// (`IN`/`OUT`/`INOUT`) is skipped, so `IN a int` and `a int` both yield `a`.
-pub fn routine_parameters(sql: &str) -> Vec<String> {
-    let tokens = meaningful_tokens(sql);
+pub fn routine_parameters_for(sql: &str, dialect: DriverDialect) -> Vec<String> {
+    let tokens = meaningful_tokens_for(sql, sqlparser_dialect(dialect).as_ref());
     let Some(position) = tokens
         .iter()
         .position(|token| matches!(token, Token::Word(word) if routine_kind_of(word).is_some()))
@@ -235,24 +269,38 @@ fn parameter_name(tokens: &[&Token]) -> Option<String> {
     }
 }
 
-/// The view name of a `CREATE ... VIEW \`name\` AS ...` statement, or `None` when the statement
-/// does not name a view.
-pub fn view_identity(sql: &str) -> Option<String> {
-    let tokens = meaningful_tokens(sql);
+/// The view name of a `CREATE ... VIEW name AS ...` statement. On schema engines (PostgreSQL) the
+/// name is returned schema-qualified (`public.v`).
+pub fn view_identity_for(sql: &str, dialect: DriverDialect) -> Option<String> {
+    let tokens = meaningful_tokens_for(sql, sqlparser_dialect(dialect).as_ref());
     let position = tokens
         .iter()
         .position(|token| matches!(token, Token::Word(word) if word.keyword == Keyword::VIEW))?;
-    tokens[position + 1..].iter().find_map(|token| match token {
-        Token::Word(word) => Some(word.value.clone()),
-        _ => None,
-    })
+    let mut parts: Vec<String> = Vec::new();
+    let mut index = position + 1;
+    while let Some(Token::Word(word)) = tokens.get(index) {
+        parts.push(word.value.clone());
+        if dialect == DriverDialect::Postgres
+            && matches!(tokens.get(index + 1), Some(Token::Period))
+        {
+            index += 2;
+        } else {
+            break;
+        }
+    }
+    let name = parts.pop()?;
+    if dialect == DriverDialect::Postgres
+        && let Some(schema) = parts.pop()
+    {
+        return Some(format!("{schema}.{name}"));
+    }
+    Some(name)
 }
 
-/// The `SELECT` of a `CREATE ... VIEW name AS <select>` statement — the first `AS` keyword after
-/// the `VIEW` keyword — used by the designer's 解释 to `EXPLAIN` the view's query.
-pub fn view_select(sql: &str) -> Option<String> {
-    let dialect = MySqlDialect {};
-    let mut tokenizer = Tokenizer::new(&dialect, sql);
+/// The `SELECT` of a `CREATE ... VIEW name AS <select>` statement, tokenized with `dialect`.
+pub fn view_select_for(sql: &str, dialect: DriverDialect) -> Option<String> {
+    let boxed = sqlparser_dialect(dialect);
+    let mut tokenizer = Tokenizer::new(boxed.as_ref(), sql);
     let tokens = tokenizer.tokenize_with_location().ok()?;
     let starts = line_starts(sql);
     let mut seen_view = false;
@@ -521,6 +569,37 @@ fn table_reference_at(tokens: &[Token], start: usize) -> Option<(SqlTableRef, us
     ))
 }
 
+/// If a dollar-quote opener (`$$`, `$tag$`) starts at `index`, return the byte offset just past the
+/// matching closing tag (or the end of the input when unterminated). `$1`/`$2` placeholders are not
+/// openers because a tag cannot start with a digit.
+fn dollar_quote_end(bytes: &[u8], index: usize) -> Option<usize> {
+    if bytes.get(index) != Some(&b'$') {
+        return None;
+    }
+    let mut j = index + 1;
+    if bytes.get(j) == Some(&b'$') {
+        j += 1;
+    } else {
+        let tag_start = j;
+        while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+            j += 1;
+        }
+        if j == tag_start || bytes[tag_start].is_ascii_digit() || bytes.get(j) != Some(&b'$') {
+            return None;
+        }
+        j += 1;
+    }
+    let opener = &bytes[index..j];
+    let mut k = j;
+    while k + opener.len() <= bytes.len() {
+        if &bytes[k..k + opener.len()] == opener {
+            return Some(k + opener.len());
+        }
+        k += 1;
+    }
+    Some(bytes.len())
+}
+
 /// The `;`-delimited statement containing `caret`, quotation- and comment-aware. Falls back to the
 /// whole text when no boundary is found.
 pub fn current_statement(sql: &str, caret: usize) -> String {
@@ -543,6 +622,12 @@ pub fn current_statement(sql: &str, caret: usize) -> String {
                 b'/' if bytes.get(index + 1) == Some(&b'*') => {
                     state = ScanState::BlockComment;
                     index += 1;
+                }
+                b'$' => {
+                    if let Some(end) = dollar_quote_end(bytes, index) {
+                        // Skip the whole dollar-quoted body; its semicolons are not boundaries.
+                        index = end.saturating_sub(1);
+                    }
                 }
                 b';' => {
                     if index >= caret {
@@ -620,6 +705,15 @@ fn in_string_or_comment(sql: &str, caret: usize) -> bool {
                 b'/' if bytes.get(index + 1) == Some(&b'*') => {
                     state = ScanState::BlockComment;
                     index += 1;
+                }
+                b'$' => {
+                    if let Some(region_end) = dollar_quote_end(bytes, index) {
+                        // The caret inside a dollar-quoted body is not a completion context.
+                        if region_end > end {
+                            return true;
+                        }
+                        index = region_end.saturating_sub(1);
+                    }
                 }
                 _ => {}
             },
@@ -774,19 +868,22 @@ mod tests {
     fn parses_routine_identity_and_parameters() {
         let procedure = "CREATE DEFINER=`root`@`localhost` PROCEDURE `123`(IN a int, b varchar(10))\nBEGIN\nEND";
         assert_eq!(
-            routine_identity(procedure),
+            routine_identity_for(procedure, DriverDialect::Mysql),
             Some((RoutineKind::Procedure, "123".to_string()))
         );
-        assert_eq!(routine_parameters(procedure), vec!["a", "b"]);
+        assert_eq!(
+            routine_parameters_for(procedure, DriverDialect::Mysql),
+            vec!["a", "b"]
+        );
 
         let function = "CREATE FUNCTION new_function()\nRETURNS int\nBEGIN\nRETURN 0;\nEND";
         assert_eq!(
-            routine_identity(function),
+            routine_identity_for(function, DriverDialect::Mysql),
             Some((RoutineKind::Function, "new_function".to_string()))
         );
-        assert!(routine_parameters(function).is_empty());
+        assert!(routine_parameters_for(function, DriverDialect::Mysql).is_empty());
 
-        assert_eq!(routine_identity("SELECT 1"), None);
+        assert_eq!(routine_identity_for("SELECT 1", DriverDialect::Mysql), None);
     }
 
     #[test]
@@ -794,34 +891,49 @@ mod tests {
         let definition = "CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`localhost` SQL SECURITY DEFINER \
                           VIEW `view_wms_count_inventory` AS SELECT `a` AS `id` FROM `t`";
         assert_eq!(
-            view_identity(definition),
+            view_identity_for(definition, DriverDialect::Mysql),
             Some("view_wms_count_inventory".to_string())
         );
         assert_eq!(
-            view_select(definition),
+            view_select_for(definition, DriverDialect::Mysql),
             Some("SELECT `a` AS `id` FROM `t`".to_string())
         );
-        assert_eq!(view_identity("SELECT 1"), None);
-        assert_eq!(view_select("SELECT 1"), None);
+        assert_eq!(view_identity_for("SELECT 1", DriverDialect::Mysql), None);
+        assert_eq!(view_select_for("SELECT 1", DriverDialect::Mysql), None);
     }
 
     #[test]
     fn infers_editable_single_table_queries() {
         assert_eq!(
-            infer_single_table("SELECT * FROM users"),
+            infer_single_table_for("SELECT * FROM users", DriverDialect::Mysql),
             Some((None, "users".to_string()))
         );
         assert_eq!(
-            infer_single_table("select id from `app`.`users` where id = 1"),
+            infer_single_table_for(
+                "select id from `app`.`users` where id = 1",
+                DriverDialect::Mysql
+            ),
             Some((Some("app".to_string()), "users".to_string()))
         );
         assert_eq!(
-            infer_single_table("SELECT a FROM t1 JOIN t2 ON t1.id = t2.id"),
+            infer_single_table_for(
+                "SELECT a FROM t1 JOIN t2 ON t1.id = t2.id",
+                DriverDialect::Mysql
+            ),
             None
         );
-        assert_eq!(infer_single_table("SELECT a FROM t1, t2"), None);
-        assert_eq!(infer_single_table("SELECT 1"), None);
-        assert_eq!(infer_single_table("UPDATE users SET a = 1"), None);
+        assert_eq!(
+            infer_single_table_for("SELECT a FROM t1, t2", DriverDialect::Mysql),
+            None
+        );
+        assert_eq!(
+            infer_single_table_for("SELECT 1", DriverDialect::Mysql),
+            None
+        );
+        assert_eq!(
+            infer_single_table_for("UPDATE users SET a = 1", DriverDialect::Mysql),
+            None
+        );
     }
 
     #[test]

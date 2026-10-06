@@ -13,7 +13,7 @@ use std::path::Path;
 use std::rc::Rc;
 
 use rfd::AsyncFileDialog;
-use rustgrid_core::{ObjectKind, PageRequest, SortColumn};
+use rustgrid_core::{DriverDialect, ObjectKind, PageRequest, SortColumn};
 use rustgrid_export::{ExportOptions, SqlDialect, TableWriter, default_output_path};
 
 use super::*;
@@ -766,7 +766,15 @@ impl AppView {
         cx.notify();
 
         let runtime = self.runtime.clone();
-        let dialect = SqlDialect::MySql;
+        // The `.sql` writer quotes identifiers per engine; the other formats are engine-agnostic.
+        let dialect = match self
+            .registry
+            .get(&connection.driver_id())
+            .map(|driver| driver.dialect())
+        {
+            Some(DriverDialect::Postgres) => SqlDialect::Postgres,
+            _ => SqlDialect::MySql,
+        };
         cx.spawn(async move |this, cx| {
             let mut exported = 0usize;
             let mut failed = 0usize;

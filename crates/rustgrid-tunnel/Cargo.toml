@@ -1,5 +1,5 @@
 [package]
-name = "rustgrid-mysql"
+name = "rustgrid-tunnel"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,12 +9,6 @@ authors.workspace = true
 
 [dependencies]
 rustgrid-core.workspace = true
-rustgrid-tunnel.workspace = true
-async-trait.workspace = true
-chrono.workspace = true
-sqlx.workspace = true
-futures-util.workspace = true
 tokio.workspace = true
-
-[dev-dependencies]
-tokio.workspace = true
+russh.workspace = true
+base64.workspace = true

@@ -9,11 +9,8 @@ const GITHUB_URL: &str = "https://github.com/yisier/rustgrid";
 /// Engines shown greyed out in the New Connection menu: listed in Navicat's order, but not yet
 /// implemented. Registered drivers are added from the registry and ordered by their descriptor's
 /// `order`; these placeholders occupy their slots until an engine ships.
-const PLANNED_ENGINES: [(&str, &str, u16); 3] = [
-    ("postgresql", "PostgreSQL", 20),
-    ("oracle", "Oracle", 30),
-    ("mongodb", "MongoDB", 70),
-];
+const PLANNED_ENGINES: [(&str, &str, u16); 2] =
+    [("oracle", "Oracle", 30), ("mongodb", "MongoDB", 70)];
 
 /// The visual state of one main-toolbar button: `active` fills it with the brand tint, `enabled`
 /// greys it out, and `caret` appends the dropdown chevron.

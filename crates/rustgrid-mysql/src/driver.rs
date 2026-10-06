@@ -9,7 +9,7 @@ use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlSslMode};
 
 use crate::connection::MysqlConnection;
 use crate::engine::Engine;
-use crate::tunnel::Tunnel;
+use rustgrid_tunnel::Tunnel;
 
 /// The MySQL driver.
 #[derive(Debug, Default)]

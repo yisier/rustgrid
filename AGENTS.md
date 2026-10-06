@@ -36,6 +36,26 @@ not a later refactor.
   onto the account model (database/object privilege management is still partial). Statements use the
   text/batch path for DDL and `CREATE PROCEDURE`, and the parameterized RPC path for `SELECT`/DML so
   row counts are available.
+- `crates/rustgrid-postgresql` — the **PostgreSQL** driver, built on **sqlx 0.9** with its
+  `postgres` feature (sharing the workspace's `tls-rustls-ring`). PostgreSQL cannot query across
+  databases, so `PostgresConnection` keeps a **lazily-created `PgPool` per database** (`pools`,
+  default database kept warm, others capped at 2 connections with a short idle timeout and an LRU
+  cap) and routes every operation through `pool(database)`. Object names are **schema-qualified**
+  (`public.users`), matching SQL Server, so the tree nests databases → schema → tables/views/…;
+  system schemas (`pg_*`, `information_schema`) are hidden. Read paths project every column to text
+  (`"c"::text`) because the binary protocol path (taken whenever a filter is bound) cannot decode
+  `numeric`/`uuid`/`json`/arrays from raw bytes; writes cast every bound parameter to the column's
+  `format_type` (`CAST($1 AS integer)`) because PostgreSQL is strongly typed. `helpers.rs` holds the
+  dialect helpers (double-quote identifiers, `$n` placeholders, dollar-quote-aware script splitting,
+  filter translation with casts, text decoding, literal rendering); `schema.rs` assembles
+  `CREATE/ALTER TABLE` from `pg_catalog` (there is no `SHOW CREATE`); `routine.rs` encodes a routine's
+  schema and identity arguments into its name (`public.get_user(integer)`); `view.rs`, `user.rs` and
+  `backup.rs` cover views, roles/ACLs and `.rgbak`. Multi-statement scripts run on **one pinned
+  connection** through `raw_sql(...).fetch_many`, letting the server split dollar-quoted function
+  bodies. See `docs/postgresql-driver.md`.
+- `crates/rustgrid-tunnel` — the shared **SSH / SOCKS5 / HTTP** tunnel (local port forwarding) used
+  by the network drivers (`rustgrid-mysql`, `rustgrid-postgresql`). Migrated out of
+  `rustgrid-mysql` so PostgreSQL reuses it; `rustgrid-mysql` re-exports `Tunnel`.
 - `crates/rustgrid-odbc` — the **generic ODBC driver** (app feature `driver-odbc`, on by default).
   It connects through a user-installed ODBC driver or a raw connection string and speaks the engine's
   SQL, as the fallback for engines without a native Rust driver (Oracle, DB2, 达梦, ...). The ODBC
@@ -82,6 +102,8 @@ not a later refactor.
 - SQLite: the same **sqlx 0.9** with its `sqlite` feature added by `rustgrid-sqlite` (this
   statically bundles SQLite through `libsqlite3-sys`, so a C compiler is required — `gcc` on
   Windows, see Gotchas).
+- PostgreSQL: the same **sqlx 0.9** with its `postgres` feature added by `rustgrid-postgresql`
+  (TLS via the workspace's `tls-rustls-ring`, so no new native dependency).
 - SQL Server: **tiberius 0.13** (`tds80` + `rustls` + `chrono`, `default-features = false`) with
   **bb8 0.9** and **tokio-util** (`compat`). tiberius is not sqlx-based, uses rustls (so no OpenSSL),
   and its `Client` is `Send` but not `Sync`, so every operation checks out a pooled client. tokio's
@@ -124,6 +146,12 @@ not a later refactor.
   `cargo test -p rustgrid-sqlserver -- --ignored`. It exercises connect, catalog listing, paging,
   editing, arbitrary SQL, schema introspection, backup/restore and views against a real server
   (e.g. Docker `mcr.microsoft.com/mssql/server`).
+- Live PostgreSQL integration test (ignored by default): set `RUSTGRID_PG_PASSWORD` (and optionally
+  `RUSTGRID_PG_HOST`/`PORT`/`USER`/`DATABASE`), then `cargo test -p rustgrid-postgresql -- --ignored`.
+  It exercises connect, catalog/schema listing, paging with a filter, strongly-typed
+  insert/update/delete, arbitrary SQL (multi-statement, dollar-quoted functions, transactions),
+  schema management, table designer, views, routines, roles and backup/restore against a real server
+  (e.g. Docker `postgres:17`).
 - Live ODBC integration test (ignored by default): set `RUSTGRID_ODBC_CONNECTION_STRING` (e.g.
   `Driver={ODBC Driver 17 for SQL Server};Server=localhost,1433;UID=sa;PWD=...;TrustServerCertificate=yes;`),
   then `cargo test -p rustgrid-odbc -- --ignored`. It exercises driver enumeration, catalog listing,
@@ -423,7 +451,7 @@ shadcn chrome described above. Implemented today:
     layout-independent so both layouts share the selection, and publish row rectangles through
     `AppView::note_row_rect(MarqueeTarget::…, …)` from each row's `on_children_prepainted`.
 
-Still out of scope: engines other than MySQL, MariaDB, SQLite and SQL Server, and the disabled placeholder UI
+Still out of scope: engines other than MySQL, MariaDB, SQLite, SQL Server and PostgreSQL, and the disabled placeholder UI
 (the `Design/New/Delete Table` toolbar buttons and the query editor's `Query Builder`/`Snippets`
 items are deliberate stubs — leave them disabled unless asked). The abstractions above are what
 make more engines cheap later — do not build those features early.
@@ -466,7 +494,8 @@ make more engines cheap later — do not build those features early.
   variables cannot span the split statements). `list_tables`/`list_routine_infos` return
   **schema-qualified names** (`dbo.users`), and every table/view/routine operation parses that prefix
   (`resolve_object`). The connection tree therefore inserts a schema level — 数据库 → dbo/… →
-  表/视图/函数/查询/备份 — for any engine whose object names are schema-qualified (SQL Server);
+  表/视图/函数/查询/备份 — for any engine whose object names are schema-qualified (SQL Server,
+  PostgreSQL);
   schema-less engines (MySQL/SQLite) keep the flat database → category tree. Queries and backups are
   stored per database, so they appear (duplicated) under every schema node. The object pane is scoped
   to the clicked schema for tables/views/functions; queries/backups stay database-scoped.

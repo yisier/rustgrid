@@ -215,9 +215,14 @@ pub struct UserAccount {
 }
 
 impl UserAccount {
-    /// The `user@host` label used by the user list.
+    /// The `user@host` label used by the user list. Engines without a host concept (PostgreSQL,
+    /// SQL Server) leave `host` empty and the label is just the user name.
     pub fn label(&self) -> String {
-        format!("{}@{}", self.user, self.host)
+        if self.host.is_empty() {
+            self.user.clone()
+        } else {
+            format!("{}@{}", self.user, self.host)
+        }
     }
 
     /// Whether the account has a super-user (`SUPER`) grant on the server.
@@ -237,14 +242,14 @@ pub struct RoleMembership {
 }
 
 impl RoleMembership {
-    /// The role side of the edge as `user@host`.
+    /// The role side of the edge as `user@host` (or just `user` when the engine has no host).
     pub fn role_label(&self) -> String {
-        format!("{}@{}", self.role_user, self.role_host)
+        label(&self.role_user, &self.role_host)
     }
 
-    /// The member side of the edge as `user@host`.
+    /// The member side of the edge as `user@host` (or just `user` when the engine has no host).
     pub fn member_label(&self) -> String {
-        format!("{}@{}", self.member_user, self.member_host)
+        label(&self.member_user, &self.member_host)
     }
 }
 
@@ -286,7 +291,16 @@ impl ObjectPrivilegeRow {
     }
 
     pub fn label(&self) -> String {
-        format!("{}@{}", self.user, self.host)
+        label(&self.user, &self.host)
+    }
+}
+
+/// The `user@host` label, or just `user` when the engine has no host concept.
+fn label(user: &str, host: &str) -> String {
+    if host.is_empty() {
+        user.to_string()
+    } else {
+        format!("{user}@{host}")
     }
 }
 

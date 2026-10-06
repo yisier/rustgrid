@@ -176,7 +176,11 @@ impl AppView {
         let view = tab.view.as_ref()?;
         let connection = tab.connection_index.and_then(|i| self.connection_arc(i))?;
         let database = tab.database.clone().unwrap_or_default();
-        let name = sql::view_identity(&tab.sql).unwrap_or_else(|| view.name.clone());
+        let dialect = tab
+            .connection_index
+            .map(|index| self.driver_dialect(index))
+            .unwrap_or_default();
+        let name = sql::view_identity_for(&tab.sql, dialect).unwrap_or_else(|| view.name.clone());
         let edit = ViewEdit {
             name,
             definition: tab.sql.clone(),
@@ -204,8 +208,12 @@ impl AppView {
         };
         let database = tab.database.clone().unwrap_or_default();
         let definition = tab.sql.clone();
+        let dialect = tab
+            .connection_index
+            .map(|index| self.driver_dialect(index))
+            .unwrap_or_default();
         let (name, original) = (
-            sql::view_identity(&definition).unwrap_or_else(|| view.name.clone()),
+            sql::view_identity_for(&definition, dialect).unwrap_or_else(|| view.name.clone()),
             view.original_name.clone(),
         );
         let edit = ViewEdit {
@@ -327,7 +335,11 @@ impl AppView {
             .map(|node| node.profile.name.clone())
             .unwrap_or_default();
         let database = tab.database.clone().unwrap_or_default();
-        let source = sql::view_select(&tab.sql)
+        let dialect = tab
+            .connection_index
+            .map(|index| self.driver_dialect(index))
+            .unwrap_or_default();
+        let source = sql::view_select_for(&tab.sql, dialect)
             .unwrap_or_else(|| format!("SELECT * FROM {}", quote_identifier(&view.name)));
         let explain_sql = format!("EXPLAIN\n{source};");
 

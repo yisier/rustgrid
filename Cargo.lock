@@ -7002,6 +7002,7 @@ dependencies = [
  "rustgrid-import",
  "rustgrid-mysql",
  "rustgrid-odbc",
+ "rustgrid-postgresql",
  "rustgrid-sqlite",
  "rustgrid-sqlserver",
  "serde_json",
@@ -7073,11 +7074,10 @@ name = "rustgrid-mysql"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
  "chrono",
  "futures-util",
- "russh",
  "rustgrid-core",
+ "rustgrid-tunnel",
  "sqlx",
  "tokio",
 ]
@@ -7089,6 +7089,19 @@ dependencies = [
  "async-trait",
  "libloading",
  "rustgrid-core",
+ "tokio",
+]
+
+[[package]]
+name = "rustgrid-postgresql"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures-util",
+ "rustgrid-core",
+ "rustgrid-tunnel",
+ "sqlx",
  "tokio",
 ]
 
@@ -7115,6 +7128,16 @@ dependencies = [
  "tokio",
  "tokio-util",
  "uuid",
+]
+
+[[package]]
+name = "rustgrid-tunnel"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "russh",
+ "rustgrid-core",
+ "tokio",
 ]
 
 [[package]]
