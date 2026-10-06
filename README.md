@@ -2,65 +2,42 @@ English | [简体中文](README_zh.md)
 
 # RustGrid
 
-> A Navicat-compatible database GUI — migrate with zero cost and zero learning curve.
+> A Navicat-style database GUI built in Rust — native, lightweight, zero learning curve.
 
 RustGrid is a cross-platform (Windows / macOS / Linux) database management tool built with
-**Rust + GPUI**. It follows Navicat's layout and interaction conventions, so you can switch
-from Navicat without re-learning anything: the connection tree, object panes, toolbars and
-dialogs all behave the way you already expect.
+**Rust + GPUI**. Its layout and interactions follow Navicat, so switching costs nothing:
+the connection tree, object lists, toolbars and dialogs all behave the way you already expect.
 
-## Why RustGrid
+## Highlights
 
-- **Zero-cost migration from Navicat** — familiar connection tree, object lists, toolbars and dialogs.
-- **Same habits, no learning curve** — interactions mirror Navicat's workflow.
-- **Friendly open-source license** — licensed under the Apache License 2.0, free for commercial use.
-- **Native and lightweight** — a single Rust binary with a GPU-rendered GPUI interface, no bundled runtime.
+- **Native, not a WebView** — GPU-rendered GPUI elements, no browser engine, a single binary.
+- **Navicat-compatible** — the same connection tree, object panes, toolbars and dialogs.
+- **Extensible drivers** — an engine-agnostic driver layer; new engines never touch the UI.
+- **Apache-2.0** — free for commercial use.
 
-## Not a WebView
+## Supported databases
 
-RustGrid is a native application rendered directly on the GPU with GPUI — it is **not** a
-WebView/Electron-style app. Many database GUI tools embed a browser engine (Chromium,
-Electron, WebView2, or a similar web runtime) and draw their interface with HTML/CSS/JS.
-RustGrid does not.
+| Engine                     | Status           |
+| -------------------------- | ---------------- |
+| MySQL / MariaDB            | Supported        |
+| SQLite                     | Supported        |
+| SQL Server                 | Supported        |
+| Oracle, DB2, Dameng, ...   | via generic ODBC |
+| PostgreSQL                 | Planned          |
 
-|                          | WebView / Electron-based tools                     | RustGrid                                              |
-| ------------------------ | -------------------------------------------------- | ---------------------------------------------------- |
-| UI stack                 | HTML/CSS/JS inside an embedded browser             | Native GPUI elements rendered on the GPU             |
-| Runtime                  | Bundles a browser engine or relies on a system WebView | No browser engine; a single native binary        |
-| Startup and memory       | The browser engine has to initialize first         | Lighter, native startup                              |
-| Look and feel            | Web widgets                                        | Native desktop look (classic window / dialog style)  |
-| System integration       | Runs inside a web sandbox                          | Direct integration with native OS windows            |
+## Features
 
-Because there is no browser engine to ship or load, RustGrid does not require WebView2 on
-Windows, WebKitGTK on Linux, or any other system web runtime, and it renders consistently
-across platforms. The result feels like a native desktop application rather than a web page
-inside a window.
-
-## Supported databases (roadmap)
-
-RustGrid is designed around an engine-agnostic driver layer, so adding a new database only
-means adding a driver — the UI stays the same.
-
-| Engine      | Status                                    |
-| ----------- | ----------------------------------------- |
-| MySQL       | In development (first milestone)          |
-| PostgreSQL  | Planned                                   |
-| SQL Server  | Planned                                   |
-| Oracle      | Planned                                   |
-| SQLite      | Planned                                   |
-
-> RustGrid is iterating rapidly. **MySQL support is currently under active development.** The
-> current build can already connect, browse databases/tables/views, manage databases
-> (create/edit/delete with charset and collation) and preview table data with pagination.
-
-## Features (current)
-
-- Connection management: create / edit / delete, connect / disconnect, password prompt.
-- Passwords are stored encrypted on disk (XChaCha20-Poly1305); profiles never contain plaintext.
-- Enumerate databases; create, edit and delete a database (charset + collation).
-- Per-database listing of tables and views.
-- Paginated, read-only data grid for table preview.
-- Light / dark / system themes and English / 简体中文 UI.
+- **Connections** — create / edit / delete, connect, password prompt; passwords are encrypted
+  on disk (XChaCha20-Poly1305) and never stored in a profile.
+- **Databases** — enumerate, create / edit / delete with charset and collation.
+- **Tables & views** — browse tables and views, a paginated grid with in-place editing, and
+  drop / empty / truncate / rename operations.
+- **SQL editor** — syntax highlighting, keyword/table completion, beautify, explain, and saved
+  named queries.
+- **Import & export wizards** — Excel, CSV and TXT.
+- **Users & routines** — account and privilege management, plus stored-routine and view designers.
+- **Backup & restore** — RustGrid's own `.rgbak` container.
+- **Themes & languages** — light / dark / system, English / 简体中文.
 
 ## Build from source
 
@@ -74,8 +51,8 @@ cargo run -p rustgrid-app
 
 The produced binary is named `RustGrid`.
 
-On Windows a linker and C compiler are required (for sqlx's `ring`). The default MSVC
-toolchain works when MSVC Build Tools are installed. Otherwise use the GNU toolchain:
+On Windows a linker and C compiler are required (for sqlx's `ring`). With MSVC Build Tools
+installed the default toolchain works; otherwise use the GNU toolchain:
 
 ```powershell
 $env:RUSTUP_TOOLCHAIN="stable-x86_64-pc-windows-gnu"
@@ -87,7 +64,13 @@ cargo run -p rustgrid-app
 ## Project layout (Cargo workspace)
 
 - `crates/rustgrid-core` — engine-agnostic domain: driver/connection traits and models.
-- `crates/rustgrid-mysql` — MySQL driver implementation.
+- `crates/rustgrid-mysql` — MySQL and MariaDB drivers.
+- `crates/rustgrid-sqlite` — SQLite driver.
+- `crates/rustgrid-sqlserver` — SQL Server driver.
+- `crates/rustgrid-odbc` — generic ODBC driver (Oracle, DB2, Dameng, ...).
+- `crates/rustgrid-backup` — the `.rgbak` backup container.
+- `crates/rustgrid-export` — table-data exporters (`.xlsx` / `.csv` / `.sql` / `.txt`).
+- `crates/rustgrid-import` — Excel / CSV / TXT source readers.
 - `crates/rustgrid-config` — versioned settings/profiles and encrypted secret storage.
 - `crates/rustgrid-app` — the GPUI desktop application (binary `RustGrid`).
 
