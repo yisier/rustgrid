@@ -53,12 +53,26 @@ not a later refactor.
   `backup.rs` cover views, roles/ACLs and `.rgbak`. Multi-statement scripts run on **one pinned
   connection** through `raw_sql(...).fetch_many`, letting the server split dollar-quoted function
   bodies. See `docs/postgresql-driver.md`.
+- `crates/rustgrid-oracle` — the **Oracle** driver, built on Oracle's official pure-Rust thin driver
+  **`oracledb`** (26.0.0-beta.4, pinned exactly; **no OCI / Instant Client**). Oracle is a
+  **schema-first** engine like SQL Server/PostgreSQL (one connection sees every schema of its
+  service/PDB), so a single `Arc<oracledb::Pool>` serves every operation. `oracledb` is a
+  **synchronous** API, so every trait method runs inside `tokio::task::spawn_blocking` and checks a
+  connection out of the pool (`connection.rs::with_conn`); `Pool` is not `Clone`, hence the `Arc`.
+  `helpers.rs` holds the dialect helpers (double-quote identifiers, `:n` placeholders **without
+  lower-casing**, `TO_DATE`/`TO_TIMESTAMP` binds, `OFFSET … FETCH` paging, filter translation, the
+  **client-side script splitter** that keeps PL/SQL blocks and `q'[...]'` quotes whole and strips
+  trailing semicolons, plus `CellValue` decoding); `columns`/`fetch_page` read the `ALL_*` catalogs,
+  `schema.rs` assembles `CREATE/ALTER TABLE` (Oracle has no `SHOW CREATE`; the designer reads
+  `ALL_TAB_COLUMNS`/`ALL_CONSTRAINTS`), `routine.rs` reads functions/procedures/packages/triggers
+  from `ALL_OBJECTS` and `DBMS_METADATA.GET_DDL`, and `view.rs`/`user.rs`/`backup.rs` cover views,
+  users/roles and `.rgbak`. See `docs/oracle-driver.md`.
 - `crates/rustgrid-tunnel` — the shared **SSH / SOCKS5 / HTTP** tunnel (local port forwarding) used
-  by the network drivers (`rustgrid-mysql`, `rustgrid-postgresql`). Migrated out of
+  by the network drivers (`rustgrid-mysql`, `rustgrid-postgresql`, `rustgrid-oracle`). Migrated out of
   `rustgrid-mysql` so PostgreSQL reuses it; `rustgrid-mysql` re-exports `Tunnel`.
 - `crates/rustgrid-odbc` — the **generic ODBC driver** (app feature `driver-odbc`, on by default).
   It connects through a user-installed ODBC driver or a raw connection string and speaks the engine's
-  SQL, as the fallback for engines without a native Rust driver (Oracle, DB2, 达梦, ...). The ODBC
+  SQL, as the fallback for engines without a native Rust driver (DB2, 达梦, ...). The ODBC
   driver manager (`odbc32.dll` / `libodbc.so`) is loaded **at runtime** via `libloading` (`api.rs`),
   so the build carries no link-time dependency and a machine without ODBC still runs normally;
   `driver.rs`/`connection.rs` implement the trait on top of that. It is synchronous and implements
@@ -104,6 +118,11 @@ not a later refactor.
   Windows, see Gotchas).
 - PostgreSQL: the same **sqlx 0.9** with its `postgres` feature added by `rustgrid-postgresql`
   (TLS via the workspace's `tls-rustls-ring`, so no new native dependency).
+- Oracle: **`oracledb = "=26.0.0-beta.4"`** (Oracle's official pure-Rust thin driver, `default-features
+  = false`; **pinned exactly** because it is a pre-release whose API is still changing). It needs no
+  OCI / Instant Client; TLS reuses the workspace's `rustls 0.23` (already in the lock file), so it
+  adds no native compilation. Its API is **synchronous**, so the driver bridges through
+  `tokio::task::spawn_blocking` (see the `rustgrid-oracle` bullet).
 - SQL Server: **tiberius 0.13** (`tds80` + `rustls` + `chrono`, `default-features = false`) with
   **bb8 0.9** and **tokio-util** (`compat`). tiberius is not sqlx-based, uses rustls (so no OpenSSL),
   and its `Client` is `Send` but not `Sync`, so every operation checks out a pooled client. tokio's
@@ -152,6 +171,11 @@ not a later refactor.
   insert/update/delete, arbitrary SQL (multi-statement, dollar-quoted functions, transactions),
   schema management, table designer, views, routines, roles and backup/restore against a real server
   (e.g. Docker `postgres:17`).
+- Live Oracle integration test (ignored by default): set `RUSTGRID_ORACLE_PASSWORD` (and optionally
+  `RUSTGRID_ORACLE_HOST`/`PORT`/`USER`/`SERVICE`), then `cargo test -p rustgrid-oracle -- --ignored`.
+  It exercises connect, catalog/schema listing, paging, editing and arbitrary SQL (including PL/SQL
+  blocks and statements with a trailing `;`) against a real server
+  (e.g. Docker `gvenzl/oracle-free:23-slim`, service `FREEPDB1`).
 - Live ODBC integration test (ignored by default): set `RUSTGRID_ODBC_CONNECTION_STRING` (e.g.
   `Driver={ODBC Driver 17 for SQL Server};Server=localhost,1433;UID=sa;PWD=...;TrustServerCertificate=yes;`),
   then `cargo test -p rustgrid-odbc -- --ignored`. It exercises driver enumeration, catalog listing,
@@ -451,7 +475,7 @@ shadcn chrome described above. Implemented today:
     layout-independent so both layouts share the selection, and publish row rectangles through
     `AppView::note_row_rect(MarqueeTarget::…, …)` from each row's `on_children_prepainted`.
 
-Still out of scope: engines other than MySQL, MariaDB, SQLite, SQL Server and PostgreSQL, and the disabled placeholder UI
+Still out of scope: engines other than MySQL, MariaDB, SQLite, SQL Server, PostgreSQL and Oracle, and the disabled placeholder UI
 (the `Design/New/Delete Table` toolbar buttons and the query editor's `Query Builder`/`Snippets`
 items are deliberate stubs — leave them disabled unless asked). The abstractions above are what
 make more engines cheap later — do not build those features early.

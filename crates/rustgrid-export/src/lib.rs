@@ -94,18 +94,30 @@ pub enum SqlDialect {
     #[default]
     MySql,
     Postgres,
+    Oracle,
 }
 
 impl SqlDialect {
     fn quote_identifier(self, name: &str) -> String {
         match self {
             SqlDialect::MySql => format!("`{}`", name.replace('`', "``")),
-            SqlDialect::Postgres => format!("\"{}\"", name.replace('"', "\"\"")),
+            SqlDialect::Postgres | SqlDialect::Oracle => {
+                format!("\"{}\"", name.replace('"', "\"\""))
+            }
         }
     }
 
-    /// Render one value as a SQL literal. `BIT` columns accept the hex form for byte values.
-    fn literal(self, value: &CellValue) -> String {
+    /// Render one value as a SQL literal. `column_type` is only consulted by the Oracle dialect,
+    /// which wraps a temporal value in `TO_DATE`/`TO_TIMESTAMP` so the script does not depend on
+    /// the session's NLS settings.
+    fn literal(self, value: &CellValue, column_type: Option<&str>) -> String {
+        if self == SqlDialect::Oracle
+            && let CellValue::Text(text) = value
+            && let Some(column_type) = column_type
+            && let Some(literal) = oracle_temporal_literal(text, column_type)
+        {
+            return literal;
+        }
         match self {
             SqlDialect::MySql => match value {
                 CellValue::Null => "NULL".to_string(),
@@ -158,8 +170,101 @@ impl SqlDialect {
                     hex
                 }
             },
+            SqlDialect::Oracle => match value {
+                // Oracle has no SQL boolean literal; numbers are the portable representation.
+                CellValue::Null => "NULL".to_string(),
+                CellValue::Bool(value) => u8::from(*value).to_string(),
+                CellValue::Int(value) => value.to_string(),
+                CellValue::Uint(value) => value.to_string(),
+                CellValue::Float(value) => {
+                    if value.is_finite() {
+                        value.to_string()
+                    } else {
+                        "NULL".to_string()
+                    }
+                }
+                // Oracle stores the empty string as `NULL`, so render it that way.
+                CellValue::Text(text) if text.is_empty() => "NULL".to_string(),
+                CellValue::Text(text) => quote_oracle_string(text),
+                CellValue::Bytes(bytes) => {
+                    if bytes.is_empty() {
+                        return "NULL".to_string();
+                    }
+                    let mut hex = String::with_capacity(bytes.len() * 2 + 10);
+                    hex.push_str("HEXTORAW('");
+                    for byte in bytes {
+                        hex.push_str(&format!("{byte:02X}"));
+                    }
+                    hex.push_str("')");
+                    hex
+                }
+            },
         }
     }
+}
+
+/// Escape a string as an Oracle single-quoted literal (`''` for an embedded quote).
+fn quote_oracle_string(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+/// Wrap a driver-decoded temporal value as an NLS-independent Oracle literal. The Oracle driver
+/// renders `DATE`/`TIMESTAMP` as ISO-ish text (`2025-01-02T03:04:05.123456789Z`); a plain
+/// `2025-01-02[ 03:04:05]` is accepted too. Returns `None` when the column is not temporal or the
+/// text is not a recognizable datetime, so an ordinary string is still emitted quoted.
+fn oracle_temporal_literal(text: &str, column_type: &str) -> Option<String> {
+    let base = column_type.trim().to_ascii_uppercase();
+    let timestamp = base.starts_with("TIMESTAMP");
+    if !timestamp && !base.starts_with("DATE") {
+        return None;
+    }
+    let (datetime, offset) = split_iso_datetime(text)?;
+    if timestamp {
+        return Some(match offset {
+            Some(offset) => format!(
+                "TO_TIMESTAMP_TZ('{datetime} {offset}', 'YYYY-MM-DD HH24:MI:SS.FF9 TZH:TZM')"
+            ),
+            None => format!("TO_TIMESTAMP('{datetime}', 'YYYY-MM-DD HH24:MI:SS.FF9')"),
+        });
+    }
+    // A DATE has whole seconds; drop any (always-zero) fractional part.
+    let date = datetime.split('.').next().unwrap_or(&datetime);
+    Some(format!("TO_DATE('{date}', 'YYYY-MM-DD HH24:MI:SS')"))
+}
+
+/// Split an ISO-ish datetime into `("YYYY-MM-DD HH:MM:SS[.f…]", Some("±HH:MM"))`, normalizing the
+/// `T` separator to a space and expanding a bare date to midnight. `None` when the text is not a
+/// plain ASCII datetime, so a genuine string is never rewritten.
+fn split_iso_datetime(text: &str) -> Option<(String, Option<String>)> {
+    let text = text.trim();
+    if text.len() < 10 || !text.is_ascii() {
+        return None;
+    }
+    let (body, offset) = if let Some(body) = text.strip_suffix('Z') {
+        (body, Some("+00:00".to_string()))
+    } else if let Some(index) = text[10..].find(['+', '-']) {
+        let index = index + 10;
+        (&text[..index], Some(text[index..].to_string()))
+    } else {
+        (text, None)
+    };
+    let body = body.trim();
+    if body.len() < 10 {
+        return None;
+    }
+    let normalized = body.replace('T', " ");
+    let normalized = if normalized.len() == 10 {
+        format!("{normalized} 00:00:00")
+    } else {
+        normalized
+    };
+    if !normalized
+        .chars()
+        .all(|character| character.is_ascii_digit() || " -:.".contains(character))
+    {
+        return None;
+    }
+    Some((normalized, offset))
 }
 
 /// Escape a string as a PostgreSQL standard-conforming single-quoted literal.
@@ -207,6 +312,7 @@ impl TableWriter {
         path: &Path,
         table: &str,
         columns: &[String],
+        column_types: &[String],
         format: ExportFormat,
         options: ExportOptions,
         dialect: SqlDialect,
@@ -236,6 +342,7 @@ impl TableWriter {
                 path,
                 table,
                 columns,
+                column_types,
                 options.include_header,
                 dialect,
             )?),
@@ -464,6 +571,8 @@ struct SqlSink {
     out: BufWriter<File>,
     table: String,
     columns: Vec<String>,
+    /// Column engine types, parallel to `columns`; the Oracle dialect wraps temporal values.
+    column_types: Vec<String>,
     dialect: SqlDialect,
     include_columns: bool,
     batch: Vec<String>,
@@ -475,6 +584,7 @@ impl SqlSink {
         path: &Path,
         table: &str,
         columns: &[String],
+        column_types: &[String],
         include_columns: bool,
         dialect: SqlDialect,
     ) -> Result<Self> {
@@ -484,6 +594,7 @@ impl SqlSink {
             out,
             table: table.to_string(),
             columns: columns.to_vec(),
+            column_types: column_types.to_vec(),
             dialect,
             include_columns,
             batch: Vec::new(),
@@ -495,7 +606,11 @@ impl SqlSink {
         for row in rows {
             let values: Vec<String> = row
                 .iter()
-                .map(|value| self.dialect.literal(value))
+                .enumerate()
+                .map(|(index, value)| {
+                    self.dialect
+                        .literal(value, self.column_types.get(index).map(String::as_str))
+                })
                 .collect();
             let literal = format!("({})", values.join(", "));
             let bytes = literal.len() + 2;
@@ -601,6 +716,7 @@ mod tests {
             &path,
             "users",
             &columns(),
+            &[],
             format,
             options,
             SqlDialect::MySql,
@@ -643,12 +759,57 @@ mod tests {
     }
 
     #[test]
+    fn oracle_sql_wraps_temporal_literals() {
+        let path = temp_file("sql");
+        let columns = vec![
+            "id".to_string(),
+            "hired".to_string(),
+            "stamp".to_string(),
+            "note".to_string(),
+        ];
+        let types = vec![
+            "NUMBER".to_string(),
+            "DATE".to_string(),
+            "TIMESTAMP".to_string(),
+            "VARCHAR2".to_string(),
+        ];
+        let mut writer = TableWriter::create(
+            &path,
+            "emp",
+            &columns,
+            &types,
+            ExportFormat::Sql,
+            ExportOptions::default(),
+            SqlDialect::Oracle,
+        )
+        .unwrap();
+        writer
+            .write_rows(&[vec![
+                CellValue::Int(1),
+                CellValue::Text("2025-01-02T00:00:00.000000000Z".to_string()),
+                CellValue::Text("2025-01-02T03:04:05.123456789+08:30".to_string()),
+                // A VARCHAR2 that merely looks like a datetime must stay quoted.
+                CellValue::Text("2025-01-02T03:04:05".to_string()),
+            ]])
+            .unwrap();
+        writer.finish().unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("TO_DATE('2025-01-02 00:00:00', 'YYYY-MM-DD HH24:MI:SS')"));
+        assert!(text.contains(
+            "TO_TIMESTAMP_TZ('2025-01-02 03:04:05.123456789 +08:30', 'YYYY-MM-DD HH24:MI:SS.FF9 TZH:TZM')"
+        ));
+        assert!(text.contains("'2025-01-02T03:04:05'"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn txt_is_tab_delimited_and_single_line() {
         let path = temp_file("txt");
         let mut writer = TableWriter::create(
             &path,
             "users",
             &columns(),
+            &[],
             ExportFormat::Txt,
             ExportOptions::default(),
             SqlDialect::MySql,
@@ -675,6 +836,7 @@ mod tests {
             &path,
             "users",
             &columns(),
+            &[],
             ExportFormat::Xlsx,
             ExportOptions::default(),
             SqlDialect::MySql,

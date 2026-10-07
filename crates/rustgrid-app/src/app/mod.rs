@@ -425,10 +425,22 @@ struct ExportTablePlan {
     path: String,
 }
 
+/// One table's resolved export run: the output path, the selected columns (names and engine types)
+/// and the primary-key ordering used for paged reads.
+struct ExportPlan {
+    name: String,
+    path: String,
+    columns: Vec<String>,
+    column_types: Vec<String>,
+    order_by: Vec<rustgrid_core::SortColumn>,
+}
+
 /// The P3 field selection of one table.
 struct ExportFields {
     /// Every column of the table, in catalog order.
     columns: Vec<String>,
+    /// Column engine types, parallel to `columns`; the Oracle `.sql` writer wraps temporal values.
+    data_types: Vec<String>,
     /// Whether each column is exported; parallel to `columns`.
     selected: Vec<bool>,
     /// The table's primary-key columns, used to order the export's paged reads.
@@ -445,9 +457,14 @@ impl ExportFields {
             .filter(|column| column.primary_key)
             .map(|column| column.name.clone())
             .collect();
+        let data_types = columns
+            .iter()
+            .map(|column| column.data_type.clone())
+            .collect();
         Self {
             selected: vec![true; columns.len()],
             columns: columns.into_iter().map(|column| column.name).collect(),
+            data_types,
             primary_key,
             loading: false,
             error: None,
@@ -461,6 +478,16 @@ impl ExportFields {
             .zip(&self.selected)
             .filter(|(_, selected)| **selected)
             .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    /// The exported column types, parallel to [`Self::selected_columns`].
+    fn selected_column_types(&self) -> Vec<String> {
+        self.data_types
+            .iter()
+            .zip(&self.selected)
+            .filter(|(_, selected)| **selected)
+            .map(|(data_type, _)| data_type.clone())
             .collect()
     }
 

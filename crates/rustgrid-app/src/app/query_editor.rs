@@ -104,7 +104,8 @@ impl AppView {
                     .map(|driver| driver.dialect())
                     .unwrap_or_default(),
             };
-            let referenced = sql::referenced_tables(&sql::current_statement(text, text.len()));
+            let referenced =
+                sql::referenced_tables(&sql::current_statement(text, text.len(), scope.dialect));
             for table in referenced {
                 if let Some((database, table)) = sql_completion::catalog_target(&scope, &table) {
                     self.ensure_query_columns(cx, connection_index, &database, &table);

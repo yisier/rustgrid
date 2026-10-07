@@ -20,6 +20,7 @@ rustgrid-mysql.workspace = true
 rustgrid-sqlite.workspace = true
 rustgrid-sqlserver.workspace = true
 rustgrid-postgresql.workspace = true
+rustgrid-oracle.workspace = true
 rustgrid-odbc = { workspace = true, optional = true }
 rustgrid-config.workspace = true
 gpui.workspace = true

@@ -23,7 +23,8 @@ the connection tree, object lists, toolbars and dialogs all behave the way you a
 | SQLite                     | Supported        |
 | SQL Server                 | Supported        |
 | PostgreSQL                 | Supported        |
-| Oracle, DB2, Dameng, ...   | via generic ODBC |
+| Oracle                     | Supported        |
+| DB2, Dameng, ...           | via generic ODBC |
 
 ## Features
 
@@ -68,8 +69,9 @@ cargo run -p rustgrid-app
 - `crates/rustgrid-sqlite` — SQLite driver.
 - `crates/rustgrid-sqlserver` — SQL Server driver.
 - `crates/rustgrid-postgresql` — PostgreSQL driver.
+- `crates/rustgrid-oracle` — Oracle driver (Oracle's pure-Rust `oracledb` thin driver, no Instant Client).
 - `crates/rustgrid-tunnel` — shared SSH / SOCKS5 / HTTP tunnel used by the network drivers.
-- `crates/rustgrid-odbc` — generic ODBC driver (Oracle, DB2, Dameng, ...).
+- `crates/rustgrid-odbc` — generic ODBC driver (DB2, Dameng, ...).
 - `crates/rustgrid-backup` — the `.rgbak` backup container.
 - `crates/rustgrid-export` — table-data exporters (`.xlsx` / `.csv` / `.sql` / `.txt`).
 - `crates/rustgrid-import` — Excel / CSV / TXT source readers.

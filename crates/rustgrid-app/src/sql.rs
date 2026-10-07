@@ -1,7 +1,7 @@
 //! SQL language helpers built on mature third-party crates: `sqlparser` for tokenizing /
 //! keyword metadata and `sqlformat` for beautifying, so the app does not hand-roll a SQL lexer.
 
-use sqlparser::dialect::{Dialect, GenericDialect, MySqlDialect, PostgreSqlDialect};
+use sqlparser::dialect::{Dialect, GenericDialect, MySqlDialect, OracleDialect, PostgreSqlDialect};
 use sqlparser::keywords::Keyword;
 use sqlparser::tokenizer::{Location, Token, TokenWithSpan, Tokenizer, Whitespace};
 
@@ -13,10 +13,18 @@ pub fn sqlparser_dialect(dialect: DriverDialect) -> Box<dyn Dialect> {
     match dialect {
         DriverDialect::Mysql => Box::new(MySqlDialect {}),
         DriverDialect::Postgres => Box::new(PostgreSqlDialect {}),
+        DriverDialect::Oracle => Box::new(OracleDialect {}),
         DriverDialect::SqlServer | DriverDialect::Sqlite | DriverDialect::Generic => {
             Box::new(GenericDialect {})
         }
     }
+}
+
+/// Whether the engine qualifies object names with a schema (`schema.name`) rather than a database.
+/// SQL Server, PostgreSQL and Oracle all nest the tree as database → schema → objects, and their
+/// `CREATE ... VIEW`/routine names parse as schema-qualified.
+pub fn is_schema_qualified(dialect: DriverDialect) -> bool {
+    matches!(dialect, DriverDialect::Postgres | DriverDialect::Oracle)
 }
 
 /// A coarse token category used only for syntax coloring.
@@ -198,7 +206,7 @@ pub fn routine_identity_for(sql: &str, dialect: DriverDialect) -> Option<(Routin
         }
     }
     let name = parts.pop()?;
-    if dialect == DriverDialect::Postgres
+    if is_schema_qualified(dialect)
         && let Some(schema) = parts.pop()
     {
         return Some((kind, format!("{schema}.{name}")));
@@ -280,16 +288,14 @@ pub fn view_identity_for(sql: &str, dialect: DriverDialect) -> Option<String> {
     let mut index = position + 1;
     while let Some(Token::Word(word)) = tokens.get(index) {
         parts.push(word.value.clone());
-        if dialect == DriverDialect::Postgres
-            && matches!(tokens.get(index + 1), Some(Token::Period))
-        {
+        if is_schema_qualified(dialect) && matches!(tokens.get(index + 1), Some(Token::Period)) {
             index += 2;
         } else {
             break;
         }
     }
     let name = parts.pop()?;
-    if dialect == DriverDialect::Postgres
+    if is_schema_qualified(dialect)
         && let Some(schema) = parts.pop()
     {
         return Some(format!("{schema}.{name}"));
@@ -358,7 +364,7 @@ pub struct SqlCompletionContext {
 /// Analyze `sql` at `caret` (a byte offset) for context-aware completion. The whole statement
 /// containing the caret is scanned for table references (so a `SELECT |FROM t` already offers
 /// `t`'s columns), while the fragment and qualifier come from the text just before the caret.
-pub fn completion_context(sql: &str, caret: usize) -> SqlCompletionContext {
+pub fn completion_context(sql: &str, caret: usize, dialect: DriverDialect) -> SqlCompletionContext {
     let end = caret.min(sql.len());
     let mut start = end;
     while start > 0 {
@@ -371,7 +377,7 @@ pub fn completion_context(sql: &str, caret: usize) -> SqlCompletionContext {
     }
     let prefix = sql[start..end].to_lowercase();
     let qualifier = qualifier_parts(sql, start);
-    let statement = current_statement(sql, end);
+    let statement = current_statement(sql, end, dialect);
     let tables = referenced_tables(&statement);
     let kind = if qualifier.is_empty() && expects_table_name(sql, start) {
         SqlCompletionKind::Table
@@ -600,13 +606,46 @@ fn dollar_quote_end(bytes: &[u8], index: usize) -> Option<usize> {
     Some(bytes.len())
 }
 
+/// If an Oracle alternative quote (`q'!x!'`, `q'[x]'`) starts at `index`, return the byte offset
+/// just past the closing `'` (or the end of the input when unterminated).
+fn q_quote_end(bytes: &[u8], index: usize) -> Option<usize> {
+    // `bytes[index]` is `q`/`Q`, `bytes[index + 1]` is `'`.
+    let delimiter = *bytes.get(index + 2)?;
+    let closer = match delimiter {
+        b'[' => b']',
+        b'{' => b'}',
+        b'(' => b')',
+        b'<' => b'>',
+        other => other,
+    };
+    let mut i = index + 3;
+    while i + 1 < bytes.len() {
+        if bytes[i] == closer && bytes[i + 1] == b'\'' {
+            return Some(i + 2);
+        }
+        i += 1;
+    }
+    Some(bytes.len())
+}
+
+fn is_sql_word_char(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
 /// The `;`-delimited statement containing `caret`, quotation- and comment-aware. Falls back to the
 /// whole text when no boundary is found.
-pub fn current_statement(sql: &str, caret: usize) -> String {
+///
+/// The `BEGIN … END;` nesting depth is tracked **only for Oracle**, where a `;` inside a PL/SQL
+/// block is not a statement boundary. In MySQL/PostgreSQL/SQL Server a bare `BEGIN` starts a
+/// transaction and `IF(...)`/`LOOP` are ordinary functions/statements, so counting them would
+/// wrongly merge every following statement into one.
+pub fn current_statement(sql: &str, caret: usize, dialect: DriverDialect) -> String {
+    let oracle_plsql = dialect == DriverDialect::Oracle;
     let bytes = sql.as_bytes();
     let mut start = 0usize;
     let mut index = 0usize;
     let mut state = ScanState::Normal;
+    let mut depth: i32 = 0;
     while index < bytes.len() {
         let byte = bytes[index];
         match state {
@@ -623,6 +662,11 @@ pub fn current_statement(sql: &str, caret: usize) -> String {
                     state = ScanState::BlockComment;
                     index += 1;
                 }
+                b'q' | b'Q' if bytes.get(index + 1) == Some(&b'\'') => {
+                    if let Some(end) = q_quote_end(bytes, index) {
+                        index = end.saturating_sub(1);
+                    }
+                }
                 b'$' => {
                     if let Some(end) = dollar_quote_end(bytes, index) {
                         // Skip the whole dollar-quoted body; its semicolons are not boundaries.
@@ -630,10 +674,29 @@ pub fn current_statement(sql: &str, caret: usize) -> String {
                     }
                 }
                 b';' => {
-                    if index >= caret {
-                        return sql[start..index].to_string();
+                    if depth <= 0 {
+                        if index >= caret {
+                            return sql[start..index].to_string();
+                        }
+                        start = index + 1;
                     }
-                    start = index + 1;
+                }
+                byte if oracle_plsql
+                    && (byte.is_ascii_alphabetic() || byte == b'_')
+                    && (index == 0 || !is_sql_word_char(bytes[index - 1])) =>
+                {
+                    // A standalone keyword adjusts the Oracle PL/SQL nesting depth; only a
+                    // top-level `;` ends the statement.
+                    let mut end = index;
+                    while end < bytes.len() && is_sql_word_char(bytes[end]) {
+                        end += 1;
+                    }
+                    match sql[index..end].to_ascii_uppercase().as_str() {
+                        "BEGIN" | "CASE" | "LOOP" | "IF" => depth += 1,
+                        "END" => depth = (depth - 1).max(0),
+                        _ => {}
+                    }
+                    index = end.saturating_sub(1);
                 }
                 _ => {}
             },
@@ -705,6 +768,15 @@ fn in_string_or_comment(sql: &str, caret: usize) -> bool {
                 b'/' if bytes.get(index + 1) == Some(&b'*') => {
                     state = ScanState::BlockComment;
                     index += 1;
+                }
+                b'q' | b'Q' if bytes.get(index + 1) == Some(&b'\'') => {
+                    if let Some(region_end) = q_quote_end(bytes, index) {
+                        // The caret inside an Oracle alternative quote is not a completion context.
+                        if region_end > end {
+                            return true;
+                        }
+                        index = region_end.saturating_sub(1);
+                    }
                 }
                 b'$' => {
                     if let Some(region_end) = dollar_quote_end(bytes, index) {
@@ -968,7 +1040,7 @@ mod tests {
     fn analyzes_completion_context() {
         // The table after the caret is still offered (mirrors `SELECT |FROM t`).
         let sql = "SELECT \nFROM ams_item";
-        let context = completion_context(sql, "SELECT \n".len());
+        let context = completion_context(sql, "SELECT \n".len(), DriverDialect::Mysql);
         assert_eq!(context.prefix, "");
         assert_eq!(context.kind, SqlCompletionKind::Column);
         assert_eq!(context.tables.len(), 1);
@@ -976,34 +1048,121 @@ mod tests {
 
         // A partial identifier after FROM expects a table name.
         let sql = "SELECT * FROM ams";
-        let context = completion_context(sql, sql.len());
+        let context = completion_context(sql, sql.len(), DriverDialect::Mysql);
         assert_eq!(context.prefix, "ams");
         assert_eq!(context.prefix_start, "SELECT * FROM ".len());
         assert_eq!(context.kind, SqlCompletionKind::Table);
 
         // `alias.` and `db.table.` qualifiers are split out.
         let sql = "SELECT a. FROM t a";
-        let context = completion_context(sql, "SELECT a.".len());
+        let context = completion_context(sql, "SELECT a.".len(), DriverDialect::Mysql);
         assert_eq!(context.prefix, "");
         assert_eq!(context.qualifier, vec!["a".to_string()]);
 
         let sql = "SELECT app.us.";
-        let context = completion_context(sql, sql.len());
+        let context = completion_context(sql, sql.len(), DriverDialect::Mysql);
         assert_eq!(context.qualifier, vec!["app".to_string(), "us".to_string()]);
 
         // Completion is suppressed inside strings and comments.
-        assert!(completion_context("SELECT 'abc", "SELECT 'abc".len()).suppress);
-        assert!(completion_context("SELECT 1 -- x", "SELECT 1 -- x".len()).suppress);
-        assert!(!completion_context("SELECT a.", "SELECT a.".len()).suppress);
+        assert!(
+            completion_context("SELECT 'abc", "SELECT 'abc".len(), DriverDialect::Mysql).suppress
+        );
+        assert!(
+            completion_context("SELECT 1 -- x", "SELECT 1 -- x".len(), DriverDialect::Mysql)
+                .suppress
+        );
+        assert!(!completion_context("SELECT a.", "SELECT a.".len(), DriverDialect::Mysql).suppress);
     }
 
     #[test]
     fn scopes_statements_around_the_caret() {
-        assert_eq!(current_statement("SELECT 1; SELECT 2", 5), "SELECT 1");
-        assert_eq!(current_statement("SELECT 1; SELECT 2", 12), " SELECT 2");
         assert_eq!(
-            current_statement("SELECT ';' FROM t", 5),
+            current_statement("SELECT 1; SELECT 2", 5, DriverDialect::Mysql),
+            "SELECT 1"
+        );
+        assert_eq!(
+            current_statement("SELECT 1; SELECT 2", 12, DriverDialect::Mysql),
+            " SELECT 2"
+        );
+        assert_eq!(
+            current_statement("SELECT ';' FROM t", 5, DriverDialect::Mysql),
             "SELECT ';' FROM t"
         );
+    }
+
+    #[test]
+    fn plsql_depth_is_oracle_only() {
+        // MySQL/PostgreSQL: a bare `BEGIN` starts a transaction, so the following statements are
+        // still separate.
+        let mysql = "BEGIN; INSERT INTO t VALUES (1); SELECT * FROM t";
+        assert_eq!(
+            current_statement(mysql, mysql.len(), DriverDialect::Mysql),
+            " SELECT * FROM t"
+        );
+        // MySQL: `IF(...)` is a function, not a block opener.
+        let if_fn = "SELECT IF(a, 1, 2) FROM t; SELECT * FROM u";
+        assert_eq!(
+            current_statement(if_fn, if_fn.len(), DriverDialect::Mysql),
+            " SELECT * FROM u"
+        );
+        // SQL Server: `BEGIN TRANSACTION` is a statement.
+        let mssql = "BEGIN TRANSACTION; UPDATE t SET a = 1; SELECT * FROM t";
+        assert_eq!(
+            current_statement(mssql, mssql.len(), DriverDialect::SqlServer),
+            " SELECT * FROM t"
+        );
+        // Oracle still keeps a PL/SQL block whole.
+        assert_eq!(
+            current_statement(
+                "BEGIN NULL; END; SELECT 1 FROM dual",
+                5,
+                DriverDialect::Oracle
+            ),
+            "BEGIN NULL; END"
+        );
+    }
+
+    #[test]
+    fn oracle_scanner_handles_q_quotes_and_plsql_blocks() {
+        // A `;` inside an Oracle alternative quote is not a statement boundary.
+        assert_eq!(
+            current_statement(
+                "SELECT q'[a;b]' FROM dual; SELECT 2 FROM dual",
+                10,
+                DriverDialect::Oracle
+            ),
+            "SELECT q'[a;b]' FROM dual"
+        );
+        assert!(
+            completion_context("SELECT q'[a;b]' FROM dual", 12, DriverDialect::Oracle).suppress
+        );
+        // A PL/SQL block's inner `;` does not split the statement.
+        let block = "CREATE OR REPLACE PROCEDURE p AS BEGIN NULL; END;";
+        let caret = block.find("NULL").unwrap();
+        assert_eq!(
+            current_statement(block, caret, DriverDialect::Oracle),
+            block.trim_end_matches(';')
+        );
+    }
+
+    #[test]
+    fn oracle_names_are_schema_qualified() {
+        assert_eq!(
+            view_identity_for(
+                "CREATE OR REPLACE VIEW \"APP\".\"V\" AS SELECT 1 FROM dual",
+                DriverDialect::Oracle
+            ),
+            Some("APP.V".to_string())
+        );
+        assert_eq!(
+            routine_identity_for(
+                "CREATE OR REPLACE FUNCTION \"APP\".\"F\"(p1 NUMBER) RETURN NUMBER AS BEGIN RETURN 0; END;",
+                DriverDialect::Oracle
+            ),
+            Some((RoutineKind::Function, "APP.F".to_string()))
+        );
+        assert!(is_schema_qualified(DriverDialect::Oracle));
+        assert!(is_schema_qualified(DriverDialect::Postgres));
+        assert!(!is_schema_qualified(DriverDialect::Mysql));
     }
 }

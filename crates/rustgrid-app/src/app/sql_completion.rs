@@ -137,7 +137,13 @@ impl CompletionProvider for SqlCompletionProvider {
         _cx: &mut App,
     ) -> Task<anyhow::Result<CompletionResponse>> {
         let sql_text = text.to_string();
-        let context = sql::completion_context(&sql_text, offset);
+        let dialect = self
+            .source
+            .scope
+            .read()
+            .expect("completion scope lock")
+            .dialect;
+        let context = sql::completion_context(&sql_text, offset, dialect);
         let mut items = build_items(&self.source, &context);
         // Anchor the replacement range explicitly. gpui's completion menu derives it from the
         // offset of the *first* keystroke that opened the menu (`trigger_start_offset`), so
@@ -378,7 +384,7 @@ mod tests {
     #[test]
     fn replacement_range_covers_the_typed_identifier() {
         let sql = "SELECT * FROM ams";
-        let context = crate::sql::completion_context(sql, sql.len());
+        let context = crate::sql::completion_context(sql, sql.len(), DriverDialect::Mysql);
         let range = replacement_range(&Rope::from(sql), &context, sql.len());
         assert_eq!(range.start.line, 0);
         assert_eq!(range.start.character, "SELECT * FROM ".len() as u32);
@@ -388,7 +394,7 @@ mod tests {
     #[test]
     fn replacement_range_is_empty_at_a_fresh_dot() {
         let sql = "SELECT t.";
-        let context = crate::sql::completion_context(sql, sql.len());
+        let context = crate::sql::completion_context(sql, sql.len(), DriverDialect::Mysql);
         let range = replacement_range(&Rope::from(sql), &context, sql.len());
         assert_eq!(range.start, range.end);
         assert_eq!(range.end.character, sql.len() as u32);

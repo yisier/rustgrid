@@ -577,6 +577,17 @@ pub(super) fn routine_template_for(
     name: &str,
     dialect: rustgrid_core::DriverDialect,
 ) -> String {
+    if dialect == rustgrid_core::DriverDialect::Oracle {
+        let quoted = format!("\"{}\"", name.replace('"', "\"\""));
+        return match kind {
+            RoutineKind::Function => format!(
+                "CREATE OR REPLACE FUNCTION {quoted}(p1 NUMBER)\nRETURN NUMBER AS\nBEGIN\n    RETURN 0;\nEND;"
+            ),
+            RoutineKind::Procedure => {
+                format!("CREATE OR REPLACE PROCEDURE {quoted}() AS\nBEGIN\n    NULL;\nEND;")
+            }
+        };
+    }
     if dialect == rustgrid_core::DriverDialect::Postgres {
         let quoted = format!("\"{}\"", name.replace('"', "\"\""));
         return match kind {
@@ -614,7 +625,17 @@ fn routine_call_sql_for(
         .map(|parameter| format!("/* {parameter} */"))
         .collect::<Vec<_>>()
         .join(", ");
-    if dialect == rustgrid_core::DriverDialect::Postgres {
+    if dialect == rustgrid_core::DriverDialect::Oracle {
+        // Oracle object names are `schema.name`; the `(argtypes)` signature must not be part of a
+        // call. A function is selected from `dual`, a procedure runs in an anonymous block (a plain
+        // `CALL` cannot carry OUT parameters).
+        let target = routine_pg_name(name);
+        if kind.is_procedure() {
+            format!("BEGIN {target}({arguments});\nEND;")
+        } else {
+            format!("SELECT {target}({arguments}) FROM dual;")
+        }
+    } else if dialect == rustgrid_core::DriverDialect::Postgres {
         // PostgreSQL object names are `schema.name`; a database prefix is never valid, and the
         // `(argtypes)` signature the Functions list carries must not be part of a call.
         let target = routine_pg_name(name);

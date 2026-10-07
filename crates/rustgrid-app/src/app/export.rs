@@ -571,6 +571,7 @@ impl AppView {
                     name.clone(),
                     ExportFields {
                         columns: Vec::new(),
+                        data_types: Vec::new(),
                         selected: Vec::new(),
                         primary_key: Vec::new(),
                         loading: true,
@@ -594,6 +595,7 @@ impl AppView {
                             Ok(Ok(columns)) => ExportFields::all(columns),
                             Ok(Err(error)) => ExportFields {
                                 columns: Vec::new(),
+                                data_types: Vec::new(),
                                 selected: Vec::new(),
                                 primary_key: Vec::new(),
                                 loading: false,
@@ -601,6 +603,7 @@ impl AppView {
                             },
                             Err(error) => ExportFields {
                                 columns: Vec::new(),
+                                data_types: Vec::new(),
                                 selected: Vec::new(),
                                 primary_key: Vec::new(),
                                 loading: false,
@@ -698,7 +701,7 @@ impl AppView {
             return;
         }
         // Snapshot everything the run needs so no `AppView` borrow is held across the awaits.
-        let plans: Vec<(String, String, Vec<String>, Vec<SortColumn>)> = wizard
+        let plans: Vec<ExportPlan> = wizard
             .tables
             .iter()
             .filter(|table| table.selected)
@@ -706,6 +709,9 @@ impl AppView {
                 let fields = wizard.fields.get(&table.name);
                 let columns = fields
                     .map(ExportFields::selected_columns)
+                    .unwrap_or_default();
+                let column_types = fields
+                    .map(ExportFields::selected_column_types)
                     .unwrap_or_default();
                 let order_by = fields
                     .map(|fields| {
@@ -719,14 +725,20 @@ impl AppView {
                             .collect()
                     })
                     .unwrap_or_default();
-                (table.name.clone(), table.path.clone(), columns, order_by)
+                ExportPlan {
+                    name: table.name.clone(),
+                    path: table.path.clone(),
+                    columns,
+                    column_types,
+                    order_by,
+                }
             })
             .collect();
         if plans.is_empty() {
             self.set_export_error(t!("export.no_tables").to_string(), cx);
             return;
         }
-        if plans.iter().any(|(_, path, _, _)| path.trim().is_empty()) {
+        if plans.iter().any(|plan| plan.path.trim().is_empty()) {
             self.set_export_error(t!("export.no_path").to_string(), cx);
             return;
         }
@@ -773,16 +785,25 @@ impl AppView {
             .map(|driver| driver.dialect())
         {
             Some(DriverDialect::Postgres) => SqlDialect::Postgres,
+            Some(DriverDialect::Oracle) => SqlDialect::Oracle,
             _ => SqlDialect::MySql,
         };
         cx.spawn(async move |this, cx| {
             let mut exported = 0usize;
             let mut failed = 0usize;
-            for (name, path, columns, order_by) in plans {
+            for plan in plans {
+                let ExportPlan {
+                    name,
+                    path,
+                    columns,
+                    column_types,
+                    order_by,
+                } = plan;
                 let created = TableWriter::create(
                     Path::new(&path),
                     &name,
                     &columns,
+                    &column_types,
                     format,
                     options,
                     dialect,
