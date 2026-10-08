@@ -62,6 +62,7 @@ pub(crate) async fn user_details(pool: &MySqlPool, user: &str, host: &str) -> Re
         server_privileges,
         denied_server_privileges: BTreeSet::new(),
         grants,
+        default_privileges: Vec::new(),
         roles,
         members,
     })
@@ -318,7 +319,9 @@ pub(crate) fn privilege_catalog() -> PrivilegeCatalog {
                     .collect::<Vec<_>>(),
             ),
         ],
+        default_privileges: Vec::new(),
         deny_supported: false,
+        securable_classes: Vec::new(),
     }
 }
 
@@ -374,6 +377,7 @@ fn read_account(row: &MySqlRow) -> UserAccount {
         profile: String::new(),
         tablespace_quota: String::new(),
         is_super_user: flag(row, "super_priv"),
+        ..UserAccount::default()
     }
 }
 
@@ -1281,8 +1285,14 @@ mod tests {
             server_privileges: BTreeSet::new(),
             denied_server_privileges: BTreeSet::new(),
             grants: Vec::new(),
+            default_privileges: Vec::new(),
             roles: Vec::new(),
             members: Vec::new(),
+            mappings: Vec::new(),
+            original_mappings: Vec::new(),
+            old_password: None,
+            securables: Vec::new(),
+            original_securables: Vec::new(),
         };
         let alter = edit_statements(&edit)
             .into_iter()
@@ -1319,8 +1329,14 @@ mod tests {
             server_privileges: BTreeSet::new(),
             denied_server_privileges: BTreeSet::new(),
             grants: Vec::new(),
+            default_privileges: Vec::new(),
             roles: Vec::new(),
             members: Vec::new(),
+            mappings: Vec::new(),
+            original_mappings: Vec::new(),
+            old_password: None,
+            securables: Vec::new(),
+            original_securables: Vec::new(),
         };
         assert!(edit_groups(&edit).is_empty(), "{:?}", edit_groups(&edit));
         assert!(edit_statements(&edit).is_empty());
@@ -1351,8 +1367,14 @@ mod tests {
             server_privileges: BTreeSet::new(),
             denied_server_privileges: BTreeSet::new(),
             grants: Vec::new(),
+            default_privileges: Vec::new(),
             roles: Vec::new(),
             members: Vec::new(),
+            mappings: Vec::new(),
+            original_mappings: Vec::new(),
+            old_password: None,
+            securables: Vec::new(),
+            original_securables: Vec::new(),
         };
         assert_eq!(
             edit_statements(&edit),
@@ -1391,8 +1413,14 @@ mod tests {
             server_privileges: BTreeSet::new(),
             denied_server_privileges: BTreeSet::new(),
             grants: Vec::new(),
+            default_privileges: Vec::new(),
             roles: Vec::new(),
             members: Vec::new(),
+            mappings: Vec::new(),
+            original_mappings: Vec::new(),
+            old_password: None,
+            securables: Vec::new(),
+            original_securables: Vec::new(),
         };
         let statements = edit_statements(&edit);
         let joined = statements.join("\n");
@@ -1438,8 +1466,14 @@ mod tests {
             server_privileges: [p("INSERT")].into_iter().collect(),
             denied_server_privileges: BTreeSet::new(),
             grants: Vec::new(),
+            default_privileges: Vec::new(),
             roles: Vec::new(),
             members: Vec::new(),
+            mappings: Vec::new(),
+            original_mappings: Vec::new(),
+            old_password: None,
+            securables: Vec::new(),
+            original_securables: Vec::new(),
         };
 
         let groups = edit_groups(&edit);

@@ -7,9 +7,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use rustgrid_core::{
-    Error, ObjectGrant, ObjectPrivilegeRow, PrivilegeCatalog, PrivilegeGroup, PrivilegeId,
-    PrivilegeInfo, PrivilegePreset, Result, RoleMembership, UserAccount, UserDetails, UserEdit,
-    UserEditSection,
+    DefaultObjectType, DefaultPrivilege, DefaultPrivilegeInfo, Error, ObjectGrant,
+    ObjectPrivilegeRow, PrivilegeCatalog, PrivilegeGroup, PrivilegeId, PrivilegeInfo,
+    PrivilegePreset, Result, RoleMembership, UserAccount, UserDetails, UserEdit, UserEditSection,
 };
 use sqlx::Row;
 
@@ -47,6 +47,54 @@ const OBJECT_PRIVILEGES: &[(&str, &str, &str)] = &[
     ("REFERENCES", "user.priv.references", "ddl"),
     ("TRIGGER", "user.priv.trigger", "ddl"),
 ];
+
+/// The privileges `ALTER DEFAULT PRIVILEGES` offers per object kind, as `(kind, keyword)`. A
+/// keyword may repeat across kinds (`SELECT` on tables and sequences), each as its own entry.
+const DEFAULT_PRIVILEGES: &[(DefaultObjectType, &str)] = &[
+    (DefaultObjectType::Tables, "SELECT"),
+    (DefaultObjectType::Tables, "INSERT"),
+    (DefaultObjectType::Tables, "UPDATE"),
+    (DefaultObjectType::Tables, "DELETE"),
+    (DefaultObjectType::Tables, "TRUNCATE"),
+    (DefaultObjectType::Tables, "REFERENCES"),
+    (DefaultObjectType::Tables, "TRIGGER"),
+    (DefaultObjectType::Sequences, "USAGE"),
+    (DefaultObjectType::Sequences, "SELECT"),
+    (DefaultObjectType::Sequences, "UPDATE"),
+    (DefaultObjectType::Functions, "EXECUTE"),
+    (DefaultObjectType::Types, "USAGE"),
+    (DefaultObjectType::Schemas, "CREATE"),
+    (DefaultObjectType::Schemas, "USAGE"),
+];
+
+/// The app i18n key for a privilege keyword, when one exists (falling back to the keyword itself).
+fn privilege_label_key(keyword: &str) -> Option<&'static str> {
+    match keyword {
+        "SELECT" => Some("user.priv.select"),
+        "INSERT" => Some("user.priv.insert"),
+        "UPDATE" => Some("user.priv.update"),
+        "DELETE" => Some("user.priv.delete"),
+        "TRUNCATE" => Some("user.priv.truncate"),
+        "REFERENCES" => Some("user.priv.references"),
+        "TRIGGER" => Some("user.priv.trigger"),
+        "USAGE" => Some("user.priv.usage"),
+        "EXECUTE" => Some("user.priv.execute"),
+        "CREATE" => Some("user.priv.create"),
+        _ => None,
+    }
+}
+
+/// The object-kind `"char"` PostgreSQL stores in `pg_default_acl.defaclobjtype`.
+fn default_object_type(code: &str) -> Option<DefaultObjectType> {
+    match code {
+        "r" => Some(DefaultObjectType::Tables),
+        "S" => Some(DefaultObjectType::Sequences),
+        "f" => Some(DefaultObjectType::Functions),
+        "T" => Some(DefaultObjectType::Types),
+        "n" => Some(DefaultObjectType::Schemas),
+        _ => None,
+    }
+}
 
 /// The PostgreSQL privilege catalog: role attributes (server), database/schema/table privileges,
 /// their groups and the quick presets.
@@ -124,7 +172,19 @@ pub(crate) fn privilege_catalog() -> PrivilegeCatalog {
                     .collect::<Vec<_>>(),
             ),
         ],
+        default_privileges: DEFAULT_PRIVILEGES
+            .iter()
+            .map(|(object_type, keyword)| {
+                DefaultPrivilegeInfo::new(
+                    *object_type,
+                    *keyword,
+                    privilege_label_key(keyword),
+                    keyword,
+                )
+            })
+            .collect(),
         deny_supported: false,
+        securable_classes: Vec::new(),
     }
 }
 
@@ -180,6 +240,7 @@ fn account_from_row(row: &sqlx::postgres::PgRow) -> UserAccount {
         profile: String::new(),
         tablespace_quota: String::new(),
         is_super_user: row.try_get("rolsuper").unwrap_or(false),
+        ..UserAccount::default()
     }
 }
 
@@ -239,12 +300,14 @@ pub(crate) async fn user_details(
     let roles = role_edges(&pool, "am.member", user).await?;
     let members = role_edges(&pool, "am.roleid", user).await?;
     let grants = object_grants(&pool, connection.default_database_name(), user).await?;
+    let default_privileges = default_privileges(&pool, user).await?;
 
     Ok(UserDetails {
         account,
         server_privileges,
         denied_server_privileges: BTreeSet::new(),
         grants,
+        default_privileges,
         roles,
         members,
     })
@@ -326,6 +389,72 @@ async fn object_grants(
     Ok(grants)
 }
 
+/// The account's `ALTER DEFAULT PRIVILEGES` rules, read from `pg_default_acl`. `PUBLIC` grants
+/// (`grantee = 0`) are skipped: the editor grants to roles only, and leaving them out means an
+/// untouched `PUBLIC` rule is never revoked on save.
+async fn default_privileges(pool: &sqlx::PgPool, user: &str) -> Result<Vec<DefaultPrivilege>> {
+    let rows = sqlx::query(
+        "SELECT COALESCE(n.nspname, ''), d.defaclobjtype::text, a.grantee::regrole::text, \
+                a.privilege_type \
+         FROM pg_default_acl d \
+         LEFT JOIN pg_namespace n ON n.oid = d.defaclnamespace \
+         CROSS JOIN LATERAL aclexplode(d.defaclacl) AS a \
+         WHERE d.defaclrole = (SELECT oid FROM pg_roles WHERE rolname = $1) \
+           AND a.grantee <> 0 \
+         ORDER BY 1, 2, 3",
+    )
+    .bind(user)
+    .fetch_all(pool)
+    .await
+    .map_err(map_query_error)?;
+
+    let mut rules: Vec<DefaultPrivilege> = Vec::new();
+    for row in &rows {
+        let schema: String = row.try_get(0).unwrap_or_default();
+        let code: String = row.try_get(1).unwrap_or_default();
+        let Some(object_type) = default_object_type(&code) else {
+            continue;
+        };
+        let grantee: String = row.try_get(2).unwrap_or_default();
+        let privilege_type: String = row.try_get(3).unwrap_or_default();
+        let privilege = PrivilegeId::new(privilege_type.trim().to_ascii_uppercase());
+        if grantee.is_empty() || privilege.as_str().is_empty() {
+            continue;
+        }
+        if let Some(existing) = rules.iter_mut().find(|rule| {
+            rule.schema == schema && rule.object_type == object_type && rule.grantee == grantee
+        }) {
+            existing.privileges.insert(privilege);
+        } else {
+            let mut rule = DefaultPrivilege::new(schema, object_type, grantee);
+            rule.privileges.insert(privilege);
+            rules.push(rule);
+        }
+    }
+    Ok(rules)
+}
+
+/// The schemas the account editor's 默认权限 section lists: the user schemas of the database the
+/// driver reads and writes default privileges in.
+pub(crate) async fn default_privilege_schemas(
+    connection: &PostgresConnection,
+) -> Result<Vec<String>> {
+    let pool = connection
+        .pool_for(connection.default_database_name())
+        .await?;
+    let rows = sqlx::query(
+        "SELECT nspname FROM pg_namespace \
+         WHERE nspname NOT LIKE 'pg\\_%' AND nspname <> 'information_schema' \
+         ORDER BY nspname",
+    )
+    .fetch_all(&pool)
+    .await
+    .map_err(map_query_error)?;
+    rows.iter()
+        .map(|row| row.try_get(0).map_err(map_query_error))
+        .collect()
+}
+
 /// Build the statements an edit runs, grouped by what they change.
 pub(crate) fn edit_groups(edit: &UserEdit) -> Vec<(UserEditSection, Vec<String>)> {
     let account = &edit.account;
@@ -361,6 +490,18 @@ pub(crate) fn edit_groups(edit: &UserEdit) -> Vec<(UserEditSection, Vec<String>)
         let statements = grant_statements(edit);
         if !statements.is_empty() {
             groups.push((UserEditSection::ObjectGrants, statements));
+        }
+    }
+
+    if !edit.default_privileges.is_empty()
+        || edit
+            .original
+            .as_ref()
+            .is_some_and(|o| !o.default_privileges.is_empty())
+    {
+        let statements = default_privilege_statements(edit);
+        if !statements.is_empty() {
+            groups.push((UserEditSection::DefaultPrivileges, statements));
         }
     }
 
@@ -497,6 +638,77 @@ fn grant_statements(edit: &UserEdit) -> Vec<String> {
             statements.push(format!(
                 "REVOKE {} ON TABLE {qualified} FROM {user}",
                 removed.join(", ")
+            ));
+        }
+    }
+    statements
+}
+
+/// The `ALTER DEFAULT PRIVILEGES` statements for the rules that changed, keyed by
+/// `(schema, object kind, grantee)`.
+fn default_privilege_statements(edit: &UserEdit) -> Vec<String> {
+    let role = quote_identifier(&edit.account.user);
+    let mut before: BTreeMap<(String, DefaultObjectType, String), BTreeSet<PrivilegeId>> =
+        BTreeMap::new();
+    if let Some(original) = &edit.original {
+        for rule in &original.default_privileges {
+            before
+                .entry(rule.key())
+                .or_default()
+                .extend(rule.privileges.iter().cloned());
+        }
+    }
+    let mut after: BTreeMap<(String, DefaultObjectType, String), BTreeSet<PrivilegeId>> =
+        BTreeMap::new();
+    for rule in &edit.default_privileges {
+        after
+            .entry(rule.key())
+            .or_default()
+            .extend(rule.privileges.iter().cloned());
+    }
+
+    let keys: BTreeSet<(String, DefaultObjectType, String)> =
+        before.keys().chain(after.keys()).cloned().collect();
+    let mut statements = Vec::new();
+    for (schema, object_type, grantee) in keys {
+        let empty = BTreeSet::new();
+        let old = before
+            .get(&(schema.clone(), object_type, grantee.clone()))
+            .unwrap_or(&empty);
+        let new = after
+            .get(&(schema.clone(), object_type, grantee.clone()))
+            .unwrap_or(&empty);
+        let added: Vec<String> = new
+            .difference(old)
+            .map(|privilege| privilege.as_str().to_string())
+            .collect();
+        let removed: Vec<String> = old
+            .difference(new)
+            .map(|privilege| privilege.as_str().to_string())
+            .collect();
+        if added.is_empty() && removed.is_empty() {
+            continue;
+        }
+        // `ALTER DEFAULT PRIVILEGES FOR ROLE x [IN SCHEMA s] …` targets the edited role's future
+        // objects; the connection's own role must not be used (the editor usually runs as an admin).
+        let mut target = format!("ALTER DEFAULT PRIVILEGES FOR ROLE {role}");
+        if !schema.is_empty() {
+            target.push_str(&format!(" IN SCHEMA {}", quote_identifier(&schema)));
+        }
+        if !added.is_empty() {
+            statements.push(format!(
+                "{target} GRANT {} ON {} TO {}",
+                added.join(", "),
+                object_type.keyword(),
+                quote_identifier(&grantee)
+            ));
+        }
+        if !removed.is_empty() {
+            statements.push(format!(
+                "{target} REVOKE {} ON {} FROM {}",
+                removed.join(", "),
+                object_type.keyword(),
+                quote_identifier(&grantee)
             ));
         }
     }
@@ -721,5 +933,71 @@ mod tests {
         );
         // A bare table name defaults to the `public` schema.
         assert_eq!(grant_target("shop", "users"), "TABLE \"public\".\"users\"");
+    }
+
+    fn rule(
+        schema: &str,
+        object_type: DefaultObjectType,
+        grantee: &str,
+        privileges: &[&str],
+    ) -> DefaultPrivilege {
+        DefaultPrivilege {
+            schema: schema.to_string(),
+            object_type,
+            grantee: grantee.to_string(),
+            privileges: privileges.iter().map(|p| PrivilegeId::new(*p)).collect(),
+        }
+    }
+
+    fn account(name: &str) -> UserAccount {
+        UserAccount {
+            user: name.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn default_privilege_rules_diff_into_grant_and_revoke() {
+        let original = UserDetails {
+            account: account("alice"),
+            default_privileges: vec![
+                rule("public", DefaultObjectType::Tables, "bob", &["SELECT"]),
+                rule("", DefaultObjectType::Sequences, "bob", &["USAGE"]),
+            ],
+            ..Default::default()
+        };
+        let edit = UserEdit {
+            original: Some(original),
+            account: account("alice"),
+            password: None,
+            server_privileges: BTreeSet::new(),
+            denied_server_privileges: BTreeSet::new(),
+            grants: Vec::new(),
+            default_privileges: vec![
+                rule(
+                    "public",
+                    DefaultObjectType::Tables,
+                    "bob",
+                    &["SELECT", "INSERT"],
+                ),
+                // The sequence rule is dropped: its USAGE is revoked. A second grantee is added.
+                rule("public", DefaultObjectType::Tables, "carol", &["SELECT"]),
+            ],
+            roles: Vec::new(),
+            members: Vec::new(),
+            mappings: Vec::new(),
+            original_mappings: Vec::new(),
+            old_password: None,
+            securables: Vec::new(),
+            original_securables: Vec::new(),
+        };
+        assert_eq!(
+            default_privilege_statements(&edit),
+            vec![
+                "ALTER DEFAULT PRIVILEGES FOR ROLE \"alice\" REVOKE USAGE ON SEQUENCES FROM \"bob\"",
+                "ALTER DEFAULT PRIVILEGES FOR ROLE \"alice\" IN SCHEMA \"public\" GRANT INSERT ON TABLES TO \"bob\"",
+                "ALTER DEFAULT PRIVILEGES FOR ROLE \"alice\" IN SCHEMA \"public\" GRANT SELECT ON TABLES TO \"carol\"",
+            ]
+        );
     }
 }

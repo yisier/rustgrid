@@ -11,7 +11,8 @@ use crate::model::{
 };
 use crate::routine::{RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind};
 use crate::user::{
-    ObjectPrivilegeRow, PrivilegeCatalog, UserAccount, UserDetails, UserEdit, UserEditSection,
+    ObjectPrivilegeRow, PrivilegeCatalog, ServerSecurableGrant, UserAccount, UserDetails, UserEdit,
+    UserEditSection, UserMapping,
 };
 use crate::view::{ViewDetails, ViewEdit};
 
@@ -167,6 +168,9 @@ pub struct UserEditorSpec {
     pub password_valid_until: bool,
     /// The 锁定该账号 checkbox.
     pub account_lock: bool,
+    /// When set, the account-lock checkbox is labelled 已启用 and reads `!account_locked`
+    /// (SQL Server's login `is_disabled`, which is the inverse of a lock).
+    pub account_enabled: bool,
     /// The 最大问题数 resource limit (MySQL).
     pub max_questions: bool,
     /// The 最大更新数 resource limit (MySQL).
@@ -187,11 +191,27 @@ pub struct UserEditorSpec {
     pub server_privileges: bool,
     /// Whether the 权限 (object-grant) section is shown.
     pub object_privileges: bool,
+    /// Whether the 默认权限 (default-privileges) section is shown (PostgreSQL's
+    /// `ALTER DEFAULT PRIVILEGES`).
+    pub default_privileges: bool,
     /// Whether the 对象权限管理器 toolbar item is offered. It may be `true` while
     /// `object_privileges` is `false` (SQL Server manages object grants only through the manager).
     pub object_privilege_manager: bool,
+    /// Whether a save must finish with `FLUSH PRIVILEGES` (MySQL/MariaDB reload the grant tables;
+    /// other engines apply GRANT/REVOKE immediately).
+    pub flush_privileges: bool,
     /// Whether the 角色 section is shown.
     pub roles: bool,
+    /// Whether the 用户映射 section is shown (SQL Server's login → database user mappings and
+    /// database roles).
+    pub user_mapping: bool,
+    /// Whether the 登录信息 section shows the verification type (SQL Server's Windows / SQL Server
+    /// authentication).
+    pub verification_type: bool,
+    /// Whether the 终端节点权限 section is shown (SQL Server's endpoint permissions).
+    pub endpoint_permissions: bool,
+    /// Whether the 登录权限 section is shown (SQL Server's per-login securable permissions).
+    pub login_permissions: bool,
 }
 
 impl UserEditorSpec {
@@ -203,6 +223,7 @@ impl UserEditorSpec {
             password_expiry: true,
             password_valid_until: false,
             account_lock: true,
+            account_enabled: false,
             max_questions: true,
             max_updates: true,
             max_connections: true,
@@ -213,8 +234,14 @@ impl UserEditorSpec {
             list_super_user: true,
             server_privileges: true,
             object_privileges: true,
+            default_privileges: false,
             object_privilege_manager: true,
+            flush_privileges: true,
             roles: true,
+            user_mapping: false,
+            verification_type: false,
+            endpoint_permissions: false,
+            login_permissions: false,
         }
     }
 }
@@ -473,6 +500,27 @@ pub trait Connection: Send + Sync {
         ))
     }
 
+    /// The account's per-database mappings (SQL Server's 用户映射): one row per database, each
+    /// with whether the account has a database user there and the database roles it belongs to.
+    /// The editor's 用户映射 section uses this for a new account (whose `user_details` would
+    /// fail); engines without database-scoped users return an empty list.
+    async fn user_mappings(&self, _user: &str, _host: &str) -> Result<Vec<UserMapping>> {
+        Ok(Vec::new())
+    }
+
+    /// The account's permissions on every server-level securable (SQL Server's endpoints and
+    /// logins), one row per available securable, for the editor's 终端节点权限 / 登录权限
+    /// sections. Engines without such securables return an empty list.
+    async fn user_securables(&self, _user: &str, _host: &str) -> Result<Vec<ServerSecurableGrant>> {
+        Ok(Vec::new())
+    }
+
+    /// The login verification types offered by the editor's 验证类型 dropdown (SQL Server's
+    /// `SQL Server` / `Windows`). Empty hides the control.
+    fn login_types(&self) -> Vec<&'static str> {
+        Vec::new()
+    }
+
     /// The SQL script [`Connection::save_user`] runs, for the editor's SQL preview.
     fn user_edit_sql(&self, _edit: &UserEdit) -> String {
         String::new()
@@ -520,6 +568,12 @@ pub trait Connection: Send + Sync {
     /// The SSL types offered by the account editor's SSL type dropdown.
     fn ssl_types(&self) -> Vec<&'static str> {
         Vec::new()
+    }
+
+    /// The schemas the account editor's 默认权限 section lists, in the database the driver reads
+    /// and writes default privileges in. Engines without default privileges return an empty list.
+    async fn default_privilege_schemas(&self) -> Result<Vec<String>> {
+        Ok(Vec::new())
     }
 
     /// Every account's privileges on one object (`database` plus an optional table/routine name,

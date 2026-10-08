@@ -80,6 +80,7 @@ impl Driver for SqlServerDriver {
             password_expiry: false,
             password_valid_until: false,
             account_lock: true,
+            account_enabled: true,
             max_questions: false,
             max_updates: false,
             max_connections: false,
@@ -92,8 +93,16 @@ impl Driver for SqlServerDriver {
             // The account editor's 权限 section needs per-database object grants the login's user
             // owns; object grants are managed through the 对象权限管理器 instead.
             object_privileges: false,
+            default_privileges: false,
             object_privilege_manager: true,
+            flush_privileges: false,
             roles: true,
+            // SQL Server logins are mapped into databases as users, with database roles.
+            user_mapping: true,
+            // SQL Server logins have a verification type and endpoint/login securable permissions.
+            verification_type: true,
+            endpoint_permissions: true,
+            login_permissions: true,
         }
     }
 

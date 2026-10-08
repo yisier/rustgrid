@@ -53,6 +53,7 @@ impl Driver for PostgresDriver {
             password_expiry: false,
             password_valid_until: true,
             account_lock: true,
+            account_enabled: false,
             max_questions: false,
             max_updates: false,
             max_connections: true,
@@ -63,8 +64,14 @@ impl Driver for PostgresDriver {
             list_super_user: true,
             server_privileges: true,
             object_privileges: true,
+            default_privileges: true,
             object_privilege_manager: true,
+            flush_privileges: false,
             roles: true,
+            user_mapping: false,
+            verification_type: false,
+            endpoint_permissions: false,
+            login_permissions: false,
         }
     }
 

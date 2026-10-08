@@ -7,9 +7,9 @@ use rustgrid_core::{
     BackupObjectKind, CellValue, ColumnDef, ColumnInfo, Connection, DatabaseInfo, DatabaseOptions,
     DriverId, Error, ForeignKeyDef, IndexDef, ObjectDump, ObjectKind, ObjectPrivilegeRow,
     PageRequest, PrivilegeCatalog, QueryResult, Result, RoutineDetails, RoutineEdit, RoutineInfo,
-    RoutineKind, RowInsert, RowUpdate, TableInfo, TableOptions, TablePage, TableSchema,
-    TableStatus, TriggerDef, UserAccount, UserDetails, UserEdit, UserEditSection, ViewDetails,
-    ViewEdit, ViewInfo,
+    RoutineKind, RowInsert, RowUpdate, ServerSecurableGrant, TableInfo, TableOptions, TablePage,
+    TableSchema, TableStatus, TriggerDef, UserAccount, UserDetails, UserEdit, UserEditSection,
+    UserMapping, ViewDetails, ViewEdit, ViewInfo,
 };
 use tiberius::{QueryItem, Row, ToSql};
 
@@ -1543,6 +1543,22 @@ impl Connection for SqlServerConnection {
 
     async fn user_details(&self, user_name: &str, host: &str) -> Result<UserDetails> {
         user::user_details(self, user_name, host).await
+    }
+
+    async fn user_mappings(&self, user_name: &str, _host: &str) -> Result<Vec<UserMapping>> {
+        user::user_mappings(self, user_name).await
+    }
+
+    async fn user_securables(
+        &self,
+        user_name: &str,
+        _host: &str,
+    ) -> Result<Vec<ServerSecurableGrant>> {
+        user::user_securables(self, user_name).await
+    }
+
+    fn login_types(&self) -> Vec<&'static str> {
+        user::login_types()
     }
 
     fn user_edit_sql(&self, edit: &UserEdit) -> String {

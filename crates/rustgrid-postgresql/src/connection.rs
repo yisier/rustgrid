@@ -1033,6 +1033,10 @@ impl Connection for PostgresConnection {
         Vec::new()
     }
 
+    async fn default_privilege_schemas(&self) -> Result<Vec<String>> {
+        crate::user::default_privilege_schemas(self).await
+    }
+
     async fn object_privilege_matrix(
         &self,
         database: &str,

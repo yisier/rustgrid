@@ -33,7 +33,9 @@ not a later refactor.
   `[bracketed]` identifiers, `@P1` parameters and `OFFSET … FETCH NEXT` paging (always with an
   `ORDER BY`); `helpers.rs` holds the dialect helpers (quoting, script splitting aware of
   `BEGIN`/`CASE … END`, filter translation, `CellValue` decoding); `user.rs` maps SQL Server logins
-  onto the account model (database/object privilege management is still partial). Statements use the
+  onto the account model — server privileges, server roles and per-database 用户映射 (each login's
+  database user, default schema and database-role memberships) — while database/object privileges
+  are managed through the 对象权限管理器. Statements use the
   text/batch path for DDL and `CREATE PROCEDURE`, and the parameterized RPC path for `SELECT`/DML so
   row counts are available.
 - `crates/rustgrid-postgresql` — the **PostgreSQL** driver, built on **sqlx 0.9** with its

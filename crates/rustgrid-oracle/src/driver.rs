@@ -73,6 +73,7 @@ impl Driver for OracleDriver {
             password_expiry: false,
             password_valid_until: false,
             account_lock: true,
+            account_enabled: false,
             max_questions: false,
             max_updates: false,
             max_connections: false,
@@ -83,8 +84,14 @@ impl Driver for OracleDriver {
             list_super_user: false,
             server_privileges: true,
             object_privileges: true,
+            default_privileges: false,
             object_privilege_manager: true,
+            flush_privileges: false,
             roles: true,
+            user_mapping: false,
+            verification_type: false,
+            endpoint_permissions: false,
+            login_permissions: false,
         }
     }
 

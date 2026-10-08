@@ -60,6 +60,68 @@ pub enum PrivilegeScope {
     Object,
 }
 
+/// The object kind a default-privileges rule applies to (PostgreSQL's `ALTER DEFAULT PRIVILEGES
+/// ... ON TABLES|SEQUENCES|FUNCTIONS|TYPES|SCHEMAS`). The engine keyword is the variant's
+/// [`DefaultObjectType::keyword`], so the model needs no per-engine knowledge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DefaultObjectType {
+    Tables,
+    Sequences,
+    Functions,
+    Types,
+    Schemas,
+}
+
+impl DefaultObjectType {
+    /// Every kind, in catalog display order.
+    pub const ALL: [DefaultObjectType; 5] = [
+        DefaultObjectType::Tables,
+        DefaultObjectType::Sequences,
+        DefaultObjectType::Functions,
+        DefaultObjectType::Types,
+        DefaultObjectType::Schemas,
+    ];
+
+    /// The `ON <keyword>` object kind.
+    pub fn keyword(self) -> &'static str {
+        match self {
+            DefaultObjectType::Tables => "TABLES",
+            DefaultObjectType::Sequences => "SEQUENCES",
+            DefaultObjectType::Functions => "FUNCTIONS",
+            DefaultObjectType::Types => "TYPES",
+            DefaultObjectType::Schemas => "SCHEMAS",
+        }
+    }
+}
+
+/// One privilege a default-privileges rule can grant, for one object kind. A privilege may apply to
+/// several kinds (`SELECT` is valid on tables and sequences), each as its own entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefaultPrivilegeInfo {
+    pub object_type: DefaultObjectType,
+    pub id: PrivilegeId,
+    /// The app i18n key, when the app knows one.
+    pub label_key: Option<String>,
+    /// Fallback display label (usually the engine keyword).
+    pub label: String,
+}
+
+impl DefaultPrivilegeInfo {
+    pub fn new(
+        object_type: DefaultObjectType,
+        id: impl Into<PrivilegeId>,
+        label_key: Option<&str>,
+        label: &str,
+    ) -> Self {
+        Self {
+            object_type,
+            id: id.into(),
+            label_key: label_key.map(str::to_string),
+            label: label.to_string(),
+        }
+    }
+}
+
 /// One privilege in a driver's catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrivilegeInfo {
@@ -246,12 +308,34 @@ pub struct PrivilegeCatalog {
     pub privileges: Vec<PrivilegeInfo>,
     pub server_presets: Vec<PrivilegePreset>,
     pub object_presets: Vec<PrivilegePreset>,
+    /// The privileges offered by the default-privileges editor (PostgreSQL's
+    /// `ALTER DEFAULT PRIVILEGES`), per object kind. Empty for engines without default privileges.
+    pub default_privileges: Vec<DefaultPrivilegeInfo>,
     /// Whether the engine has an explicit deny (`DENY` in SQL Server), which the privilege manager
     /// offers as a per-privilege toggle.
     pub deny_supported: bool,
+    /// The server-level securable classes the account editor offers (SQL Server's endpoints and
+    /// logins), each with its grantable permissions. Empty for engines without such securables.
+    pub securable_classes: Vec<SecurableClass>,
 }
 
 impl PrivilegeCatalog {
+    /// The privileges offered for one object kind of a default-privileges rule, in catalog order.
+    pub fn default_privileges_for(
+        &self,
+        object_type: DefaultObjectType,
+    ) -> Vec<&DefaultPrivilegeInfo> {
+        self.default_privileges
+            .iter()
+            .filter(|info| info.object_type == object_type)
+            .collect()
+    }
+
+    /// Whether the catalog offers default privileges at all.
+    pub fn has_default_privileges(&self) -> bool {
+        !self.default_privileges.is_empty()
+    }
+
     /// The privileges that can be granted server-wide.
     pub fn server(&self) -> impl Iterator<Item = &PrivilegeInfo> {
         self.privileges.iter().filter(|info| info.is_server())
@@ -356,6 +440,33 @@ pub struct UserAccount {
     /// for none. Oracle reports/accepts it per tablespace; the editor manages the default one.
     #[serde(default)]
     pub tablespace_quota: String,
+    /// SQL Server's login verification type (`SQL Server`, `Windows`). Empty for other engines.
+    #[serde(default)]
+    pub login_type: String,
+    /// SQL Server's default database for the login.
+    #[serde(default)]
+    pub default_database: String,
+    /// SQL Server's default language for the login.
+    #[serde(default)]
+    pub default_language: String,
+    /// SQL Server's `CHECK_POLICY`.
+    #[serde(default)]
+    pub check_policy: bool,
+    /// SQL Server's `CHECK_EXPIRATION`.
+    #[serde(default)]
+    pub check_expiration: bool,
+    /// SQL Server's `MUST_CHANGE`: the password must change at the next login.
+    #[serde(default)]
+    pub must_change: bool,
+    /// SQL Server's certificate the login is mapped from.
+    #[serde(default)]
+    pub certificate: String,
+    /// SQL Server's asymmetric key the login is mapped from.
+    #[serde(default)]
+    pub asymmetric_key: String,
+    /// SQL Server's credential attached to the login.
+    #[serde(default)]
+    pub credential: String,
     /// Whether the account holds the global `SUPER` privilege.
     pub is_super_user: bool,
 }
@@ -400,6 +511,53 @@ impl RoleMembership {
     }
 }
 
+/// One database a login is mapped into (SQL Server's 用户映射): whether the login has a database
+/// user there, that user's name and default schema, and the database roles it belongs to.
+///
+/// Engines whose accounts are not database-scoped (MySQL, MariaDB, SQLite, PostgreSQL, Oracle)
+/// have no mappings; the editor's 用户映射 section is hidden for them.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct UserMapping {
+    pub database: String,
+    /// Whether the login has a user in this database.
+    pub mapped: bool,
+    /// The database user's name. Empty or the login name means the login's own name.
+    pub user_name: String,
+    /// The database user's default schema.
+    pub default_schema: String,
+    /// The database roles the user belongs to.
+    pub roles: BTreeSet<String>,
+    /// The database roles the editor offers for this database (fixed and user-defined roles).
+    pub available_roles: Vec<String>,
+}
+
+/// One server-level securable's permissions for one account (SQL Server's endpoints and logins).
+/// The editor's 终端节点权限 / 登录权限 sections render one row per available securable.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ServerSecurableGrant {
+    /// The securable class keyword (`ENDPOINT`, `LOGIN`), as used in `ON <class>::<name>`.
+    pub class: String,
+    pub name: String,
+    pub privileges: BTreeSet<PrivilegeId>,
+    /// Permissions explicitly denied (SQL Server's `DENY`, which overrides a grant).
+    pub denied: BTreeSet<PrivilegeId>,
+}
+
+/// One class of server-level securables the account editor offers (SQL Server's endpoints, logins),
+/// with the permissions grantable on it. The editor renders one section per class; `id` is the
+/// stable key it matches its section against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecurableClass {
+    /// A stable id the editor uses to pick its section (`endpoint`, `login`).
+    pub id: String,
+    /// The class keyword used in `ON <class>::<name>`.
+    pub class: String,
+    pub label_key: Option<String>,
+    pub label: String,
+    /// The permissions offered, in display order.
+    pub privileges: Vec<PrivilegeId>,
+}
+
 /// One object-level grant shown by the 权限 tab: a database plus (optionally) a table or routine
 /// and the privileges granted on it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -441,6 +599,41 @@ impl ObjectGrant {
             }
             _ => (String::new(), qualified.to_string()),
         }
+    }
+}
+
+/// One default-privileges rule: the privileges `for_role` automatically grants on the objects it
+/// creates, in one schema (or every schema) and for one object kind (PostgreSQL's
+/// `ALTER DEFAULT PRIVILEGES`). The `FOR ROLE` is the account the editor is editing, so it is not
+/// stored per rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefaultPrivilege {
+    /// The schema the rule applies in; empty means every schema (no `IN SCHEMA`).
+    pub schema: String,
+    pub object_type: DefaultObjectType,
+    /// The grantee account. PostgreSQL has no host part, so this is the bare role name.
+    pub grantee: String,
+    /// The privileges granted.
+    pub privileges: BTreeSet<PrivilegeId>,
+}
+
+impl DefaultPrivilege {
+    pub fn new(
+        schema: impl Into<String>,
+        object_type: DefaultObjectType,
+        grantee: impl Into<String>,
+    ) -> Self {
+        Self {
+            schema: schema.into(),
+            object_type,
+            grantee: grantee.into(),
+            privileges: BTreeSet::new(),
+        }
+    }
+
+    /// The key that identifies the rule: its schema, object kind and grantee.
+    pub fn key(&self) -> (String, DefaultObjectType, String) {
+        (self.schema.clone(), self.object_type, self.grantee.clone())
     }
 }
 
@@ -489,6 +682,8 @@ pub struct UserDetails {
     pub denied_server_privileges: BTreeSet<PrivilegeId>,
     /// The object-level grants of the 权限 tab.
     pub grants: Vec<ObjectGrant>,
+    /// The account's default-privileges rules (PostgreSQL's `ALTER DEFAULT PRIVILEGES`).
+    pub default_privileges: Vec<DefaultPrivilege>,
     /// The role edges where this account is the member (the 成员属于 tab).
     pub roles: Vec<RoleMembership>,
     /// The role edges where this account is the role (the 成员 tab).
@@ -508,12 +703,24 @@ pub struct UserEdit {
     /// Server-wide privileges to explicitly deny (SQL Server).
     pub denied_server_privileges: BTreeSet<PrivilegeId>,
     pub grants: Vec<ObjectGrant>,
+    /// The account's default-privileges rules to write (PostgreSQL's `ALTER DEFAULT PRIVILEGES`).
+    pub default_privileges: Vec<DefaultPrivilege>,
     /// Role memberships of this account as `(role_user, role_host, admin_option)`: roles this
     /// account is granted (the 成员属于 tab).
     pub roles: Vec<(String, String, bool)>,
     /// Accounts that are members of this account as `(member_user, member_host, admin_option)`
     /// (the 成员 tab, meaningful when the account is a role).
     pub members: Vec<(String, String, bool)>,
+    /// The account's per-database mappings to write (SQL Server's 用户映射).
+    pub mappings: Vec<UserMapping>,
+    /// The mappings as loaded, for the diff. Empty when creating a new account.
+    pub original_mappings: Vec<UserMapping>,
+    /// The password to verify against the old one (`ALTER LOGIN ... OLD_PASSWORD`, SQL Server).
+    pub old_password: Option<String>,
+    /// The account's server-level securable grants to write (SQL Server's endpoints/logins).
+    pub securables: Vec<ServerSecurableGrant>,
+    /// The securable grants as loaded, for the diff.
+    pub original_securables: Vec<ServerSecurableGrant>,
 }
 
 /// The kinds of change one account save makes. The editor groups the generated statements by this
@@ -526,8 +733,14 @@ pub enum UserEditSection {
     ServerPrivileges,
     /// Database/table/routine grants.
     ObjectGrants,
+    /// Default privileges (`ALTER DEFAULT PRIVILEGES`).
+    DefaultPrivileges,
     /// Role memberships.
     Roles,
+    /// Per-database mappings (SQL Server's 用户映射).
+    UserMapping,
+    /// Server-level securable grants (SQL Server's 终端节点权限 / 登录权限).
+    Securables,
 }
 
 #[cfg(test)]
@@ -553,5 +766,39 @@ mod tests {
         assert_eq!(grant.object_name(), "dbo.users");
         // A bare grant's object name is the bare name, not a schema-qualified one.
         assert_eq!(ObjectGrant::new("shop", "orders").object_name(), "orders");
+    }
+
+    #[test]
+    fn default_privileges_are_filtered_by_object_type() {
+        let catalog = PrivilegeCatalog {
+            default_privileges: vec![
+                DefaultPrivilegeInfo::new(
+                    DefaultObjectType::Tables,
+                    "SELECT",
+                    Some("user.priv.select"),
+                    "SELECT",
+                ),
+                DefaultPrivilegeInfo::new(
+                    DefaultObjectType::Sequences,
+                    "USAGE",
+                    Some("user.priv.usage"),
+                    "USAGE",
+                ),
+            ],
+            ..Default::default()
+        };
+        assert!(catalog.has_default_privileges());
+        let tables: Vec<&str> = catalog
+            .default_privileges_for(DefaultObjectType::Tables)
+            .iter()
+            .map(|info| info.id.as_str())
+            .collect();
+        assert_eq!(tables, vec!["SELECT"]);
+        assert!(
+            catalog
+                .default_privileges_for(DefaultObjectType::Functions)
+                .is_empty()
+        );
+        assert_eq!(DefaultObjectType::Schemas.keyword(), "SCHEMAS");
     }
 }

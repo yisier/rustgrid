@@ -118,7 +118,9 @@ pub(crate) fn privilege_catalog() -> PrivilegeCatalog {
                     .collect::<Vec<_>>(),
             ),
         ],
+        default_privileges: Vec::new(),
         deny_supported: false,
+        securable_classes: Vec::new(),
     }
 }
 
@@ -240,6 +242,7 @@ fn account_row(
             // Loaded separately by `user_details` (it needs the tablespace name).
             tablespace_quota: String::new(),
             is_super_user: false,
+            ..UserAccount::default()
         });
     }
     Ok(accounts)
@@ -308,6 +311,7 @@ pub(crate) async fn user_details(connection: &OracleConnection, user: &str) -> R
                 server_privileges,
                 denied_server_privileges: BTreeSet::new(),
                 grants,
+                default_privileges: Vec::new(),
                 roles,
                 members,
             })
@@ -847,8 +851,14 @@ mod tests {
             server_privileges: BTreeSet::from([PrivilegeId::new("CREATE TABLE")]),
             denied_server_privileges: BTreeSet::new(),
             grants: Vec::new(),
+            default_privileges: Vec::new(),
             roles: Vec::new(),
             members: Vec::new(),
+            mappings: Vec::new(),
+            original_mappings: Vec::new(),
+            old_password: None,
+            securables: Vec::new(),
+            original_securables: Vec::new(),
         };
         let sql = edit_sql(&edit);
         assert!(sql.contains("CREATE USER \"APP\" IDENTIFIED BY \"p\"\"w\""));
@@ -870,8 +880,14 @@ mod tests {
             server_privileges: BTreeSet::new(),
             denied_server_privileges: BTreeSet::new(),
             grants: Vec::new(),
+            default_privileges: Vec::new(),
             roles: Vec::new(),
             members: Vec::new(),
+            mappings: Vec::new(),
+            original_mappings: Vec::new(),
+            old_password: None,
+            securables: Vec::new(),
+            original_securables: Vec::new(),
         };
         let sql = edit_sql(&edit);
         assert!(sql.contains(

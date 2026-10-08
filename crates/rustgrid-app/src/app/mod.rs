@@ -21,13 +21,13 @@ use rustgrid_config::{
 };
 use rustgrid_core::{
     BackupObjectKind, CellValue, Connection, ConnectionConfig, DatabaseEditorSpec,
-    DatabaseEditorTab, DatabaseOptions, DriverCapability, DriverIconStyle, DriverId,
-    DriverRegistry, Error, FilterCondition, FilterConjunction, FilterGroup, FilterNode,
-    FilterOperator, ObjectGrant, ObjectPrivilegeRow, PageRequest, PrivilegeCatalog, PrivilegeId,
-    PrivilegePreset, PrivilegeScope, QueryResult, RoutineDetails, RoutineEdit, RoutineInfo,
-    RoutineKind, RowInsert, RowUpdate, SavedBackup, SavedQuery, TableStatus, TlsMode, TunnelAuth,
-    TunnelKind, TunnelLayer, UserAccount, UserDetails, UserEdit, UserEditSection, UserEditorSpec,
-    ViewEdit,
+    DatabaseEditorTab, DatabaseOptions, DefaultObjectType, DefaultPrivilege, DriverCapability,
+    DriverIconStyle, DriverId, DriverRegistry, Error, FilterCondition, FilterConjunction,
+    FilterGroup, FilterNode, FilterOperator, ObjectGrant, ObjectPrivilegeRow, PageRequest,
+    PrivilegeCatalog, PrivilegeId, PrivilegePreset, PrivilegeScope, QueryResult, RoutineDetails,
+    RoutineEdit, RoutineInfo, RoutineKind, RowInsert, RowUpdate, SavedBackup, SavedQuery,
+    ServerSecurableGrant, TableStatus, TlsMode, TunnelAuth, TunnelKind, TunnelLayer, UserAccount,
+    UserDetails, UserEdit, UserEditSection, UserEditorSpec, UserMapping, ViewEdit,
 };
 use rustgrid_export::ExportFormat;
 
@@ -1713,6 +1713,18 @@ pub struct AppView {
     create_user_max_user_connections: Option<Entity<TextInput>>,
     /// The 权限 database filter.
     create_user_database_search: Option<Entity<TextInput>>,
+    /// The 用户映射 section's fields for the active database.
+    create_user_mapping_user: Option<Entity<TextInput>>,
+    create_user_mapping_schema: Option<Entity<TextInput>>,
+    /// The SQL Server 常规 section's verification / default-database dropdowns.
+    create_user_verification_combo: Option<Entity<ComboBox>>,
+    create_user_default_database_combo: Option<Entity<ComboBox>>,
+    /// The SQL Server 常规 section's remaining fields.
+    create_user_old_password: Option<Entity<TextInput>>,
+    create_user_default_language: Option<Entity<TextInput>>,
+    create_user_certificate: Option<Entity<TextInput>>,
+    create_user_asymmetric_key: Option<Entity<TextInput>>,
+    create_user_credential: Option<Entity<TextInput>>,
     /// The OS window hosting the "New User" dialog, if open.
     create_user_window: Option<WindowHandle<gpui_kit::component::Root>>,
     /// Focus target for the account window: focusing it at open keeps ESC (and any key handler on
@@ -2171,6 +2183,15 @@ impl AppView {
             create_user_max_connections: None,
             create_user_max_user_connections: None,
             create_user_database_search: None,
+            create_user_mapping_user: None,
+            create_user_mapping_schema: None,
+            create_user_verification_combo: None,
+            create_user_default_database_combo: None,
+            create_user_old_password: None,
+            create_user_default_language: None,
+            create_user_certificate: None,
+            create_user_asymmetric_key: None,
+            create_user_credential: None,
             create_user_window: None,
             create_user_focus: cx.focus_handle(),
             object_privileges: None,

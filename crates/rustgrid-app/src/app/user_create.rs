@@ -35,6 +35,10 @@ const CREATE_DB_LIST_DEFAULT_WIDTH: f32 = 270.0;
 const CREATE_DB_LIST_MIN_WIDTH: f32 = 180.0;
 /// Widest the 权限 database list can be dragged.
 const CREATE_DB_LIST_MAX_WIDTH: f32 = 480.0;
+/// Width of the 默认权限 section's schema list.
+const CREATE_DEFAULT_SCHEMA_WIDTH: f32 = 190.0;
+/// Max height of the 默认权限 section's grantee list before it scrolls.
+const CREATE_DEFAULT_LIST_MAX_HEIGHT: f32 = 180.0;
 
 /// The 密码过期策略 choice, mapped to [`UserAccount::password_lifetime`].
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -125,22 +129,41 @@ fn user_host_label(user: &str, host: &str, spec: &UserEditorSpec) -> String {
     }
 }
 
+/// The i18n key naming one default-privileges object kind.
+fn default_object_type_key(object_type: DefaultObjectType) -> &'static str {
+    match object_type {
+        DefaultObjectType::Tables => "user.default.object.tables",
+        DefaultObjectType::Sequences => "user.default.object.sequences",
+        DefaultObjectType::Functions => "user.default.object.functions",
+        DefaultObjectType::Types => "user.default.object.types",
+        DefaultObjectType::Schemas => "user.default.object.schemas",
+    }
+}
+
 /// The window's left-navigation sections.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum UserSection {
     General,
     ServerPrivileges,
     ObjectPrivileges,
+    DefaultPrivileges,
     Roles,
+    UserMapping,
+    EndpointPermissions,
+    LoginPermissions,
     Sql,
 }
 
 impl UserSection {
-    const ALL: [UserSection; 5] = [
+    const ALL: [UserSection; 9] = [
         UserSection::General,
         UserSection::ServerPrivileges,
         UserSection::ObjectPrivileges,
+        UserSection::DefaultPrivileges,
         UserSection::Roles,
+        UserSection::UserMapping,
+        UserSection::EndpointPermissions,
+        UserSection::LoginPermissions,
         UserSection::Sql,
     ];
 
@@ -149,7 +172,11 @@ impl UserSection {
             UserSection::General => "user.tab.general",
             UserSection::ServerPrivileges => "user.tab.server_privileges",
             UserSection::ObjectPrivileges => "user.tab.privileges",
+            UserSection::DefaultPrivileges => "user.tab.default_privileges",
             UserSection::Roles => "user.tab.roles",
+            UserSection::UserMapping => "user.tab.user_mapping",
+            UserSection::EndpointPermissions => "user.tab.endpoint_permissions",
+            UserSection::LoginPermissions => "user.tab.login_permissions",
             UserSection::Sql => "user.tab.sql",
         }
     }
@@ -159,7 +186,11 @@ impl UserSection {
             UserSection::General => "icons/user.svg",
             UserSection::ServerPrivileges => "icons/gear.svg",
             UserSection::ObjectPrivileges => "icons/database.svg",
+            UserSection::DefaultPrivileges => "icons/tables.svg",
             UserSection::Roles => "icons/user.svg",
+            UserSection::UserMapping => "icons/database.svg",
+            UserSection::EndpointPermissions => "icons/gear.svg",
+            UserSection::LoginPermissions => "icons/user.svg",
             UserSection::Sql => "icons/queries.svg",
         }
     }
@@ -169,7 +200,11 @@ impl UserSection {
             UserSection::General => "user-create-nav-general",
             UserSection::ServerPrivileges => "user-create-nav-server",
             UserSection::ObjectPrivileges => "user-create-nav-object",
+            UserSection::DefaultPrivileges => "user-create-nav-default",
             UserSection::Roles => "user-create-nav-roles",
+            UserSection::UserMapping => "user-create-nav-mapping",
+            UserSection::EndpointPermissions => "user-create-nav-endpoint",
+            UserSection::LoginPermissions => "user-create-nav-login",
             UserSection::Sql => "user-create-nav-sql",
         }
     }
@@ -181,7 +216,20 @@ impl UserSection {
             UserSection::General | UserSection::Sql => true,
             UserSection::ServerPrivileges => spec.server_privileges,
             UserSection::ObjectPrivileges => spec.object_privileges,
+            UserSection::DefaultPrivileges => spec.default_privileges,
             UserSection::Roles => spec.roles,
+            UserSection::UserMapping => spec.user_mapping,
+            UserSection::EndpointPermissions => spec.endpoint_permissions,
+            UserSection::LoginPermissions => spec.login_permissions,
+        }
+    }
+
+    /// The `SecurableClass::id` this section edits, for the two server-securable sections.
+    fn securable_class_id(self) -> Option<&'static str> {
+        match self {
+            UserSection::EndpointPermissions => Some("endpoint"),
+            UserSection::LoginPermissions => Some("login"),
+            _ => None,
         }
     }
 }
@@ -306,6 +354,75 @@ impl DbGrant {
     }
 }
 
+/// One database row of the 用户映射 section (SQL Server): whether the login is mapped into the
+/// database, its database user and default schema, and the database roles picked for it.
+pub(super) struct UserMappingRow {
+    pub(super) database: String,
+    pub(super) mapped: bool,
+    pub(super) user_name: String,
+    pub(super) default_schema: String,
+    pub(super) roles: BTreeSet<String>,
+    /// Every database role the database offers (fixed and user-defined).
+    pub(super) available_roles: Vec<String>,
+}
+
+impl UserMappingRow {
+    fn from_mapping(mapping: UserMapping) -> Self {
+        Self {
+            database: mapping.database,
+            mapped: mapping.mapped,
+            user_name: mapping.user_name,
+            default_schema: if mapping.default_schema.trim().is_empty() {
+                "dbo".to_string()
+            } else {
+                mapping.default_schema
+            },
+            roles: mapping.roles,
+            available_roles: mapping.available_roles,
+        }
+    }
+
+    /// The `UserEdit` projection of this row.
+    fn to_mapping(&self) -> UserMapping {
+        UserMapping {
+            database: self.database.clone(),
+            mapped: self.mapped,
+            user_name: self.user_name.clone(),
+            default_schema: self.default_schema.clone(),
+            roles: self.roles.clone(),
+            available_roles: Vec::new(),
+        }
+    }
+}
+
+/// One server-level securable row of the 终端节点权限 / 登录权限 sections (SQL Server).
+pub(super) struct SecurableRow {
+    pub(super) class: String,
+    pub(super) name: String,
+    pub(super) privileges: BTreeSet<PrivilegeId>,
+    pub(super) denied: BTreeSet<PrivilegeId>,
+}
+
+impl SecurableRow {
+    fn from_grant(grant: ServerSecurableGrant) -> Self {
+        Self {
+            class: grant.class,
+            name: grant.name,
+            privileges: grant.privileges,
+            denied: grant.denied,
+        }
+    }
+
+    fn to_grant(&self) -> ServerSecurableGrant {
+        ServerSecurableGrant {
+            class: self.class.clone(),
+            name: self.name.clone(),
+            privileges: self.privileges.clone(),
+            denied: self.denied.clone(),
+        }
+    }
+}
+
 /// State of the user-account window.
 pub(super) struct UserCreateDialog {
     /// The connection the account lives on.
@@ -340,6 +457,33 @@ pub(super) struct UserCreateDialog {
     /// Lazily-loaded tables per database (the 指定具体表 picker).
     pub(super) tables: BTreeMap<String, Vec<String>>,
     pub(super) loading_tables: BTreeSet<String>,
+    /// The account's default-privileges rules (PostgreSQL's `ALTER DEFAULT PRIVILEGES`).
+    pub(super) default_rules: Vec<DefaultPrivilege>,
+    /// The schemas the 默认权限 section lists; the first row is the implicit "all schemas".
+    pub(super) default_schemas: Vec<String>,
+    /// The schema selected in the 默认权限 section; empty means every schema.
+    pub(super) default_schema: String,
+    /// The object kind selected in the 默认权限 section.
+    pub(super) default_object_type: DefaultObjectType,
+    /// The grantee whose privileges the 默认权限 detail grid edits.
+    pub(super) default_active: Option<String>,
+    pub(super) default_schema_scroll: ScrollHandle,
+    pub(super) default_account_scroll: ScrollHandle,
+    /// SQL Server's 用户映射: one row per database.
+    pub(super) mappings: Vec<UserMappingRow>,
+    /// The database shown in the 用户映射 detail pane (index into `mappings`).
+    pub(super) active_mapping: Option<usize>,
+    pub(super) mapping_scroll: ScrollHandle,
+    /// The mappings as loaded, for the save diff.
+    pub(super) mapping_original: Vec<UserMapping>,
+    /// SQL Server's 终端节点权限 / 登录权限 rows (all endpoints and logins).
+    pub(super) securables: Vec<SecurableRow>,
+    /// The securable grants as loaded, for the save diff.
+    pub(super) securables_original: Vec<ServerSecurableGrant>,
+    /// Whether the 指定旧密码 field is active while editing.
+    pub(super) use_old_password: bool,
+    /// The 指定旧密码 value (never persisted).
+    pub(super) old_password: String,
     /// The account's role/member edges, loaded with the account.
     pub(super) context: Option<UserAccountContext>,
     /// Every account on the server, for the role membership lists.
@@ -410,6 +554,21 @@ impl UserCreateDialog {
             table_scroll: ScrollHandle::new(),
             tables: BTreeMap::new(),
             loading_tables: BTreeSet::new(),
+            default_rules: Vec::new(),
+            default_schemas: Vec::new(),
+            default_schema: String::new(),
+            default_object_type: DefaultObjectType::Tables,
+            default_active: None,
+            default_schema_scroll: ScrollHandle::new(),
+            default_account_scroll: ScrollHandle::new(),
+            mappings: Vec::new(),
+            active_mapping: None,
+            mapping_scroll: ScrollHandle::new(),
+            mapping_original: Vec::new(),
+            securables: Vec::new(),
+            securables_original: Vec::new(),
+            use_old_password: false,
+            old_password: String::new(),
             context,
             accounts: Vec::new(),
             sql_scroll: ScrollHandle::new(),
@@ -426,6 +585,24 @@ impl UserCreateDialog {
     /// edit state, so the 成员属于 / 成员 check boxes reflect what the account already holds.
     pub(super) fn apply_details(&mut self, details: UserDetails) {
         self.editor.apply_details(details);
+        self.default_rules = self
+            .editor
+            .original
+            .as_ref()
+            .map(|details| details.default_privileges.clone())
+            .unwrap_or_default();
+        // Open on the first loaded rule so an existing default privilege is visible immediately.
+        self.default_schema = self
+            .default_rules
+            .first()
+            .map(|rule| rule.schema.clone())
+            .unwrap_or_default();
+        self.default_object_type = self
+            .default_rules
+            .first()
+            .map(|rule| rule.object_type)
+            .unwrap_or(DefaultObjectType::Tables);
+        self.default_active = self.default_rules.first().map(|rule| rule.grantee.clone());
         let (roles, members) = self
             .editor
             .original
@@ -460,6 +637,39 @@ impl UserCreateDialog {
             roles,
             members,
         });
+    }
+
+    /// Replace the 用户映射 rows (used on load). The first database is selected. The loaded rows
+    /// are also kept as the diff baseline, so only actual mapping changes are written.
+    pub(super) fn set_mappings(&mut self, mappings: Vec<UserMapping>) {
+        self.mapping_original = mappings.clone();
+        self.mappings = mappings
+            .into_iter()
+            .map(UserMappingRow::from_mapping)
+            .collect();
+        self.active_mapping = (!self.mappings.is_empty()).then_some(0);
+    }
+
+    /// The mappings the edit writes.
+    pub(super) fn edit_mappings(&self) -> Vec<UserMapping> {
+        self.mappings
+            .iter()
+            .map(UserMappingRow::to_mapping)
+            .collect()
+    }
+
+    /// Replace the server securable rows (used on load), keeping the loaded grants for the diff.
+    pub(super) fn set_securables(&mut self, securables: Vec<ServerSecurableGrant>) {
+        self.securables_original = securables.clone();
+        self.securables = securables
+            .into_iter()
+            .map(SecurableRow::from_grant)
+            .collect();
+    }
+
+    /// The server securable grants the edit writes.
+    pub(super) fn edit_securables(&self) -> Vec<ServerSecurableGrant> {
+        self.securables.iter().map(SecurableRow::to_grant).collect()
     }
 
     /// `(user, host)` of the account being edited, for the window title.
@@ -584,6 +794,56 @@ impl UserCreateDialog {
         }
         grants
     }
+
+    /// The default-privileges rule for one `(schema, object kind, grantee)`, if any.
+    fn default_rule(
+        &self,
+        schema: &str,
+        object_type: DefaultObjectType,
+        grantee: &str,
+    ) -> Option<&DefaultPrivilege> {
+        self.default_rules.iter().find(|rule| {
+            rule.schema == schema && rule.object_type == object_type && rule.grantee == grantee
+        })
+    }
+
+    fn default_rule_mut(
+        &mut self,
+        schema: &str,
+        object_type: DefaultObjectType,
+        grantee: &str,
+    ) -> Option<&mut DefaultPrivilege> {
+        self.default_rules.iter_mut().find(|rule| {
+            rule.schema == schema && rule.object_type == object_type && rule.grantee == grantee
+        })
+    }
+
+    /// Ensure every schema named by a loaded rule is listed, so an existing default privilege is
+    /// never hidden when the server's schema list omits it.
+    fn merge_default_schemas(&mut self) {
+        for rule in &self.default_rules {
+            if !rule.schema.is_empty() && !self.default_schemas.contains(&rule.schema) {
+                self.default_schemas.push(rule.schema.clone());
+            }
+        }
+        self.default_schemas.sort();
+        self.default_schemas.dedup();
+    }
+
+    /// The grantees with a rule at `(schema, object kind)`, as `grantee -> privileges`.
+    fn default_grantees(
+        &self,
+        schema: &str,
+        object_type: DefaultObjectType,
+    ) -> BTreeMap<String, BTreeSet<PrivilegeId>> {
+        let mut map: BTreeMap<String, BTreeSet<PrivilegeId>> = BTreeMap::new();
+        for rule in &self.default_rules {
+            if rule.schema == schema && rule.object_type == object_type {
+                map.insert(rule.grantee.clone(), rule.privileges.clone());
+            }
+        }
+        map
+    }
 }
 
 /// Which identity/limit field a change came from, used by the window's text inputs.
@@ -603,6 +863,13 @@ pub(super) enum CreateField {
     MaxConnections,
     MaxUserConnections,
     DatabaseSearch,
+    MappingUser,
+    MappingSchema,
+    OldPassword,
+    DefaultLanguage,
+    Certificate,
+    AsymmetricKey,
+    Credential,
 }
 
 /// Which dropdown a change came from.
@@ -610,6 +877,8 @@ pub(super) enum CreateField {
 enum CreateCombo {
     Plugin,
     Expiry,
+    Verification,
+    DefaultDatabase,
 }
 
 /// The account-level state the window edits: the attributes, the server privileges, the individual
@@ -988,6 +1257,87 @@ impl AppView {
             &weak,
             cx,
         ));
+        self.create_user_mapping_user = Some(make_create_field_input(
+            theme,
+            String::new(),
+            false,
+            CreateField::MappingUser,
+            &weak,
+            cx,
+        ));
+        self.create_user_mapping_schema = Some(make_create_field_input(
+            theme,
+            "dbo".to_string(),
+            false,
+            CreateField::MappingSchema,
+            &weak,
+            cx,
+        ));
+        let login_types = connection.login_types();
+        let verification_options = login_types
+            .iter()
+            .map(|login_type| ComboOption::plain(*login_type))
+            .collect();
+        self.create_user_verification_combo = Some(make_create_combo(
+            theme,
+            verification_options,
+            login_types
+                .first()
+                .copied()
+                .unwrap_or("SQL Server")
+                .to_string(),
+            CreateCombo::Verification,
+            &weak,
+            cx,
+        ));
+        self.create_user_default_database_combo = Some(make_create_combo(
+            theme,
+            Vec::new(),
+            String::new(),
+            CreateCombo::DefaultDatabase,
+            &weak,
+            cx,
+        ));
+        self.create_user_old_password = Some(make_create_field_input(
+            theme,
+            String::new(),
+            true,
+            CreateField::OldPassword,
+            &weak,
+            cx,
+        ));
+        self.create_user_default_language = Some(make_create_field_input(
+            theme,
+            String::new(),
+            false,
+            CreateField::DefaultLanguage,
+            &weak,
+            cx,
+        ));
+        self.create_user_certificate = Some(make_create_field_input(
+            theme,
+            String::new(),
+            false,
+            CreateField::Certificate,
+            &weak,
+            cx,
+        ));
+        self.create_user_asymmetric_key = Some(make_create_field_input(
+            theme,
+            String::new(),
+            false,
+            CreateField::AsymmetricKey,
+            &weak,
+            cx,
+        ));
+        self.create_user_credential = Some(make_create_field_input(
+            theme,
+            String::new(),
+            false,
+            CreateField::Credential,
+            &weak,
+            cx,
+        ));
 
         let plugin_options = plugins
             .iter()
@@ -1016,8 +1366,15 @@ impl AppView {
 
         let catalog = self.user_privilege_catalog(connection_index);
         let schemas = self.driver_supports(connection_index, DriverCapability::Schemas);
-        let dialog =
+        let mut dialog =
             UserCreateDialog::new(connection_index, plugin, spec, catalog, schemas, account);
+        // Default a new SQL Server login to the first verification type, so its password fields
+        // show before the user touches the dropdown.
+        if dialog.editor.account.login_type.trim().is_empty()
+            && let Some(first) = login_types.first()
+        {
+            dialog.editor.account.login_type = (*first).to_string();
+        }
         self.create_user_dialog = Some(dialog);
         if editing {
             self.load_edit_account(cx);
@@ -1041,6 +1398,9 @@ impl AppView {
             return;
         };
         let runtime = self.runtime.clone();
+        let want_schemas = dialog.spec.default_privileges;
+        let want_mappings = dialog.spec.user_mapping;
+        let want_securables = dialog.spec.endpoint_permissions || dialog.spec.login_permissions;
         cx.spawn(async move |this, cx| {
             let joined = {
                 let connection = connection.clone();
@@ -1049,11 +1409,26 @@ impl AppView {
                         let details = connection.user_details(&user, &host).await;
                         let accounts = connection.list_users().await;
                         let databases = connection.list_databases().await;
-                        (details, accounts, databases)
+                        let schemas = if want_schemas {
+                            connection.default_privilege_schemas().await
+                        } else {
+                            Ok(Vec::new())
+                        };
+                        let mappings = if want_mappings {
+                            connection.user_mappings(&user, &host).await
+                        } else {
+                            Ok(Vec::new())
+                        };
+                        let securables = if want_securables {
+                            connection.user_securables(&user, &host).await
+                        } else {
+                            Ok(Vec::new())
+                        };
+                        (details, accounts, databases, schemas, mappings, securables)
                     })
                     .await
             };
-            let (details, accounts, databases) = match joined {
+            let (details, accounts, databases, schemas, mappings, securables) = match joined {
                 Ok(joined) => joined,
                 Err(error) => {
                     let _ = this.update(cx, |app, cx| {
@@ -1087,6 +1462,17 @@ impl AppView {
                     }
                     Err(error) => dialog.error = Some(error.to_string()),
                 }
+                match schemas {
+                    Ok(schemas) => dialog.default_schemas = schemas,
+                    Err(error) => dialog.error = Some(error.to_string()),
+                }
+                if let Ok(mappings) = mappings {
+                    dialog.set_mappings(mappings);
+                }
+                if let Ok(securables) = securables {
+                    dialog.set_securables(securables);
+                }
+                dialog.merge_default_schemas();
                 dialog.rebuild_db_grants();
                 app.sync_create_editor_fields(cx);
                 cx.notify();
@@ -1109,6 +1495,10 @@ impl AppView {
             return;
         };
         let runtime = self.runtime.clone();
+        let want_schemas = dialog.spec.default_privileges;
+        let want_mappings = dialog.spec.user_mapping;
+        let want_securables = dialog.spec.endpoint_permissions || dialog.spec.login_permissions;
+        let user = dialog.editor.account.user.clone();
         cx.spawn(async move |this, cx| {
             let joined = {
                 let connection = connection.clone();
@@ -1116,7 +1506,22 @@ impl AppView {
                     .spawn(async move {
                         let databases = connection.list_databases().await;
                         let accounts = connection.list_users().await;
-                        (databases, accounts)
+                        let schemas = if want_schemas {
+                            connection.default_privilege_schemas().await
+                        } else {
+                            Ok(Vec::new())
+                        };
+                        let mappings = if want_mappings {
+                            connection.user_mappings(&user, "").await
+                        } else {
+                            Ok(Vec::new())
+                        };
+                        let securables = if want_securables {
+                            connection.user_securables(&user, "").await
+                        } else {
+                            Ok(Vec::new())
+                        };
+                        (databases, accounts, schemas, mappings, securables)
                     })
                     .await
             };
@@ -1125,7 +1530,7 @@ impl AppView {
                     return;
                 };
                 match joined {
-                    Ok((databases, accounts)) => {
+                    Ok((databases, accounts, schemas, mappings, securables)) => {
                         match databases {
                             Ok(databases) => {
                                 dialog.databases =
@@ -1141,10 +1546,22 @@ impl AppView {
                                 .map(|account| (account.user, account.host))
                                 .collect();
                         }
+                        match schemas {
+                            Ok(schemas) => dialog.default_schemas = schemas,
+                            Err(error) => dialog.error = Some(error.to_string()),
+                        }
+                        if let Ok(mappings) = mappings {
+                            dialog.set_mappings(mappings);
+                        }
+                        if let Ok(securables) = securables {
+                            dialog.set_securables(securables);
+                        }
                     }
                     Err(error) => dialog.error = Some(error.to_string()),
                 }
+                dialog.merge_default_schemas();
                 dialog.rebuild_db_grants();
+                app.sync_create_editor_fields(cx);
                 cx.notify();
             });
         })
@@ -1296,6 +1713,15 @@ impl AppView {
         self.create_user_max_connections = None;
         self.create_user_max_user_connections = None;
         self.create_user_database_search = None;
+        self.create_user_mapping_user = None;
+        self.create_user_mapping_schema = None;
+        self.create_user_verification_combo = None;
+        self.create_user_default_database_combo = None;
+        self.create_user_old_password = None;
+        self.create_user_default_language = None;
+        self.create_user_certificate = None;
+        self.create_user_asymmetric_key = None;
+        self.create_user_credential = None;
         self.create_user_window = None;
         cx.notify();
     }
@@ -1352,6 +1778,31 @@ impl AppView {
                     dialog.editor.account.max_user_connections = parse_limit(text)
                 }
                 CreateField::DatabaseSearch => dialog.database_search = text.to_string(),
+                CreateField::MappingUser => {
+                    let index = dialog.active_mapping;
+                    if let Some(row) = index.and_then(|index| dialog.mappings.get_mut(index)) {
+                        row.user_name = text.to_string();
+                    }
+                }
+                CreateField::MappingSchema => {
+                    let index = dialog.active_mapping;
+                    if let Some(row) = index.and_then(|index| dialog.mappings.get_mut(index)) {
+                        row.default_schema = text.trim().to_string();
+                    }
+                }
+                CreateField::OldPassword => dialog.old_password = text.to_string(),
+                CreateField::DefaultLanguage => {
+                    dialog.editor.account.default_language = text.trim().to_string()
+                }
+                CreateField::Certificate => {
+                    dialog.editor.account.certificate = text.trim().to_string()
+                }
+                CreateField::AsymmetricKey => {
+                    dialog.editor.account.asymmetric_key = text.trim().to_string()
+                }
+                CreateField::Credential => {
+                    dialog.editor.account.credential = text.trim().to_string()
+                }
             }
         }
         cx.notify();
@@ -1368,6 +1819,10 @@ impl AppView {
             match field {
                 CreateCombo::Plugin => dialog.editor.account.plugin = value.to_string(),
                 CreateCombo::Expiry => dialog.expiry = CreateExpiry::from_value(value),
+                CreateCombo::Verification => dialog.editor.account.login_type = value.to_string(),
+                CreateCombo::DefaultDatabase => {
+                    dialog.editor.account.default_database = value.to_string()
+                }
             }
         }
         cx.notify();
@@ -1537,6 +1992,150 @@ impl AppView {
         cx.notify();
     }
 
+    /// Select the database shown in the 用户映射 detail pane and load its fields.
+    pub(super) fn activate_create_mapping(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        let (user, schema) = {
+            let Some(dialog) = self.create_user_dialog.as_mut() else {
+                return;
+            };
+            let Some(row) = dialog.mappings.get(index) else {
+                return;
+            };
+            dialog.active_mapping = Some(index);
+            (row.user_name.clone(), row.default_schema.clone())
+        };
+        if let Some(input) = self.create_user_mapping_user.clone() {
+            input.update(cx, |input, cx| input.set_text(user, cx));
+        }
+        if let Some(input) = self.create_user_mapping_schema.clone() {
+            input.update(cx, |input, cx| input.set_text(schema, cx));
+        }
+        cx.notify();
+    }
+
+    /// Toggle whether the login is mapped into one database.
+    pub(super) fn toggle_create_mapping(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        {
+            let Some(dialog) = self.create_user_dialog.as_mut() else {
+                return;
+            };
+            let login = dialog.editor.account.user.clone();
+            let Some(row) = dialog.mappings.get_mut(index) else {
+                return;
+            };
+            row.mapped = !row.mapped;
+            if row.mapped {
+                if row.user_name.trim().is_empty() {
+                    row.user_name = login;
+                }
+                if row.default_schema.trim().is_empty() {
+                    row.default_schema = "dbo".to_string();
+                }
+            }
+        }
+        self.activate_create_mapping(index, cx);
+    }
+
+    /// Toggle one database role for a mapping row.
+    pub(super) fn toggle_create_mapping_role(
+        &mut self,
+        index: usize,
+        role: String,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(dialog) = self.create_user_dialog.as_mut()
+            && let Some(row) = dialog.mappings.get_mut(index)
+        {
+            if row.roles.contains(&role) {
+                row.roles.remove(&role);
+            } else {
+                row.roles.insert(role);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Toggle one permission of one server securable row. Granting clears any deny of the same
+    /// permission.
+    pub(super) fn toggle_create_securable(
+        &mut self,
+        index: usize,
+        privilege: PrivilegeId,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(dialog) = self.create_user_dialog.as_mut()
+            && let Some(row) = dialog.securables.get_mut(index)
+        {
+            if row.privileges.contains(&privilege) {
+                row.privileges.remove(&privilege);
+            } else {
+                row.privileges.insert(privilege.clone());
+                row.denied.remove(&privilege);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Toggle the explicit deny of one server securable permission. Denying clears any grant.
+    pub(super) fn toggle_create_securable_deny(
+        &mut self,
+        index: usize,
+        privilege: PrivilegeId,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(dialog) = self.create_user_dialog.as_mut()
+            && let Some(row) = dialog.securables.get_mut(index)
+        {
+            if row.denied.contains(&privilege) {
+                row.denied.remove(&privilege);
+            } else {
+                row.denied.insert(privilege.clone());
+                row.privileges.remove(&privilege);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Toggle the 指定旧密码 checkbox; clearing it drops any typed old password.
+    pub(super) fn toggle_create_old_password(&mut self, cx: &mut Context<'_, Self>) {
+        let mut cleared = false;
+        if let Some(dialog) = self.create_user_dialog.as_mut() {
+            dialog.use_old_password = !dialog.use_old_password;
+            if !dialog.use_old_password {
+                dialog.old_password.clear();
+                cleared = true;
+            }
+        }
+        if cleared && let Some(input) = self.create_user_old_password.clone() {
+            input.update(cx, |input, cx| input.set_text(String::new(), cx));
+        }
+        cx.notify();
+    }
+
+    /// Toggle the SQL Server 实施密码策略 (CHECK_POLICY) checkbox.
+    pub(super) fn toggle_create_check_policy(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(dialog) = self.create_user_dialog.as_mut() {
+            dialog.editor.account.check_policy = !dialog.editor.account.check_policy;
+        }
+        cx.notify();
+    }
+
+    /// Toggle the SQL Server 实施密码过期 (CHECK_EXPIRATION) checkbox.
+    pub(super) fn toggle_create_check_expiration(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(dialog) = self.create_user_dialog.as_mut() {
+            dialog.editor.account.check_expiration = !dialog.editor.account.check_expiration;
+        }
+        cx.notify();
+    }
+
+    /// Toggle the SQL Server 用户必须在下次登录时更改密码 (MUST_CHANGE) checkbox.
+    pub(super) fn toggle_create_must_change(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(dialog) = self.create_user_dialog.as_mut() {
+            dialog.editor.account.must_change = !dialog.editor.account.must_change;
+        }
+        cx.notify();
+    }
+
     /// Clear every database's grant.
     pub(super) fn clear_create_databases(&mut self, cx: &mut Context<'_, Self>) {
         if let Some(dialog) = self.create_user_dialog.as_mut() {
@@ -1547,6 +2146,17 @@ impl AppView {
                 row.active_table = None;
                 row.privileges.clear();
                 row.table_privileges.clear();
+            }
+        }
+        cx.notify();
+    }
+
+    /// Unmap every database and clear its picked roles.
+    pub(super) fn clear_create_mappings(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(dialog) = self.create_user_dialog.as_mut() {
+            for row in &mut dialog.mappings {
+                row.mapped = false;
+                row.roles.clear();
             }
         }
         cx.notify();
@@ -1724,6 +2334,149 @@ impl AppView {
         cx.notify();
     }
 
+    /// Select the schema whose default privileges the 默认权限 section edits (empty = all schemas).
+    pub(super) fn select_create_default_schema(
+        &mut self,
+        schema: String,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(dialog) = self.create_user_dialog.as_mut() {
+            dialog.default_schema = schema.clone();
+            let object_type = dialog.default_object_type;
+            dialog.default_active = dialog
+                .default_rules
+                .iter()
+                .find(|rule| rule.schema == schema && rule.object_type == object_type)
+                .map(|rule| rule.grantee.clone());
+        }
+        cx.notify();
+    }
+
+    /// Select the object kind whose default privileges the 默认权限 section edits.
+    pub(super) fn select_create_default_object_type(
+        &mut self,
+        object_type: DefaultObjectType,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(dialog) = self.create_user_dialog.as_mut() {
+            dialog.default_object_type = object_type;
+            let schema = dialog.default_schema.clone();
+            dialog.default_active = dialog
+                .default_rules
+                .iter()
+                .find(|rule| rule.schema == schema && rule.object_type == object_type)
+                .map(|rule| rule.grantee.clone());
+        }
+        cx.notify();
+    }
+
+    /// Tick a grantee into the default-privileges rules of the active schema and object kind, or
+    /// untick it (the rule is dropped, so the save revokes it).
+    pub(super) fn toggle_create_default_grantee(
+        &mut self,
+        grantee: String,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(dialog) = self.create_user_dialog.as_mut() {
+            let schema = dialog.default_schema.clone();
+            let object_type = dialog.default_object_type;
+            let existing = dialog
+                .default_rule(&schema, object_type, &grantee)
+                .is_some();
+            if existing {
+                dialog.default_rules.retain(|rule| {
+                    !(rule.schema == schema
+                        && rule.object_type == object_type
+                        && rule.grantee == grantee)
+                });
+                if dialog.default_active.as_deref() == Some(grantee.as_str()) {
+                    dialog.default_active = dialog
+                        .default_rules
+                        .iter()
+                        .find(|rule| rule.schema == schema && rule.object_type == object_type)
+                        .map(|rule| rule.grantee.clone());
+                }
+            } else {
+                dialog.default_rules.push(DefaultPrivilege::new(
+                    schema,
+                    object_type,
+                    grantee.clone(),
+                ));
+                dialog.default_active = Some(grantee);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Make one grantee the active target of the 默认权限 detail grid, granting it if needed.
+    pub(super) fn activate_create_default_grantee(
+        &mut self,
+        grantee: String,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(dialog) = self.create_user_dialog.as_mut() {
+            let schema = dialog.default_schema.clone();
+            let object_type = dialog.default_object_type;
+            if dialog
+                .default_rule(&schema, object_type, &grantee)
+                .is_none()
+            {
+                dialog.default_rules.push(DefaultPrivilege::new(
+                    schema,
+                    object_type,
+                    grantee.clone(),
+                ));
+            }
+            dialog.default_active = Some(grantee);
+        }
+        cx.notify();
+    }
+
+    /// Toggle one privilege on the active default-privileges rule.
+    pub(super) fn toggle_create_default_privilege(
+        &mut self,
+        privilege: PrivilegeId,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(dialog) = self.create_user_dialog.as_mut() {
+            let schema = dialog.default_schema.clone();
+            let object_type = dialog.default_object_type;
+            let grantee = dialog.default_active.clone();
+            if let Some(grantee) = grantee
+                && let Some(rule) = dialog.default_rule_mut(&schema, object_type, &grantee)
+                && !rule.privileges.remove(&privilege)
+            {
+                rule.privileges.insert(privilege);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Select every privilege of the active default-privileges rule, or clear them all.
+    pub(super) fn toggle_create_default_privileges_all(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(dialog) = self.create_user_dialog.as_mut() {
+            let object_type = dialog.default_object_type;
+            let all: BTreeSet<PrivilegeId> = dialog
+                .catalog
+                .default_privileges_for(object_type)
+                .into_iter()
+                .map(|info| info.id.clone())
+                .collect();
+            let schema = dialog.default_schema.clone();
+            let grantee = dialog.default_active.clone();
+            if let Some(grantee) = grantee
+                && let Some(rule) = dialog.default_rule_mut(&schema, object_type, &grantee)
+            {
+                if rule.privileges == all {
+                    rule.privileges.clear();
+                } else {
+                    rule.privileges = all;
+                }
+            }
+        }
+        cx.notify();
+    }
+
     /// Toggle one role/member edge. Turning a grant off also drops its admin option.
     pub(super) fn toggle_create_membership(
         &mut self,
@@ -1867,6 +2620,62 @@ impl AppView {
                 input.set_text(account.tablespace_quota.clone(), cx)
             });
         }
+        let (mapping_user, mapping_schema) = self
+            .create_user_dialog
+            .as_ref()
+            .and_then(|dialog| {
+                dialog
+                    .active_mapping
+                    .and_then(|index| dialog.mappings.get(index))
+                    .map(|row| (row.user_name.clone(), row.default_schema.clone()))
+            })
+            .unwrap_or_default();
+        if let Some(input) = self.create_user_mapping_user.clone() {
+            input.update(cx, |input, cx| input.set_text(mapping_user, cx));
+        }
+        if let Some(input) = self.create_user_mapping_schema.clone() {
+            input.update(cx, |input, cx| input.set_text(mapping_schema, cx));
+        }
+        let databases = self
+            .create_user_dialog
+            .as_ref()
+            .map(|dialog| dialog.databases.clone())
+            .unwrap_or_default();
+        if let Some(combo) = self.create_user_verification_combo.clone() {
+            combo.update(cx, |combo, cx| {
+                combo.set_selected(account.login_type.clone(), cx)
+            });
+        }
+        if let Some(combo) = self.create_user_default_database_combo.clone() {
+            let options: Vec<ComboOption> = databases
+                .iter()
+                .map(|name| ComboOption::new(name.clone(), name.clone()))
+                .collect();
+            let selected = account.default_database.clone();
+            combo.update(cx, |combo, cx| {
+                combo.set_options(options, cx);
+                combo.set_selected(selected, cx);
+            });
+        }
+        for (input, value) in [
+            (
+                &self.create_user_default_language,
+                account.default_language.clone(),
+            ),
+            (&self.create_user_certificate, account.certificate.clone()),
+            (
+                &self.create_user_asymmetric_key,
+                account.asymmetric_key.clone(),
+            ),
+            (&self.create_user_credential, account.credential.clone()),
+        ] {
+            if let Some(input) = input.clone() {
+                input.update(cx, |input, cx| input.set_text(value, cx));
+            }
+        }
+        if let Some(input) = self.create_user_old_password.clone() {
+            input.update(cx, |input, cx| input.set_text(String::new(), cx));
+        }
         if let Some(dialog) = self.create_user_dialog.as_mut() {
             dialog.expiry = expiry;
             dialog.expiry_days = expiry_days;
@@ -1896,9 +2705,24 @@ impl AppView {
             return;
         };
         let runtime = self.runtime.clone();
+        let want_mappings = dialog.spec.user_mapping;
+        let want_securables = dialog.spec.endpoint_permissions || dialog.spec.login_permissions;
         cx.spawn(async move |this, cx| {
             let result = runtime
-                .spawn(async move { connection.user_details(&user, &host).await })
+                .spawn(async move {
+                    let details = connection.user_details(&user, &host).await;
+                    let mappings = if want_mappings {
+                        connection.user_mappings(&user, &host).await
+                    } else {
+                        Ok(Vec::new())
+                    };
+                    let securables = if want_securables {
+                        connection.user_securables(&user, &host).await
+                    } else {
+                        Ok(Vec::new())
+                    };
+                    (details, mappings, securables)
+                })
                 .await;
             let _ = this.update(cx, |app, cx| {
                 let Some(dialog) = app.create_user_dialog.as_mut() else {
@@ -1906,11 +2730,17 @@ impl AppView {
                 };
                 dialog.loading = false;
                 match result {
-                    Ok(Ok(details)) => {
+                    Ok((Ok(details), mappings, securables)) => {
                         dialog.apply_details(details);
+                        if let Ok(mappings) = mappings {
+                            dialog.set_mappings(mappings);
+                        }
+                        if let Ok(securables) = securables {
+                            dialog.set_securables(securables);
+                        }
                         app.sync_create_editor_fields(cx);
                     }
-                    Ok(Err(error)) => dialog.error = Some(error.to_string()),
+                    Ok((Err(error), _, _)) => dialog.error = Some(error.to_string()),
                     Err(error) => dialog.error = Some(error.to_string()),
                 }
                 cx.notify();
@@ -1956,8 +2786,18 @@ impl AppView {
             server_privileges: dialog.editor.server_privileges.clone(),
             denied_server_privileges: dialog.editor.denied_server_privileges.clone(),
             grants: dialog.object_grants(),
+            default_privileges: dialog.default_rules.clone(),
             roles,
             members,
+            mappings: dialog.edit_mappings(),
+            original_mappings: dialog.mapping_original.clone(),
+            old_password: if dialog.use_old_password && !dialog.old_password.is_empty() {
+                Some(dialog.old_password.clone())
+            } else {
+                None
+            },
+            securables: dialog.edit_securables(),
+            original_securables: dialog.securables_original.clone(),
         })
     }
 
@@ -2189,11 +3029,13 @@ impl AppView {
                 out.push_str(";\n");
             }
         }
-        // `edit_statements` refreshes the grant tables once after a non-empty script; mirror it so
-        // the preview matches exactly what Save runs.
-        out.push('\n');
-        out.push_str(&format!("-- {}\n", t!("user.create.preview_refresh")));
-        out.push_str("FLUSH PRIVILEGES;\n");
+        // MySQL/MariaDB refresh the grant tables once after a non-empty script; mirror it so the
+        // preview matches exactly what Save runs. Other engines apply GRANT/REVOKE immediately.
+        if dialog.spec.flush_privileges {
+            out.push('\n');
+            out.push_str(&format!("-- {}\n", t!("user.create.preview_refresh")));
+            out.push_str("FLUSH PRIVILEGES;\n");
+        }
         out
     }
 }
@@ -2211,7 +3053,10 @@ fn user_edit_section_key(section: UserEditSection) -> &'static str {
         UserEditSection::Account => "user.create.preview.account",
         UserEditSection::ServerPrivileges => "user.tab.server_privileges",
         UserEditSection::ObjectGrants => "user.tab.privileges",
+        UserEditSection::DefaultPrivileges => "user.tab.default_privileges",
         UserEditSection::Roles => "user.tab.roles",
+        UserEditSection::UserMapping => "user.tab.user_mapping",
+        UserEditSection::Securables => "user.tab.securables",
     }
 }
 
@@ -2565,11 +3410,17 @@ impl AppView {
         let Some(dialog) = self.create_user_dialog.as_ref() else {
             return div().into_any_element();
         };
-        match dialog.section {
+        let section = dialog.section;
+        match section {
             UserSection::General => self.render_create_general(cx),
             UserSection::ServerPrivileges => self.render_create_server_privileges(cx),
             UserSection::ObjectPrivileges => self.render_create_grants(cx),
+            UserSection::DefaultPrivileges => self.render_create_default_privileges(cx),
             UserSection::Roles => self.render_create_roles(cx),
+            UserSection::UserMapping => self.render_create_user_mapping(cx),
+            UserSection::EndpointPermissions | UserSection::LoginPermissions => {
+                self.render_create_securables(section, cx)
+            }
             UserSection::Sql => self.render_create_sql(cx),
         }
     }
@@ -2581,6 +3432,9 @@ impl AppView {
             return div().into_any_element();
         };
         let account = &dialog.editor.account;
+        // A login with Windows / certificate / key verification has no password of its own.
+        let sql_auth =
+            !dialog.spec.verification_type || account.login_type.eq_ignore_ascii_case("SQL Server");
 
         let mut identity = div().flex().flex_col().gap_2().w_full();
         identity = identity.child(create_row(
@@ -2643,55 +3497,90 @@ impl AppView {
             ));
         }
 
-        if dialog.is_edit() {
+        if dialog.spec.verification_type {
+            identity = identity.child(create_row(
+                t!("user.field.verification_type").to_string(),
+                sized_combo(self.create_user_verification_combo.as_ref(), theme),
+                theme,
+            ));
+        }
+
+        if sql_auth {
+            if dialog.is_edit() {
+                identity = identity.child(create_row(
+                    String::new(),
+                    check_row(
+                        "user-create-change-password",
+                        t!("user.create.change_password").to_string(),
+                        dialog.change_password,
+                        theme,
+                        cx.listener(|this, _event, _window, cx| {
+                            this.toggle_create_change_password(cx)
+                        }),
+                    )
+                    .into_any_element(),
+                    theme,
+                ));
+            }
+            if !dialog.is_edit() || dialog.change_password {
+                identity = identity
+                    .child(create_row(
+                        t!("user.field.password").to_string(),
+                        sized_text(self.create_user_password.as_ref(), theme),
+                        theme,
+                    ))
+                    .child(create_row(
+                        t!("user.field.confirm_password").to_string(),
+                        sized_text(self.create_user_confirm.as_ref(), theme),
+                        theme,
+                    ));
+                let hint: String = if dialog.is_edit() {
+                    if account.password_set {
+                        t!("user.create.password_set_hint").to_string()
+                    } else {
+                        t!("user.create.password_unset_hint").to_string()
+                    }
+                } else {
+                    t!("user.create.password_hint").to_string()
+                };
+                identity = identity.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(CREATE_LABEL_GAP))
+                        .child(div().w(px(CREATE_LABEL_WIDTH)).flex_none())
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(rgb(theme.text_muted))
+                                .child(hint),
+                        ),
+                );
+            }
+        }
+
+        // SQL Server's 指定旧密码: verify the current password when setting a new one.
+        if dialog.spec.verification_type && sql_auth && dialog.is_edit() {
             identity = identity.child(create_row(
                 String::new(),
                 check_row(
-                    "user-create-change-password",
-                    t!("user.create.change_password").to_string(),
-                    dialog.change_password,
+                    "user-create-old-password",
+                    t!("user.create.specify_old_password").to_string(),
+                    dialog.use_old_password,
                     theme,
-                    cx.listener(|this, _event, _window, cx| this.toggle_create_change_password(cx)),
+                    cx.listener(|this, _event, _window, cx| this.toggle_create_old_password(cx)),
                 )
                 .into_any_element(),
                 theme,
             ));
-        }
-        if !dialog.is_edit() || dialog.change_password {
-            identity = identity
-                .child(create_row(
-                    t!("user.field.password").to_string(),
-                    sized_text(self.create_user_password.as_ref(), theme),
-                    theme,
-                ))
-                .child(create_row(
-                    t!("user.field.confirm_password").to_string(),
-                    sized_text(self.create_user_confirm.as_ref(), theme),
+            if dialog.use_old_password {
+                identity = identity.child(create_row(
+                    t!("user.field.old_password").to_string(),
+                    sized_text(self.create_user_old_password.as_ref(), theme),
                     theme,
                 ));
-            let hint: String = if dialog.is_edit() {
-                if account.password_set {
-                    t!("user.create.password_set_hint").to_string()
-                } else {
-                    t!("user.create.password_unset_hint").to_string()
-                }
-            } else {
-                t!("user.create.password_hint").to_string()
-            };
-            identity = identity.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(CREATE_LABEL_GAP))
-                    .child(div().w(px(CREATE_LABEL_WIDTH)).flex_none())
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(rgb(theme.text_muted))
-                            .child(hint),
-                    ),
-            );
+            }
         }
 
         let show_status = dialog.spec.password_expiry
@@ -2706,11 +3595,16 @@ impl AppView {
                     controls.child(sized_combo(self.create_user_expiry_combo.as_ref(), theme));
             }
             if dialog.spec.account_lock {
+                let (label_key, locked) = if dialog.spec.account_enabled {
+                    ("user.field.enabled", !account.account_locked)
+                } else {
+                    ("user.field.locked_account", account.account_locked)
+                };
                 controls = controls.child(
                     check_row(
                         "user-create-locked",
-                        t!("user.field.locked_account").to_string(),
-                        account.account_locked,
+                        t!(label_key).to_string(),
+                        locked,
                         theme,
                         cx.listener(|this, _event, _window, cx| this.toggle_create_locked(cx)),
                     )
@@ -2764,6 +3658,87 @@ impl AppView {
             storage = storage.child(create_row(
                 t!("user.field.profile").to_string(),
                 sized_text(self.create_user_profile.as_ref(), theme),
+                theme,
+            ));
+        }
+
+        // SQL Server's login options: password policy, defaults and a credential.
+        let mut login_options = div().flex().flex_col().gap_2().w_full();
+        if dialog.spec.verification_type {
+            if sql_auth {
+                login_options = login_options.child(create_row(
+                    String::new(),
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_4()
+                        .child(
+                            check_row(
+                                "user-create-check-policy",
+                                t!("user.create.check_policy").to_string(),
+                                account.check_policy,
+                                theme,
+                                cx.listener(|this, _event, _window, cx| {
+                                    this.toggle_create_check_policy(cx)
+                                }),
+                            )
+                            .into_any_element(),
+                        )
+                        .child(
+                            check_row(
+                                "user-create-check-expiration",
+                                t!("user.create.check_expiration").to_string(),
+                                account.check_expiration,
+                                theme,
+                                cx.listener(|this, _event, _window, cx| {
+                                    this.toggle_create_check_expiration(cx)
+                                }),
+                            )
+                            .into_any_element(),
+                        )
+                        .child(
+                            check_row(
+                                "user-create-must-change",
+                                t!("user.create.must_change").to_string(),
+                                account.must_change,
+                                theme,
+                                cx.listener(|this, _event, _window, cx| {
+                                    this.toggle_create_must_change(cx)
+                                }),
+                            )
+                            .into_any_element(),
+                        )
+                        .into_any_element(),
+                    theme,
+                ));
+            }
+            login_options = login_options.child(create_row(
+                t!("user.field.default_database").to_string(),
+                sized_combo(self.create_user_default_database_combo.as_ref(), theme),
+                theme,
+            ));
+            login_options = login_options.child(create_row(
+                t!("user.field.default_language").to_string(),
+                sized_text(self.create_user_default_language.as_ref(), theme),
+                theme,
+            ));
+            if !account.login_type.eq_ignore_ascii_case("Windows") {
+                login_options = login_options
+                    .child(create_row(
+                        t!("user.field.certificate").to_string(),
+                        sized_text(self.create_user_certificate.as_ref(), theme),
+                        theme,
+                    ))
+                    .child(create_row(
+                        t!("user.field.asymmetric_key").to_string(),
+                        sized_text(self.create_user_asymmetric_key.as_ref(), theme),
+                        theme,
+                    ));
+            }
+            login_options = login_options.child(create_row(
+                t!("user.field.credential").to_string(),
+                sized_text(self.create_user_credential.as_ref(), theme),
                 theme,
             ));
         }
@@ -2838,6 +3813,14 @@ impl AppView {
                 t!("user.create.storage").to_string(),
                 None,
                 storage.into_any_element(),
+                theme,
+            ));
+        }
+        if dialog.spec.verification_type {
+            general = general.child(section(
+                t!("user.create.login_options").to_string(),
+                None,
+                login_options.into_any_element(),
                 theme,
             ));
         }
@@ -3510,6 +4493,382 @@ impl AppView {
         column.into_any_element()
     }
 
+    /// 默认权限: the account's PostgreSQL `ALTER DEFAULT PRIVILEGES` rules — a schema list on the
+    /// left and, on the right, the object kind and the grantee roles that receive the privileges.
+    fn render_create_default_privileges(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let Some(dialog) = self.create_user_dialog.as_ref() else {
+            return div().into_any_element();
+        };
+        let schema = dialog.default_schema.clone();
+        let object_type = dialog.default_object_type;
+
+        // Left: every schema plus the implicit "all schemas" row.
+        let mut schema_list = div()
+            .id("user-create-default-schemas")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .overflow_y_scroll()
+            .track_scroll(&dialog.default_schema_scroll);
+        let entries: Vec<(String, String)> =
+            std::iter::once((String::new(), t!("user.default.all_schemas").to_string()))
+                .chain(
+                    dialog
+                        .default_schemas
+                        .iter()
+                        .cloned()
+                        .map(|name| (name.clone(), name)),
+                )
+                .collect();
+        for (index, (value, label)) in entries.iter().enumerate() {
+            let active = dialog.default_schema == *value;
+            let selected = value.clone();
+            schema_list = schema_list.child(
+                div()
+                    .id(SharedString::from(format!(
+                        "user-create-default-schema-{index}"
+                    )))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .h(px(28.0))
+                    .px_2()
+                    .flex_none()
+                    .rounded(px(4.0))
+                    .cursor_pointer()
+                    .when(active, move |style| style.bg(rgb(theme.tree_selected_bg)))
+                    .when(!active, move |style| {
+                        style.hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                    })
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.select_create_default_schema(selected.clone(), cx)
+                    }))
+                    .child(tree_icon(
+                        "icons/database.svg",
+                        if active {
+                            theme.icon_database_active
+                        } else {
+                            theme.text_muted
+                        },
+                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_size(px(12.0))
+                            .text_color(rgb(if active {
+                                theme.tree_selected_text
+                            } else {
+                                theme.text
+                            }))
+                            .child(label.clone()),
+                    ),
+            );
+        }
+
+        let left = div()
+            .flex()
+            .flex_col()
+            .w(px(CREATE_DEFAULT_SCHEMA_WIDTH))
+            .flex_none()
+            .h_full()
+            .min_h(px(0.0))
+            .pr_3()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .w_full()
+                    .pb_2()
+                    .text_size(px(11.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(
+                        t!(
+                            "user.default.schema_count",
+                            count = dialog.default_schemas.len()
+                        )
+                        .to_string(),
+                    ),
+            )
+            .child(schema_list);
+
+        // Right: the object kinds, then the grantee list and the fine-grained grid.
+        let mut kinds = div().flex().flex_row().items_center().gap_1().flex_none();
+        for option in DefaultObjectType::ALL {
+            let active = option == object_type;
+            kinds = kinds.child(
+                div()
+                    .id(SharedString::from(format!(
+                        "user-create-default-kind-{}",
+                        option.keyword()
+                    )))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .h(px(24.0))
+                    .px_3()
+                    .rounded(px(4.0))
+                    .text_size(px(12.0))
+                    .cursor_pointer()
+                    .when(active, move |style| {
+                        style
+                            .bg(rgb(theme.primary))
+                            .text_color(rgb(if theme.is_dark() {
+                                theme.window_bg
+                            } else {
+                                0xffffff
+                            }))
+                    })
+                    .when(!active, move |style| {
+                        style
+                            .bg(rgb(theme.button_bg))
+                            .border_1()
+                            .border_color(rgb(theme.border))
+                            .text_color(rgb(theme.text_muted))
+                    })
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.select_create_default_object_type(option, cx)
+                    }))
+                    .child(t!(default_object_type_key(option)).to_string()),
+            );
+        }
+
+        let grantees = dialog.default_grantees(&schema, object_type);
+        let active = dialog.default_active.clone();
+        let active_privileges = active
+            .as_ref()
+            .and_then(|grantee| grantees.get(grantee).cloned())
+            .unwrap_or_default();
+
+        let mut accounts = div()
+            .id("user-create-default-accounts")
+            .flex()
+            .flex_col()
+            .max_h(px(CREATE_DEFAULT_LIST_MAX_HEIGHT))
+            .overflow_y_scroll()
+            .track_scroll(&dialog.default_account_scroll)
+            .border_1()
+            .border_color(rgb(theme.border))
+            .bg(rgb(theme.input_bg));
+        for (index, (user, host)) in dialog.accounts.iter().enumerate() {
+            let label = user_host_label(user, host, &dialog.spec);
+            let checked = grantees.contains_key(user);
+            let is_active = active.as_deref() == Some(user.as_str());
+            let count = grantees.get(user).map(BTreeSet::len).unwrap_or(0);
+            let activate = user.clone();
+            let toggle = user.clone();
+            let mut entry = div()
+                .id(SharedString::from(format!(
+                    "user-create-default-account-{index}"
+                )))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .h(px(24.0))
+                .px_2()
+                .flex_none()
+                .rounded(px(4.0))
+                .cursor_pointer()
+                .when(is_active, move |style| {
+                    style.bg(rgb(theme.tree_selected_bg))
+                })
+                .when(!is_active, move |style| {
+                    style.hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                })
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    this.activate_create_default_grantee(activate.clone(), cx)
+                }))
+                .child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "user-create-default-account-check-{index}"
+                        )))
+                        .flex()
+                        .items_center()
+                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                            cx.stop_propagation();
+                            this.toggle_create_default_grantee(toggle.clone(), cx);
+                        }))
+                        .child(checkbox_box(checked, theme)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_size(px(12.0))
+                        .text_color(rgb(if is_active {
+                            theme.tree_selected_text
+                        } else {
+                            theme.text
+                        }))
+                        .child(label),
+                );
+            if count > 0 {
+                entry = entry.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(10.5))
+                        .text_color(rgb(theme.primary))
+                        .child(count.to_string()),
+                );
+            }
+            accounts = accounts.child(entry);
+        }
+
+        let mut grid = div().flex().flex_row().flex_wrap().w_full();
+        for (position, info) in dialog
+            .catalog
+            .default_privileges_for(object_type)
+            .into_iter()
+            .enumerate()
+        {
+            let checked = active_privileges.contains(&info.id);
+            let keyword = info.id.as_str().to_string();
+            let description = catalog_label(&info.label_key, &info.label);
+            let privilege = info.id.clone();
+            grid = grid.child(
+                div()
+                    .id(SharedString::from(format!(
+                        "user-create-default-priv-{position}"
+                    )))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .w(px(210.0))
+                    .h(px(CREATE_ROW_HEIGHT))
+                    .cursor_pointer()
+                    .tooltip(move |_, cx| cx.new(|_| PrivilegeTooltip(description.clone())).into())
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.toggle_create_default_privilege(privilege.clone(), cx)
+                    }))
+                    .child(checkbox_box(checked, theme))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(theme.text))
+                            .child(keyword),
+                    ),
+            );
+        }
+
+        let header = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .w_full()
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(t!("user.tab.default_privileges").to_string()),
+            )
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(t!("user.default.hint").to_string()),
+            );
+
+        let mut column = div()
+            .id("user-create-default-detail")
+            .flex()
+            .flex_col()
+            .gap_4()
+            .flex_1()
+            .min_w(px(0.0))
+            .min_h(px(0.0))
+            .h_full()
+            .overflow_y_scroll()
+            .child(header)
+            .child(section(
+                t!("user.default.object_kind").to_string(),
+                None,
+                kinds.into_any_element(),
+                theme,
+            ))
+            .child(section(
+                t!("user.default.grantees").to_string(),
+                Some(t!("user.default.grantees_hint", count = grantees.len()).to_string()),
+                accounts.into_any_element(),
+                theme,
+            ));
+        if dialog.default_active.is_some() {
+            let account_label = dialog.default_active.clone().unwrap_or_default();
+            let schema_label = if schema.is_empty() {
+                t!("user.default.all_schemas").to_string()
+            } else {
+                schema.clone()
+            };
+            let hint = t!(
+                "user.default.applies",
+                account = account_label,
+                schema = schema_label,
+                object = t!(default_object_type_key(object_type)).to_string()
+            )
+            .to_string();
+            column = column.child(section(
+                t!("user.create.fine_grained").to_string(),
+                Some(hint),
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .w_full()
+                    .child(
+                        div().flex().flex_row().justify_end().w_full().child(
+                            div()
+                                .id("user-create-default-priv-toggle-all")
+                                .cursor_pointer()
+                                .text_size(px(11.0))
+                                .text_color(rgb(theme.primary))
+                                .hover(move |style| style.text_color(rgb(theme.text)))
+                                .on_click(cx.listener(|this, _event, _window, cx| {
+                                    this.toggle_create_default_privileges_all(cx)
+                                }))
+                                .child(t!("user.create.toggle_all").to_string()),
+                        ),
+                    )
+                    .child(grid)
+                    .into_any_element(),
+                theme,
+            ));
+        } else {
+            column = column.child(section(
+                t!("user.create.fine_grained").to_string(),
+                None,
+                tree_message(
+                    t!("user.default.select_grantee").to_string(),
+                    8.0,
+                    theme.text_muted,
+                )
+                .into_any_element(),
+                theme,
+            ));
+        }
+
+        div()
+            .id("user-create-default")
+            .flex()
+            .flex_row()
+            .gap_4()
+            .w_full()
+            .flex_1()
+            .min_h(px(0.0))
+            .child(left)
+            .child(column)
+            .into_any_element()
+    }
+
     /// The 指定具体表 picker of the active database. Clicking a table's name makes it active; its
     /// check box picks it into the scope, and each selected table shows its own privilege summary.
     fn render_create_table_picker(
@@ -3664,6 +5023,440 @@ impl AppView {
     }
 
     /// 角色: the roles this account belongs to, and the members of this account.
+    /// 用户映射: a database list on the left and the selected database's mapping detail on the
+    /// right (SQL Server's login → database user mapping and database roles).
+    fn render_create_user_mapping(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let Some(dialog) = self.create_user_dialog.as_ref() else {
+            return div().into_any_element();
+        };
+
+        let mut rows = div()
+            .id("user-create-mapping-scroll")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .overflow_y_scroll()
+            .track_scroll(&dialog.mapping_scroll);
+        for (index, row) in dialog.mappings.iter().enumerate() {
+            let active = dialog.active_mapping == Some(index);
+            let mapped = row.mapped;
+            let name = row.database.clone();
+            let badge = if mapped {
+                if row.user_name.trim().is_empty() {
+                    dialog.editor.account.user.clone()
+                } else {
+                    row.user_name.clone()
+                }
+            } else {
+                t!("user.mapping.unmapped").to_string()
+            };
+            let mut entry = div()
+                .id(SharedString::from(format!("user-create-mapping-{index}")))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .h(px(34.0))
+                .px_2()
+                .flex_none()
+                .rounded(px(4.0))
+                .cursor_pointer()
+                .when(active, move |style| style.bg(rgb(theme.tree_selected_bg)))
+                .when(!active, move |style| {
+                    style.hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                })
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    this.activate_create_mapping(index, cx)
+                }))
+                .child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "user-create-mapping-check-{index}"
+                        )))
+                        .flex()
+                        .items_center()
+                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                            cx.stop_propagation();
+                            this.toggle_create_mapping(index, cx);
+                        }))
+                        .child(checkbox_box(mapped, theme)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_size(px(12.0))
+                        .text_color(rgb(if active {
+                            theme.tree_selected_text
+                        } else {
+                            theme.text
+                        }))
+                        .child(name),
+                );
+            if mapped {
+                entry = entry.child(
+                    div()
+                        .flex_none()
+                        .px_2()
+                        .py_0p5()
+                        .rounded(px(9.0))
+                        .text_size(px(10.5))
+                        .bg(rgb(theme.tree_hover_bg))
+                        .text_color(rgb(theme.primary))
+                        .child(badge),
+                );
+            } else {
+                entry = entry.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(10.5))
+                        .text_color(rgb(theme.text_muted))
+                        .child(badge),
+                );
+            }
+            rows = rows.child(entry);
+        }
+
+        let list = div()
+            .flex()
+            .flex_col()
+            .w(px(CREATE_DB_LIST_DEFAULT_WIDTH))
+            .flex_none()
+            .h_full()
+            .min_h(px(0.0))
+            .pr_3()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .w_full()
+                    .pb_2()
+                    .text_size(px(11.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(t!("user.mapping.count", count = dialog.mappings.len()).to_string())
+                    .child(
+                        div()
+                            .id("user-create-mapping-clear")
+                            .cursor_pointer()
+                            .text_color(rgb(theme.primary))
+                            .hover(move |style| style.text_color(rgb(theme.text)))
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.clear_create_mappings(cx)
+                            }))
+                            .child(t!("user.create.clear_all").to_string()),
+                    ),
+            )
+            .child(rows);
+
+        div()
+            .id("user-create-mapping")
+            .flex()
+            .flex_row()
+            .gap_4()
+            .w_full()
+            .flex_1()
+            .min_h(px(0.0))
+            .child(list)
+            .child(self.render_create_mapping_detail(cx))
+            .into_any_element()
+    }
+
+    /// The 用户映射 section's right detail pane for the active database.
+    fn render_create_mapping_detail(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let Some(dialog) = self.create_user_dialog.as_ref() else {
+            return div().into_any_element();
+        };
+        let Some(index) = dialog.active_mapping else {
+            return tree_message(
+                t!("user.mapping.select_database").to_string(),
+                8.0,
+                theme.text_muted,
+            )
+            .into_any_element();
+        };
+        let Some(row) = dialog.mappings.get(index) else {
+            return div().into_any_element();
+        };
+        let database = row.database.clone();
+        let mapped = row.mapped;
+        let roles = row.roles.clone();
+        let available = row.available_roles.clone();
+
+        let mut form = div().flex().flex_col().gap_2().w_full();
+        form = form.child(create_row(
+            t!("user.mapping.database").to_string(),
+            div()
+                .text_size(px(12.0))
+                .text_color(rgb(theme.text))
+                .child(database)
+                .into_any_element(),
+            theme,
+        ));
+        form = form.child(create_row(
+            t!("user.mapping.mapped").to_string(),
+            check_row(
+                "user-create-mapping-mapped",
+                t!("user.mapping.mapped").to_string(),
+                mapped,
+                theme,
+                cx.listener(move |this, _event, _window, cx| this.toggle_create_mapping(index, cx)),
+            )
+            .into_any_element(),
+            theme,
+        ));
+        form = form.child(create_row(
+            t!("user.mapping.user").to_string(),
+            sized_text(self.create_user_mapping_user.as_ref(), theme),
+            theme,
+        ));
+        form = form.child(create_row(
+            t!("user.mapping.default_schema").to_string(),
+            sized_text(self.create_user_mapping_schema.as_ref(), theme),
+            theme,
+        ));
+
+        let mut column = div().flex().flex_col().gap_4().flex_1().min_w(px(0.0));
+        column = column.child(section(
+            t!("user.mapping.mapping").to_string(),
+            Some(t!("user.mapping.user_hint").to_string()),
+            form.into_any_element(),
+            theme,
+        ));
+
+        if available.is_empty() {
+            column = column.child(section(
+                t!("user.mapping.roles").to_string(),
+                None,
+                tree_message(
+                    t!("user.mapping.no_roles").to_string(),
+                    8.0,
+                    theme.text_muted,
+                )
+                .into_any_element(),
+                theme,
+            ));
+        } else {
+            let mut grid = div().flex().flex_row().flex_wrap().w_full();
+            for (position, role) in available.iter().enumerate() {
+                let checked = roles.contains(role);
+                let label = role.clone();
+                let key = role.clone();
+                grid = grid.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "user-create-mapping-role-{index}-{position}"
+                        )))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .w(px(200.0))
+                        .h(px(CREATE_ROW_HEIGHT))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                            this.toggle_create_mapping_role(index, key.clone(), cx)
+                        }))
+                        .child(checkbox_box(checked, theme))
+                        .child(div().text_size(px(12.0)).child(label)),
+                );
+            }
+            column = column.child(section(
+                t!("user.mapping.roles").to_string(),
+                Some(t!("user.mapping.roles_hint").to_string()),
+                grid.into_any_element(),
+                theme,
+            ));
+        }
+        column.into_any_element()
+    }
+
+    /// 终端节点权限 / 登录权限: a matrix of server securables × the class's permissions.
+    fn render_create_securables(
+        &self,
+        active_section: UserSection,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let theme = self.theme;
+        let Some(dialog) = self.create_user_dialog.as_ref() else {
+            return div().into_any_element();
+        };
+        let Some(class_id) = active_section.securable_class_id() else {
+            return div().into_any_element();
+        };
+        let Some(class) = dialog
+            .catalog
+            .securable_classes
+            .iter()
+            .find(|class| class.id == class_id)
+        else {
+            return tree_message(
+                t!("user.securables.unsupported").to_string(),
+                8.0,
+                theme.text_muted,
+            )
+            .into_any_element();
+        };
+        let privileges = class.privileges.clone();
+        let class_keyword = class.class.clone();
+        let title = catalog_label(&class.label_key, &class.label);
+        let deny_supported = dialog.catalog.deny_supported;
+
+        let mut header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .h(px(24.0))
+            .flex_none()
+            .bg(rgb(theme.header_bg))
+            .border_b_1()
+            .border_color(rgb(theme.border))
+            .text_size(px(11.0))
+            .child(
+                div()
+                    .w(px(220.0))
+                    .px_2()
+                    .child(t!("user.securables.name").to_string()),
+            );
+        for privilege in &privileges {
+            header = header.child(
+                div()
+                    .w(px(120.0))
+                    .flex()
+                    .justify_center()
+                    .child(privilege.as_str().to_string()),
+            );
+        }
+
+        let mut rows = div().flex().flex_col();
+        let mut shown = 0usize;
+        for (index, row) in dialog.securables.iter().enumerate() {
+            if row.class != class_keyword {
+                continue;
+            }
+            let name = row.name.clone();
+            let row_index = index;
+            let position = shown;
+            shown += 1;
+            let mut entry = div()
+                .id(SharedString::from(format!(
+                    "user-create-securable-{class_id}-{position}"
+                )))
+                .flex()
+                .flex_row()
+                .items_center()
+                .h(px(CREATE_ROW_HEIGHT))
+                .flex_none()
+                .when(position % 2 == 1, move |style| {
+                    style.bg(rgb(theme.row_alt_bg))
+                })
+                .child(
+                    div()
+                        .w(px(220.0))
+                        .px_2()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(tree_icon("icons/user.svg", theme.icon_users))
+                        .child(div().text_size(px(12.0)).child(name)),
+                );
+            for (column, privilege) in privileges.iter().enumerate() {
+                let checked = row.privileges.contains(privilege);
+                let denied = row.denied.contains(privilege);
+                let grant_key = privilege.clone();
+                let deny_key = privilege.clone();
+                let mut cell = div()
+                    .id(SharedString::from(format!(
+                        "user-create-securable-{class_id}-{position}-{column}"
+                    )))
+                    .w(px(120.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_center()
+                    .gap_1()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.toggle_create_securable(row_index, grant_key.clone(), cx)
+                    }))
+                    .child(checkbox_box(checked, theme));
+                if deny_supported {
+                    let label = t!("user.privilege.deny").to_string();
+                    cell = cell.child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "user-create-securable-deny-{class_id}-{position}-{column}"
+                            )))
+                            .px_1()
+                            .rounded(px(3.0))
+                            .text_size(px(10.0))
+                            .cursor_pointer()
+                            .when(denied, move |style| {
+                                style.bg(rgb(theme.danger)).text_color(rgb(0xffffff))
+                            })
+                            .when(!denied, move |style| {
+                                style
+                                    .text_color(rgb(theme.text_muted))
+                                    .hover(move |style| style.text_color(rgb(theme.danger)))
+                            })
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                cx.stop_propagation();
+                                this.toggle_create_securable_deny(row_index, deny_key.clone(), cx);
+                            }))
+                            .child(label),
+                    );
+                }
+                entry = entry.child(cell);
+            }
+            rows = rows.child(entry);
+        }
+
+        let body: AnyElement = if shown == 0 {
+            tree_message(
+                t!("user.securables.empty").to_string(),
+                8.0,
+                theme.text_muted,
+            )
+            .into_any_element()
+        } else {
+            div()
+                .id(SharedString::from(format!(
+                    "user-create-securables-scroll-{class_id}"
+                )))
+                .flex()
+                .flex_col()
+                .max_h(px(400.0))
+                .overflow_y_scroll()
+                .child(rows)
+                .into_any_element()
+        };
+
+        section(
+            title,
+            Some(t!("user.securables.hint", count = shown).to_string()),
+            div()
+                .flex()
+                .flex_col()
+                .w_full()
+                .border_1()
+                .border_color(rgb(theme.border))
+                .bg(rgb(theme.input_bg))
+                .overflow_hidden()
+                .child(header)
+                .child(body)
+                .into_any_element(),
+            theme,
+        )
+        .into_any_element()
+    }
+
     fn render_create_roles(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let Some(dialog) = self.create_user_dialog.as_ref() else {
             return div().into_any_element();
@@ -4024,6 +5817,7 @@ mod tests {
         assert!(UserSection::Roles.visible(&mysql));
         assert!(UserSection::General.visible(&mysql));
         assert!(UserSection::Sql.visible(&mysql));
+        assert!(!UserSection::UserMapping.visible(&mysql));
 
         // An engine without object-grant management hides the 权限 section.
         let sqlserver = UserEditorSpec {
@@ -4034,6 +5828,32 @@ mod tests {
         assert!(UserSection::ServerPrivileges.visible(&sqlserver));
         assert!(UserSection::General.visible(&sqlserver));
         assert!(UserSection::Sql.visible(&sqlserver));
+
+        // SQL Server shows the 用户映射 section.
+        let sqlserver_mapping = UserEditorSpec {
+            user_mapping: true,
+            ..UserEditorSpec::mysql()
+        };
+        assert!(UserSection::UserMapping.visible(&sqlserver_mapping));
+
+        // SQL Server shows the 终端节点权限 / 登录权限 sections.
+        assert!(!UserSection::EndpointPermissions.visible(&mysql));
+        assert!(!UserSection::LoginPermissions.visible(&mysql));
+        let sqlserver_securables = UserEditorSpec {
+            endpoint_permissions: true,
+            login_permissions: true,
+            ..UserEditorSpec::mysql()
+        };
+        assert!(UserSection::EndpointPermissions.visible(&sqlserver_securables));
+        assert!(UserSection::LoginPermissions.visible(&sqlserver_securables));
+        assert_eq!(
+            UserSection::EndpointPermissions.securable_class_id(),
+            Some("endpoint")
+        );
+        assert_eq!(
+            UserSection::LoginPermissions.securable_class_id(),
+            Some("login")
+        );
     }
 
     #[test]
@@ -4322,6 +6142,48 @@ mod tests {
             Some(&false),
             "{:?}",
             context.members
+        );
+    }
+
+    #[test]
+    fn default_privilege_rules_round_trip_through_the_dialog() {
+        let mut dialog = new_dialog(Some(("alice".to_string(), String::new())));
+        dialog.default_schemas = vec!["public".to_string()];
+        dialog.apply_details(UserDetails {
+            account: UserAccount {
+                user: "alice".to_string(),
+                ..Default::default()
+            },
+            default_privileges: vec![DefaultPrivilege {
+                schema: "public".to_string(),
+                object_type: DefaultObjectType::Tables,
+                grantee: "bob".to_string(),
+                privileges: [p("SELECT")].into_iter().collect(),
+            }],
+            ..Default::default()
+        });
+
+        // Opening the window selects the first loaded rule.
+        assert_eq!(dialog.default_schema, "public");
+        assert_eq!(dialog.default_object_type, DefaultObjectType::Tables);
+        assert_eq!(dialog.default_active.as_deref(), Some("bob"));
+        assert!(
+            dialog
+                .default_grantees("public", DefaultObjectType::Tables)
+                .contains_key("bob")
+        );
+
+        // Clearing the rule's privileges still keeps it, so the save revokes them rather than
+        // silently dropping the change.
+        dialog
+            .default_rule_mut("public", DefaultObjectType::Tables, "bob")
+            .expect("the bob rule")
+            .privileges
+            .clear();
+        assert!(
+            dialog
+                .default_rule("public", DefaultObjectType::Tables, "bob")
+                .is_some_and(|rule| rule.privileges.is_empty())
         );
     }
 }
