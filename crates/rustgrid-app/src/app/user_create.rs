@@ -43,6 +43,8 @@ const CREATE_DEFAULT_LIST_MAX_HEIGHT: f32 = 180.0;
 const SECURABLE_NAME_WIDTH: f32 = 180.0;
 /// Width of one server-securables permission column.
 const SECURABLE_COL_WIDTH: f32 = 104.0;
+/// Width of one server-privilege cell (checkbox + keyword + deny toggle).
+const SERVER_PRIV_WIDTH: f32 = 232.0;
 
 /// The 密码过期策略 choice, mapped to [`UserAccount::password_lifetime`].
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -3920,8 +3922,8 @@ impl AppView {
                     .flex_row()
                     .items_center()
                     .gap_2()
-                    .w(px(210.0))
-                    .h(px(CREATE_ROW_HEIGHT))
+                    .w(px(SERVER_PRIV_WIDTH))
+                    .min_h(px(CREATE_ROW_HEIGHT))
                     .cursor_pointer()
                     .tooltip(move |_, cx| cx.new(|_| PrivilegeTooltip(description.clone())).into())
                     .on_click(cx.listener(move |this, _event, _window, cx| {
@@ -3930,7 +3932,10 @@ impl AppView {
                     .child(checkbox_box(checked, theme))
                     .child(
                         div()
+                            .flex_1()
+                            .min_w(px(0.0))
                             .text_size(px(12.0))
+                            .line_height(px(16.0))
                             .text_color(rgb(theme.text))
                             .child(keyword),
                     );
