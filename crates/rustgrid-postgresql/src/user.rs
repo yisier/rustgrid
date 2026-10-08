@@ -184,6 +184,7 @@ pub(crate) fn privilege_catalog() -> PrivilegeCatalog {
             })
             .collect(),
         deny_supported: false,
+        grant_option_supported: false,
         securable_classes: Vec::new(),
     }
 }
@@ -306,6 +307,7 @@ pub(crate) async fn user_details(
         account,
         server_privileges,
         denied_server_privileges: BTreeSet::new(),
+        grant_option_server_privileges: BTreeSet::new(),
         grants,
         default_privileges,
         roles,
@@ -972,6 +974,7 @@ mod tests {
             password: None,
             server_privileges: BTreeSet::new(),
             denied_server_privileges: BTreeSet::new(),
+            grant_option_server_privileges: BTreeSet::new(),
             grants: Vec::new(),
             default_privileges: vec![
                 rule(

@@ -120,6 +120,7 @@ pub(crate) fn privilege_catalog() -> PrivilegeCatalog {
         ],
         default_privileges: Vec::new(),
         deny_supported: false,
+        grant_option_supported: false,
         securable_classes: Vec::new(),
     }
 }
@@ -310,6 +311,7 @@ pub(crate) async fn user_details(connection: &OracleConnection, user: &str) -> R
                 account,
                 server_privileges,
                 denied_server_privileges: BTreeSet::new(),
+                grant_option_server_privileges: BTreeSet::new(),
                 grants,
                 default_privileges: Vec::new(),
                 roles,
@@ -850,6 +852,7 @@ mod tests {
             password: Some("p\"w".to_string()),
             server_privileges: BTreeSet::from([PrivilegeId::new("CREATE TABLE")]),
             denied_server_privileges: BTreeSet::new(),
+            grant_option_server_privileges: BTreeSet::new(),
             grants: Vec::new(),
             default_privileges: Vec::new(),
             roles: Vec::new(),
@@ -879,6 +882,7 @@ mod tests {
             password: Some("pw".to_string()),
             server_privileges: BTreeSet::new(),
             denied_server_privileges: BTreeSet::new(),
+            grant_option_server_privileges: BTreeSet::new(),
             grants: Vec::new(),
             default_privileges: Vec::new(),
             roles: Vec::new(),

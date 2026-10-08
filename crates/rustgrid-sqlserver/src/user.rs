@@ -146,6 +146,7 @@ pub(crate) fn privilege_catalog() -> PrivilegeCatalog {
         object_presets: Vec::new(),
         default_privileges: Vec::new(),
         deny_supported: true,
+        grant_option_supported: true,
         securable_classes: vec![
             SecurableClass {
                 id: "endpoint".to_string(),
@@ -467,35 +468,37 @@ pub(crate) async fn user_details(
     let permissions = connection
         .run(None, permission_sql, &[Some(user.to_string())])
         .await?;
-    let is_deny = |row: &&Vec<CellValue>| {
-        row.get(1)
-            .map(CellValue::as_display)
-            .is_some_and(|state| state.eq_ignore_ascii_case("D"))
-    };
-    let server_privileges: BTreeSet<PrivilegeId> = if account.is_super_user {
-        // A sysadmin can do anything; present the catalog's full set rather than the empty
-        // explicit-grant list.
-        privilege_catalog()
-            .server()
-            .map(|info| info.id.clone())
-            .collect()
-    } else {
+    let state_of =
+        |row: &&Vec<CellValue>| row.get(1).map(CellValue::as_display).unwrap_or_default();
+    let names_in_state = |state: &str| -> BTreeSet<PrivilegeId> {
         privilege_set(
             permissions
                 .rows
                 .iter()
-                .filter(|row| !is_deny(row))
+                .filter(|row| state_of(row).eq_ignore_ascii_case(state))
                 .filter_map(|row| row.first().map(CellValue::as_display)),
         )
     };
-    let denied_server_privileges: BTreeSet<PrivilegeId> = permissions
-        .rows
-        .iter()
-        .filter(|row| is_deny(row))
-        .filter_map(|row| row.first().map(CellValue::as_display))
-        .map(|name| PrivilegeId::new(name.trim().to_ascii_uppercase()))
-        .filter(|id| !id.as_str().is_empty())
-        .collect();
+    // `state = 'W'` is a grant *with* grant option, `'G'` a plain grant and `'D'` a deny.
+    let (server_privileges, grant_option_server_privileges, denied_server_privileges) =
+        if account.is_super_user {
+            // A sysadmin can do anything; present the catalog's full set rather than the empty
+            // explicit-grant list.
+            (
+                privilege_catalog()
+                    .server()
+                    .map(|info| info.id.clone())
+                    .collect(),
+                BTreeSet::new(),
+                BTreeSet::new(),
+            )
+        } else {
+            (
+                names_in_state("G"),
+                names_in_state("W"),
+                names_in_state("D"),
+            )
+        };
 
     let role_sql = "SELECT r.name FROM sys.server_role_members m \
          JOIN sys.server_principals r ON r.principal_id = m.role_principal_id \
@@ -545,6 +548,7 @@ pub(crate) async fn user_details(
         account,
         server_privileges,
         denied_server_privileges,
+        grant_option_server_privileges,
         grants: Vec::new(),
         default_privileges: Vec::new(),
         roles,
@@ -739,43 +743,51 @@ fn account_statements(edit: &UserEdit) -> Vec<String> {
     statements
 }
 
-/// Server-wide privilege statements, diffing the edit against the loaded grants/denies.
+/// Server-wide privilege statements, diffing the edit against the loaded grants, grant options and
+/// denies. `state = 'W'` (grant with grant option) is tracked separately from a plain grant.
 fn server_privilege_statements(edit: &UserEdit) -> Vec<String> {
     let name = quote_identifier(&edit.account.user);
-    let (old_granted, old_denied) = edit
+    let (old_granted, old_denied, old_option) = edit
         .original
         .as_ref()
         .map(|original| {
             (
                 original.server_privileges.clone(),
                 original.denied_server_privileges.clone(),
+                original.grant_option_server_privileges.clone(),
             )
         })
         .unwrap_or_default();
 
     let mut revoke = Vec::new();
     let mut grant = Vec::new();
+    let mut grant_option = Vec::new();
     let mut deny = Vec::new();
     let mut all: BTreeSet<PrivilegeId> = old_granted.clone();
     all.extend(old_denied.iter().cloned());
+    all.extend(old_option.iter().cloned());
     all.extend(edit.server_privileges.iter().cloned());
     all.extend(edit.denied_server_privileges.iter().cloned());
+    all.extend(edit.grant_option_server_privileges.iter().cloned());
     for privilege in all {
         let was_granted = old_granted.contains(&privilege);
         let was_denied = old_denied.contains(&privilege);
+        let was_option = old_option.contains(&privilege);
         let now_granted = edit.server_privileges.contains(&privilege);
         let now_denied = edit.denied_server_privileges.contains(&privilege);
-        if was_granted == now_granted && was_denied == now_denied {
+        let now_option = edit.grant_option_server_privileges.contains(&privilege);
+        if was_granted == now_granted && was_denied == now_denied && was_option == now_option {
             continue;
         }
-        if was_granted || was_denied {
+        if was_granted || was_denied || was_option {
             revoke.push(privilege.as_str().to_string());
-        }
-        if now_granted {
-            grant.push(privilege.as_str().to_string());
         }
         if now_denied {
             deny.push(privilege.as_str().to_string());
+        } else if now_option {
+            grant_option.push(privilege.as_str().to_string());
+        } else if now_granted {
+            grant.push(privilege.as_str().to_string());
         }
     }
 
@@ -785,6 +797,12 @@ fn server_privilege_statements(edit: &UserEdit) -> Vec<String> {
     }
     if !grant.is_empty() {
         statements.push(format!("GRANT {} TO {name}", grant.join(", ")));
+    }
+    if !grant_option.is_empty() {
+        statements.push(format!(
+            "GRANT {} TO {name} WITH GRANT OPTION",
+            grant_option.join(", ")
+        ));
     }
     if !deny.is_empty() {
         statements.push(format!("DENY {} TO {name}", deny.join(", ")));
@@ -1488,6 +1506,7 @@ mod tests {
             password: None,
             server_privileges: BTreeSet::new(),
             denied_server_privileges: BTreeSet::from([PrivilegeId::new("CONTROL SERVER")]),
+            grant_option_server_privileges: BTreeSet::new(),
             grants: Vec::new(),
             default_privileges: Vec::new(),
             roles: Vec::new(),
@@ -1504,6 +1523,51 @@ mod tests {
                 "REVOKE CONTROL SERVER FROM [sa]",
                 "DENY CONTROL SERVER TO [sa]",
             ]
+        );
+    }
+
+    #[test]
+    fn grant_option_diffs_with_grant_option() {
+        let original = UserDetails {
+            server_privileges: BTreeSet::from([PrivilegeId::new("VIEW SERVER STATE")]),
+            ..Default::default()
+        };
+        let mut edit = base_edit(
+            UserAccount {
+                user: "alice".to_string(),
+                ..Default::default()
+            },
+            Some(original),
+        );
+        edit.server_privileges
+            .insert(PrivilegeId::new("VIEW SERVER STATE"));
+        edit.grant_option_server_privileges
+            .insert(PrivilegeId::new("VIEW SERVER STATE"));
+        assert_eq!(
+            server_privilege_statements(&edit),
+            vec![
+                "REVOKE VIEW SERVER STATE FROM [alice]",
+                "GRANT VIEW SERVER STATE TO [alice] WITH GRANT OPTION",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_new_grant_option_has_no_revoke() {
+        let mut edit = base_edit(
+            UserAccount {
+                user: "alice".to_string(),
+                ..Default::default()
+            },
+            None,
+        );
+        edit.server_privileges
+            .insert(PrivilegeId::new("ALTER ANY LOGIN"));
+        edit.grant_option_server_privileges
+            .insert(PrivilegeId::new("ALTER ANY LOGIN"));
+        assert_eq!(
+            server_privilege_statements(&edit),
+            vec!["GRANT ALTER ANY LOGIN TO [alice] WITH GRANT OPTION"]
         );
     }
 
@@ -1551,6 +1615,7 @@ mod tests {
             password: None,
             server_privileges: BTreeSet::new(),
             denied_server_privileges: BTreeSet::new(),
+            grant_option_server_privileges: BTreeSet::new(),
             grants: Vec::new(),
             default_privileges: Vec::new(),
             roles: Vec::new(),
@@ -1632,6 +1697,7 @@ mod tests {
             password: None,
             server_privileges: BTreeSet::new(),
             denied_server_privileges: BTreeSet::new(),
+            grant_option_server_privileges: BTreeSet::new(),
             grants: Vec::new(),
             default_privileges: Vec::new(),
             roles: Vec::new(),
@@ -1684,6 +1750,7 @@ mod tests {
             password: None,
             server_privileges: BTreeSet::new(),
             denied_server_privileges: BTreeSet::new(),
+            grant_option_server_privileges: BTreeSet::new(),
             grants: Vec::new(),
             default_privileges: Vec::new(),
             roles: Vec::new(),

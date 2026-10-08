@@ -38,11 +38,12 @@ UI 层**不**出现任何引擎判断或原始 SQL：所有差异通过 `UserEdi
   `default_tablespace`/`profile`/`tablespace_quota`、SQL Server 的
   `login_type`/`default_database`/`default_language`/`check_policy`/`check_expiration`/
   `must_change`/`certificate`/`asymmetric_key`/`credential`）。
-- `UserDetails`：账户 + 服务器级 `server_privileges` / `denied_server_privileges` +
-  对象级 `grants: Vec<ObjectGrant>` + 角色边 `roles`/`members`。
+- `UserDetails`：账户 + 服务器级 `server_privileges` / `denied_server_privileges` /
+  `grant_option_server_privileges`（SQL Server 的 `state = 'W'`，可转授）+ 对象级
+  `grants: Vec<ObjectGrant>` + 角色边 `roles`/`members`。
 - `UserEdit`：编辑器保存时下发的编辑（`original`、`account`、`password`、`old_password`、
-  `server_privileges`、`denied_server_privileges`、`grants`、`roles`、`members`、
-  `mappings`/`original_mappings`、`securables`/`original_securables`）。
+  `server_privileges`、`denied_server_privileges`、`grant_option_server_privileges`、`grants`、
+  `roles`、`members`、`mappings`/`original_mappings`、`securables`/`original_securables`）。
 - `UserMapping { database, mapped, user_name, default_schema, roles, available_roles }`：
   SQL Server 的“用户映射”一行（登录在某个库里的数据库用户与库角色）。
 - `ServerSecurableGrant { class, name, privileges, denied }`：一条服务器级安全对象授权
@@ -63,8 +64,9 @@ UI 层**不**出现任何引擎判断或原始 SQL：所有差异通过 `UserEdi
   `database_and_schema` / `database_and_object`。
 - `PrivilegeGroup`、`PrivilegePreset`（一键预设）。
 - `PrivilegeCatalog { groups, privileges, server_presets, object_presets, deny_supported,
-  securable_classes }`：驱动返回的完整目录。`deny_supported` 为 `true` 时 UI 为每项提供
-  “拒绝”开关；`securable_classes` 列出服务器级安全对象类别（SQL Server 的端点/登录）。
+  grant_option_supported, securable_classes }`：驱动返回的完整目录。`deny_supported` 为真时
+  UI 为服务器权限提供“拒绝”列；`grant_option_supported` 为真时提供“含授予选项”列
+  （SQL Server 的 `WITH GRANT OPTION`）；`securable_classes` 列出服务器级安全对象类别。
 
 ## 驱动契约
 
@@ -127,8 +129,9 @@ UI 层**不**出现任何引擎判断或原始 SQL：所有差异通过 `UserEdi
   密码”）、账号状态（过期策略 / 密码有效期至 / 锁定或已启用）、资源限制、存储与配置（Oracle 的
   默认表空间 / 配额 / PROFILE）、登录选项（SQL Server 的密码策略 / 过期 / 下次登录改密、默认
   数据库 / 语言、证书 / 非对称密钥 / 凭据）。
-- 服务器权限：按目录分组的勾选网格 + 一键预设；`deny_supported` 时每项带“拒绝”开关，
-  授权与拒绝互斥。
+- 服务器权限：Navicat 风格的三列表格（`权限 | 授予 | 含授予选项 | 拒绝`）。`grant_option_supported`
+  时显示「含授予选项」（勾选即同时授予，可转授），`deny_supported` 时显示「拒绝」；授予/含授予
+  选项/拒绝三态互斥，模板一键替换整组授予。
 - 权限：数据库列表 + 细化勾选（数据库级 / 指定具体表）。
 - 默认权限（PostgreSQL）：左侧 schema 列表（含“所有 Schema”），右侧对象类型（表 / 序列 /
   函数 / 类型 / Schema）+ 授权角色列表 + 细化勾选，编辑 `ALTER DEFAULT PRIVILEGES` 规则。
@@ -165,6 +168,7 @@ UI 层**不**出现任何引擎判断或原始 SQL：所有差异通过 `UserEdi
 | 用户映射 | — | `sys.database_principals`/`sys.database_role_members` | — | — |
 | 安全对象 | — | `ON ENDPOINT::` / `ON LOGIN::`（`sys.server_permissions` class 101/105） | — | — |
 | DENY | — | ✅（对象级 + 服务器级 + 安全对象） | — | — |
+| 含授予选项 | — | ✅（服务器级，`state = 'W'`） | — | — |
 | 默认权限 | — | — | `pg_default_acl`（按 schema / 对象类型 / 角色） | — |
 | 专属属性 | plugin/ssl/资源限制 | 验证类型 / 默认库 / 默认语言 / 密码策略 / 证书 / 凭据 | `VALID UNTIL` | PROFILE / 默认表空间 / 配额 |
 
@@ -176,8 +180,8 @@ UI 层**不**出现任何引擎判断或原始 SQL：所有差异通过 `UserEdi
   `FLUSH PRIVILEGES`。
 - **SQL Server**（`rustgrid-sqlserver/src/user.rs`）：账户是**登录**（无 host）；完整属性
   （默认库/语言、密码策略/过期、验证类型、凭据）取自 `sys.server_principals` 连接
-  `sys.sql_logins`；服务器权限取 `sys.server_permissions`（`class = 100`，`G`/`W`→授予，
-  `D`→拒绝，sysadmin 显示目录全集）；对象权限矩阵取 `sys.database_permissions`，主体名用
+  `sys.sql_logins`；服务器权限取 `sys.server_permissions`（`class = 100`，`G`→授予，
+  `W`→授予且可转授，`D`→拒绝，sysadmin 显示目录全集）；对象权限矩阵取 `sys.database_permissions`，主体名用
   `SUSER_SNAME` 对齐登录名；给尚无库用户的登录授权时先发一条带守卫的
   `CREATE USER … FOR LOGIN …`。带 `DENY` 的三态差量生成 `REVOKE` + `GRANT`/`DENY`。
   用户映射按 SID 匹配 `sys.database_principals` 并读 `sys.database_role_members`，逐库差量生成

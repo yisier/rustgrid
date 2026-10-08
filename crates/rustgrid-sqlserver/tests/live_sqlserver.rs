@@ -248,6 +248,7 @@ fn edit_from(details: &UserDetails) -> UserEdit {
     edit.original = Some(details.clone());
     edit.server_privileges = details.server_privileges.clone();
     edit.denied_server_privileges = details.denied_server_privileges.clone();
+    edit.grant_option_server_privileges = details.grant_option_server_privileges.clone();
     edit.grants = details.grants.clone();
     edit.default_privileges = details.default_privileges.clone();
     edit.roles = details
@@ -284,6 +285,7 @@ fn empty_edit(account: UserAccount) -> UserEdit {
         password: None,
         server_privileges: BTreeSet::new(),
         denied_server_privileges: BTreeSet::new(),
+        grant_option_server_privileges: BTreeSet::new(),
         grants: Vec::new(),
         default_privileges: Vec::new(),
         roles: Vec::new(),
@@ -448,6 +450,26 @@ async fn manages_a_login_with_mapping_and_securables() {
             .contains(&PrivilegeId::new("VIEW SERVER STATE")),
         "{:?}",
         details.server_privileges
+    );
+
+    // 含授予选项: the 'W' state round-trips.
+    let mut edit = edit_from(&details);
+    edit.grant_option_server_privileges
+        .insert(PrivilegeId::new("VIEW SERVER STATE"));
+    connection
+        .save_user(&edit)
+        .await
+        .expect("grant with grant option");
+    let details = connection
+        .user_details(login, "")
+        .await
+        .expect("reload after grant option");
+    assert!(
+        details
+            .grant_option_server_privileges
+            .contains(&PrivilegeId::new("VIEW SERVER STATE")),
+        "{:?}",
+        details.grant_option_server_privileges
     );
 
     // Cleanup: unmap, then drop the login (its securable grants go with it).

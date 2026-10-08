@@ -43,8 +43,8 @@ const CREATE_DEFAULT_LIST_MAX_HEIGHT: f32 = 180.0;
 const SECURABLE_NAME_WIDTH: f32 = 180.0;
 /// Width of one server-securables permission column.
 const SECURABLE_COL_WIDTH: f32 = 104.0;
-/// Width of one server-privilege cell (checkbox + keyword + deny toggle).
-const SERVER_PRIV_WIDTH: f32 = 232.0;
+/// Width of one checkbox column of the server-privilege table (授予 / 含授予选项 / 拒绝).
+const SERVER_PRIV_CHECK_WIDTH: f32 = 96.0;
 
 /// The 密码过期策略 choice, mapped to [`UserAccount::password_lifetime`].
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -900,6 +900,8 @@ pub(super) struct UserEditorState {
     pub(super) server_privileges: BTreeSet<PrivilegeId>,
     /// Server-wide privileges explicitly denied (SQL Server).
     pub(super) denied_server_privileges: BTreeSet<PrivilegeId>,
+    /// Server-wide privileges held `WITH GRANT OPTION` (SQL Server).
+    pub(super) grant_option_server_privileges: BTreeSet<PrivilegeId>,
     pub(super) grants: Vec<ObjectGrant>,
 }
 
@@ -917,6 +919,7 @@ impl UserEditorState {
             guard_password: String::new(),
             server_privileges: BTreeSet::new(),
             denied_server_privileges: BTreeSet::new(),
+            grant_option_server_privileges: BTreeSet::new(),
             grants: Vec::new(),
         }
     }
@@ -925,6 +928,7 @@ impl UserEditorState {
         self.account = details.account.clone();
         self.server_privileges = details.server_privileges.clone();
         self.denied_server_privileges = details.denied_server_privileges.clone();
+        self.grant_option_server_privileges = details.grant_option_server_privileges.clone();
         self.grants = details.grants.clone();
         self.original_account = Some((details.account.user.clone(), details.account.host.clone()));
         self.original = Some(details);
@@ -1901,36 +1905,62 @@ impl AppView {
         cx.notify();
     }
 
-    /// Toggle one server privilege. Granting clears any deny of the same privilege.
+    /// Toggle the 授予 checkbox of one server privilege. Clearing it also clears the grant option;
+    /// granting clears any deny of the same privilege.
     pub(super) fn toggle_create_server_privilege(
         &mut self,
         privilege: PrivilegeId,
         cx: &mut Context<'_, Self>,
     ) {
         if let Some(dialog) = self.create_user_dialog.as_mut() {
-            let granted_now = !dialog.editor.server_privileges.remove(&privilege);
-            if granted_now {
-                dialog.editor.server_privileges.insert(privilege.clone());
-                dialog.editor.denied_server_privileges.remove(&privilege);
+            let editor = &mut dialog.editor;
+            if editor.server_privileges.contains(&privilege) {
+                editor.server_privileges.remove(&privilege);
+                editor.grant_option_server_privileges.remove(&privilege);
+            } else {
+                editor.server_privileges.insert(privilege.clone());
+                editor.denied_server_privileges.remove(&privilege);
             }
         }
         cx.notify();
     }
 
-    /// Toggle the explicit deny of one server privilege. Denying clears any grant of it.
+    /// Toggle the 含授予选项 checkbox. It implies 授予: the privilege is granted and may be
+    /// re-granted, and any deny of it is cleared.
+    pub(super) fn toggle_create_server_grant_option(
+        &mut self,
+        privilege: PrivilegeId,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(dialog) = self.create_user_dialog.as_mut() {
+            let editor = &mut dialog.editor;
+            if editor.grant_option_server_privileges.contains(&privilege) {
+                editor.grant_option_server_privileges.remove(&privilege);
+            } else {
+                editor
+                    .grant_option_server_privileges
+                    .insert(privilege.clone());
+                editor.server_privileges.insert(privilege.clone());
+                editor.denied_server_privileges.remove(&privilege);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Toggle the 拒绝 checkbox of one server privilege. Denying clears any grant and grant option.
     pub(super) fn toggle_create_server_privilege_deny(
         &mut self,
         privilege: PrivilegeId,
         cx: &mut Context<'_, Self>,
     ) {
         if let Some(dialog) = self.create_user_dialog.as_mut() {
-            let denied_now = !dialog.editor.denied_server_privileges.remove(&privilege);
-            if denied_now {
-                dialog
-                    .editor
-                    .denied_server_privileges
-                    .insert(privilege.clone());
-                dialog.editor.server_privileges.remove(&privilege);
+            let editor = &mut dialog.editor;
+            if editor.denied_server_privileges.contains(&privilege) {
+                editor.denied_server_privileges.remove(&privilege);
+            } else {
+                editor.denied_server_privileges.insert(privilege.clone());
+                editor.server_privileges.remove(&privilege);
+                editor.grant_option_server_privileges.remove(&privilege);
             }
         }
         cx.notify();
@@ -1946,6 +1976,7 @@ impl AppView {
             let privileges = preset_privileges(&dialog.catalog.server_presets, index);
             dialog.editor.server_privileges = privileges;
             dialog.editor.denied_server_privileges.clear();
+            dialog.editor.grant_option_server_privileges.clear();
         }
         cx.notify();
     }
@@ -2801,6 +2832,7 @@ impl AppView {
             },
             server_privileges: dialog.editor.server_privileges.clone(),
             denied_server_privileges: dialog.editor.denied_server_privileges.clone(),
+            grant_option_server_privileges: dialog.editor.grant_option_server_privileges.clone(),
             grants: dialog.object_grants(),
             default_privileges: dialog.default_rules.clone(),
             roles,
@@ -3897,7 +3929,58 @@ impl AppView {
         }
 
         // Grouped by the catalog, so the global set reads as categories instead of one long grid.
-        let mut groups = div().flex().flex_col().gap_3().w_full();
+        let grant_option_supported = dialog.catalog.grant_option_supported;
+        let deny_supported = dialog.catalog.deny_supported;
+
+        // One header (`权限 | 授予 | 含授予选项 | 拒绝`), a sub-header per group and one row per
+        // privilege, mirroring Navicat's server-permission table.
+        let mut header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .h(px(24.0))
+            .flex_none()
+            .bg(rgb(theme.header_bg))
+            .border_b_1()
+            .border_color(rgb(theme.border))
+            .text_size(px(11.0))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .px_2()
+                    .child(t!("user.privilege.column").to_string()),
+            )
+            .child(
+                div()
+                    .w(px(SERVER_PRIV_CHECK_WIDTH))
+                    .flex_none()
+                    .flex()
+                    .justify_center()
+                    .child(t!("user.privilege.grant").to_string()),
+            );
+        if grant_option_supported {
+            header = header.child(
+                div()
+                    .w(px(SERVER_PRIV_CHECK_WIDTH))
+                    .flex_none()
+                    .flex()
+                    .justify_center()
+                    .child(t!("user.privilege.grant_option").to_string()),
+            );
+        }
+        if deny_supported {
+            header = header.child(
+                div()
+                    .w(px(SERVER_PRIV_CHECK_WIDTH))
+                    .flex_none()
+                    .flex()
+                    .justify_center()
+                    .child(t!("user.privilege.deny").to_string()),
+            );
+        }
+
+        let mut rows = div().flex().flex_col().w_full().child(header);
         for group in &dialog.catalog.groups {
             let offered = dialog
                 .catalog
@@ -3907,82 +3990,115 @@ impl AppView {
             }
             let group_label = catalog_label(&group.label_key, &group.label);
             let group_key = group.id.clone();
-            let mut grid = div().flex().flex_row().flex_wrap().w_full();
+            rows = rows.child(
+                div()
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .text_size(px(11.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(group_label),
+            );
             for (position, privilege) in offered.into_iter().enumerate() {
                 let checked = dialog.editor.server_privileges.contains(&privilege);
+                let option = dialog
+                    .editor
+                    .grant_option_server_privileges
+                    .contains(&privilege);
                 let is_denied = dialog.editor.denied_server_privileges.contains(&privilege);
                 let keyword = privilege.as_str().to_string();
                 let description = privilege_label(&dialog.catalog, &privilege);
+                let grant_key = privilege.clone();
+                let option_key = privilege.clone();
                 let deny_key = privilege.clone();
-                let mut cell = div()
+                let mut row = div()
                     .id(SharedString::from(format!(
-                        "user-create-server-priv-{group_key}-{position}"
+                        "user-create-server-row-{group_key}-{position}"
                     )))
+                    .tooltip(move |_, cx| cx.new(|_| PrivilegeTooltip(description.clone())).into())
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_2()
-                    .w(px(SERVER_PRIV_WIDTH))
                     .min_h(px(CREATE_ROW_HEIGHT))
-                    .cursor_pointer()
-                    .tooltip(move |_, cx| cx.new(|_| PrivilegeTooltip(description.clone())).into())
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.toggle_create_server_privilege(privilege.clone(), cx)
-                    }))
-                    .child(checkbox_box(checked, theme))
+                    .flex_none()
+                    .when(position % 2 == 1, move |style| {
+                        style.bg(rgb(theme.row_alt_bg))
+                    })
                     .child(
                         div()
                             .flex_1()
                             .min_w(px(0.0))
+                            .px_2()
                             .text_size(px(12.0))
                             .line_height(px(16.0))
                             .text_color(rgb(theme.text))
                             .child(keyword),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "user-create-server-grant-{group_key}-{position}"
+                            )))
+                            .w(px(SERVER_PRIV_CHECK_WIDTH))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.toggle_create_server_privilege(grant_key.clone(), cx)
+                            }))
+                            .child(checkbox_box(checked, theme)),
                     );
-                if dialog.catalog.deny_supported {
-                    let label = t!("user.privilege.deny").to_string();
-                    cell = cell.child(
+                if grant_option_supported {
+                    row = row.child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "user-create-server-option-{group_key}-{position}"
+                            )))
+                            .w(px(SERVER_PRIV_CHECK_WIDTH))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.toggle_create_server_grant_option(option_key.clone(), cx)
+                            }))
+                            .child(checkbox_box(option, theme)),
+                    );
+                }
+                if deny_supported {
+                    row = row.child(
                         div()
                             .id(SharedString::from(format!(
                                 "user-create-server-deny-{group_key}-{position}"
                             )))
+                            .w(px(SERVER_PRIV_CHECK_WIDTH))
                             .flex_none()
-                            .px_1()
-                            .rounded(px(3.0))
-                            .text_size(px(10.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
                             .cursor_pointer()
-                            .when(is_denied, move |style| {
-                                style.bg(rgb(theme.danger)).text_color(rgb(0xffffff))
-                            })
-                            .when(!is_denied, move |style| {
-                                style
-                                    .text_color(rgb(theme.text_muted))
-                                    .hover(move |style| style.text_color(rgb(theme.danger)))
-                            })
                             .on_click(cx.listener(move |this, _event, _window, cx| {
-                                cx.stop_propagation();
-                                this.toggle_create_server_privilege_deny(deny_key.clone(), cx);
+                                this.toggle_create_server_privilege_deny(deny_key.clone(), cx)
                             }))
-                            .child(label),
+                            .child(checkbox_box(is_denied, theme)),
                     );
                 }
-                grid = grid.child(cell);
+                rows = rows.child(row);
             }
-            groups = groups.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .w_full()
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(rgb(theme.text_muted))
-                            .child(group_label),
-                    )
-                    .child(grid),
-            );
         }
+
+        let panel = div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .border_1()
+            .border_color(rgb(theme.border))
+            .bg(rgb(theme.input_bg))
+            .overflow_hidden()
+            .child(rows);
 
         div()
             .id("user-create-server")
@@ -4003,7 +4119,7 @@ impl AppView {
                     t!("user.create.server_privileges_hint", count = checked_count),
                     t!("user.create.server_danger")
                 )),
-                groups.into_any_element(),
+                panel.into_any_element(),
                 theme,
             ))
             .into_any_element()

@@ -314,6 +314,10 @@ pub struct PrivilegeCatalog {
     /// Whether the engine has an explicit deny (`DENY` in SQL Server), which the privilege manager
     /// offers as a per-privilege toggle.
     pub deny_supported: bool,
+    /// Whether the engine distinguishes `WITH GRANT OPTION` (`GRANT ... WITH GRANT OPTION` in
+    /// SQL Server: the grantee may re-grant the privilege). The editor then shows the 含授予选项
+    /// column.
+    pub grant_option_supported: bool,
     /// The server-level securable classes the account editor offers (SQL Server's endpoints and
     /// logins), each with its grantable permissions. Empty for engines without such securables.
     pub securable_classes: Vec<SecurableClass>,
@@ -680,6 +684,9 @@ pub struct UserDetails {
     pub server_privileges: BTreeSet<PrivilegeId>,
     /// Server-wide privileges explicitly denied (SQL Server's `DENY`, which overrides a grant).
     pub denied_server_privileges: BTreeSet<PrivilegeId>,
+    /// Server-wide privileges held `WITH GRANT OPTION` (SQL Server's `state = 'W'`): the account
+    /// may re-grant them. Engines without the concept leave it empty.
+    pub grant_option_server_privileges: BTreeSet<PrivilegeId>,
     /// The object-level grants of the 权限 tab.
     pub grants: Vec<ObjectGrant>,
     /// The account's default-privileges rules (PostgreSQL's `ALTER DEFAULT PRIVILEGES`).
@@ -702,6 +709,8 @@ pub struct UserEdit {
     pub server_privileges: BTreeSet<PrivilegeId>,
     /// Server-wide privileges to explicitly deny (SQL Server).
     pub denied_server_privileges: BTreeSet<PrivilegeId>,
+    /// Server-wide privileges to hold `WITH GRANT OPTION` (SQL Server).
+    pub grant_option_server_privileges: BTreeSet<PrivilegeId>,
     pub grants: Vec<ObjectGrant>,
     /// The account's default-privileges rules to write (PostgreSQL's `ALTER DEFAULT PRIVILEGES`).
     pub default_privileges: Vec<DefaultPrivilege>,
