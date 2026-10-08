@@ -9,7 +9,7 @@
 
 use rustgrid_core::{
     BackupObjectKind, ConnectionConfig, Driver, DriverId, ObjectKind, PageRequest, Result,
-    RowInsert, RowUpdate, ViewEdit,
+    RowInsert, RowUpdate, UserAccount, UserDetails, UserEdit, ViewEdit,
 };
 use rustgrid_sqlserver::SqlServerDriver;
 
@@ -238,5 +238,239 @@ async fn round_trips_a_live_sql_server() {
             &format!("DROP TABLE IF EXISTS [dbo].[{table}]"),
         )
         .await;
+    connection.close().await.unwrap();
+}
+
+/// A `UserEdit` that carries the account's loaded state unchanged, so only what the caller sets
+/// afterwards is written.
+fn edit_from(details: &UserDetails) -> UserEdit {
+    let mut edit = empty_edit(details.account.clone());
+    edit.original = Some(details.clone());
+    edit.server_privileges = details.server_privileges.clone();
+    edit.denied_server_privileges = details.denied_server_privileges.clone();
+    edit.grants = details.grants.clone();
+    edit.default_privileges = details.default_privileges.clone();
+    edit.roles = details
+        .roles
+        .iter()
+        .map(|edge| {
+            (
+                edge.role_user.clone(),
+                edge.role_host.clone(),
+                edge.admin_option,
+            )
+        })
+        .collect();
+    edit.members = details
+        .members
+        .iter()
+        .map(|edge| {
+            (
+                edge.member_user.clone(),
+                edge.member_host.clone(),
+                edge.admin_option,
+            )
+        })
+        .collect();
+    edit
+}
+
+/// A `UserEdit` with every field except the account left empty.
+fn empty_edit(account: UserAccount) -> UserEdit {
+    use std::collections::BTreeSet;
+    UserEdit {
+        original: None,
+        account,
+        password: None,
+        server_privileges: BTreeSet::new(),
+        denied_server_privileges: BTreeSet::new(),
+        grants: Vec::new(),
+        default_privileges: Vec::new(),
+        roles: Vec::new(),
+        members: Vec::new(),
+        mappings: Vec::new(),
+        original_mappings: Vec::new(),
+        old_password: None,
+        securables: Vec::new(),
+        original_securables: Vec::new(),
+    }
+}
+
+/// Exercises the SQL Server account features added for the Navicat-parity work: the full login
+/// attribute set, 用户映射 (database user + database role) and 登录权限 (a securable grant).
+#[tokio::test]
+#[ignore = "requires a live SQL Server (RUSTGRID_SQLSERVER_*)"]
+async fn manages_a_login_with_mapping_and_securables() {
+    use rustgrid_core::PrivilegeId;
+    use std::collections::BTreeSet;
+
+    let config = config();
+    let database = config
+        .database
+        .clone()
+        .unwrap_or_else(|| "master".to_string());
+    let connection = SqlServerDriver::new()
+        .connect(&config)
+        .await
+        .expect("connect");
+    let login = "rustgrid_live_login";
+
+    // Clean any leftovers from a previous run.
+    let _ = connection
+        .execute_query(
+            Some(&database),
+            &format!(
+                "IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'{login}') \
+                 DROP USER [{login}]"
+            ),
+        )
+        .await;
+    let _ = connection
+        .execute_query(
+            None,
+            &format!("IF SUSER_ID(N'{login}') IS NOT NULL DROP LOGIN [{login}]"),
+        )
+        .await;
+
+    // Create the login with the new attributes, then read them back.
+    let account = UserAccount {
+        user: login.to_string(),
+        login_type: "SQL Server".to_string(),
+        default_database: database.clone(),
+        check_policy: false,
+        check_expiration: false,
+        ..Default::default()
+    };
+    let mut edit = empty_edit(account);
+    edit.password = Some("Str0ng!passw0rd".to_string());
+    connection.save_user(&edit).await.expect("create login");
+
+    let details = connection
+        .user_details(login, "")
+        .await
+        .expect("load login");
+    assert_eq!(details.account.login_type, "SQL Server");
+    assert_eq!(details.account.default_database, database);
+    assert!(!details.account.check_policy);
+    assert!(details.account.password_set);
+
+    // 用户映射: map the login into the database with db_datareader.
+    let before = connection.user_mappings(login, "").await.expect("mappings");
+    assert!(before.iter().any(|mapping| mapping.database == database));
+    let mut after = before.clone();
+    for mapping in &mut after {
+        if mapping.database == database {
+            mapping.mapped = true;
+            mapping.user_name = login.to_string();
+            mapping.default_schema = "dbo".to_string();
+            mapping.roles = ["db_datareader".to_string()].into_iter().collect();
+        }
+    }
+    let mut edit = edit_from(&details);
+    edit.mappings = after;
+    edit.original_mappings = before;
+    connection.save_user(&edit).await.expect("map login");
+
+    let mapped = connection
+        .user_mappings(login, "")
+        .await
+        .expect("mappings after");
+    let row = mapped
+        .iter()
+        .find(|mapping| mapping.database == database)
+        .expect("the mapped database");
+    assert!(row.mapped);
+    assert_eq!(row.user_name, login);
+    assert!(row.roles.contains("db_datareader"), "{:?}", row.roles);
+
+    // 登录权限: grant IMPERSONATE on the sa login.
+    let before = connection
+        .user_securables(login, "")
+        .await
+        .expect("securables");
+    assert!(before.iter().any(|entry| entry.class == "ENDPOINT"));
+    assert!(
+        before
+            .iter()
+            .any(|entry| entry.class == "LOGIN" && entry.name == "sa")
+    );
+    let mut after = before.clone();
+    for entry in &mut after {
+        if entry.class == "LOGIN" && entry.name == "sa" {
+            entry.privileges.insert(PrivilegeId::new("IMPERSONATE"));
+        }
+    }
+    let details = connection
+        .user_details(login, "")
+        .await
+        .expect("reload login");
+    let mut edit = edit_from(&details);
+    edit.securables = after;
+    edit.original_securables = before;
+    connection
+        .save_user(&edit)
+        .await
+        .expect("grant impersonate");
+
+    let after = connection
+        .user_securables(login, "")
+        .await
+        .expect("securables after");
+    let sa = after
+        .iter()
+        .find(|entry| entry.class == "LOGIN" && entry.name == "sa")
+        .expect("the sa login row");
+    assert!(
+        sa.privileges.contains(&PrivilegeId::new("IMPERSONATE")),
+        "{:?}",
+        sa.privileges
+    );
+
+    // 服务器权限: grant VIEW SERVER STATE (also requires the master context).
+    let details = connection
+        .user_details(login, "")
+        .await
+        .expect("reload for server privilege");
+    let mut edit = edit_from(&details);
+    edit.server_privileges
+        .insert(PrivilegeId::new("VIEW SERVER STATE"));
+    connection
+        .save_user(&edit)
+        .await
+        .expect("grant server privilege");
+    let details = connection
+        .user_details(login, "")
+        .await
+        .expect("reload after server privilege");
+    assert!(
+        details
+            .server_privileges
+            .contains(&PrivilegeId::new("VIEW SERVER STATE")),
+        "{:?}",
+        details.server_privileges
+    );
+
+    // Cleanup: unmap, then drop the login (its securable grants go with it).
+    let details = connection
+        .user_details(login, "")
+        .await
+        .expect("reload cleanup");
+    let before = connection
+        .user_mappings(login, "")
+        .await
+        .expect("mappings cleanup");
+    let mut after = before.clone();
+    for mapping in &mut after {
+        if mapping.database == database {
+            mapping.mapped = false;
+            mapping.roles = BTreeSet::new();
+        }
+    }
+    let mut edit = edit_from(&details);
+    edit.mappings = after;
+    edit.original_mappings = before;
+    connection.save_user(&edit).await.expect("unmap login");
+    connection.drop_user(login, "").await.expect("drop login");
+
     connection.close().await.unwrap();
 }

@@ -407,7 +407,7 @@ pub(crate) async fn user_securables(
         .run(
             None,
             "SELECT name FROM sys.server_principals \
-             WHERE type IN ('S', 'U', 'G') AND principal_id > 4 ORDER BY name",
+             WHERE type IN ('S', 'U', 'G') ORDER BY name",
             &[],
         )
         .await?;
@@ -863,8 +863,8 @@ fn create_mapping_user_statement(user: &str, login: &str) -> String {
     let user_literal = quote_literal(user);
     let login_literal = quote_literal(login);
     format!(
-        "IF SUSER_ID(N{login_literal}) IS NOT NULL AND NOT EXISTS \
-         (SELECT 1 FROM sys.database_principals WHERE name = N{user_literal}) \
+        "IF SUSER_ID({login_literal}) IS NOT NULL AND NOT EXISTS \
+         (SELECT 1 FROM sys.database_principals WHERE name = {user_literal}) \
          CREATE USER {user_name} FOR LOGIN {login_name}"
     )
 }
@@ -1031,8 +1031,9 @@ pub(crate) fn user_edit_groups(edit: &UserEdit) -> Vec<(UserEditSection, Vec<Str
         ),
         (UserEditSection::ObjectGrants, grant_statements(edit)),
         (UserEditSection::Roles, role_statements(edit)),
-        (UserEditSection::UserMapping, mapping_statements(edit)),
         (UserEditSection::Securables, securable_statements(edit)),
+        // The per-database 用户映射 runs last: its `USE [db]` must not leak into a later group.
+        (UserEditSection::UserMapping, mapping_statements(edit)),
     ] {
         if !statements.is_empty() {
             groups.push((section, statements));
@@ -1042,11 +1043,17 @@ pub(crate) fn user_edit_groups(edit: &UserEdit) -> Vec<(UserEditSection, Vec<Str
 }
 
 pub(crate) fn user_edit_sql(edit: &UserEdit) -> String {
-    user_edit_groups(edit)
+    let statements: Vec<String> = user_edit_groups(edit)
         .into_iter()
         .flat_map(|(_, statements)| statements)
-        .collect::<Vec<_>>()
-        .join(";\n")
+        .collect();
+    if statements.is_empty() {
+        return String::new();
+    }
+    // Server-scope logins/permissions (and `ALTER SERVER ROLE`) are only valid in `master`; the
+    // connection's default database may be a user database, so pin the script to master. The
+    // 用户映射 group's own `USE [db]` switches context per database afterwards.
+    format!("USE [master];\n{}", statements.join(";\n"))
 }
 
 pub(crate) async fn save_user(connection: &SqlServerConnection, edit: &UserEdit) -> Result<()> {
@@ -1317,8 +1324,8 @@ fn create_user_statement(database: &str, login: &str) -> String {
     let name = quote_identifier(login);
     let literal = quote_literal(login);
     format!(
-        "IF SUSER_ID(N{literal}) IS NOT NULL AND NOT EXISTS \
-         (SELECT 1 FROM {db}.sys.database_principals WHERE name = N{literal}) \
+        "IF SUSER_ID({literal}) IS NOT NULL AND NOT EXISTS \
+         (SELECT 1 FROM {db}.sys.database_principals WHERE name = {literal}) \
          CREATE USER {name} FOR LOGIN {name}"
     )
 }
@@ -1497,6 +1504,23 @@ mod tests {
                 "REVOKE CONTROL SERVER FROM [sa]",
                 "DENY CONTROL SERVER TO [sa]",
             ]
+        );
+    }
+
+    #[test]
+    fn guarded_create_user_uses_a_single_n_prefix() {
+        // `quote_literal` already prepends `N`; adding another yields `NN'...'` and a syntax error.
+        assert_eq!(
+            create_mapping_user_statement("bob", "bob"),
+            "IF SUSER_ID(N'bob') IS NOT NULL AND NOT EXISTS \
+             (SELECT 1 FROM sys.database_principals WHERE name = N'bob') \
+             CREATE USER [bob] FOR LOGIN [bob]"
+        );
+        assert_eq!(
+            create_user_statement("shop", "bob"),
+            "IF SUSER_ID(N'bob') IS NOT NULL AND NOT EXISTS \
+             (SELECT 1 FROM [shop].sys.database_principals WHERE name = N'bob') \
+             CREATE USER [bob] FOR LOGIN [bob]"
         );
     }
 
