@@ -17,7 +17,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.0.1"
 edition = "2024"
 rust-version = "1.94"
 license = "Apache-2.0"
@@ -71,6 +71,19 @@ calamine = { version = "0.36", default-features = false, features = ["dates"] }
 encoding_rs = "0.8"
 dtparse = "2"
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+# GitHub-Releases self-update: detection, download of the portable archive for the running target,
+# in-place replacement and relaunch. Uses ureq (blocking, rustls) instead of the default reqwest
+# client to keep the dependency tree small.
+self_update = { version = "1.3", default-features = false, features = [
+    "github",
+    "ureq",
+    "rustls",
+    "native-certs",
+    "archive-zip",
+    "compression-zip-deflate",
+    "archive-tar",
+    "compression-tar-gz",
+] }
 chacha20poly1305 = "0.11"
 base64 = "0.22"
 russh = { version = "0.63", default-features = false, features = ["ring", "rsa"] }

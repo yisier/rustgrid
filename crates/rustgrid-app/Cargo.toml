@@ -40,6 +40,7 @@ tracing-subscriber.workspace = true
 rfd.workspace = true
 directories.workspace = true
 sys-locale.workspace = true
+self_update.workspace = true
 
 [features]
 # The generic ODBC driver is on by default: it loads the ODBC driver manager at runtime, so it

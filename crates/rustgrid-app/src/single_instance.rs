@@ -19,21 +19,44 @@ pub fn acquire() -> Option<Guard> {
 
 #[cfg(target_os = "windows")]
 mod imp {
-    use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
+    use std::time::Duration;
+
+    use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError};
     use windows::Win32::System::Threading::CreateMutexW;
     use windows::core::w;
 
     pub(super) struct Inner;
 
     pub(super) fn acquire() -> Option<Inner> {
-        // A global name; the handle is deliberately never closed, so the mutex lives for the whole
-        // process (the OS releases it on exit).
-        unsafe {
-            match CreateMutexW(None, false, w!("RustGrid.SingleInstance")) {
-                Ok(_handle) => (GetLastError() != ERROR_ALREADY_EXISTS).then_some(Inner),
-                // If the mutex cannot be created for any reason, fail open and let the app run.
-                Err(_) => Some(Inner),
+        // A process relaunched by the updater retries briefly: the instance it replaced may not have
+        // exited and released the mutex yet.
+        let attempts = attempts();
+        for _ in 0..attempts {
+            // A global name; on success the handle is deliberately never closed, so the mutex lives
+            // for the whole process (the OS releases it on exit).
+            unsafe {
+                match CreateMutexW(None, false, w!("RustGrid.SingleInstance")) {
+                    Ok(handle) => {
+                        if GetLastError() != ERROR_ALREADY_EXISTS {
+                            return Some(Inner);
+                        }
+                        // Another instance owns the mutex: drop our reference and wait for it.
+                        let _ = CloseHandle(handle);
+                    }
+                    // If the mutex cannot be created for any reason, fail open and let the app run.
+                    Err(_) => return Some(Inner),
+                }
             }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        None
+    }
+
+    fn attempts() -> u32 {
+        if std::env::var_os("RUSTGRID_RESTARTED").is_some() {
+            100
+        } else {
+            1
         }
     }
 }
@@ -42,6 +65,7 @@ mod imp {
 mod imp {
     use std::fs::{File, OpenOptions};
     use std::os::fd::AsRawFd;
+    use std::time::Duration;
 
     pub(super) struct Inner {
         _file: Option<File>,
@@ -49,18 +73,33 @@ mod imp {
 
     pub(super) fn acquire() -> Option<Inner> {
         let path = std::env::temp_dir().join("rustgrid.single-instance.lock");
-        let file = match OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-        {
-            Ok(file) => file,
-            // Cannot open the lock file: fail open rather than locking the user out.
-            Err(_) => return Some(Inner { _file: None }),
+        // A process relaunched by the updater retries briefly: the instance it replaced may not have
+        // exited and released the lock yet.
+        let attempts = if std::env::var_os("RUSTGRID_RESTARTED").is_some() {
+            100
+        } else {
+            1
         };
-        // A non-blocking exclusive lock; the OS drops it when the process exits.
-        let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
-        locked.then_some(Inner { _file: Some(file) })
+        for _ in 0..attempts {
+            let file = match OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path)
+            {
+                Ok(file) => file,
+                // Cannot open the lock file: fail open rather than locking the user out.
+                Err(_) => return Some(Inner { _file: None }),
+            };
+            // A non-blocking exclusive lock; the OS drops it when the process exits.
+            let locked =
+                unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
+            if locked {
+                return Some(Inner { _file: Some(file) });
+            }
+            drop(file);
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        None
     }
 }

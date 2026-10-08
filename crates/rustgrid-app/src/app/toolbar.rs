@@ -80,6 +80,7 @@ impl AppView {
                         theme,
                         |_event, _window, _cx| open_in_browser(GITHUB_URL),
                     ))
+                    .child(self.titlebar_update_button(theme, cx))
                     .child(titlebar_icon_button(
                         "titlebar-settings",
                         "icons/gear.svg",

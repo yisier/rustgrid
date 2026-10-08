@@ -463,7 +463,7 @@ impl AppView {
             .into_any_element()
     }
 
-    /// The left navigation: 常规 and 编辑器.
+    /// The left navigation: 常规, 编辑器 and 关于.
     fn options_nav(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
         div()
@@ -499,12 +499,25 @@ impl AppView {
                     cx.notify();
                 })),
             )
+            .child(
+                self.options_category_row(
+                    "options-about",
+                    t!("options.about").to_string(),
+                    self.options_section == OptionsSection::About,
+                    true,
+                )
+                .on_click(cx.listener(|this, _event, _window, cx| {
+                    this.options_section = OptionsSection::About;
+                    cx.notify();
+                })),
+            )
     }
 
     fn options_body(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         match self.options_section {
             OptionsSection::General => self.options_general_body(cx).into_any_element(),
             OptionsSection::Editor => self.options_editor_body(cx).into_any_element(),
+            OptionsSection::About => self.options_about_body(cx).into_any_element(),
         }
     }
 

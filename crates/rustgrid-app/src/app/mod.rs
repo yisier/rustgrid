@@ -1389,6 +1389,7 @@ const NO_LIMIT_PAGE_SIZE: u64 = 1_000_000;
 enum OptionsSection {
     General,
     Editor,
+    About,
 }
 
 pub struct AppView {
@@ -1605,6 +1606,12 @@ pub struct AppView {
     options_window: Option<WindowHandle<gpui_kit::component::Root>>,
     /// Focus target for the Options window, so ESC works before any control is focused.
     options_focus: FocusHandle,
+    /// Update-check state, driving the titlebar update button and the 关于 page.
+    update_status: update::UpdateStatus,
+    /// The newest release's version, once a check has found one.
+    update_version: Option<String>,
+    /// Whether the once-per-launch startup update check has been kicked off.
+    update_checked: bool,
     /// Last data revision handed to the cached `TreePane` / `TabBar`, so they re-render only when
     /// what they read from `AppView` actually changed (they are embedded with `.cached`, which
     /// otherwise freezes them until they are explicitly notified).
@@ -1761,6 +1768,7 @@ mod tabs;
 mod toolbar;
 mod tree;
 mod ui;
+mod update;
 mod user;
 mod user_create;
 mod view;
@@ -2046,6 +2054,9 @@ impl AppView {
             editor_size_combo: None,
             options_window: None,
             options_focus: cx.focus_handle(),
+            update_status: update::UpdateStatus::Idle,
+            update_version: None,
+            update_checked: false,
             tree_revision: 0,
             tab_revision: 0,
             sidebar_host,
@@ -2900,6 +2911,12 @@ impl Render for AppView {
         self.sync_editor_combos(cx);
         self.sync_info(cx);
         self.sync_users(cx);
+        // Check for a newer release once per launch. The result only becomes visible if there is
+        // one (a titlebar button) or the user opens 选项 → 关于.
+        if !self.update_checked {
+            self.update_checked = true;
+            self.check_for_updates(false, cx);
+        }
         // Remember the main window so closing it can take the Backup/Restore window with it.
         if self.main_window_id.is_none() {
             self.main_window_id = Some(window.window_handle().window_id());

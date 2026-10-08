@@ -1,0 +1,176 @@
+# Build and publish the portable RustGrid release archives when a `v*` tag is pushed.
+#
+# Produces five assets, one per platform/arch (the names MUST contain the `platform` tag the app
+# looks for in `crates/rustgrid-app/src/app/update.rs`):
+#
+#   RustGrid-<version>-windows-x64.zip
+#   RustGrid-<version>-windows-arm64.zip
+#   RustGrid-<version>-macos-arm64.tar.gz
+#   RustGrid-<version>-linux-x64.tar.gz
+#   RustGrid-<version>-linux-arm64.tar.gz
+#
+# Each archive holds the single self-contained executable at its root (`RustGrid.exe` on Windows,
+# `RustGrid` elsewhere). Windows executables are UPX-compressed (only Windows: UPX would break
+# macOS code signing, and Linux binaries are left as shipped). The tag's version must equal the
+# workspace `Cargo.toml` version, otherwise the release job fails — the app reports its own
+# `CARGO_PKG_VERSION` to the updater, so a mismatch would make it miss or mis-install updates.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  # Allow a manual run from the Actions tab (builds the archives without publishing a release).
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  UPX_VERSION: "4.2.4"
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform: windows-x64
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            platform: windows-arm64
+          - os: macos-14
+            target: aarch64-apple-darwin
+            platform: macos-arm64
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            platform: linux-x64
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            platform: linux-arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # GPUI on Linux needs X11/Wayland/xkbcommon/fontconfig development headers at build time.
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev \
+            libx11-dev libx11-xcb-dev libxcb1-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-xkb-dev \
+            libfontconfig1-dev libfreetype6-dev \
+            libxcursor-dev \
+            pkg-config
+
+      # Release builds compile GPUI's HLSL shaders, which needs `fxc.exe` from the Windows SDK.
+      # Point the build script at it explicitly (the Windows SDK is installed on the runner).
+      - name: Locate fxc.exe
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $roots = @(
+            "${env:ProgramFiles(x86)}\Windows Kits\10\bin",
+            "$env:ProgramFiles\Windows Kits\10\bin"
+          )
+          $fxc = $null
+          foreach ($root in $roots) {
+            if (Test-Path $root) {
+              $found = Get-ChildItem -Path $root -Filter fxc.exe -Recurse -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+              if ($found) { $fxc = $found.FullName; break }
+            }
+          }
+          if (-not $fxc) { throw "fxc.exe was not found in the Windows SDK" }
+          Write-Host "Using fxc: $fxc"
+          "GPUI_FXC_PATH=$fxc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }} -p rustgrid-app
+
+      # UPX only on Windows; macOS/Linux binaries are shipped as built.
+      - name: Compress with UPX (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $url = "https://github.com/upx/upx/releases/download/v$env:UPX_VERSION/upx-$env:UPX_VERSION-win64.zip"
+          Invoke-WebRequest -Uri $url -OutFile upx.zip
+          Expand-Archive -Path upx.zip -DestinationPath upx-tool
+          $upx = (Get-ChildItem upx-tool -Recurse -Filter upx.exe | Select-Object -First 1).FullName
+          & $upx --best --lzma "target/${{ matrix.target }}/release/RustGrid.exe"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ver = $env:GITHUB_REF_NAME -replace '^v', ''
+          $name = "RustGrid-$ver-${{ matrix.platform }}.zip"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/RustGrid.exe" -DestinationPath $name
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          name="RustGrid-${ver}-${{ matrix.platform }}.tar.gz"
+          tar -czf "$name" -C "target/${{ matrix.target }}/release" RustGrid
+          ls -lh "$name"
+
+      - name: Upload archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: RustGrid-${{ matrix.platform }}
+          path: RustGrid-*
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    # Only publish for version tags; a manual run just produces the downloadable artifacts.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Fail early when the tag and the workspace version disagree (they feed the updater).
+      - name: Check version matches the tag
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          cargo_version=$(sed -n '/^\[workspace.package\]/,/^\[/p' Cargo.toml \
+            | grep -m1 '^version' | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "tag=$tag cargo=$cargo_version"
+          if [ "$tag" != "$cargo_version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match the workspace version $cargo_version"
+            exit 1
+          fi
+
+      - name: Download archives
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          draft: false
+          prerelease: false
