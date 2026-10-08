@@ -39,6 +39,10 @@ const CREATE_DB_LIST_MAX_WIDTH: f32 = 480.0;
 const CREATE_DEFAULT_SCHEMA_WIDTH: f32 = 190.0;
 /// Max height of the 默认权限 section's grantee list before it scrolls.
 const CREATE_DEFAULT_LIST_MAX_HEIGHT: f32 = 180.0;
+/// Width of the server-securables matrix's name column.
+const SECURABLE_NAME_WIDTH: f32 = 180.0;
+/// Width of one server-securables permission column.
+const SECURABLE_COL_WIDTH: f32 = 104.0;
 
 /// The 密码过期策略 choice, mapped to [`UserAccount::password_lifetime`].
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1064,6 +1068,36 @@ fn check_row(
         )
 }
 
+/// The tri-state marker for one server-securable permission: empty (none), a check (granted) or a
+/// red `×` (denied). Clicking the cell cycles through them, so the checkbox stays centered under
+/// its column header.
+fn securable_state_box(checked: bool, denied: bool, theme: Theme) -> AnyElement {
+    if denied {
+        let foreground = if theme.is_dark() {
+            theme.window_bg
+        } else {
+            0xffffff
+        };
+        div()
+            .w(px(14.0))
+            .h(px(14.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(3.0))
+            .border_1()
+            .border_color(rgb(theme.danger))
+            .bg(rgb(theme.danger))
+            .text_color(rgb(foreground))
+            .text_size(px(11.0))
+            .child("×".to_string())
+            .into_any_element()
+    } else {
+        checkbox_box(checked, theme).into_any_element()
+    }
+}
+
 // ----- Window --------------------------------------------------------------------------------
 
 /// The root view of the user-account OS window. It re-renders whenever `AppView` changes, so the
@@ -2055,9 +2089,8 @@ impl AppView {
         cx.notify();
     }
 
-    /// Toggle one permission of one server securable row. Granting clears any deny of the same
-    /// permission.
-    pub(super) fn toggle_create_securable(
+    /// Cycle one server-securable permission: none → granted → denied → none.
+    pub(super) fn cycle_create_securable(
         &mut self,
         index: usize,
         privilege: PrivilegeId,
@@ -2066,31 +2099,12 @@ impl AppView {
         if let Some(dialog) = self.create_user_dialog.as_mut()
             && let Some(row) = dialog.securables.get_mut(index)
         {
-            if row.privileges.contains(&privilege) {
-                row.privileges.remove(&privilege);
+            if row.privileges.remove(&privilege) {
+                row.denied.insert(privilege);
+            } else if row.denied.remove(&privilege) {
+                // Denied → none: nothing left to record.
             } else {
-                row.privileges.insert(privilege.clone());
-                row.denied.remove(&privilege);
-            }
-        }
-        cx.notify();
-    }
-
-    /// Toggle the explicit deny of one server securable permission. Denying clears any grant.
-    pub(super) fn toggle_create_securable_deny(
-        &mut self,
-        index: usize,
-        privilege: PrivilegeId,
-        cx: &mut Context<'_, Self>,
-    ) {
-        if let Some(dialog) = self.create_user_dialog.as_mut()
-            && let Some(row) = dialog.securables.get_mut(index)
-        {
-            if row.denied.contains(&privilege) {
-                row.denied.remove(&privilege);
-            } else {
-                row.denied.insert(privilege.clone());
-                row.privileges.remove(&privilege);
+                row.privileges.insert(privilege);
             }
         }
         cx.notify();
@@ -5306,7 +5320,7 @@ impl AppView {
         let privileges = class.privileges.clone();
         let class_keyword = class.class.clone();
         let title = catalog_label(&class.label_key, &class.label);
-        let deny_supported = dialog.catalog.deny_supported;
+        let cell_hint = t!("user.securables.cell_hint").to_string();
 
         let mut header = div()
             .flex()
@@ -5320,14 +5334,16 @@ impl AppView {
             .text_size(px(11.0))
             .child(
                 div()
-                    .w(px(220.0))
+                    .w(px(SECURABLE_NAME_WIDTH))
+                    .flex_none()
                     .px_2()
                     .child(t!("user.securables.name").to_string()),
             );
         for privilege in &privileges {
             header = header.child(
                 div()
-                    .w(px(120.0))
+                    .w(px(SECURABLE_COL_WIDTH))
+                    .flex_none()
                     .flex()
                     .justify_center()
                     .child(privilege.as_str().to_string()),
@@ -5358,62 +5374,47 @@ impl AppView {
                 })
                 .child(
                     div()
-                        .w(px(220.0))
+                        .w(px(SECURABLE_NAME_WIDTH))
+                        .flex_none()
                         .px_2()
                         .flex()
                         .flex_row()
                         .items_center()
                         .gap_2()
                         .child(tree_icon("icons/user.svg", theme.icon_users))
-                        .child(div().text_size(px(12.0)).child(name)),
+                        .child(
+                            div()
+                                .min_w(px(0.0))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_size(px(12.0))
+                                .child(name),
+                        ),
                 );
             for (column, privilege) in privileges.iter().enumerate() {
                 let checked = row.privileges.contains(privilege);
                 let denied = row.denied.contains(privilege);
-                let grant_key = privilege.clone();
-                let deny_key = privilege.clone();
-                let mut cell = div()
-                    .id(SharedString::from(format!(
-                        "user-create-securable-{class_id}-{position}-{column}"
-                    )))
-                    .w(px(120.0))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_center()
-                    .gap_1()
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.toggle_create_securable(row_index, grant_key.clone(), cx)
-                    }))
-                    .child(checkbox_box(checked, theme));
-                if deny_supported {
-                    let label = t!("user.privilege.deny").to_string();
-                    cell = cell.child(
-                        div()
-                            .id(SharedString::from(format!(
-                                "user-create-securable-deny-{class_id}-{position}-{column}"
-                            )))
-                            .px_1()
-                            .rounded(px(3.0))
-                            .text_size(px(10.0))
-                            .cursor_pointer()
-                            .when(denied, move |style| {
-                                style.bg(rgb(theme.danger)).text_color(rgb(0xffffff))
-                            })
-                            .when(!denied, move |style| {
-                                style
-                                    .text_color(rgb(theme.text_muted))
-                                    .hover(move |style| style.text_color(rgb(theme.danger)))
-                            })
-                            .on_click(cx.listener(move |this, _event, _window, cx| {
-                                cx.stop_propagation();
-                                this.toggle_create_securable_deny(row_index, deny_key.clone(), cx);
-                            }))
-                            .child(label),
-                    );
-                }
-                entry = entry.child(cell);
+                let cycle_key = privilege.clone();
+                let description = cell_hint.clone();
+                entry = entry.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "user-create-securable-{class_id}-{position}-{column}"
+                        )))
+                        .w(px(SECURABLE_COL_WIDTH))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .tooltip(move |_, cx| {
+                            cx.new(|_| PrivilegeTooltip(description.clone())).into()
+                        })
+                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                            this.cycle_create_securable(row_index, cycle_key.clone(), cx)
+                        }))
+                        .child(securable_state_box(checked, denied, theme)),
+                );
             }
             rows = rows.child(entry);
         }
@@ -5440,7 +5441,11 @@ impl AppView {
 
         section(
             title,
-            Some(t!("user.securables.hint", count = shown).to_string()),
+            Some(format!(
+                "{} · {}",
+                t!("user.securables.hint", count = shown),
+                t!("user.securables.cell_hint")
+            )),
             div()
                 .flex()
                 .flex_col()
