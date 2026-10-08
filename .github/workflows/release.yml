@@ -10,10 +10,11 @@
 #   RustGrid-<version>-linux-arm64.tar.gz
 #
 # Each archive holds the single self-contained executable at its root (`RustGrid.exe` on Windows,
-# `RustGrid` elsewhere). Windows executables are UPX-compressed (only Windows: UPX would break
-# macOS code signing, and Linux binaries are left as shipped). The tag's version must equal the
-# workspace `Cargo.toml` version, otherwise the release job fails — the app reports its own
-# `CARGO_PKG_VERSION` to the updater, so a mismatch would make it miss or mis-install updates.
+# `RustGrid` elsewhere). Only the Windows x64 executable is UPX-compressed: UPX would break macOS
+# code signing, has no win64/arm64 support, and Linux binaries are left as shipped. The tag's
+# version must equal the workspace `Cargo.toml` version, otherwise the release job fails — the app
+# reports its own `CARGO_PKG_VERSION` to the updater, so a mismatch would make it miss or mis-install
+# updates.
 name: Release
 
 on:
@@ -82,32 +83,34 @@ jobs:
 
       # Release builds compile GPUI's HLSL shaders, which needs `fxc.exe` from the Windows SDK.
       # Point the build script at it explicitly (the Windows SDK is installed on the runner).
+      # `fxc.exe` must match the runner's architecture: an arm64 fxc cannot run on an x64 runner
+      # (and vice versa). Prefer the host-arch build, then fall back to any.
       - name: Locate fxc.exe
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          $arch = if ($env:RUNNER_ARCH -eq 'ARM64') { 'arm64' } else { 'x64' }
           $roots = @(
             "${env:ProgramFiles(x86)}\Windows Kits\10\bin",
             "$env:ProgramFiles\Windows Kits\10\bin"
           )
-          $fxc = $null
-          foreach ($root in $roots) {
+          $candidates = foreach ($root in $roots) {
             if (Test-Path $root) {
-              $found = Get-ChildItem -Path $root -Filter fxc.exe -Recurse -ErrorAction SilentlyContinue |
-                Select-Object -First 1
-              if ($found) { $fxc = $found.FullName; break }
+              Get-ChildItem -Path $root -Filter fxc.exe -Recurse -ErrorAction SilentlyContinue
             }
           }
+          $fxc = $candidates | Where-Object { $_.FullName -match "\\$arch\\fxc\.exe$" } | Select-Object -First 1
+          if (-not $fxc) { $fxc = $candidates | Select-Object -First 1 }
           if (-not $fxc) { throw "fxc.exe was not found in the Windows SDK" }
-          Write-Host "Using fxc: $fxc"
-          "GPUI_FXC_PATH=$fxc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Using fxc ($arch): $($fxc.FullName)"
+          "GPUI_FXC_PATH=$($fxc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }} -p rustgrid-app
 
-      # UPX only on Windows; macOS/Linux binaries are shipped as built.
-      - name: Compress with UPX (Windows)
-        if: runner.os == 'Windows'
+      # UPX only on Windows x64: UPX has no win64/arm64 support, and macOS/Linux ship as built.
+      - name: Compress with UPX (Windows x64)
+        if: runner.os == 'Windows' && matrix.platform == 'windows-x64'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
