@@ -325,7 +325,26 @@ impl AppView {
                 let di = *database_index;
                 let schema = schema.clone();
                 let new_query_schema = schema.clone();
+                let open_schema_name = schema.clone();
+                let close_schema_name = schema.clone();
                 items = items
+                    .child(self.context_item(
+                        "schema-open",
+                        t!("database.open_schema").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.open_schema(ci, di, open_schema_name.clone(), cx);
+                        }),
+                    ))
+                    .child(self.context_item(
+                        "schema-close",
+                        t!("database.close_schema").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.close_schema(ci, di, close_schema_name.clone(), cx);
+                        }),
+                    ))
+                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
                     .child(self.context_item(
                         "schema-new",
                         t!("database.new_schema").to_string(),

@@ -441,6 +441,7 @@ impl AppView {
                                                 expanded: existing.expanded,
                                                 categories: existing.categories,
                                                 expanded_schemas: existing.expanded_schemas,
+                                                opened_schemas: existing.opened_schemas,
                                                 schemas: existing.schemas,
                                             }
                                         } else {
@@ -453,6 +454,7 @@ impl AppView {
                                                 expanded: false,
                                                 categories: Default::default(),
                                                 expanded_schemas: Default::default(),
+                                                opened_schemas: Default::default(),
                                                 schemas: None,
                                             }
                                         }
@@ -705,6 +707,124 @@ impl AppView {
             && !database.expanded_schemas.insert(schema.clone())
         {
             database.expanded_schemas.remove(&schema);
+        }
+        cx.notify();
+    }
+
+    /// Open a schema (SQL Server): highlight its tree node, load the database's objects if needed
+    /// and show the schema's objects in the content pane.
+    pub(super) fn open_schema(
+        &mut self,
+        connection_index: usize,
+        database_index: usize,
+        schema: String,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let mut should_load = false;
+        let mut should_load_routines = false;
+        let mut should_load_schemas = false;
+        let supports_routines = self.driver_supports(connection_index, DriverCapability::Routines);
+        let supports_schemas = self.driver_supports(connection_index, DriverCapability::Schemas);
+
+        if let Some(node) = self.connections.get_mut(connection_index)
+            && let Loadable::Loaded(databases) = &mut node.databases
+            && let Some(database) = databases.get_mut(database_index)
+        {
+            database.opened = true;
+            database.expanded = true;
+            database.opened_schemas.insert(schema.clone());
+            database.expanded_schemas.insert(schema.clone());
+            if matches!(database.tables, Loadable::Idle | Loadable::Failed(_)) {
+                should_load = true;
+            }
+            if supports_routines
+                && matches!(database.routines, Loadable::Idle | Loadable::Failed(_))
+            {
+                should_load_routines = true;
+            }
+            if supports_schemas
+                && (database.schemas.is_none()
+                    || matches!(database.schemas, Some(Loadable::Idle | Loadable::Failed(_))))
+            {
+                should_load_schemas = true;
+            }
+        }
+
+        if should_load
+            && let Some(connection) = self.connection_arc(connection_index)
+            && let Some(database_name) = self.database_name(connection_index, database_index)
+        {
+            self.load_tables(
+                connection_index,
+                database_index,
+                connection,
+                database_name,
+                cx,
+            );
+        }
+        if should_load_routines
+            && let Some(connection) = self.connection_arc(connection_index)
+            && let Some(database_name) = self.database_name(connection_index, database_index)
+        {
+            self.load_routines(
+                connection_index,
+                database_index,
+                connection,
+                database_name,
+                cx,
+            );
+        }
+        if should_load_schemas
+            && let Some(connection) = self.connection_arc(connection_index)
+            && let Some(database_name) = self.database_name(connection_index, database_index)
+        {
+            self.load_schemas(
+                connection_index,
+                database_index,
+                connection,
+                database_name,
+                cx,
+            );
+        }
+
+        let category = match self.main_tab {
+            MainTab::Views => Category::Views,
+            MainTab::Functions if supports_routines => Category::Functions,
+            MainTab::Queries => Category::Queries,
+            _ => Category::Tables,
+        };
+        self.open_object_pane(connection_index, database_index, Some(schema), category, cx);
+        self.clear_object_search(cx);
+        self.active_grid = None;
+        self.active_query = None;
+        self.active_design = None;
+        cx.notify();
+    }
+
+    /// Close a schema (SQL Server): un-highlight it, collapse it and clear the content pane when it
+    /// was showing this schema.
+    pub(super) fn close_schema(
+        &mut self,
+        connection_index: usize,
+        database_index: usize,
+        schema: String,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(node) = self.connections.get_mut(connection_index)
+            && let Loadable::Loaded(databases) = &mut node.databases
+            && let Some(database) = databases.get_mut(database_index)
+        {
+            database.opened_schemas.remove(&schema);
+            database.expanded_schemas.remove(&schema);
+        }
+        let showing_schema = self.object_pane.as_ref().is_some_and(|pane| {
+            let pane = pane.read(cx);
+            pane.connection_index == connection_index
+                && pane.database_index == database_index
+                && pane.schema.as_deref() == Some(schema.as_str())
+        });
+        if showing_schema {
+            self.object_pane = None;
         }
         cx.notify();
     }

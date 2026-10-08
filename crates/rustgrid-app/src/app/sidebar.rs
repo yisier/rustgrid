@@ -41,6 +41,7 @@ struct TreeDatabase {
     /// objects are not schema-qualified (MySQL/SQLite), which then render categories directly.
     schemas: Vec<String>,
     expanded_schemas: BTreeSet<String>,
+    opened_schemas: BTreeSet<String>,
 }
 
 #[derive(Clone)]
@@ -183,6 +184,7 @@ fn snapshot_connections(app: &AppView) -> Vec<TreeConnection> {
                                 routines,
                                 schemas,
                                 expanded_schemas: database.expanded_schemas.clone(),
+                                opened_schemas: database.opened_schemas.clone(),
                             }
                         })
                         .collect(),
@@ -659,7 +661,14 @@ impl TreePane {
                 }),
             )
             .child(tree_chevron(expanded, theme.chevron))
-            .child(tree_icon("icons/database.svg", theme.icon_database))
+            .child(tree_icon(
+                "icons/database.svg",
+                if database.opened_schemas.contains(schema) {
+                    theme.icon_database_active
+                } else {
+                    theme.icon_database
+                },
+            ))
             .child(div().child(schema.to_string()));
 
         let mut sub = div().flex().flex_col().w_full();
