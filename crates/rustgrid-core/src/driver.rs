@@ -10,7 +10,9 @@ use crate::model::{
     TableStatus,
 };
 use crate::routine::{RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind};
-use crate::user::{ObjectPrivilegeRow, UserAccount, UserDetails, UserEdit, UserEditSection};
+use crate::user::{
+    ObjectPrivilegeRow, PrivilegeCatalog, UserAccount, UserDetails, UserEdit, UserEditSection,
+};
 use crate::view::{ViewDetails, ViewEdit};
 
 #[async_trait]
@@ -99,6 +101,13 @@ pub trait Driver: Send + Sync {
         }
     }
 
+    /// Which fields and sections the New/Edit User window shows for this engine, and the privilege
+    /// sets it offers. The default is MySQL's account model (user@host, an authentication plugin,
+    /// resource limits and the full privilege set); engines without those concepts hide them.
+    fn user_editor(&self) -> UserEditorSpec {
+        UserEditorSpec::mysql()
+    }
+
     /// The recovery models offered by the database dialog (SQL Server). Empty hides the field.
     fn database_recovery_models(&self) -> Vec<&'static str> {
         Vec::new()
@@ -138,6 +147,76 @@ pub enum DatabaseEditorTab {
     Files,
     Advanced,
     Comment,
+}
+
+/// Which fields and sections the New/Edit User window shows for an engine. The default
+/// ([`UserEditorSpec::mysql`]) is MySQL's account model; other engines turn off the parts their
+/// server has no equivalent for, so the editor never shows a control that cannot do anything.
+///
+/// The privileges themselves come from the driver's [`PrivilegeCatalog`]
+/// ([`Connection::privilege_catalog`]), not from this spec.
+#[derive(Debug, Clone)]
+pub struct UserEditorSpec {
+    /// The user@host identity row and its host quick chips (MySQL/MariaDB).
+    pub host: bool,
+    /// The authentication-plugin dropdown.
+    pub authentication_plugin: bool,
+    /// The password-expiry policy row.
+    pub password_expiry: bool,
+    /// The password-valid-until row (PostgreSQL's `VALID UNTIL`).
+    pub password_valid_until: bool,
+    /// The 锁定该账号 checkbox.
+    pub account_lock: bool,
+    /// The 最大问题数 resource limit (MySQL).
+    pub max_questions: bool,
+    /// The 最大更新数 resource limit (MySQL).
+    pub max_updates: bool,
+    /// The 最大连接数 resource limit (MySQL, PostgreSQL).
+    pub max_connections: bool,
+    /// The 最大用户连接数 resource limit (MySQL).
+    pub max_user_connections: bool,
+    /// The Oracle PROFILE row.
+    pub profile: bool,
+    /// The Oracle DEFAULT TABLESPACE row.
+    pub default_tablespace: bool,
+    /// The Oracle tablespace-quota row.
+    pub tablespace_quota: bool,
+    /// Whether the 超级用户 column is meaningful in the Users account list.
+    pub list_super_user: bool,
+    /// Whether the 服务器权限 section is shown.
+    pub server_privileges: bool,
+    /// Whether the 权限 (object-grant) section is shown.
+    pub object_privileges: bool,
+    /// Whether the 对象权限管理器 toolbar item is offered. It may be `true` while
+    /// `object_privileges` is `false` (SQL Server manages object grants only through the manager).
+    pub object_privilege_manager: bool,
+    /// Whether the 角色 section is shown.
+    pub roles: bool,
+}
+
+impl UserEditorSpec {
+    /// MySQL/MariaDB: every field.
+    pub fn mysql() -> Self {
+        Self {
+            host: true,
+            authentication_plugin: true,
+            password_expiry: true,
+            password_valid_until: false,
+            account_lock: true,
+            max_questions: true,
+            max_updates: true,
+            max_connections: true,
+            max_user_connections: true,
+            profile: false,
+            default_tablespace: false,
+            tablespace_quota: false,
+            list_super_user: true,
+            server_privileges: true,
+            object_privileges: true,
+            object_privilege_manager: true,
+            roles: true,
+        }
+    }
 }
 
 #[async_trait]
@@ -378,6 +457,12 @@ pub trait Connection: Send + Sync {
         Err(Error::Query(
             "user management is not supported by this driver".to_string(),
         ))
+    }
+
+    /// The privileges this engine can grant, for the account editor and the object-privilege
+    /// manager. Drivers without account management return an empty catalog.
+    fn privilege_catalog(&self) -> PrivilegeCatalog {
+        PrivilegeCatalog::default()
     }
 
     /// Load one account's editable state: its attributes, granted server privileges, role edges

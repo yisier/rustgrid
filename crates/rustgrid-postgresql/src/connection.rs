@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use futures_util::TryStreamExt;
 use rustgrid_core::{
     BackupObjectKind, CellValue, ColumnInfo, Connection, DatabaseInfo, DatabaseOptions, DriverId,
-    Error, ObjectDump, ObjectKind, ObjectPrivilegeRow, PageRequest, QueryResult, Result,
-    RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind, RowInsert, RowUpdate, TableInfo,
+    Error, ObjectDump, ObjectKind, ObjectPrivilegeRow, PageRequest, PrivilegeCatalog, QueryResult,
+    Result, RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind, RowInsert, RowUpdate, TableInfo,
     TablePage, TableSchema, TableStatus, UserAccount, UserDetails, UserEdit, UserEditSection,
     ViewDetails, ViewEdit,
 };
@@ -1019,6 +1019,10 @@ impl Connection for PostgresConnection {
         _new_host: &str,
     ) -> Result<()> {
         crate::user::rename_user(self, user, new_user).await
+    }
+
+    fn privilege_catalog(&self) -> PrivilegeCatalog {
+        crate::user::privilege_catalog()
     }
 
     fn authentication_plugins(&self) -> Vec<&'static str> {

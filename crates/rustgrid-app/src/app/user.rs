@@ -8,6 +8,60 @@ fn user_key(account: &UserAccount) -> String {
     account.label()
 }
 
+/// One column of the Users 详细列表. Which columns are shown depends on the engine's
+/// [`UserEditorSpec`]: MySQL adds the resource limits and the super-user flag, other engines only
+/// the columns they actually report.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UsersColumn {
+    Name,
+    MaxQuestions,
+    MaxUpdates,
+    MaxConnections,
+    MaxUserConnections,
+    SuperUser,
+}
+
+impl UsersColumn {
+    /// The column's header label.
+    fn header(self) -> String {
+        match self {
+            UsersColumn::Name => t!("common.name").to_string(),
+            UsersColumn::MaxQuestions => t!("user.col.max_questions").to_string(),
+            UsersColumn::MaxUpdates => t!("user.col.max_updates").to_string(),
+            UsersColumn::MaxConnections => t!("user.col.max_connections").to_string(),
+            UsersColumn::MaxUserConnections => t!("user.col.max_user_connections").to_string(),
+            UsersColumn::SuperUser => t!("user.col.superuser").to_string(),
+        }
+    }
+
+    /// The narrowest the column may be (its content-fitted width can be larger).
+    fn min_width(self) -> f32 {
+        match self {
+            UsersColumn::Name => 180.0,
+            UsersColumn::SuperUser => 64.0,
+            _ => 72.0,
+        }
+    }
+
+    /// The account's value for the column. 名称 renders a badge plus this text, so it returns the
+    /// account label; every other column is plain text.
+    fn value(self, account: &UserAccount) -> String {
+        match self {
+            UsersColumn::Name => account.label(),
+            UsersColumn::MaxQuestions => account.max_questions.to_string(),
+            UsersColumn::MaxUpdates => account.max_updates.to_string(),
+            UsersColumn::MaxConnections => account.max_connections.to_string(),
+            UsersColumn::MaxUserConnections => account.max_user_connections.to_string(),
+            UsersColumn::SuperUser => if account.is_super_user() {
+                t!("common.yes")
+            } else {
+                t!("common.no")
+            }
+            .to_string(),
+        }
+    }
+}
+
 impl AppView {
     /// The connection whose accounts the Users tab shows: the connection tree's current selection
     /// (walking a database/category/table row up to its connection), or the first open connection.
@@ -194,7 +248,9 @@ impl AppView {
                         "user-privilege-manager",
                         "icons/gear.svg",
                         t!("user.privilege_manager").to_string(),
-                        self.users_connection.is_some(),
+                        self.users_connection.is_some_and(|index| {
+                            self.user_editor_spec(index).object_privilege_manager
+                        }),
                         cx.listener(|this, _event, _window, cx| this.open_privilege_manager(cx)),
                     )),
             )
@@ -281,42 +337,54 @@ impl AppView {
         container.into_any_element()
     }
 
-    /// The content-fitted widths of the Users 详细列表 columns (名称 + the four resource limits +
-    /// 超级用户), in render order.
-    fn users_detail_widths(&self, visible: &[(usize, String, UserAccount)]) -> Vec<f32> {
-        let yes = t!("common.yes").to_string();
-        let no = t!("common.no").to_string();
-        let mut longest = [
-            ui::approx_text_width(&t!("common.name")) + 30.0,
-            ui::approx_text_width(&t!("user.col.max_questions")),
-            ui::approx_text_width(&t!("user.col.max_updates")),
-            ui::approx_text_width(&t!("user.col.max_connections")),
-            ui::approx_text_width(&t!("user.col.max_user_connections")),
-            ui::approx_text_width(&t!("user.col.superuser")),
-        ];
-        for (_, _, account) in visible {
-            longest[0] = longest[0].max(ui::approx_text_width(&account.label()) + 30.0);
-            longest[1] = longest[1].max(ui::approx_text_width(&account.max_questions.to_string()));
-            longest[2] = longest[2].max(ui::approx_text_width(&account.max_updates.to_string()));
-            longest[3] =
-                longest[3].max(ui::approx_text_width(&account.max_connections.to_string()));
-            longest[4] = longest[4].max(ui::approx_text_width(
-                &account.max_user_connections.to_string(),
-            ));
-            longest[5] = longest[5].max(ui::approx_text_width(if account.is_super_user() {
-                &yes
-            } else {
-                &no
-            }));
+    /// The Users 详细列表 columns for the current connection's engine, in render order.
+    fn users_detail_columns(&self) -> Vec<UsersColumn> {
+        let spec = self
+            .users_connection
+            .map(|index| self.user_editor_spec(index))
+            .unwrap_or_else(UserEditorSpec::mysql);
+        let mut columns = vec![UsersColumn::Name];
+        if spec.max_questions {
+            columns.push(UsersColumn::MaxQuestions);
         }
-        vec![
-            ui::detail_column_width(longest[0], 180.0),
-            ui::detail_column_width(longest[1], 72.0),
-            ui::detail_column_width(longest[2], 72.0),
-            ui::detail_column_width(longest[3], 72.0),
-            ui::detail_column_width(longest[4], 72.0),
-            ui::detail_column_width(longest[5], 64.0),
-        ]
+        if spec.max_updates {
+            columns.push(UsersColumn::MaxUpdates);
+        }
+        if spec.max_connections {
+            columns.push(UsersColumn::MaxConnections);
+        }
+        if spec.max_user_connections {
+            columns.push(UsersColumn::MaxUserConnections);
+        }
+        if spec.list_super_user {
+            columns.push(UsersColumn::SuperUser);
+        }
+        columns
+    }
+
+    /// The content-fitted widths of the Users 详细列表 columns, in render order.
+    fn users_detail_widths(
+        &self,
+        visible: &[(usize, String, UserAccount)],
+        columns: &[UsersColumn],
+    ) -> Vec<f32> {
+        columns
+            .iter()
+            .map(|column| {
+                let mut longest = ui::approx_text_width(&column.header());
+                if *column == UsersColumn::Name {
+                    longest += 30.0;
+                }
+                for (_, _, account) in visible {
+                    let mut value = ui::approx_text_width(&column.value(account));
+                    if *column == UsersColumn::Name {
+                        value += 30.0;
+                    }
+                    longest = longest.max(value);
+                }
+                ui::detail_column_width(longest, column.min_width())
+            })
+            .collect()
     }
 
     /// The Users 详细列表: the account's name plus its resource limits and super-user flag.
@@ -326,27 +394,18 @@ impl AppView {
         theme: Theme,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
-        let fitted = self.users_detail_widths(visible);
+        let columns = self.users_detail_columns();
+        let fitted = self.users_detail_widths(visible, &columns);
         let widths = self.users_columns.borrow_mut().resolve(&fitted);
         let mut header = ui::detail_header_row(theme);
-        for (index, label) in [
-            t!("common.name").to_string(),
-            t!("user.col.max_questions").to_string(),
-            t!("user.col.max_updates").to_string(),
-            t!("user.col.max_connections").to_string(),
-            t!("user.col.max_user_connections").to_string(),
-            t!("user.col.superuser").to_string(),
-        ]
-        .into_iter()
-        .enumerate()
-        {
+        for (index, column) in columns.iter().enumerate() {
             let width = widths[index];
             header = header.child(ui::detail_header_column(
                 SharedString::from(format!("users-resize-{index}")),
                 width,
                 self.users_columns.borrow().resizing(index),
                 theme,
-                ui::detail_header_cell_plain(label, theme),
+                ui::detail_header_cell_plain(column.header(), theme),
                 cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
                     cx.stop_propagation();
                     this.users_columns
@@ -366,7 +425,6 @@ impl AppView {
         for (index, key, account) in visible {
             let selected = self.users_selection.contains(key);
             let label = account.label();
-            let is_super = account.is_super_user();
             let value = |text: String| {
                 div()
                     .w_full()
@@ -374,7 +432,7 @@ impl AppView {
                     .text_color(rgb(theme.text_muted))
                     .child(text)
             };
-            let row = ui::detail_row(
+            let mut row = ui::detail_row(
                 SharedString::from(format!("user-row-{index}")),
                 selected,
                 theme,
@@ -397,63 +455,38 @@ impl AppView {
                         let _ = event;
                     }
                 }),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .w(px(widths[0]))
-                    .flex_none()
-                    .overflow_hidden()
-                    .text_color(rgb(theme.text))
-                    .child(ui::leading_icon_badge(
-                        "icons/user.svg",
-                        theme.icon_users,
-                        22.0,
-                    ))
-                    .child(ui::detail_cell_text(
-                        SharedString::from(format!("user-cell-{index}-0")),
-                        label,
-                    )),
-            )
-            .child(
-                div()
-                    .w(px(widths[1]))
-                    .flex_none()
-                    .child(value(account.max_questions.to_string())),
-            )
-            .child(
-                div()
-                    .w(px(widths[2]))
-                    .flex_none()
-                    .child(value(account.max_updates.to_string())),
-            )
-            .child(
-                div()
-                    .w(px(widths[3]))
-                    .flex_none()
-                    .child(value(account.max_connections.to_string())),
-            )
-            .child(
-                div()
-                    .w(px(widths[4]))
-                    .flex_none()
-                    .child(value(account.max_user_connections.to_string())),
-            )
-            .child(
-                div()
-                    .w(px(widths[5]))
-                    .flex_none()
-                    .whitespace_nowrap()
-                    .text_align(gpui::TextAlign::Left)
-                    .child(if is_super {
-                        t!("common.yes").to_string()
-                    } else {
-                        t!("common.no").to_string()
-                    }),
             );
+            for (column_index, column) in columns.iter().enumerate() {
+                let width = widths[column_index];
+                let cell: AnyElement = match column {
+                    UsersColumn::Name => div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .w(px(width))
+                        .flex_none()
+                        .overflow_hidden()
+                        .text_color(rgb(theme.text))
+                        .child(ui::leading_icon_badge(
+                            "icons/user.svg",
+                            theme.icon_users,
+                            22.0,
+                        ))
+                        .child(ui::detail_cell_text(
+                            SharedString::from(format!("user-cell-{index}-0")),
+                            label.clone(),
+                        ))
+                        .into_any_element(),
+                    _ => div()
+                        .w(px(width))
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .child(value(column.value(account)))
+                        .into_any_element(),
+                };
+                row = row.child(cell);
+            }
             list = list.child(list_ops::row_with_rect(
                 cx.weak_entity(),
                 row,
@@ -693,6 +726,14 @@ impl AppView {
         let Some(connection_index) = self.users_connection_index(cx) else {
             return;
         };
+        // The object-privilege manager only makes sense for engines whose driver implements the
+        // object-grant matrix (the toolbar item is disabled otherwise).
+        if !self
+            .user_editor_spec(connection_index)
+            .object_privilege_manager
+        {
+            return;
+        }
         let Some(connection) = self.connection_arc(connection_index) else {
             return;
         };
@@ -703,10 +744,12 @@ impl AppView {
             .unwrap_or_default();
         let theme = self.theme;
         let runtime = self.runtime.clone();
+        let catalog = self.user_privilege_catalog(connection_index);
         let manager = cx.new(|cx| {
             privilege_manager::PrivilegeManager::new(
                 connection,
                 connection_name.clone(),
+                catalog,
                 runtime,
                 theme,
                 cx,

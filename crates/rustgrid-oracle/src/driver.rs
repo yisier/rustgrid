@@ -6,6 +6,7 @@ use oracledb::PoolConfig;
 use rustgrid_core::{
     Connection, ConnectionConfig, DatabaseEditorSpec, Driver, DriverCapabilities, DriverCapability,
     DriverDescriptor, DriverDialect, DriverIconStyle, DriverId, Error, Result, TlsMode,
+    UserEditorSpec,
 };
 
 use crate::connection::OracleConnection;
@@ -61,6 +62,30 @@ impl Driver for OracleDriver {
 
     fn database_editor(&self) -> DatabaseEditorSpec {
         DatabaseEditorSpec::default()
+    }
+
+    fn user_editor(&self) -> UserEditorSpec {
+        UserEditorSpec {
+            // Oracle users have no host, plugin, password expiry or resource limits. The account
+            // list has no super-user concept (`is_super_user` is always false).
+            host: false,
+            authentication_plugin: false,
+            password_expiry: false,
+            password_valid_until: false,
+            account_lock: true,
+            max_questions: false,
+            max_updates: false,
+            max_connections: false,
+            max_user_connections: false,
+            profile: true,
+            default_tablespace: true,
+            tablespace_quota: true,
+            list_super_user: false,
+            server_privileges: true,
+            object_privileges: true,
+            object_privilege_manager: true,
+            roles: true,
+        }
     }
 
     fn descriptor(&self) -> DriverDescriptor {

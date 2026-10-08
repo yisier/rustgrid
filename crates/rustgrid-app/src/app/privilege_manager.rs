@@ -8,7 +8,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::user_create::{DbTemplate, db_privilege_groups, privilege_summary, section};
+use super::user_create::{
+    PrivilegeTooltip, catalog_label, preset_privileges, privilege_label, privilege_summary, section,
+};
 use super::*;
 
 /// Height of one account row in the account list.
@@ -53,14 +55,20 @@ pub(super) struct PrivilegeManager {
     pub(super) theme: Theme,
     connection: Arc<dyn Connection>,
     pub(super) connection_name: String,
+    /// The engine's privilege catalog (groups, privileges and presets).
+    catalog: PrivilegeCatalog,
     /// The window root's focus, so ESC closes the window.
     focus: FocusHandle,
 
     databases: Vec<String>,
+    /// Tables per database, keyed by their `schema.name` (or bare name) — the table grants.
     tables: BTreeMap<String, Vec<String>>,
+    /// Schemas per database — the schema grants (loaded only for engines that support them).
+    schemas: BTreeMap<String, Vec<String>>,
     /// The expanded database in the object list.
     expanded: Option<String>,
-    /// The selected object: `(database, name)`; `name` is empty for a database-wide grant.
+    /// The selected object: `(database, name)` where `name` is empty for a database-wide grant,
+    /// `schema.*` for a schema grant, else the table/routine name.
     selected: Option<(String, String)>,
     /// The accounts to grant on `selected`, with their pending privileges.
     rows: Vec<ObjectPrivilegeRow>,
@@ -84,6 +92,7 @@ impl PrivilegeManager {
     pub(super) fn new(
         connection: Arc<dyn Connection>,
         connection_name: String,
+        catalog: PrivilegeCatalog,
         runtime: Arc<Runtime>,
         theme: Theme,
         cx: &mut Context<'_, Self>,
@@ -93,9 +102,11 @@ impl PrivilegeManager {
             theme,
             connection,
             connection_name,
+            catalog,
             focus: cx.focus_handle(),
             databases: Vec::new(),
             tables: BTreeMap::new(),
+            schemas: BTreeMap::new(),
             expanded: None,
             selected: None,
             rows: Vec::new(),
@@ -179,20 +190,39 @@ impl PrivilegeManager {
         }
         let connection = self.connection.clone();
         let runtime = self.runtime.clone();
+        let load_schemas = self.catalog.has_scope(PrivilegeScope::Schema);
         let query = database.clone();
         cx.spawn(async move |this, cx| {
             let result = runtime
-                .spawn(async move { connection.list_tables(&query).await })
+                .spawn(async move {
+                    let tables = connection.list_tables(&query).await;
+                    let schemas = if load_schemas {
+                        connection.list_schemas(&query).await
+                    } else {
+                        Ok(Vec::new())
+                    };
+                    (tables, schemas)
+                })
                 .await;
             let _ = this.update(cx, |manager, cx| {
                 match result {
-                    Ok(Ok(tables)) => {
-                        manager.tables.insert(
-                            database,
-                            tables.into_iter().map(|table| table.name).collect(),
-                        );
+                    Ok((tables, schemas)) => {
+                        match tables {
+                            Ok(tables) => {
+                                manager.tables.insert(
+                                    database.clone(),
+                                    tables.into_iter().map(|table| table.name).collect(),
+                                );
+                            }
+                            Err(error) => manager.error = Some(error.to_string()),
+                        }
+                        match schemas {
+                            Ok(schemas) => {
+                                manager.schemas.insert(database, schemas);
+                            }
+                            Err(error) => manager.error = Some(error.to_string()),
+                        }
                     }
-                    Ok(Err(error)) => manager.error = Some(error.to_string()),
                     Err(error) => manager.error = Some(error.to_string()),
                 }
                 cx.notify();
@@ -292,7 +322,7 @@ impl PrivilegeManager {
     }
 
     /// The privilege set the 细粒度特权分配 panel edits.
-    fn active_privileges(&self) -> BTreeSet<Privilege> {
+    fn active_privileges(&self) -> BTreeSet<PrivilegeId> {
         let Some((user, host)) = self.active.as_ref() else {
             return BTreeSet::new();
         };
@@ -301,7 +331,7 @@ impl PrivilegeManager {
             .unwrap_or_default()
     }
 
-    fn active_privileges_mut(&mut self) -> Option<&mut BTreeSet<Privilege>> {
+    fn active_privileges_mut(&mut self) -> Option<&mut BTreeSet<PrivilegeId>> {
         let (user, host) = self.active.clone()?;
         self.rows
             .iter_mut()
@@ -309,28 +339,96 @@ impl PrivilegeManager {
             .map(|row| &mut row.privileges)
     }
 
-    /// Apply a quick preset to the active account.
-    fn apply_template(&mut self, template: DbTemplate, cx: &mut Context<'_, Self>) {
-        let privileges = template.privileges();
+    /// The denied (DENY) privilege set of the active account.
+    fn active_denied(&self) -> BTreeSet<PrivilegeId> {
+        let Some((user, host)) = self.active.as_ref() else {
+            return BTreeSet::new();
+        };
+        self.row_index(user, host)
+            .map(|index| self.rows[index].denied.clone())
+            .unwrap_or_default()
+    }
+
+    fn active_denied_mut(&mut self) -> Option<&mut BTreeSet<PrivilegeId>> {
+        let (user, host) = self.active.clone()?;
+        self.rows
+            .iter_mut()
+            .find(|row| row.user == user && row.host == host)
+            .map(|row| &mut row.denied)
+    }
+
+    /// Apply a quick preset (index into `catalog.object_presets`) to the active account.
+    fn apply_template(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        let privileges = preset_privileges(&self.catalog.object_presets, index);
         if let Some(target) = self.active_privileges_mut() {
             *target = privileges;
             self.dirty = true;
         }
+        if let Some(denied) = self.active_denied_mut() {
+            denied.clear();
+        }
         cx.notify();
     }
 
-    fn toggle_privilege(&mut self, privilege: Privilege, cx: &mut Context<'_, Self>) {
-        if let Some(target) = self.active_privileges_mut()
-            && !target.remove(&privilege)
-        {
-            target.insert(privilege);
+    /// Toggle a grant. Granting clears any deny of the same privilege.
+    fn toggle_privilege(&mut self, privilege: PrivilegeId, cx: &mut Context<'_, Self>) {
+        let granted_now = match self.active_privileges_mut() {
+            Some(target) => {
+                if target.remove(&privilege) {
+                    false
+                } else {
+                    target.insert(privilege.clone());
+                    true
+                }
+            }
+            None => false,
+        };
+        if granted_now && let Some(denied) = self.active_denied_mut() {
+            denied.remove(&privilege);
         }
         self.dirty = true;
         cx.notify();
     }
 
+    /// Toggle a deny. Denying clears any grant of the same privilege.
+    fn toggle_privilege_deny(&mut self, privilege: PrivilegeId, cx: &mut Context<'_, Self>) {
+        let denied_now = match self.active_denied_mut() {
+            Some(target) => {
+                if target.remove(&privilege) {
+                    false
+                } else {
+                    target.insert(privilege.clone());
+                    true
+                }
+            }
+            None => false,
+        };
+        if denied_now && let Some(granted) = self.active_privileges_mut() {
+            granted.remove(&privilege);
+        }
+        self.dirty = true;
+        cx.notify();
+    }
+
+    /// The scope the 细粒度特权分配 grid edits: whole-database permissions for a selected
+    /// database when the engine has them (SQL Server), otherwise object privileges.
+    fn active_scope(&self) -> PrivilegeScope {
+        let candidate = match self.selected.as_ref().map(|(_, name)| name.as_str()) {
+            Some("") => PrivilegeScope::Database,
+            Some(name) if name.ends_with(".*") => PrivilegeScope::Schema,
+            _ => PrivilegeScope::Object,
+        };
+        if self.catalog.has_scope(candidate) {
+            candidate
+        } else {
+            PrivilegeScope::Object
+        }
+    }
+
     fn toggle_all_privileges(&mut self, cx: &mut Context<'_, Self>) {
-        let all: BTreeSet<Privilege> = Privilege::OBJECT.into_iter().collect();
+        let scope = self.active_scope();
+        let all: BTreeSet<PrivilegeId> =
+            self.catalog.at(scope).map(|info| info.id.clone()).collect();
         if let Some(target) = self.active_privileges_mut() {
             if *target == all {
                 target.clear();
@@ -338,6 +436,9 @@ impl PrivilegeManager {
                 *target = all;
             }
             self.dirty = true;
+        }
+        if let Some(denied) = self.active_denied_mut() {
+            denied.clear();
         }
         cx.notify();
     }
@@ -854,6 +955,60 @@ impl PrivilegeManager {
                     ),
             );
             if expanded {
+                // Schema grants (PostgreSQL): the schema is selected as `schema.*`.
+                if self.catalog.has_scope(PrivilegeScope::Schema) {
+                    for (schema_index, schema) in self
+                        .schemas
+                        .get(database)
+                        .cloned()
+                        .unwrap_or_default()
+                        .iter()
+                        .enumerate()
+                    {
+                        let key = format!("{schema}.*");
+                        let selected = self
+                            .selected
+                            .as_ref()
+                            .is_some_and(|(db, name)| db == database && name == &key);
+                        let node = (database.clone(), key);
+                        list = list.child(
+                            div()
+                                .id(SharedString::from(format!(
+                                    "op-schema-{index}-{schema_index}"
+                                )))
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_1()
+                                .h(px(PM_OBJECT_ROW_HEIGHT))
+                                .pl(px(PM_TABLE_INDENT))
+                                .pr_2()
+                                .flex_none()
+                                .rounded(px(4.0))
+                                .cursor_pointer()
+                                .when(selected, move |style| {
+                                    style
+                                        .bg(rgb(theme.tree_selected_bg))
+                                        .text_color(rgb(theme.tree_selected_text))
+                                })
+                                .when(!selected, move |style| {
+                                    style.hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                                })
+                                .on_click(cx.listener(move |this, _event, _window, cx| {
+                                    this.select_node(node.clone(), cx)
+                                }))
+                                .child(tree_icon("icons/database.svg", theme.icon_database_active))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w(px(0.0))
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .child(schema.clone()),
+                                ),
+                        );
+                    }
+                }
                 for (table_index, table) in self
                     .tables
                     .get(database)
@@ -932,20 +1087,29 @@ impl PrivilegeManager {
             )
             .into_any_element();
         };
-        let is_table = !name.is_empty();
+        let is_schema = name.ends_with(".*");
+        let is_table = !name.is_empty() && !is_schema;
         let active = self.active.clone();
         let privileges = self.active_privileges();
         let granted = self.rows.len();
 
-        let (icon, kind) = if is_table {
+        let (icon, kind, title) = if is_schema {
+            (
+                tree_icon("icons/database.svg", theme.icon_database_active),
+                t!("user.create.schema_level").to_string(),
+                name.trim_end_matches(".*").to_string(),
+            )
+        } else if is_table {
             (
                 tree_icon("icons/tables.svg", theme.icon_table),
                 t!("user.create.table_level").to_string(),
+                name.clone(),
             )
         } else {
             (
                 tree_icon("icons/database.svg", theme.icon_database_active),
                 t!("user.create.database_level").to_string(),
+                database.clone(),
             )
         };
         let header = div()
@@ -963,11 +1127,7 @@ impl PrivilegeManager {
                         div()
                             .text_size(px(13.0))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(if is_table {
-                                name.clone()
-                            } else {
-                                database.clone()
-                            }),
+                            .child(title),
                     )
                     .child(
                         div()
@@ -987,47 +1147,47 @@ impl PrivilegeManager {
 
         // The quick presets, matched against the active account's own set.
         let mut presets = div().flex().flex_row().items_center().gap_2().w_full();
-        for template in DbTemplate::ALL {
-            let active_preset = if template == DbTemplate::None {
+        for (index, preset) in self.catalog.object_presets.iter().enumerate() {
+            let preset_set = preset_privileges(&self.catalog.object_presets, index);
+            let active_preset = if preset_set.is_empty() {
                 privileges.is_empty()
             } else {
-                !privileges.is_empty() && privileges == template.privileges()
+                !privileges.is_empty() && privileges == preset_set
             };
-            presets = presets.child(
-                div()
-                    .id(SharedString::from(format!(
-                        "op-template-{}",
-                        template.label_key()
-                    )))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .h(px(28.0))
-                    .px_3()
-                    .rounded(px(4.0))
-                    .text_size(px(12.0))
-                    .cursor_pointer()
-                    .when(active_preset, move |style| {
-                        style
-                            .bg(rgb(theme.primary))
-                            .text_color(rgb(if theme.is_dark() {
-                                theme.window_bg
-                            } else {
-                                0xffffff
-                            }))
-                    })
-                    .when(!active_preset, move |style| {
-                        style
-                            .bg(rgb(theme.button_bg))
-                            .border_1()
-                            .border_color(rgb(theme.border))
-                            .text_color(rgb(theme.text_muted))
-                    })
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.apply_template(template, cx)
-                    }))
-                    .child(t!(template.label_key()).to_string()),
-            );
+            let label = catalog_label(&preset.label_key, &preset.label);
+            presets =
+                presets.child(
+                    div()
+                        .id(SharedString::from(format!("op-template-{index}")))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .h(px(28.0))
+                        .px_3()
+                        .rounded(px(4.0))
+                        .text_size(px(12.0))
+                        .cursor_pointer()
+                        .when(active_preset, move |style| {
+                            style
+                                .bg(rgb(theme.primary))
+                                .text_color(rgb(if theme.is_dark() {
+                                    theme.window_bg
+                                } else {
+                                    0xffffff
+                                }))
+                        })
+                        .when(!active_preset, move |style| {
+                            style
+                                .bg(rgb(theme.button_bg))
+                                .border_1()
+                                .border_color(rgb(theme.border))
+                                .text_color(rgb(theme.text_muted))
+                        })
+                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                            this.apply_template(index, cx)
+                        }))
+                        .child(label),
+                );
         }
         let fine_grained_hint = active.as_ref().map(|(user, host)| {
             t!(
@@ -1049,24 +1209,31 @@ impl PrivilegeManager {
             .overflow_y_scroll()
             .p_3()
             .child(header)
-            .child(target)
-            .child(section(
+            .child(target);
+        if !self.catalog.object_presets.is_empty() {
+            column = column.child(section(
                 t!("user.create.db_template").to_string(),
                 Some(t!("user.create.db_template_hint").to_string()),
                 presets.into_any_element(),
                 theme,
-            ))
-            .child(section(
-                t!("user.privilege.accounts").to_string(),
-                Some(t!("user.privilege.accounts_selected", count = granted).to_string()),
-                self.render_accounts(&active, cx),
-                theme,
             ));
+        }
+        column = column.child(section(
+            t!("user.privilege.accounts").to_string(),
+            Some(t!("user.privilege.accounts_selected", count = granted).to_string()),
+            self.render_accounts(&active, cx),
+            theme,
+        ));
         if active.is_some() {
             column = column.child(section(
                 t!("user.create.fine_grained").to_string(),
                 fine_grained_hint,
-                self.render_fine_grained(&privileges, cx),
+                self.render_fine_grained(
+                    &privileges,
+                    &self.active_denied(),
+                    self.active_scope(),
+                    cx,
+                ),
                 theme,
             ));
         } else {
@@ -1122,7 +1289,9 @@ impl PrivilegeManager {
             let is_active = active.as_ref() == Some(&key);
             let (badge, authorized) = self
                 .row_index(&key.0, &key.1)
-                .map(|row| privilege_summary(&self.rows[row].privileges))
+                .map(|row| {
+                    privilege_summary(&self.rows[row].privileges, &self.catalog.object_presets)
+                })
                 .unwrap_or_else(|| (t!("user.create.unauthorized").to_string(), false));
             let activate_key = key.clone();
             let toggle_key = key.clone();
@@ -1236,38 +1405,77 @@ impl PrivilegeManager {
     /// The grouped fine-grained privileges of the active account.
     fn render_fine_grained(
         &self,
-        privileges: &BTreeSet<Privilege>,
+        privileges: &BTreeSet<PrivilegeId>,
+        denied: &BTreeSet<PrivilegeId>,
+        scope: PrivilegeScope,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let theme = self.theme;
         let mut groups = div().flex().flex_col().gap_3().w_full();
-        for (group_key, group_privileges) in db_privilege_groups() {
+        for group in &self.catalog.groups {
+            let offered = self.catalog.group_privileges(&group.id, scope);
+            if offered.is_empty() {
+                continue;
+            }
+            let group_label = catalog_label(&group.label_key, &group.label);
+            let group_key = group.id.clone();
             let mut grid = div().flex().flex_row().flex_wrap().w_full();
-            for (position, privilege) in group_privileges.into_iter().enumerate() {
+            for (position, privilege) in offered.into_iter().enumerate() {
                 let checked = privileges.contains(&privilege);
-                grid = grid.child(
-                    div()
-                        .id(SharedString::from(format!(
-                            "op-priv-{group_key}-{position}"
-                        )))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_2()
-                        .w(px(210.0))
-                        .h(px(PM_ROW_HEIGHT))
-                        .cursor_pointer()
-                        .on_click(cx.listener(move |this, _event, _window, cx| {
-                            this.toggle_privilege(privilege, cx)
-                        }))
-                        .child(checkbox_box(checked, theme))
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(rgb(theme.text))
-                                .child(t!(privilege.label_key()).to_string()),
-                        ),
-                );
+                let is_denied = denied.contains(&privilege);
+                let keyword = privilege.as_str().to_string();
+                let description = privilege_label(&self.catalog, &privilege);
+                let deny_key = privilege.clone();
+                let mut cell = div()
+                    .id(SharedString::from(format!(
+                        "op-priv-{group_key}-{position}"
+                    )))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .w(px(210.0))
+                    .h(px(PM_ROW_HEIGHT))
+                    .cursor_pointer()
+                    .tooltip(move |_, cx| cx.new(|_| PrivilegeTooltip(description.clone())).into())
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.toggle_privilege(privilege.clone(), cx)
+                    }))
+                    .child(checkbox_box(checked, theme))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(theme.text))
+                            .child(keyword),
+                    );
+                if self.catalog.deny_supported {
+                    let label = t!("user.privilege.deny").to_string();
+                    cell = cell.child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "op-deny-{group_key}-{position}"
+                            )))
+                            .flex_none()
+                            .px_1()
+                            .rounded(px(3.0))
+                            .text_size(px(10.0))
+                            .cursor_pointer()
+                            .when(is_denied, move |style| {
+                                style.bg(rgb(theme.danger)).text_color(rgb(0xffffff))
+                            })
+                            .when(!is_denied, move |style| {
+                                style
+                                    .text_color(rgb(theme.text_muted))
+                                    .hover(move |style| style.text_color(rgb(theme.danger)))
+                            })
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                cx.stop_propagation();
+                                this.toggle_privilege_deny(deny_key.clone(), cx);
+                            }))
+                            .child(label),
+                    );
+                }
+                grid = grid.child(cell);
             }
             groups = groups.child(
                 div()
@@ -1279,7 +1487,7 @@ impl PrivilegeManager {
                         div()
                             .text_size(px(11.0))
                             .text_color(rgb(theme.text_muted))
-                            .child(t!(group_key).to_string()),
+                            .child(group_label),
                     )
                     .child(grid),
             );
@@ -1308,10 +1516,13 @@ impl PrivilegeManager {
     }
 }
 
-/// The `db`.*` / `db`.`table` spec an object's grant applies to.
+/// The spec an object's grant applies to: `` `db`.* `` for the database, `` `db`.`schema` `` for a
+/// schema (`name` = `schema.*`), or `` `db`.`obj` `` for a table.
 fn object_spec(database: &str, name: &str) -> String {
     if name.is_empty() {
         format!("`{database}`.*")
+    } else if let Some(schema) = name.strip_suffix(".*") {
+        format!("`{database}`.`{schema}`")
     } else {
         format!("`{database}`.`{name}`")
     }
@@ -1322,8 +1533,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn object_spec_covers_databases_and_tables() {
+    fn object_spec_covers_databases_schemas_and_tables() {
         assert_eq!(object_spec("shop", ""), "`shop`.*");
+        assert_eq!(object_spec("shop", "public.*"), "`shop`.`public`");
         assert_eq!(object_spec("shop", "orders"), "`shop`.`orders`");
     }
 }

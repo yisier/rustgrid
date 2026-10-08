@@ -4,10 +4,10 @@ use futures_util::TryStreamExt;
 use rustgrid_core::{
     BackupObjectKind, CellValue, ColumnDef, ColumnInfo, Connection, DatabaseInfo, DatabaseOptions,
     DriverId, Error, FilterCondition, FilterConjunction, FilterNode, FilterOperator, ForeignKeyDef,
-    IndexDef, ObjectDump, ObjectKind, ObjectPrivilegeRow, PageRequest, QueryResult, Result,
-    RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind, RowInsert, RowUpdate, TableInfo,
-    TableOptions, TablePage, TableSchema, TableStatus, TriggerDef, UserAccount, UserDetails,
-    UserEdit, ViewDetails, ViewEdit,
+    IndexDef, ObjectDump, ObjectKind, ObjectPrivilegeRow, PageRequest, PrivilegeCatalog,
+    QueryResult, Result, RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind, RowInsert,
+    RowUpdate, TableInfo, TableOptions, TablePage, TableSchema, TableStatus, TriggerDef,
+    UserAccount, UserDetails, UserEdit, ViewDetails, ViewEdit,
 };
 use sqlx::mysql::{MySqlColumn, MySqlRow};
 use sqlx::{
@@ -1138,6 +1138,10 @@ impl Connection for MysqlConnection {
         new_host: &str,
     ) -> Result<()> {
         crate::user::rename_user(&self.pool, user, host, new_user, new_host).await
+    }
+
+    fn privilege_catalog(&self) -> PrivilegeCatalog {
+        crate::user::privilege_catalog()
     }
 
     fn authentication_plugins(&self) -> Vec<&'static str> {

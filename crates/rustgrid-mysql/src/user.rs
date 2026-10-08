@@ -9,8 +9,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use rustgrid_core::{
-    ObjectGrant, ObjectPrivilegeRow, Privilege, Result, RoleMembership, UserAccount, UserDetails,
-    UserEdit, UserEditSection,
+    ObjectGrant, ObjectPrivilegeRow, PrivilegeCatalog, PrivilegeGroup, PrivilegeId, PrivilegeInfo,
+    PrivilegePreset, Result, RoleMembership, UserAccount, UserDetails, UserEdit, UserEditSection,
 };
 use sqlx::mysql::MySqlRow;
 use sqlx::{AssertSqlSafe, MySqlPool, Row};
@@ -60,6 +60,7 @@ pub(crate) async fn user_details(pool: &MySqlPool, user: &str, host: &str) -> Re
     Ok(UserDetails {
         account,
         server_privileges,
+        denied_server_privileges: BTreeSet::new(),
         grants,
         roles,
         members,
@@ -135,6 +136,220 @@ pub(crate) fn ssl_types() -> Vec<&'static str> {
     vec!["", "ANY", "X509", "SPECIFIED"]
 }
 
+/// `(keyword, i18n key, server group)` for the 28 MySQL server privileges, in the order the
+/// 服务器权限 grid shows them.
+const SERVER_PRIVILEGES: &[(&str, &str, &str)] = &[
+    ("ALTER", "user.priv.alter", "ddl"),
+    ("ALTER ROUTINE", "user.priv.alter_routine", "ddl"),
+    ("CREATE", "user.priv.create", "ddl"),
+    ("CREATE ROUTINE", "user.priv.create_routine", "ddl"),
+    (
+        "CREATE TEMPORARY TABLES",
+        "user.priv.create_temporary_tables",
+        "ddl",
+    ),
+    ("CREATE USER", "user.priv.create_user", "account"),
+    ("CREATE VIEW", "user.priv.create_view", "ddl"),
+    ("DELETE", "user.priv.delete", "dml"),
+    ("DROP", "user.priv.drop", "ddl"),
+    ("EVENT", "user.priv.event", "account"),
+    ("EXECUTE", "user.priv.execute", "exec"),
+    ("FILE", "user.priv.file", "admin"),
+    ("GRANT OPTION", "user.priv.grant_option", "admin"),
+    ("INDEX", "user.priv.index", "ddl"),
+    ("INSERT", "user.priv.insert", "dml"),
+    ("LOCK TABLES", "user.priv.lock_tables", "exec"),
+    ("PROCESS", "user.priv.process", "admin"),
+    ("REFERENCES", "user.priv.references", "ddl"),
+    ("RELOAD", "user.priv.reload", "admin"),
+    (
+        "REPLICATION CLIENT",
+        "user.priv.replication_client",
+        "replication",
+    ),
+    (
+        "REPLICATION SLAVE",
+        "user.priv.replication_slave",
+        "replication",
+    ),
+    ("SELECT", "user.priv.select", "dml"),
+    ("SHOW DATABASES", "user.priv.show_databases", "exec"),
+    ("SHOW VIEW", "user.priv.show_view", "exec"),
+    ("SHUTDOWN", "user.priv.shutdown", "admin"),
+    ("SUPER", "user.priv.super", "admin"),
+    ("TRIGGER", "user.priv.trigger", "ddl"),
+    ("UPDATE", "user.priv.update", "dml"),
+];
+
+/// `(keyword, object group)` for the subset of server privileges grantable on an object.
+const OBJECT_PRIVILEGES: &[(&str, &str)] = &[
+    ("ALTER", "ddl"),
+    ("ALTER ROUTINE", "routines"),
+    ("CREATE", "ddl"),
+    ("CREATE ROUTINE", "routines"),
+    ("CREATE TEMPORARY TABLES", "ddl"),
+    ("CREATE VIEW", "ddl"),
+    ("DELETE", "dml"),
+    ("DROP", "ddl"),
+    ("EXECUTE", "routines"),
+    ("GRANT OPTION", "routines"),
+    ("INDEX", "ddl"),
+    ("INSERT", "dml"),
+    ("REFERENCES", "routines"),
+    ("SELECT", "dml"),
+    ("SHOW VIEW", "routines"),
+    ("TRIGGER", "routines"),
+    ("UPDATE", "dml"),
+];
+
+/// The MySQL privilege catalog: the server and object privileges, their editor groups and the
+/// quick presets. Backs the account editor and the object-privilege manager.
+pub(crate) fn privilege_catalog() -> PrivilegeCatalog {
+    let groups = [
+        ("dml", "user.create.priv_group.dml"),
+        ("ddl", "user.create.priv_group.ddl"),
+        ("exec", "user.create.server_group.exec"),
+        ("admin", "user.create.server_group.admin"),
+        ("replication", "user.create.server_group.replication"),
+        ("account", "user.create.server_group.account"),
+        ("routines", "user.create.priv_group.routines"),
+    ]
+    .into_iter()
+    .map(|(id, label_key)| PrivilegeGroup {
+        id: id.to_string(),
+        label_key: Some(label_key.to_string()),
+        label: id.to_string(),
+    })
+    .collect();
+
+    let privileges = SERVER_PRIVILEGES
+        .iter()
+        .map(|(keyword, label_key, server_group)| {
+            let object_group = OBJECT_PRIVILEGES
+                .iter()
+                .find(|(name, _)| name == keyword)
+                .map(|(_, group)| *group);
+            match object_group {
+                Some(object_group) => PrivilegeInfo::both(
+                    *keyword,
+                    server_group,
+                    object_group,
+                    Some(*label_key),
+                    keyword,
+                ),
+                None => PrivilegeInfo::server(*keyword, server_group, Some(*label_key), keyword),
+            }
+        })
+        .collect();
+
+    PrivilegeCatalog {
+        groups,
+        privileges,
+        server_presets: vec![
+            preset("none", "user.create.template.none", &[]),
+            preset(
+                "read_only",
+                "user.create.template.read_only",
+                &["SELECT", "SHOW VIEW"],
+            ),
+            preset(
+                "read_write",
+                "user.create.template.read_write",
+                &[
+                    "SELECT",
+                    "INSERT",
+                    "UPDATE",
+                    "DELETE",
+                    "SHOW VIEW",
+                    "EXECUTE",
+                ],
+            ),
+            preset(
+                "developer",
+                "user.create.template.developer",
+                &[
+                    "SELECT",
+                    "INSERT",
+                    "UPDATE",
+                    "DELETE",
+                    "SHOW VIEW",
+                    "EXECUTE",
+                    "CREATE",
+                    "ALTER",
+                    "DROP",
+                    "INDEX",
+                    "CREATE VIEW",
+                    "CREATE ROUTINE",
+                    "ALTER ROUTINE",
+                    "REFERENCES",
+                    "TRIGGER",
+                    "EVENT",
+                    "CREATE TEMPORARY TABLES",
+                    "LOCK TABLES",
+                ],
+            ),
+            preset(
+                "admin",
+                "user.create.template.admin",
+                &SERVER_PRIVILEGES
+                    .iter()
+                    .map(|(keyword, _, _)| *keyword)
+                    .collect::<Vec<_>>(),
+            ),
+        ],
+        object_presets: vec![
+            preset("none", "user.create.db_template.none", &[]),
+            preset(
+                "read_only",
+                "user.create.db_template.read_only",
+                &["SELECT"],
+            ),
+            preset(
+                "read_write",
+                "user.create.db_template.read_write",
+                &["SELECT", "INSERT", "UPDATE", "DELETE"],
+            ),
+            preset(
+                "full",
+                "user.create.db_template.full",
+                &OBJECT_PRIVILEGES
+                    .iter()
+                    .map(|(keyword, _)| *keyword)
+                    .collect::<Vec<_>>(),
+            ),
+        ],
+        deny_supported: false,
+    }
+}
+
+fn preset(id: &str, label_key: &str, keywords: &[&str]) -> PrivilegePreset {
+    PrivilegePreset {
+        id: id.to_string(),
+        label_key: Some(label_key.to_string()),
+        label: id.to_string(),
+        privileges: keywords
+            .iter()
+            .map(|keyword| PrivilegeId::new(*keyword))
+            .collect(),
+    }
+}
+
+/// Resolve a keyword the server reports to the canonical privilege id, when it is one of MySQL's
+/// known privileges. Unknown (dynamic) privileges are dropped so they are left untouched on save.
+fn privilege_id(keyword: &str) -> Option<PrivilegeId> {
+    SERVER_PRIVILEGES
+        .iter()
+        .find(|(name, _, _)| name.eq_ignore_ascii_case(keyword.trim()))
+        .map(|(name, _, _)| PrivilegeId::new(*name))
+}
+
+/// Whether a privilege set carries the special `GRANT OPTION` privilege.
+fn has_grant_option(privileges: &BTreeSet<PrivilegeId>) -> bool {
+    privileges
+        .iter()
+        .any(|privilege| privilege.matches("GRANT OPTION"))
+}
+
 // ----- Reading -------------------------------------------------------------------------------
 
 fn read_account(row: &MySqlRow) -> UserAccount {
@@ -145,6 +360,7 @@ fn read_account(row: &MySqlRow) -> UserAccount {
         password_set: !text(row, "authentication_string").is_empty(),
         password_expired: flag(row, "password_expired"),
         password_lifetime: int(row, "password_lifetime").map(|value| value.max(0) as u32),
+        password_valid_until: None,
         account_locked: flag(row, "account_locked"),
         max_questions: uint(row, "max_questions"),
         max_updates: uint(row, "max_updates"),
@@ -154,11 +370,14 @@ fn read_account(row: &MySqlRow) -> UserAccount {
         ssl_cipher: text(row, "ssl_cipher"),
         x509_issuer: text(row, "x509_issuer"),
         x509_subject: text(row, "x509_subject"),
+        default_tablespace: String::new(),
+        profile: String::new(),
+        tablespace_quota: String::new(),
         is_super_user: flag(row, "super_priv"),
     }
 }
 
-async fn fetch_server_privileges(pool: &MySqlPool, grantee: &str) -> Result<BTreeSet<Privilege>> {
+async fn fetch_server_privileges(pool: &MySqlPool, grantee: &str) -> Result<BTreeSet<PrivilegeId>> {
     // The view can be unavailable on some servers; report no granted privileges rather than
     // failing the account load.
     let rows = match sqlx::query(
@@ -173,13 +392,13 @@ async fn fetch_server_privileges(pool: &MySqlPool, grantee: &str) -> Result<BTre
     };
     Ok(rows
         .iter()
-        .filter_map(|row| Privilege::from_sql_name(&text(row, "PRIVILEGE_TYPE")))
+        .filter_map(|row| privilege_id(&text(row, "PRIVILEGE_TYPE")))
         .collect())
 }
 
 /// The object-level grants of an account, merged into one row per `(database, object)`.
 async fn fetch_object_grants(pool: &MySqlPool, grantee: &str) -> Result<Vec<ObjectGrant>> {
-    let mut merged: BTreeMap<(String, String), BTreeSet<Privilege>> = BTreeMap::new();
+    let mut merged: BTreeMap<(String, String), BTreeSet<PrivilegeId>> = BTreeMap::new();
     for sql in [
         "SELECT TABLE_SCHEMA, '' AS object_name, PRIVILEGE_TYPE \
          FROM information_schema.SCHEMA_PRIVILEGES WHERE GRANTEE = ?",
@@ -195,7 +414,7 @@ async fn fetch_object_grants(pool: &MySqlPool, grantee: &str) -> Result<Vec<Obje
             Err(_) => continue,
         };
         for row in &rows {
-            let Some(privilege) = Privilege::from_sql_name(&text(row, "PRIVILEGE_TYPE")) else {
+            let Some(privilege) = privilege_id(&text(row, "PRIVILEGE_TYPE")) else {
                 continue;
             };
             merged
@@ -209,6 +428,8 @@ async fn fetch_object_grants(pool: &MySqlPool, grantee: &str) -> Result<Vec<Obje
         .into_iter()
         .map(|((database, name), privileges)| ObjectGrant {
             database,
+            // MySQL has no schema level; its database-wide grant already lives in `database`.
+            schema: String::new(),
             name,
             privileges,
         })
@@ -409,10 +630,10 @@ fn server_privilege_statements(edit: &UserEdit, target: &str) -> Vec<String> {
 
     // Only the privileges this app knows about are diffed, so dynamic privileges the account may
     // hold (SYSTEM_VARIABLES_ADMIN, BACKUP_ADMIN, ...) are left untouched.
-    let removed: Vec<&str> = original
+    let removed: Vec<String> = original
         .difference(current)
-        .filter(|privilege| **privilege != Privilege::GrantOption)
-        .map(|privilege| privilege.sql_name())
+        .filter(|privilege| !privilege.matches("GRANT OPTION"))
+        .map(|privilege| privilege.as_str().to_string())
         .collect();
     if !removed.is_empty() {
         statements.push(format!(
@@ -421,22 +642,22 @@ fn server_privilege_statements(edit: &UserEdit, target: &str) -> Vec<String> {
             target
         ));
     }
-    if original.contains(&Privilege::GrantOption) && !current.contains(&Privilege::GrantOption) {
+    if has_grant_option(&original) && !has_grant_option(current) {
         statements.push(format!("REVOKE GRANT OPTION ON *.* FROM {target}"));
     }
 
-    let grant_option = current.contains(&Privilege::GrantOption);
-    let mut added: Vec<&str> = current
+    let grant_option = has_grant_option(current);
+    let mut added: Vec<String> = current
         .difference(&original)
-        .filter(|privilege| **privilege != Privilege::GrantOption)
-        .map(|privilege| privilege.sql_name())
+        .filter(|privilege| !privilege.matches("GRANT OPTION"))
+        .map(|privilege| privilege.as_str().to_string())
         .collect();
-    let grant_option_added = grant_option && !original.contains(&Privilege::GrantOption);
+    let grant_option_added = grant_option && !has_grant_option(&original);
     if added.is_empty() && !grant_option_added {
         return statements;
     }
     if added.is_empty() {
-        added.push("USAGE");
+        added.push("USAGE".to_string());
     }
     let mut statement = format!("GRANT {} ON *.* TO {target}", added.join(", "));
     if grant_option {
@@ -447,7 +668,7 @@ fn server_privilege_statements(edit: &UserEdit, target: &str) -> Vec<String> {
 }
 
 fn object_grant_statements(edit: &UserEdit, target: &str) -> Vec<String> {
-    let original: BTreeMap<(String, String), BTreeSet<Privilege>> = edit
+    let original: BTreeMap<(String, String), BTreeSet<PrivilegeId>> = edit
         .original
         .as_ref()
         .map(|details| {
@@ -463,7 +684,7 @@ fn object_grant_statements(edit: &UserEdit, target: &str) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default();
-    let current: BTreeMap<(String, String), BTreeSet<Privilege>> = edit
+    let current: BTreeMap<(String, String), BTreeSet<PrivilegeId>> = edit
         .grants
         .iter()
         .map(|grant| {
@@ -484,10 +705,10 @@ fn object_grant_statements(edit: &UserEdit, target: &str) -> Vec<String> {
         let new = current.get(&key).cloned().unwrap_or_default();
         let object = object_spec(&key.0, &key.1);
 
-        let removed: Vec<&str> = old
+        let removed: Vec<String> = old
             .difference(&new)
-            .filter(|privilege| **privilege != Privilege::GrantOption)
-            .map(|privilege| privilege.sql_name())
+            .filter(|privilege| !privilege.matches("GRANT OPTION"))
+            .map(|privilege| privilege.as_str().to_string())
             .collect();
         if !removed.is_empty() {
             statements.push(format!(
@@ -502,28 +723,28 @@ fn object_grant_statements(edit: &UserEdit, target: &str) -> Vec<String> {
             // `REVOKE ALL [PRIVILEGES], GRANT OPTION` has no `ON` clause (it only strips a user's
             // global privileges), so an object that loses every privilege is emptied by revoking
             // exactly what it held above, plus its GRANT OPTION here.
-            if old.contains(&Privilege::GrantOption) {
+            if has_grant_option(&old) {
                 statements.push(format!("REVOKE GRANT OPTION ON {} FROM {}", object, target));
             }
             continue;
         }
 
-        if old.contains(&Privilege::GrantOption) && !new.contains(&Privilege::GrantOption) {
+        if has_grant_option(&old) && !has_grant_option(&new) {
             statements.push(format!("REVOKE GRANT OPTION ON {} FROM {}", object, target));
         }
 
-        let grant_option = new.contains(&Privilege::GrantOption);
-        let mut added: Vec<&str> = new
+        let grant_option = has_grant_option(&new);
+        let mut added: Vec<String> = new
             .difference(&old)
-            .filter(|privilege| **privilege != Privilege::GrantOption)
-            .map(|privilege| privilege.sql_name())
+            .filter(|privilege| !privilege.matches("GRANT OPTION"))
+            .map(|privilege| privilege.as_str().to_string())
             .collect();
-        let grant_option_added = grant_option && !old.contains(&Privilege::GrantOption);
+        let grant_option_added = grant_option && !has_grant_option(&old);
         if added.is_empty() && !grant_option_added {
             continue;
         }
         if added.is_empty() {
-            added.push("USAGE");
+            added.push("USAGE".to_string());
         }
         let mut statement = format!("GRANT {} ON {} TO {}", added.join(", "), object, target);
         if grant_option {
@@ -761,10 +982,10 @@ pub(crate) async fn object_privilege_matrix(
         .map_err(map_query_error)?
     };
 
-    let mut merged: BTreeMap<(String, String), BTreeSet<Privilege>> = BTreeMap::new();
+    let mut merged: BTreeMap<(String, String), BTreeSet<PrivilegeId>> = BTreeMap::new();
     for row in &rows {
         let (user, host) = parse_grantee(&text(row, "GRANTEE"));
-        let Some(privilege) = Privilege::from_sql_name(&text(row, "PRIVILEGE_TYPE")) else {
+        let Some(privilege) = privilege_id(&text(row, "PRIVILEGE_TYPE")) else {
             continue;
         };
         merged.entry((user, host)).or_default().insert(privilege);
@@ -776,6 +997,8 @@ pub(crate) async fn object_privilege_matrix(
             user,
             host,
             privileges,
+            // MySQL has no DENY concept.
+            denied: BTreeSet::new(),
         })
         .collect())
 }
@@ -787,7 +1010,7 @@ pub(crate) async fn set_object_privileges(
     name: &str,
     rows: &[ObjectPrivilegeRow],
 ) -> Result<()> {
-    let current: BTreeMap<(String, String), BTreeSet<Privilege>> =
+    let current: BTreeMap<(String, String), BTreeSet<PrivilegeId>> =
         object_privilege_matrix(pool, database, name)
             .await?
             .into_iter()
@@ -806,7 +1029,7 @@ pub(crate) fn object_privileges_sql(
     original: &[ObjectPrivilegeRow],
     rows: &[ObjectPrivilegeRow],
 ) -> String {
-    let current: BTreeMap<(String, String), BTreeSet<Privilege>> = original
+    let current: BTreeMap<(String, String), BTreeSet<PrivilegeId>> = original
         .iter()
         .map(|row| ((row.user.clone(), row.host.clone()), row.privileges.clone()))
         .collect();
@@ -822,7 +1045,7 @@ pub(crate) fn object_privileges_sql(
 fn object_privilege_statements(
     database: &str,
     name: &str,
-    current: &BTreeMap<(String, String), BTreeSet<Privilege>>,
+    current: &BTreeMap<(String, String), BTreeSet<PrivilegeId>>,
     rows: &[ObjectPrivilegeRow],
 ) -> Vec<String> {
     let object = object_spec(database, name);
@@ -840,10 +1063,10 @@ fn object_privilege_statements(
             continue;
         }
 
-        let removed: Vec<&str> = old
+        let removed: Vec<String> = old
             .difference(new)
-            .filter(|privilege| **privilege != Privilege::GrantOption)
-            .map(|privilege| privilege.sql_name())
+            .filter(|privilege| !privilege.matches("GRANT OPTION"))
+            .map(|privilege| privilege.as_str().to_string())
             .collect();
         if !removed.is_empty() {
             statements.push(format!(
@@ -853,22 +1076,22 @@ fn object_privilege_statements(
                 target
             ));
         }
-        if old.contains(&Privilege::GrantOption) && !new.contains(&Privilege::GrantOption) {
+        if has_grant_option(&old) && !has_grant_option(new) {
             statements.push(format!("REVOKE GRANT OPTION ON {} FROM {}", object, target));
         }
 
-        let grant_option = new.contains(&Privilege::GrantOption);
-        let mut added: Vec<&str> = new
+        let grant_option = has_grant_option(new);
+        let mut added: Vec<String> = new
             .difference(&old)
-            .filter(|privilege| **privilege != Privilege::GrantOption)
-            .map(|privilege| privilege.sql_name())
+            .filter(|privilege| !privilege.matches("GRANT OPTION"))
+            .map(|privilege| privilege.as_str().to_string())
             .collect();
-        let grant_option_added = grant_option && !old.contains(&Privilege::GrantOption);
+        let grant_option_added = grant_option && !has_grant_option(&old);
         if added.is_empty() && !grant_option_added {
             continue;
         }
         if added.is_empty() {
-            added.push("USAGE");
+            added.push("USAGE".to_string());
         }
         let mut statement = format!("GRANT {} ON {} TO {}", added.join(", "), object, target);
         if grant_option {
@@ -886,10 +1109,10 @@ fn object_privilege_statements(
         {
             continue;
         }
-        let removed: Vec<&str> = old
+        let removed: Vec<String> = old
             .iter()
-            .filter(|privilege| **privilege != Privilege::GrantOption)
-            .map(|privilege| privilege.sql_name())
+            .filter(|privilege| !privilege.matches("GRANT OPTION"))
+            .map(|privilege| privilege.as_str().to_string())
             .collect();
         let target = quote_account(user, host);
         if !removed.is_empty() {
@@ -900,7 +1123,7 @@ fn object_privilege_statements(
                 target
             ));
         }
-        if old.contains(&Privilege::GrantOption) {
+        if has_grant_option(old) {
             statements.push(format!("REVOKE GRANT OPTION ON {} FROM {}", object, target));
         }
     }
@@ -929,23 +1152,28 @@ fn parse_grantee(grantee: &str) -> (String, String) {
 mod tests {
     use super::*;
 
-    fn row(user: &str, host: &str, privileges: &[Privilege]) -> ObjectPrivilegeRow {
+    fn p(name: &str) -> PrivilegeId {
+        PrivilegeId::new(name)
+    }
+
+    fn row(user: &str, host: &str, privileges: &[PrivilegeId]) -> ObjectPrivilegeRow {
         ObjectPrivilegeRow {
             user: user.to_string(),
             host: host.to_string(),
-            privileges: privileges.iter().copied().collect(),
+            privileges: privileges.iter().cloned().collect(),
+            denied: BTreeSet::new(),
         }
     }
 
     fn current(
-        entries: &[(&str, &str, &[Privilege])],
-    ) -> BTreeMap<(String, String), BTreeSet<Privilege>> {
+        entries: &[(&str, &str, &[PrivilegeId])],
+    ) -> BTreeMap<(String, String), BTreeSet<PrivilegeId>> {
         entries
             .iter()
             .map(|(user, host, privileges)| {
                 (
                     (user.to_string(), host.to_string()),
-                    privileges.iter().copied().collect(),
+                    privileges.iter().cloned().collect(),
                 )
             })
             .collect()
@@ -957,7 +1185,7 @@ mod tests {
             "shop",
             "",
             &current(&[]),
-            &[row("alice", "%", &[Privilege::Select, Privilege::Insert])],
+            &[row("alice", "%", &[p("SELECT"), p("INSERT")])],
         );
         assert_eq!(
             statements,
@@ -970,8 +1198,8 @@ mod tests {
         let statements = object_privilege_statements(
             "shop",
             "orders",
-            &current(&[("alice", "%", &[Privilege::Select, Privilege::Insert])]),
-            &[row("alice", "%", &[Privilege::Select])],
+            &current(&[("alice", "%", &[p("SELECT"), p("INSERT")])]),
+            &[row("alice", "%", &[p("SELECT")])],
         );
         assert_eq!(
             statements,
@@ -984,7 +1212,7 @@ mod tests {
         let statements = object_privilege_statements(
             "shop",
             "",
-            &current(&[("alice", "%", &[Privilege::Select, Privilege::GrantOption])]),
+            &current(&[("alice", "%", &[p("SELECT"), p("GRANT OPTION")])]),
             &[],
         );
         assert_eq!(
@@ -1002,10 +1230,10 @@ mod tests {
             "shop",
             "",
             &current(&[
-                ("alice", "%", &[Privilege::Select]),
-                ("bob", "localhost", &[Privilege::Insert]),
+                ("alice", "%", &[p("SELECT")]),
+                ("bob", "localhost", &[p("INSERT")]),
             ]),
-            &[row("alice", "%", &[Privilege::Select])],
+            &[row("alice", "%", &[p("SELECT")])],
         );
         assert_eq!(
             statements,
@@ -1051,6 +1279,7 @@ mod tests {
             },
             password: None,
             server_privileges: BTreeSet::new(),
+            denied_server_privileges: BTreeSet::new(),
             grants: Vec::new(),
             roles: Vec::new(),
             members: Vec::new(),
@@ -1088,6 +1317,7 @@ mod tests {
             account,
             password: None,
             server_privileges: BTreeSet::new(),
+            denied_server_privileges: BTreeSet::new(),
             grants: Vec::new(),
             roles: Vec::new(),
             members: Vec::new(),
@@ -1119,6 +1349,7 @@ mod tests {
             },
             password: None,
             server_privileges: BTreeSet::new(),
+            denied_server_privileges: BTreeSet::new(),
             grants: Vec::new(),
             roles: Vec::new(),
             members: Vec::new(),
@@ -1142,10 +1373,9 @@ mod tests {
             },
             grants: vec![ObjectGrant {
                 database: "test".to_string(),
+                schema: String::new(),
                 name: "t".to_string(),
-                privileges: [Privilege::Select, Privilege::GrantOption]
-                    .into_iter()
-                    .collect(),
+                privileges: [p("SELECT"), p("GRANT OPTION")].into_iter().collect(),
             }],
             ..Default::default()
         };
@@ -1159,6 +1389,7 @@ mod tests {
             },
             password: None,
             server_privileges: BTreeSet::new(),
+            denied_server_privileges: BTreeSet::new(),
             grants: Vec::new(),
             roles: Vec::new(),
             members: Vec::new(),
@@ -1191,7 +1422,7 @@ mod tests {
                 host: "%".to_string(),
                 ..Default::default()
             },
-            server_privileges: [Privilege::Select].into_iter().collect(),
+            server_privileges: [p("SELECT")].into_iter().collect(),
             ..Default::default()
         };
         let edit = UserEdit {
@@ -1204,7 +1435,8 @@ mod tests {
                 ..Default::default()
             },
             password: None,
-            server_privileges: [Privilege::Insert].into_iter().collect(),
+            server_privileges: [p("INSERT")].into_iter().collect(),
+            denied_server_privileges: BTreeSet::new(),
             grants: Vec::new(),
             roles: Vec::new(),
             members: Vec::new(),

@@ -1,191 +1,323 @@
 //! Engine-agnostic models for account (user/role) administration and the privileges that can be
-//! granted to an account. The UI only ever sees these types; each driver maps them to its own
-//! catalog and grant syntax.
+//! granted to an account. The UI only ever sees these types; each driver exposes a
+//! [`PrivilegeCatalog`] describing its own privileges and maps them to its own grant syntax.
 
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-/// A privilege that can be granted to an account.
-///
-/// MySQL has two levels: the server-wide privileges (`mysql.user`'s `*_priv` columns) and the
-/// subset that can also be granted on a database/table/routine/column ([`Privilege::OBJECT`]).
-/// The `sql_name` is the keyword used in a `GRANT` statement and is also the value MySQL reports
-/// through `information_schema.*_PRIVILEGES.PRIVILEGE_TYPE`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub enum Privilege {
-    Alter,
-    AlterRoutine,
-    Create,
-    CreateRoutine,
-    CreateTemporaryTables,
-    CreateUser,
-    CreateView,
-    Delete,
-    Drop,
-    Event,
-    Execute,
-    File,
-    GrantOption,
-    Index,
-    Insert,
-    LockTables,
-    Process,
-    References,
-    Reload,
-    ReplicationClient,
-    ReplicationSlave,
-    Select,
-    ShowDatabases,
-    ShowView,
-    Shutdown,
-    Super,
-    Trigger,
-    Update,
-}
+/// A privilege's identity: the engine keyword used in a `GRANT` statement (e.g. `"SELECT"`,
+/// `"CONTROL SERVER"`, `"CREATE ANY TABLE"`). Compared case-insensitively.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct PrivilegeId(String);
 
-impl Privilege {
-    /// Every server-wide privilege, in the order the UI presents them.
-    pub const ALL: [Privilege; 28] = [
-        Privilege::Alter,
-        Privilege::AlterRoutine,
-        Privilege::Create,
-        Privilege::CreateRoutine,
-        Privilege::CreateTemporaryTables,
-        Privilege::CreateUser,
-        Privilege::CreateView,
-        Privilege::Delete,
-        Privilege::Drop,
-        Privilege::Event,
-        Privilege::Execute,
-        Privilege::File,
-        Privilege::GrantOption,
-        Privilege::Index,
-        Privilege::Insert,
-        Privilege::LockTables,
-        Privilege::Process,
-        Privilege::References,
-        Privilege::Reload,
-        Privilege::ReplicationClient,
-        Privilege::ReplicationSlave,
-        Privilege::Select,
-        Privilege::ShowDatabases,
-        Privilege::ShowView,
-        Privilege::Shutdown,
-        Privilege::Super,
-        Privilege::Trigger,
-        Privilege::Update,
-    ];
-
-    /// The privileges that can be granted on an object (database/table/routine), in the order the
-    /// privilege dialog presents them.
-    pub const OBJECT: [Privilege; 16] = [
-        Privilege::Alter,
-        Privilege::AlterRoutine,
-        Privilege::Create,
-        Privilege::CreateRoutine,
-        Privilege::CreateTemporaryTables,
-        Privilege::CreateView,
-        Privilege::Delete,
-        Privilege::Drop,
-        Privilege::GrantOption,
-        Privilege::Index,
-        Privilege::Insert,
-        Privilege::References,
-        Privilege::Select,
-        Privilege::ShowView,
-        Privilege::Trigger,
-        Privilege::Update,
-    ];
-
-    /// The i18n key of the privilege's label.
-    pub fn label_key(self) -> &'static str {
-        match self {
-            Privilege::Alter => "user.priv.alter",
-            Privilege::AlterRoutine => "user.priv.alter_routine",
-            Privilege::Create => "user.priv.create",
-            Privilege::CreateRoutine => "user.priv.create_routine",
-            Privilege::CreateTemporaryTables => "user.priv.create_temporary_tables",
-            Privilege::CreateUser => "user.priv.create_user",
-            Privilege::CreateView => "user.priv.create_view",
-            Privilege::Delete => "user.priv.delete",
-            Privilege::Drop => "user.priv.drop",
-            Privilege::Event => "user.priv.event",
-            Privilege::Execute => "user.priv.execute",
-            Privilege::File => "user.priv.file",
-            Privilege::GrantOption => "user.priv.grant_option",
-            Privilege::Index => "user.priv.index",
-            Privilege::Insert => "user.priv.insert",
-            Privilege::LockTables => "user.priv.lock_tables",
-            Privilege::Process => "user.priv.process",
-            Privilege::References => "user.priv.references",
-            Privilege::Reload => "user.priv.reload",
-            Privilege::ReplicationClient => "user.priv.replication_client",
-            Privilege::ReplicationSlave => "user.priv.replication_slave",
-            Privilege::Select => "user.priv.select",
-            Privilege::ShowDatabases => "user.priv.show_databases",
-            Privilege::ShowView => "user.priv.show_view",
-            Privilege::Shutdown => "user.priv.shutdown",
-            Privilege::Super => "user.priv.super",
-            Privilege::Trigger => "user.priv.trigger",
-            Privilege::Update => "user.priv.update",
-        }
+impl PrivilegeId {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
     }
 
-    /// The keyword MySQL uses in `GRANT`, and the value it reports through
-    /// `information_schema.*_PRIVILEGES`.
-    pub fn sql_name(self) -> &'static str {
-        match self {
-            Privilege::Alter => "ALTER",
-            Privilege::AlterRoutine => "ALTER ROUTINE",
-            Privilege::Create => "CREATE",
-            Privilege::CreateRoutine => "CREATE ROUTINE",
-            Privilege::CreateTemporaryTables => "CREATE TEMPORARY TABLES",
-            Privilege::CreateUser => "CREATE USER",
-            Privilege::CreateView => "CREATE VIEW",
-            Privilege::Delete => "DELETE",
-            Privilege::Drop => "DROP",
-            Privilege::Event => "EVENT",
-            Privilege::Execute => "EXECUTE",
-            Privilege::File => "FILE",
-            Privilege::GrantOption => "GRANT OPTION",
-            Privilege::Index => "INDEX",
-            Privilege::Insert => "INSERT",
-            Privilege::LockTables => "LOCK TABLES",
-            Privilege::Process => "PROCESS",
-            Privilege::References => "REFERENCES",
-            Privilege::Reload => "RELOAD",
-            Privilege::ReplicationClient => "REPLICATION CLIENT",
-            Privilege::ReplicationSlave => "REPLICATION SLAVE",
-            Privilege::Select => "SELECT",
-            Privilege::ShowDatabases => "SHOW DATABASES",
-            Privilege::ShowView => "SHOW VIEW",
-            Privilege::Shutdown => "SHUTDOWN",
-            Privilege::Super => "SUPER",
-            Privilege::Trigger => "TRIGGER",
-            Privilege::Update => "UPDATE",
-        }
+    /// The engine keyword.
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 
-    /// Whether an object-level grant can carry this privilege.
-    pub fn is_object(self) -> bool {
-        Privilege::OBJECT.contains(&self)
-    }
-
-    /// Resolve a privilege from the keyword MySQL reports (case-insensitive), e.g. `"ALTER"`.
-    pub fn from_sql_name(name: &str) -> Option<Self> {
-        let name = name.trim().to_ascii_uppercase();
-        Privilege::ALL
-            .into_iter()
-            .find(|privilege| privilege.sql_name() == name)
+    /// Whether `name` is this privilege, ignoring case and surrounding whitespace.
+    pub fn matches(&self, name: &str) -> bool {
+        self.0.eq_ignore_ascii_case(name.trim())
     }
 }
 
-/// The columns of a privilege list, in [`Privilege::ALL`] order. Used by the UI grids.
-pub fn privilege_columns(privileges: &[Privilege]) -> Vec<Privilege> {
-    let mut all = privileges.to_vec();
-    all.sort();
-    all
+impl From<&str> for PrivilegeId {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
+
+impl From<String> for PrivilegeId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl std::fmt::Display for PrivilegeId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Where a privilege can be granted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrivilegeScope {
+    /// Server-wide (`*.*` in MySQL, `SERVER` in SQL Server, system privileges in Oracle).
+    Server,
+    /// On a whole database (`ON DATABASE::db` in SQL Server, `ON DATABASE db` in PostgreSQL).
+    /// Engines whose database-wide grants reuse their object privileges (MySQL's `db.*`) leave
+    /// this empty.
+    Database,
+    /// On a schema (`ON SCHEMA public` in PostgreSQL).
+    Schema,
+    /// On a table/view/routine.
+    Object,
+}
+
+/// One privilege in a driver's catalog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrivilegeInfo {
+    pub id: PrivilegeId,
+    /// The scopes it can be granted at (a privilege may be both server- and object-level).
+    pub scopes: Vec<PrivilegeScope>,
+    /// The `(scope, group id)` pairs this privilege belongs to. The grouping can differ per scope
+    /// (MySQL puts `ALTER ROUTINE` under 定义 for server privileges but under 例程 for objects).
+    pub groups: Vec<(PrivilegeScope, String)>,
+    /// The app i18n key, when the app knows one.
+    pub label_key: Option<String>,
+    /// Fallback display label (usually the engine keyword).
+    pub label: String,
+}
+
+impl PrivilegeInfo {
+    /// A server-only privilege in `group`.
+    pub fn server(
+        id: impl Into<PrivilegeId>,
+        group: &str,
+        label_key: Option<&str>,
+        label: &str,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            scopes: vec![PrivilegeScope::Server],
+            groups: vec![(PrivilegeScope::Server, group.to_string())],
+            label_key: label_key.map(str::to_string),
+            label: label.to_string(),
+        }
+    }
+
+    /// An object-only privilege in `group`.
+    pub fn object(
+        id: impl Into<PrivilegeId>,
+        group: &str,
+        label_key: Option<&str>,
+        label: &str,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            scopes: vec![PrivilegeScope::Object],
+            groups: vec![(PrivilegeScope::Object, group.to_string())],
+            label_key: label_key.map(str::to_string),
+            label: label.to_string(),
+        }
+    }
+
+    /// A database-only privilege in `group` (SQL Server's `ON DATABASE::db` permissions).
+    pub fn database(
+        id: impl Into<PrivilegeId>,
+        group: &str,
+        label_key: Option<&str>,
+        label: &str,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            scopes: vec![PrivilegeScope::Database],
+            groups: vec![(PrivilegeScope::Database, group.to_string())],
+            label_key: label_key.map(str::to_string),
+            label: label.to_string(),
+        }
+    }
+
+    /// A schema-only privilege in `group` (PostgreSQL's `ON SCHEMA`).
+    pub fn schema(
+        id: impl Into<PrivilegeId>,
+        group: &str,
+        label_key: Option<&str>,
+        label: &str,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            scopes: vec![PrivilegeScope::Schema],
+            groups: vec![(PrivilegeScope::Schema, group.to_string())],
+            label_key: label_key.map(str::to_string),
+            label: label.to_string(),
+        }
+    }
+
+    /// A privilege grantable on both a database and a schema, each in its own group.
+    pub fn database_and_schema(
+        id: impl Into<PrivilegeId>,
+        database_group: &str,
+        schema_group: &str,
+        label_key: Option<&str>,
+        label: &str,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            scopes: vec![PrivilegeScope::Database, PrivilegeScope::Schema],
+            groups: vec![
+                (PrivilegeScope::Database, database_group.to_string()),
+                (PrivilegeScope::Schema, schema_group.to_string()),
+            ],
+            label_key: label_key.map(str::to_string),
+            label: label.to_string(),
+        }
+    }
+
+    /// A privilege grantable on both a whole database and an object, each in its own group.
+    pub fn database_and_object(
+        id: impl Into<PrivilegeId>,
+        database_group: &str,
+        object_group: &str,
+        label_key: Option<&str>,
+        label: &str,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            scopes: vec![PrivilegeScope::Database, PrivilegeScope::Object],
+            groups: vec![
+                (PrivilegeScope::Database, database_group.to_string()),
+                (PrivilegeScope::Object, object_group.to_string()),
+            ],
+            label_key: label_key.map(str::to_string),
+            label: label.to_string(),
+        }
+    }
+
+    /// A privilege grantable at both scopes, each in its own group.
+    pub fn both(
+        id: impl Into<PrivilegeId>,
+        server_group: &str,
+        object_group: &str,
+        label_key: Option<&str>,
+        label: &str,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            scopes: vec![PrivilegeScope::Server, PrivilegeScope::Object],
+            groups: vec![
+                (PrivilegeScope::Server, server_group.to_string()),
+                (PrivilegeScope::Object, object_group.to_string()),
+            ],
+            label_key: label_key.map(str::to_string),
+            label: label.to_string(),
+        }
+    }
+
+    /// Whether the privilege can be granted server-wide.
+    pub fn is_server(&self) -> bool {
+        self.scopes.contains(&PrivilegeScope::Server)
+    }
+
+    /// Whether the privilege can be granted on a whole database.
+    pub fn is_database(&self) -> bool {
+        self.scopes.contains(&PrivilegeScope::Database)
+    }
+
+    /// Whether the privilege can be granted on a schema.
+    pub fn is_schema(&self) -> bool {
+        self.scopes.contains(&PrivilegeScope::Schema)
+    }
+
+    /// Whether the privilege can be granted on an object.
+    pub fn is_object(&self) -> bool {
+        self.scopes.contains(&PrivilegeScope::Object)
+    }
+}
+
+/// A named group of privileges, shown together in the editor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrivilegeGroup {
+    pub id: String,
+    pub label_key: Option<String>,
+    pub label: String,
+}
+
+/// A one-click preset: a named set of privileges.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrivilegePreset {
+    pub id: String,
+    pub label_key: Option<String>,
+    pub label: String,
+    pub privileges: Vec<PrivilegeId>,
+}
+
+/// An engine's privilege catalog: the groups, privileges and presets the account editor and the
+/// object-privilege manager render. Drivers return their own; the UI never matches on engine id.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PrivilegeCatalog {
+    pub groups: Vec<PrivilegeGroup>,
+    pub privileges: Vec<PrivilegeInfo>,
+    pub server_presets: Vec<PrivilegePreset>,
+    pub object_presets: Vec<PrivilegePreset>,
+    /// Whether the engine has an explicit deny (`DENY` in SQL Server), which the privilege manager
+    /// offers as a per-privilege toggle.
+    pub deny_supported: bool,
+}
+
+impl PrivilegeCatalog {
+    /// The privileges that can be granted server-wide.
+    pub fn server(&self) -> impl Iterator<Item = &PrivilegeInfo> {
+        self.privileges.iter().filter(|info| info.is_server())
+    }
+
+    /// The privileges that can be granted on a whole database.
+    pub fn database(&self) -> impl Iterator<Item = &PrivilegeInfo> {
+        self.privileges.iter().filter(|info| info.is_database())
+    }
+
+    /// The privileges that can be granted on a schema.
+    pub fn schema(&self) -> impl Iterator<Item = &PrivilegeInfo> {
+        self.privileges.iter().filter(|info| info.is_schema())
+    }
+
+    /// The privileges that can be granted on an object.
+    pub fn object(&self) -> impl Iterator<Item = &PrivilegeInfo> {
+        self.privileges.iter().filter(|info| info.is_object())
+    }
+
+    /// Every privilege grantable at `scope`, in catalog order.
+    pub fn at(&self, scope: PrivilegeScope) -> impl Iterator<Item = &PrivilegeInfo> {
+        self.privileges
+            .iter()
+            .filter(move |info| info.scopes.contains(&scope))
+    }
+
+    /// Whether the catalog has any privilege at `scope`.
+    pub fn has_scope(&self, scope: PrivilegeScope) -> bool {
+        self.privileges
+            .iter()
+            .any(|info| info.scopes.contains(&scope))
+    }
+
+    /// The catalog entry for `id`.
+    pub fn info(&self, id: &PrivilegeId) -> Option<&PrivilegeInfo> {
+        self.privileges.iter().find(|info| &info.id == id)
+    }
+
+    /// The group `id` names.
+    pub fn group(&self, id: &str) -> Option<&PrivilegeGroup> {
+        self.groups.iter().find(|group| group.id == id)
+    }
+
+    /// Whether `id` can be granted server-wide.
+    pub fn is_server(&self, id: &PrivilegeId) -> bool {
+        self.info(id).is_some_and(PrivilegeInfo::is_server)
+    }
+
+    /// Whether `id` can be granted on an object.
+    pub fn is_object(&self, id: &PrivilegeId) -> bool {
+        self.info(id).is_some_and(PrivilegeInfo::is_object)
+    }
+
+    /// The ids of one group at one scope, in catalog order.
+    pub fn group_privileges(&self, group: &str, scope: PrivilegeScope) -> Vec<PrivilegeId> {
+        self.privileges
+            .iter()
+            .filter(|info| {
+                info.groups
+                    .iter()
+                    .any(|(candidate, id)| *candidate == scope && id == group)
+            })
+            .map(|info| info.id.clone())
+            .collect()
+    }
 }
 
 /// One account (a MySQL user or role) as listed by the Users tab.
@@ -201,6 +333,10 @@ pub struct UserAccount {
     pub password_expired: bool,
     /// `password_lifetime` in days; `None` means the server default (`DEFAULT`).
     pub password_lifetime: Option<u32>,
+    /// PostgreSQL's `rolvaliduntil`: the moment the password stops being valid. `None` means no
+    /// expiry. Stored as the value the engine reports (`YYYY-MM-DD HH:MM:SS+TZ`).
+    #[serde(default)]
+    pub password_valid_until: Option<String>,
     pub account_locked: bool,
     pub max_questions: u64,
     pub max_updates: u64,
@@ -210,6 +346,16 @@ pub struct UserAccount {
     pub ssl_cipher: String,
     pub x509_issuer: String,
     pub x509_subject: String,
+    /// Oracle's default tablespace.
+    #[serde(default)]
+    pub default_tablespace: String,
+    /// Oracle's resource/tuning profile.
+    #[serde(default)]
+    pub profile: String,
+    /// The account's quota on its default tablespace: `UNLIMITED`, a size like `100M`, or empty
+    /// for none. Oracle reports/accepts it per tablespace; the editor manages the default one.
+    #[serde(default)]
+    pub tablespace_quota: String,
     /// Whether the account holds the global `SUPER` privilege.
     pub is_super_user: bool,
 }
@@ -230,6 +376,7 @@ impl UserAccount {
         self.is_super_user
     }
 }
+
 /// One row of `mysql.role_edges`: a role granted to (or, for the Members tab, a member of) an
 /// account.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -258,17 +405,41 @@ impl RoleMembership {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectGrant {
     pub database: String,
-    /// Empty for a database-wide grant; otherwise the table/routine name.
+    /// The schema/owner the object lives in; empty for engines without schemas.
+    pub schema: String,
+    /// Empty for a database-wide grant; otherwise the bare table/routine name.
     pub name: String,
-    pub privileges: BTreeSet<Privilege>,
+    pub privileges: BTreeSet<PrivilegeId>,
 }
 
 impl ObjectGrant {
     pub fn new(database: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             database: database.into(),
+            schema: String::new(),
             name: name.into(),
             privileges: BTreeSet::new(),
+        }
+    }
+
+    /// The `schema.name` display key of the object, or `name` when there is no schema. Empty for a
+    /// database-wide grant.
+    pub fn object_name(&self) -> String {
+        if self.schema.is_empty() {
+            self.name.clone()
+        } else {
+            format!("{}.{}", self.schema, self.name)
+        }
+    }
+
+    /// Split a schema-qualified object name (`schema.name`) into `(schema, name)`. A bare name
+    /// yields an empty schema, so engines without schemas pass their name through unchanged.
+    pub fn split_object_name(qualified: &str) -> (String, String) {
+        match qualified.split_once('.') {
+            Some((schema, name)) if !schema.is_empty() && !name.is_empty() => {
+                (schema.to_string(), name.to_string())
+            }
+            _ => (String::new(), qualified.to_string()),
         }
     }
 }
@@ -278,7 +449,10 @@ impl ObjectGrant {
 pub struct ObjectPrivilegeRow {
     pub user: String,
     pub host: String,
-    pub privileges: BTreeSet<Privilege>,
+    pub privileges: BTreeSet<PrivilegeId>,
+    /// Privileges explicitly denied (`DENY` in SQL Server, which overrides a grant). Engines
+    /// without a deny concept leave it empty.
+    pub denied: BTreeSet<PrivilegeId>,
 }
 
 impl ObjectPrivilegeRow {
@@ -287,6 +461,7 @@ impl ObjectPrivilegeRow {
             user: user.into(),
             host: host.into(),
             privileges: BTreeSet::new(),
+            denied: BTreeSet::new(),
         }
     }
 
@@ -309,7 +484,9 @@ fn label(user: &str, host: &str) -> String {
 pub struct UserDetails {
     pub account: UserAccount,
     /// The server-wide privileges currently granted.
-    pub server_privileges: BTreeSet<Privilege>,
+    pub server_privileges: BTreeSet<PrivilegeId>,
+    /// Server-wide privileges explicitly denied (SQL Server's `DENY`, which overrides a grant).
+    pub denied_server_privileges: BTreeSet<PrivilegeId>,
     /// The object-level grants of the 权限 tab.
     pub grants: Vec<ObjectGrant>,
     /// The role edges where this account is the member (the 成员属于 tab).
@@ -327,7 +504,9 @@ pub struct UserEdit {
     pub account: UserAccount,
     /// `Some` when the password should be (re)set.
     pub password: Option<String>,
-    pub server_privileges: BTreeSet<Privilege>,
+    pub server_privileges: BTreeSet<PrivilegeId>,
+    /// Server-wide privileges to explicitly deny (SQL Server).
+    pub denied_server_privileges: BTreeSet<PrivilegeId>,
     pub grants: Vec<ObjectGrant>,
     /// Role memberships of this account as `(role_user, role_host, admin_option)`: roles this
     /// account is granted (the 成员属于 tab).
@@ -349,4 +528,30 @@ pub enum UserEditSection {
     ObjectGrants,
     /// Role memberships.
     Roles,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn object_names_split_and_rejoin() {
+        assert_eq!(
+            ObjectGrant::split_object_name("dbo.users"),
+            ("dbo".to_string(), "users".to_string())
+        );
+        assert_eq!(
+            ObjectGrant::split_object_name("users"),
+            (String::new(), "users".to_string())
+        );
+        let grant = ObjectGrant {
+            database: "shop".to_string(),
+            schema: "dbo".to_string(),
+            name: "users".to_string(),
+            privileges: BTreeSet::new(),
+        };
+        assert_eq!(grant.object_name(), "dbo.users");
+        // A bare grant's object name is the bare name, not a schema-qualified one.
+        assert_eq!(ObjectGrant::new("shop", "orders").object_name(), "orders");
+    }
 }

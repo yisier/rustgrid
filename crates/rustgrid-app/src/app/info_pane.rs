@@ -585,9 +585,7 @@ impl AppView {
             return div().into_any_element();
         };
         let superuser = match &self.info_user {
-            Loadable::Loaded(details) => {
-                Some(details.server_privileges.contains(&Privilege::Super))
-            }
+            Loadable::Loaded(details) => Some(details.account.is_super_user),
             _ => None,
         };
         let yes_no = |value: bool| t!(if value { "common.yes" } else { "common.no" }).to_string();

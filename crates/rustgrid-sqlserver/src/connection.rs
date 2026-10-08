@@ -6,9 +6,10 @@ use futures_util::TryStreamExt;
 use rustgrid_core::{
     BackupObjectKind, CellValue, ColumnDef, ColumnInfo, Connection, DatabaseInfo, DatabaseOptions,
     DriverId, Error, ForeignKeyDef, IndexDef, ObjectDump, ObjectKind, ObjectPrivilegeRow,
-    PageRequest, QueryResult, Result, RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind,
-    RowInsert, RowUpdate, TableInfo, TableOptions, TablePage, TableSchema, TableStatus, TriggerDef,
-    UserAccount, UserDetails, UserEdit, UserEditSection, ViewDetails, ViewEdit, ViewInfo,
+    PageRequest, PrivilegeCatalog, QueryResult, Result, RoutineDetails, RoutineEdit, RoutineInfo,
+    RoutineKind, RowInsert, RowUpdate, TableInfo, TableOptions, TablePage, TableSchema,
+    TableStatus, TriggerDef, UserAccount, UserDetails, UserEdit, UserEditSection, ViewDetails,
+    ViewEdit, ViewInfo,
 };
 use tiberius::{QueryItem, Row, ToSql};
 
@@ -1570,27 +1571,39 @@ impl Connection for SqlServerConnection {
         user::rename_user(self, user_name, host, new_user, new_host).await
     }
 
+    fn privilege_catalog(&self) -> PrivilegeCatalog {
+        user::privilege_catalog()
+    }
+
     fn authentication_plugins(&self) -> Vec<&'static str> {
         user::authentication_plugins()
     }
 
     async fn object_privilege_matrix(
         &self,
-        _database: &str,
-        _name: &str,
+        database: &str,
+        name: &str,
     ) -> Result<Vec<ObjectPrivilegeRow>> {
-        Ok(Vec::new())
+        user::object_privilege_matrix(self, database, name).await
     }
 
     async fn set_object_privileges(
         &self,
-        _database: &str,
-        _name: &str,
-        _rows: &[ObjectPrivilegeRow],
+        database: &str,
+        name: &str,
+        rows: &[ObjectPrivilegeRow],
     ) -> Result<()> {
-        Err(Error::Query(
-            "SQL Server object privilege management is not supported yet".to_string(),
-        ))
+        user::set_object_privileges(self, database, name, rows).await
+    }
+
+    fn object_privileges_sql(
+        &self,
+        database: &str,
+        name: &str,
+        original: &[ObjectPrivilegeRow],
+        rows: &[ObjectPrivilegeRow],
+    ) -> String {
+        user::object_privileges_sql(database, name, original, rows)
     }
 }
 
@@ -2448,14 +2461,16 @@ fn create_index_statements(table: &str, indexes: &[IndexDef]) -> Vec<String> {
         .collect()
 }
 
-/// Convert a `UserAccount`'s contiguous decoded rows into the model's `BTreeSet` of
-/// privileges (used by `user.rs`).
+/// Normalize reported permission names into privilege ids (used by `user.rs`). SQL Server's
+/// permission names are the grant keywords themselves, so no translation is needed; unknown
+/// permissions are kept so an untouched grant is never silently dropped on save.
 pub(crate) fn privilege_set(
     names: impl IntoIterator<Item = String>,
-) -> BTreeSet<rustgrid_core::Privilege> {
+) -> BTreeSet<rustgrid_core::PrivilegeId> {
     names
         .into_iter()
-        .filter_map(|name| rustgrid_core::Privilege::from_sql_name(&name))
+        .map(|name| rustgrid_core::PrivilegeId::new(name.trim().to_ascii_uppercase()))
+        .filter(|id| !id.as_str().is_empty())
         .collect()
 }
 

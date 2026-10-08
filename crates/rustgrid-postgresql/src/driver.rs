@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use rustgrid_core::{
     Connection, ConnectionConfig, DatabaseEditorSpec, Driver, DriverCapabilities, DriverCapability,
     DriverDescriptor, DriverDialect, DriverIconStyle, DriverId, Error, Result, TlsMode,
+    UserEditorSpec,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
 
@@ -40,6 +41,30 @@ impl Driver for PostgresDriver {
             collation: true,
             owner: true,
             ..Default::default()
+        }
+    }
+
+    fn user_editor(&self) -> UserEditorSpec {
+        UserEditorSpec {
+            // PostgreSQL roles have no host, plugin, password expiry or MySQL resource limits;
+            // only `rolconnlimit` (最大连接数) is honoured.
+            host: false,
+            authentication_plugin: false,
+            password_expiry: false,
+            password_valid_until: true,
+            account_lock: true,
+            max_questions: false,
+            max_updates: false,
+            max_connections: true,
+            max_user_connections: false,
+            profile: false,
+            default_tablespace: false,
+            tablespace_quota: false,
+            list_super_user: true,
+            server_privileges: true,
+            object_privileges: true,
+            object_privilege_manager: true,
+            roles: true,
         }
     }
 

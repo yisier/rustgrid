@@ -8,74 +8,147 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use rustgrid_core::{
-    Error, ObjectGrant, ObjectPrivilegeRow, Privilege, Result, RoleMembership, UserAccount,
-    UserDetails, UserEdit, UserEditSection,
+    Error, ObjectGrant, ObjectPrivilegeRow, PrivilegeCatalog, PrivilegeGroup, PrivilegeId,
+    PrivilegeInfo, PrivilegePreset, Result, RoleMembership, UserAccount, UserDetails, UserEdit,
+    UserEditSection,
 };
 
 use crate::connection::{OracleConnection, map_query_error};
 use crate::helpers::{qualify, quote_identifier};
 
-/// The Oracle system privilege for a core privilege, when one exists.
-fn server_privilege(privilege: Privilege) -> Option<&'static str> {
-    match privilege {
-        Privilege::Alter => Some("ALTER ANY TABLE"),
-        Privilege::AlterRoutine => Some("ALTER ANY PROCEDURE"),
-        Privilege::Create => Some("CREATE TABLE"),
-        Privilege::CreateRoutine => Some("CREATE PROCEDURE"),
-        Privilege::CreateUser => Some("CREATE USER"),
-        Privilege::CreateView => Some("CREATE VIEW"),
-        Privilege::Delete => Some("DELETE ANY TABLE"),
-        Privilege::Drop => Some("DROP ANY TABLE"),
-        Privilege::Execute => Some("EXECUTE ANY PROCEDURE"),
-        Privilege::Index => Some("CREATE ANY INDEX"),
-        Privilege::Insert => Some("INSERT ANY TABLE"),
-        Privilege::Select => Some("SELECT ANY TABLE"),
-        Privilege::Update => Some("UPDATE ANY TABLE"),
-        _ => None,
+/// The Oracle system privileges surfaced by the account editor's 服务器权限 grid, as
+/// `(privilege, i18n key)`.
+const SYSTEM_PRIVILEGES: &[(&str, &str)] = &[
+    ("CREATE SESSION", "user.priv.oracle.create_session"),
+    ("SELECT ANY TABLE", "user.priv.oracle.select_any_table"),
+    ("INSERT ANY TABLE", "user.priv.oracle.insert_any_table"),
+    ("UPDATE ANY TABLE", "user.priv.oracle.update_any_table"),
+    ("DELETE ANY TABLE", "user.priv.oracle.delete_any_table"),
+    ("CREATE TABLE", "user.priv.oracle.create_table"),
+    ("ALTER ANY TABLE", "user.priv.oracle.alter_any_table"),
+    ("DROP ANY TABLE", "user.priv.oracle.drop_any_table"),
+    ("CREATE ANY INDEX", "user.priv.oracle.create_any_index"),
+    ("CREATE VIEW", "user.priv.oracle.create_view"),
+    ("CREATE PROCEDURE", "user.priv.oracle.create_procedure"),
+    (
+        "ALTER ANY PROCEDURE",
+        "user.priv.oracle.alter_any_procedure",
+    ),
+    (
+        "EXECUTE ANY PROCEDURE",
+        "user.priv.oracle.execute_any_procedure",
+    ),
+    ("CREATE USER", "user.priv.oracle.create_user"),
+];
+
+/// The Oracle object privileges surfaced by the 权限 grid, as `(privilege, i18n key, group)`.
+const OBJECT_PRIVILEGES: &[(&str, &str, &str)] = &[
+    ("SELECT", "user.priv.select", "dml"),
+    ("INSERT", "user.priv.insert", "dml"),
+    ("UPDATE", "user.priv.update", "dml"),
+    ("DELETE", "user.priv.delete", "dml"),
+    ("ALTER", "user.priv.alter", "ddl"),
+    ("INDEX", "user.priv.index", "ddl"),
+    ("REFERENCES", "user.priv.references", "ddl"),
+    ("EXECUTE", "user.priv.execute", "routines"),
+];
+
+/// The Oracle privilege catalog: its system privileges (server), object privileges, groups and
+/// presets.
+pub(crate) fn privilege_catalog() -> PrivilegeCatalog {
+    let groups = [
+        ("system", "user.tab.server_privileges"),
+        ("dml", "user.create.priv_group.dml"),
+        ("ddl", "user.create.priv_group.ddl"),
+        ("routines", "user.create.priv_group.routines"),
+    ]
+    .into_iter()
+    .map(|(id, label_key)| PrivilegeGroup {
+        id: id.to_string(),
+        label_key: Some(label_key.to_string()),
+        label: id.to_string(),
+    })
+    .collect();
+
+    let mut privileges: Vec<PrivilegeInfo> = SYSTEM_PRIVILEGES
+        .iter()
+        .map(|(name, label_key)| PrivilegeInfo::server(*name, "system", Some(*label_key), name))
+        .collect();
+    privileges.extend(OBJECT_PRIVILEGES.iter().map(|(name, label_key, group)| {
+        PrivilegeInfo::object(*name, group, Some(*label_key), name)
+    }));
+
+    PrivilegeCatalog {
+        groups,
+        privileges,
+        server_presets: vec![
+            preset("none", "user.create.template.none", &[]),
+            preset(
+                "connect",
+                "user.create.template.read_only",
+                &["CREATE SESSION"],
+            ),
+            preset(
+                "admin",
+                "user.create.template.admin",
+                &SYSTEM_PRIVILEGES
+                    .iter()
+                    .map(|(name, _)| *name)
+                    .collect::<Vec<_>>(),
+            ),
+        ],
+        object_presets: vec![
+            preset("none", "user.create.db_template.none", &[]),
+            preset(
+                "read_only",
+                "user.create.db_template.read_only",
+                &["SELECT"],
+            ),
+            preset(
+                "read_write",
+                "user.create.db_template.read_write",
+                &["SELECT", "INSERT", "UPDATE", "DELETE"],
+            ),
+            preset(
+                "full",
+                "user.create.db_template.full",
+                &OBJECT_PRIVILEGES
+                    .iter()
+                    .map(|(name, _, _)| *name)
+                    .collect::<Vec<_>>(),
+            ),
+        ],
+        deny_supported: false,
     }
 }
 
-/// The core privilege for an Oracle system privilege name.
-fn server_privilege_from(name: &str) -> Option<Privilege> {
-    let upper = name.to_ascii_uppercase();
-    Privilege::ALL
-        .into_iter()
-        .find(|privilege| server_privilege(*privilege).is_some_and(|value| value == upper))
-}
-
-/// The Oracle object-level privilege for a core privilege, when one exists.
-fn object_privilege(privilege: Privilege) -> Option<&'static str> {
-    match privilege {
-        Privilege::Select => Some("SELECT"),
-        Privilege::Insert => Some("INSERT"),
-        Privilege::Update => Some("UPDATE"),
-        Privilege::Delete => Some("DELETE"),
-        Privilege::Alter => Some("ALTER"),
-        Privilege::Index => Some("INDEX"),
-        Privilege::References => Some("REFERENCES"),
-        Privilege::Execute => Some("EXECUTE"),
-        _ => None,
-    }
-}
-
-/// The core privilege for an Oracle object privilege name.
-fn object_privilege_from(name: &str) -> Option<Privilege> {
-    match name.to_ascii_uppercase().as_str() {
-        "SELECT" | "READ" => Some(Privilege::Select),
-        "INSERT" => Some(Privilege::Insert),
-        "UPDATE" => Some(Privilege::Update),
-        "DELETE" => Some(Privilege::Delete),
-        "ALTER" => Some(Privilege::Alter),
-        "INDEX" => Some(Privilege::Index),
-        "REFERENCES" => Some(Privilege::References),
-        "EXECUTE" => Some(Privilege::Execute),
-        _ => None,
+fn preset(id: &str, label_key: &str, names: &[&str]) -> PrivilegePreset {
+    PrivilegePreset {
+        id: id.to_string(),
+        label_key: Some(label_key.to_string()),
+        label: id.to_string(),
+        privileges: names.iter().map(|name| PrivilegeId::new(*name)).collect(),
     }
 }
 
 /// Escape a password for `IDENTIFIED BY "..."` (the quotes are doubled).
 fn quote_password(password: &str) -> String {
     format!("\"{}\"", password.replace('"', "\"\""))
+}
+
+/// `QUOTA <size> ON <tablespace>`, or `None` when either part is missing. The size is passed
+/// through as typed (`UNLIMITED`, `100M`, ...), which Oracle parses.
+fn quota_clause(tablespace: &str, quota: &str) -> Option<String> {
+    let tablespace = tablespace.trim();
+    let quota = quota.trim();
+    if tablespace.is_empty() || quota.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "QUOTA {} ON {}",
+        quota,
+        quote_identifier(tablespace)
+    ))
 }
 
 /// A user account read from `dba_users` (or `all_users`, which lacks the status columns).
@@ -128,6 +201,23 @@ fn account_row(
             "OPEN".to_string()
         };
         let upper = status.to_ascii_uppercase();
+        // `all_users` (the fallback) has no tablespace/profile columns.
+        let default_tablespace = if dba {
+            row.get::<Option<String>>(2)
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let profile = if dba {
+            row.get::<Option<String>>(3)
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         accounts.push(UserAccount {
             user: username,
             host: String::new(),
@@ -135,6 +225,7 @@ fn account_row(
             password_set: true,
             password_expired: upper.contains("EXPIRED"),
             password_lifetime: None,
+            password_valid_until: None,
             account_locked: upper.contains("LOCKED"),
             max_questions: 0,
             max_updates: 0,
@@ -144,6 +235,10 @@ fn account_row(
             ssl_cipher: String::new(),
             x509_issuer: String::new(),
             x509_subject: String::new(),
+            default_tablespace,
+            profile,
+            // Loaded separately by `user_details` (it needs the tablespace name).
+            tablespace_quota: String::new(),
             is_super_user: false,
         });
     }
@@ -163,24 +258,26 @@ pub(crate) async fn user_details(connection: &OracleConnection, user: &str) -> R
     let user = user.to_string();
     connection
         .with_conn(move |raw| {
-            let account = match account_row(raw, Some(&user), true) {
+            let mut account = match account_row(raw, Some(&user), true) {
                 Ok(accounts) if !accounts.is_empty() => accounts.into_iter().next().unwrap(),
                 _ => account_row(raw, Some(&user), false)?
                     .into_iter()
                     .next()
                     .ok_or_else(|| Error::Query(format!("user {user} not found")))?,
             };
+            if !account.default_tablespace.is_empty() {
+                account.tablespace_quota =
+                    query_tablespace_quota(raw, &user, &account.default_tablespace);
+            }
 
-            let mut server_privileges = BTreeSet::new();
+            let mut server_privileges: BTreeSet<PrivilegeId> = BTreeSet::new();
             for name in query_strings(
                 raw,
                 "SELECT privilege FROM dba_sys_privs WHERE grantee = :1",
                 &user,
                 "SELECT privilege FROM user_sys_privs",
             )? {
-                if let Some(privilege) = server_privilege_from(&name) {
-                    server_privileges.insert(privilege);
-                }
+                server_privileges.insert(PrivilegeId::new(name.trim().to_ascii_uppercase()));
             }
 
             let roles = query_role_edges(raw, "grantee", &user)?
@@ -204,11 +301,12 @@ pub(crate) async fn user_details(connection: &OracleConnection, user: &str) -> R
                 })
                 .collect();
 
-            let grants = query_object_grants(raw, &user)?;
+            let grants = query_object_grants(raw, &container_name(raw), &user)?;
 
             Ok(UserDetails {
                 account,
                 server_privileges,
+                denied_server_privileges: BTreeSet::new(),
                 grants,
                 roles,
                 members,
@@ -279,8 +377,55 @@ fn query_role_edges(
     Ok(edges)
 }
 
-/// The object grants of a user, grouped by object.
-fn query_object_grants(raw: &oracledb::Connection, user: &str) -> Result<Vec<ObjectGrant>> {
+/// The user's quota on one tablespace: `UNLIMITED` when `dba_ts_quotas.max_bytes` is negative,
+/// else the byte count. Empty when there is no quota row.
+fn query_tablespace_quota(raw: &oracledb::Connection, user: &str, tablespace: &str) -> String {
+    let binds: Vec<String> = vec![user.to_string(), tablespace.to_string()];
+    let refs = crate::connection::bind_refs(&binds);
+    let cursor = match raw.query(
+        "SELECT max_bytes FROM dba_ts_quotas WHERE username = :1 AND tablespace_name = :2",
+        &refs,
+    ) {
+        Ok(cursor) => cursor,
+        Err(_) => return String::new(),
+    };
+    for row in cursor {
+        let row = match row {
+            Ok(row) => row,
+            Err(_) => return String::new(),
+        };
+        if let Ok(Some(bytes)) = row.get::<Option<i64>>(0) {
+            return if bytes < 0 {
+                "UNLIMITED".to_string()
+            } else {
+                bytes.to_string()
+            };
+        }
+    }
+    String::new()
+}
+
+/// The current container/PDB name, used as the object grants' database so they line up with the
+/// connection tree's single database row.
+fn container_name(raw: &oracledb::Connection) -> String {
+    raw.query_row(
+        "SELECT COALESCE(SYS_CONTEXT('USERENV', 'CON_NAME'), SYS_CONTEXT('USERENV', 'DB_NAME')) \
+         FROM dual",
+        &[],
+    )
+    .ok()
+    .and_then(|row| row.get::<Option<String>>(0).ok().flatten())
+    .filter(|value| !value.is_empty())
+    .unwrap_or_default()
+}
+
+/// The object grants of a user, grouped by object. `database` is the current container/PDB, the
+/// schema is the object's owner (Oracle's `OWNER.TABLE`).
+fn query_object_grants(
+    raw: &oracledb::Connection,
+    database: &str,
+    user: &str,
+) -> Result<Vec<ObjectGrant>> {
     let binds: Vec<String> = vec![user.to_string()];
     let refs = crate::connection::bind_refs(&binds);
     let cursor = match raw.query(
@@ -315,16 +460,24 @@ fn query_object_grants(raw: &oracledb::Connection, user: &str) -> Result<Vec<Obj
             .ok()
             .flatten()
             .unwrap_or_default();
-        let Some(privilege) = object_privilege_from(&privilege_name) else {
+        let privilege = PrivilegeId::new(privilege_name.trim().to_ascii_uppercase());
+        if privilege.as_str().is_empty() {
             continue;
-        };
-        let object = format!("{owner}.{table}");
-        match grants.iter_mut().find(|grant| grant.name == object) {
+        }
+        match grants
+            .iter_mut()
+            .find(|grant| grant.schema == owner && grant.name == table)
+        {
             Some(existing) => {
                 existing.privileges.insert(privilege);
             }
             None => {
-                let mut grant = ObjectGrant::new(String::new(), object);
+                let mut grant = ObjectGrant {
+                    database: database.to_string(),
+                    schema: owner,
+                    name: table,
+                    privileges: BTreeSet::new(),
+                };
                 grant.privileges.insert(privilege);
                 grants.push(grant);
             }
@@ -346,10 +499,24 @@ pub(crate) fn edit_groups(edit: &UserEdit) -> Vec<(UserEditSection, Vec<String>)
             .clone()
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "change_me".to_string());
-        account_statements.push(format!(
+        let mut sql = format!(
             "CREATE USER {user} IDENTIFIED BY {}",
             quote_password(&password)
-        ));
+        );
+        if !account.default_tablespace.is_empty() {
+            sql.push_str(&format!(
+                " DEFAULT TABLESPACE {}",
+                quote_identifier(&account.default_tablespace)
+            ));
+        }
+        if !account.profile.is_empty() {
+            sql.push_str(&format!(" PROFILE {}", quote_identifier(&account.profile)));
+        }
+        if let Some(quota) = quota_clause(&account.default_tablespace, &account.tablespace_quota) {
+            sql.push(' ');
+            sql.push_str(&quota);
+        }
+        account_statements.push(sql);
     } else if let Some(password) = edit.password.clone().filter(|value| !value.is_empty()) {
         account_statements.push(format!(
             "ALTER USER {user} IDENTIFIED BY {}",
@@ -367,6 +534,30 @@ pub(crate) fn edit_groups(edit: &UserEdit) -> Vec<(UserEditSection, Vec<String>)
                 "ACCOUNT UNLOCK"
             }
         ));
+    }
+    if let Some(original) = &edit.original {
+        if original.account.default_tablespace != account.default_tablespace
+            && !account.default_tablespace.is_empty()
+        {
+            account_statements.push(format!(
+                "ALTER USER {user} DEFAULT TABLESPACE {}",
+                quote_identifier(&account.default_tablespace)
+            ));
+        }
+        if original.account.profile != account.profile && !account.profile.is_empty() {
+            account_statements.push(format!(
+                "ALTER USER {user} PROFILE {}",
+                quote_identifier(&account.profile)
+            ));
+        }
+        let quota_changed = original.account.tablespace_quota != account.tablespace_quota
+            || original.account.default_tablespace != account.default_tablespace;
+        if quota_changed
+            && let Some(quota) =
+                quota_clause(&account.default_tablespace, &account.tablespace_quota)
+        {
+            account_statements.push(format!("ALTER USER {user} {quota}"));
+        }
     }
     if !account_statements.is_empty() {
         groups.push((UserEditSection::Account, account_statements));
@@ -392,23 +583,23 @@ pub(crate) fn edit_groups(edit: &UserEdit) -> Vec<(UserEditSection, Vec<String>)
 
 fn privilege_statements(edit: &UserEdit) -> Vec<String> {
     let user = quote_identifier(&edit.account.user);
-    let before: BTreeSet<Privilege> = edit
+    let before: BTreeSet<PrivilegeId> = edit
         .original
         .as_ref()
         .map(|details| details.server_privileges.clone())
         .unwrap_or_default();
     let mut statements = Vec::new();
-    let added: Vec<&str> = edit
+    let added: Vec<String> = edit
         .server_privileges
         .difference(&before)
-        .filter_map(|privilege| server_privilege(*privilege))
+        .map(|privilege| privilege.as_str().to_string())
         .collect();
     if !added.is_empty() {
         statements.push(format!("GRANT {} TO {user}", added.join(", ")));
     }
-    let removed: Vec<&str> = before
+    let removed: Vec<String> = before
         .difference(&edit.server_privileges)
-        .filter_map(|privilege| server_privilege(*privilege))
+        .map(|privilege| privilege.as_str().to_string())
         .collect();
     if !removed.is_empty() {
         statements.push(format!("REVOKE {} FROM {user}", removed.join(", ")));
@@ -418,36 +609,43 @@ fn privilege_statements(edit: &UserEdit) -> Vec<String> {
 
 fn grant_statements(edit: &UserEdit) -> Vec<String> {
     let user = quote_identifier(&edit.account.user);
-    let original: BTreeMap<&str, &BTreeSet<Privilege>> = edit
+    let original: BTreeMap<String, &BTreeSet<PrivilegeId>> = edit
         .original
         .as_ref()
         .map(|details| {
             details
                 .grants
                 .iter()
-                .map(|grant| (grant.name.as_str(), &grant.privileges))
+                .map(|grant| (grant.object_name(), &grant.privileges))
                 .collect()
         })
         .unwrap_or_default();
     let empty = BTreeSet::new();
     let mut statements = Vec::new();
     for grant in &edit.grants {
-        let before = original.get(grant.name.as_str()).copied().unwrap_or(&empty);
-        let target = match grant.name.split_once('.') {
-            Some((schema, name)) => qualify(schema, name),
-            None => quote_identifier(&grant.name),
+        let before = original
+            .get(&grant.object_name())
+            .copied()
+            .unwrap_or(&empty);
+        let target = if grant.schema.is_empty() {
+            match grant.name.split_once('.') {
+                Some((schema, name)) => qualify(schema, name),
+                None => quote_identifier(&grant.name),
+            }
+        } else {
+            qualify(&grant.schema, &grant.name)
         };
-        let added: Vec<&str> = grant
+        let added: Vec<String> = grant
             .privileges
             .difference(before)
-            .filter_map(|privilege| object_privilege(*privilege))
+            .map(|privilege| privilege.as_str().to_string())
             .collect();
         if !added.is_empty() {
             statements.push(format!("GRANT {} ON {target} TO {user}", added.join(", ")));
         }
-        let removed: Vec<&str> = before
+        let removed: Vec<String> = before
             .difference(&grant.privileges)
-            .filter_map(|privilege| object_privilege(*privilege))
+            .map(|privilege| privilege.as_str().to_string())
             .collect();
         if !removed.is_empty() {
             statements.push(format!(
@@ -549,9 +747,10 @@ pub(crate) async fn object_privilege_matrix(
                     .ok()
                     .flatten()
                     .unwrap_or_default();
-                let Some(privilege) = object_privilege_from(&privilege_name) else {
+                let privilege = PrivilegeId::new(privilege_name.trim().to_ascii_uppercase());
+                if privilege.as_str().is_empty() {
                     continue;
-                };
+                }
                 match result.iter_mut().find(|entry| entry.user == grantee) {
                     Some(entry) => {
                         entry.privileges.insert(privilege);
@@ -587,17 +786,17 @@ pub(crate) fn object_privileges_sql(
             .cloned()
             .unwrap_or_default();
         let user = quote_identifier(&row.user);
-        let added: Vec<&str> = row
+        let added: Vec<String> = row
             .privileges
             .difference(&before)
-            .filter_map(|privilege| object_privilege(*privilege))
+            .map(|privilege| privilege.as_str().to_string())
             .collect();
         if !added.is_empty() {
             statements.push(format!("GRANT {} ON {target} TO {user}", added.join(", ")));
         }
-        let removed: Vec<&str> = before
+        let removed: Vec<String> = before
             .difference(&row.privileges)
-            .filter_map(|privilege| object_privilege(*privilege))
+            .map(|privilege| privilege.as_str().to_string())
             .collect();
         if !removed.is_empty() {
             statements.push(format!(
@@ -628,13 +827,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn maps_privileges_both_ways() {
-        assert_eq!(object_privilege(Privilege::Select), Some("SELECT"));
-        assert_eq!(object_privilege_from("INSERT"), Some(Privilege::Insert));
-        assert_eq!(
-            server_privilege_from("CREATE USER"),
-            Some(Privilege::CreateUser)
-        );
+    fn the_catalog_lists_system_and_object_privileges() {
+        let catalog = privilege_catalog();
+        assert!(catalog.is_server(&PrivilegeId::new("CREATE SESSION")));
+        assert!(catalog.is_object(&PrivilegeId::new("SELECT")));
+        assert!(!catalog.is_object(&PrivilegeId::new("CREATE SESSION")));
+        assert!(catalog.is_server(&PrivilegeId::new("CREATE USER")));
     }
 
     #[test]
@@ -646,7 +844,8 @@ mod tests {
                 ..Default::default()
             },
             password: Some("p\"w".to_string()),
-            server_privileges: BTreeSet::from([Privilege::Create]),
+            server_privileges: BTreeSet::from([PrivilegeId::new("CREATE TABLE")]),
+            denied_server_privileges: BTreeSet::new(),
             grants: Vec::new(),
             roles: Vec::new(),
             members: Vec::new(),
@@ -654,5 +853,30 @@ mod tests {
         let sql = edit_sql(&edit);
         assert!(sql.contains("CREATE USER \"APP\" IDENTIFIED BY \"p\"\"w\""));
         assert!(sql.contains("GRANT CREATE TABLE TO \"APP\""));
+    }
+
+    #[test]
+    fn create_statement_carries_tablespace_and_profile() {
+        let edit = UserEdit {
+            original: None,
+            account: UserAccount {
+                user: "APP".to_string(),
+                default_tablespace: "USERS".to_string(),
+                profile: "DEFAULT".to_string(),
+                tablespace_quota: "UNLIMITED".to_string(),
+                ..Default::default()
+            },
+            password: Some("pw".to_string()),
+            server_privileges: BTreeSet::new(),
+            denied_server_privileges: BTreeSet::new(),
+            grants: Vec::new(),
+            roles: Vec::new(),
+            members: Vec::new(),
+        };
+        let sql = edit_sql(&edit);
+        assert!(sql.contains(
+            "CREATE USER \"APP\" IDENTIFIED BY \"pw\" \
+             DEFAULT TABLESPACE \"USERS\" PROFILE \"DEFAULT\" QUOTA UNLIMITED ON \"USERS\""
+        ));
     }
 }

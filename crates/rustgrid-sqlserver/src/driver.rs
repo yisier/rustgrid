@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use rustgrid_core::{
     Connection, ConnectionConfig, DatabaseEditorSpec, DatabaseEditorTab, Driver,
     DriverCapabilities, DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle,
-    DriverId, Error, Result, TlsMode,
+    DriverId, Error, Result, TlsMode, UserEditorSpec,
 };
 use tiberius::{AuthMethod, Config};
 
@@ -68,6 +68,32 @@ impl Driver for SqlServerDriver {
                 DatabaseEditorTab::Advanced,
                 DatabaseEditorTab::Comment,
             ],
+        }
+    }
+
+    fn user_editor(&self) -> UserEditorSpec {
+        UserEditorSpec {
+            // SQL Server logins have no user@host split, authentication plugin, password expiry or
+            // resource limits, and object-level privilege management is not implemented yet.
+            host: false,
+            authentication_plugin: false,
+            password_expiry: false,
+            password_valid_until: false,
+            account_lock: true,
+            max_questions: false,
+            max_updates: false,
+            max_connections: false,
+            max_user_connections: false,
+            profile: false,
+            default_tablespace: false,
+            tablespace_quota: false,
+            list_super_user: true,
+            server_privileges: true,
+            // The account editor's 权限 section needs per-database object grants the login's user
+            // owns; object grants are managed through the 对象权限管理器 instead.
+            object_privileges: false,
+            object_privilege_manager: true,
+            roles: true,
         }
     }
 

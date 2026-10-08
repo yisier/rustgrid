@@ -7,29 +7,142 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use rustgrid_core::{
-    Error, ObjectGrant, ObjectPrivilegeRow, Privilege, Result, RoleMembership, UserAccount,
-    UserDetails, UserEdit, UserEditSection,
+    Error, ObjectGrant, ObjectPrivilegeRow, PrivilegeCatalog, PrivilegeGroup, PrivilegeId,
+    PrivilegeInfo, PrivilegePreset, Result, RoleMembership, UserAccount, UserDetails, UserEdit,
+    UserEditSection,
 };
 use sqlx::Row;
 
 use crate::connection::{PostgresConnection, map_query_error};
 use crate::helpers::{qualify, quote_identifier, quote_literal, split_qualified};
 
-/// Map a core privilege to the PostgreSQL object-level keyword, when it has an equivalent.
-fn object_privilege(privilege: Privilege) -> Option<&'static str> {
-    match privilege {
-        Privilege::Select => Some("SELECT"),
-        Privilege::Insert => Some("INSERT"),
-        Privilege::Update => Some("UPDATE"),
-        Privilege::Delete => Some("DELETE"),
-        Privilege::References => Some("REFERENCES"),
-        Privilege::Trigger => Some("TRIGGER"),
-        Privilege::Execute => Some("EXECUTE"),
-        Privilege::Create => Some("CREATE"),
-        Privilege::CreateTemporaryTables => Some("TEMPORARY"),
-        Privilege::CreateView => Some("CREATE"),
-        _ => None,
+/// The PostgreSQL role attributes surfaced by the account editor's 服务器权限 grid, as
+/// `(attribute keyword, i18n key)`.
+const ROLE_ATTRIBUTES: &[(&str, &str)] = &[
+    ("SUPERUSER", "user.priv.pg.superuser"),
+    ("CREATEDB", "user.priv.pg.createdb"),
+    ("CREATEROLE", "user.priv.pg.createrole"),
+    ("REPLICATION", "user.priv.pg.replication"),
+    ("BYPASSRLS", "user.priv.pg.bypassrls"),
+];
+
+/// The PostgreSQL database-level privileges (`ON DATABASE db`), as `(keyword, i18n key)`. `CREATE`
+/// is shared with the schema scope and is built separately.
+const DATABASE_PRIVILEGES: &[(&str, &str)] = &[
+    ("CONNECT", "user.priv.pg.connect"),
+    ("TEMPORARY", "user.priv.temporary"),
+];
+
+/// The PostgreSQL schema-level privileges (`ON SCHEMA x`), as `(keyword, i18n key)`. `CREATE` is
+/// shared with the database scope and is built separately.
+const SCHEMA_PRIVILEGES: &[(&str, &str)] = &[("USAGE", "user.priv.usage")];
+
+/// The PostgreSQL table/view privileges surfaced by the 权限 grid, as `(keyword, i18n key, group)`.
+const OBJECT_PRIVILEGES: &[(&str, &str, &str)] = &[
+    ("SELECT", "user.priv.select", "dml"),
+    ("INSERT", "user.priv.insert", "dml"),
+    ("UPDATE", "user.priv.update", "dml"),
+    ("DELETE", "user.priv.delete", "dml"),
+    ("TRUNCATE", "user.priv.truncate", "dml"),
+    ("REFERENCES", "user.priv.references", "ddl"),
+    ("TRIGGER", "user.priv.trigger", "ddl"),
+];
+
+/// The PostgreSQL privilege catalog: role attributes (server), database/schema/table privileges,
+/// their groups and the quick presets.
+pub(crate) fn privilege_catalog() -> PrivilegeCatalog {
+    let groups = [
+        ("attributes", "user.create.server_group.attributes"),
+        ("database", "user.create.priv_group.database"),
+        ("schema", "user.create.priv_group.schema"),
+        ("dml", "user.create.priv_group.dml"),
+        ("ddl", "user.create.priv_group.ddl"),
+    ]
+    .into_iter()
+    .map(|(id, label_key)| PrivilegeGroup {
+        id: id.to_string(),
+        label_key: Some(label_key.to_string()),
+        label: id.to_string(),
+    })
+    .collect();
+
+    let mut privileges: Vec<PrivilegeInfo> = ROLE_ATTRIBUTES
+        .iter()
+        .map(|(keyword, label_key)| {
+            PrivilegeInfo::server(*keyword, "attributes", Some(*label_key), keyword)
+        })
+        .collect();
+    privileges.extend(DATABASE_PRIVILEGES.iter().map(|(keyword, label_key)| {
+        PrivilegeInfo::database(*keyword, "database", Some(*label_key), keyword)
+    }));
+    privileges.push(PrivilegeInfo::database_and_schema(
+        "CREATE",
+        "database",
+        "schema",
+        Some("user.priv.create"),
+        "CREATE",
+    ));
+    privileges.extend(SCHEMA_PRIVILEGES.iter().map(|(keyword, label_key)| {
+        PrivilegeInfo::schema(*keyword, "schema", Some(*label_key), keyword)
+    }));
+    privileges.extend(OBJECT_PRIVILEGES.iter().map(|(keyword, label_key, group)| {
+        PrivilegeInfo::object(*keyword, group, Some(*label_key), keyword)
+    }));
+
+    PrivilegeCatalog {
+        groups,
+        privileges,
+        server_presets: vec![
+            preset("none", "user.create.template.none", &[]),
+            preset(
+                "admin",
+                "user.create.template.admin",
+                &ROLE_ATTRIBUTES
+                    .iter()
+                    .map(|(keyword, _)| *keyword)
+                    .collect::<Vec<_>>(),
+            ),
+        ],
+        object_presets: vec![
+            preset("none", "user.create.db_template.none", &[]),
+            preset(
+                "read_only",
+                "user.create.db_template.read_only",
+                &["SELECT"],
+            ),
+            preset(
+                "read_write",
+                "user.create.db_template.read_write",
+                &["SELECT", "INSERT", "UPDATE", "DELETE"],
+            ),
+            preset(
+                "full",
+                "user.create.db_template.full",
+                &OBJECT_PRIVILEGES
+                    .iter()
+                    .map(|(keyword, _, _)| *keyword)
+                    .collect::<Vec<_>>(),
+            ),
+        ],
+        deny_supported: false,
     }
+}
+
+fn preset(id: &str, label_key: &str, keywords: &[&str]) -> PrivilegePreset {
+    PrivilegePreset {
+        id: id.to_string(),
+        label_key: Some(label_key.to_string()),
+        label: id.to_string(),
+        privileges: keywords
+            .iter()
+            .map(|keyword| PrivilegeId::new(*keyword))
+            .collect(),
+    }
+}
+
+/// Whether a privilege set contains the role attribute `name`.
+fn has(privileges: &BTreeSet<PrivilegeId>, name: &str) -> bool {
+    privileges.iter().any(|privilege| privilege.matches(name))
 }
 
 /// Resolve a `schema.name` object name, defaulting to `public`.
@@ -48,6 +161,7 @@ fn account_from_row(row: &sqlx::postgres::PgRow) -> UserAccount {
         password_set: row.try_get("has_password").unwrap_or(false),
         password_expired: false,
         password_lifetime: None,
+        password_valid_until: row.try_get("valid_until").ok().flatten(),
         account_locked: !can_login,
         max_questions: 0,
         max_updates: 0,
@@ -62,12 +176,16 @@ fn account_from_row(row: &sqlx::postgres::PgRow) -> UserAccount {
         ssl_cipher: String::new(),
         x509_issuer: String::new(),
         x509_subject: String::new(),
+        default_tablespace: String::new(),
+        profile: String::new(),
+        tablespace_quota: String::new(),
         is_super_user: row.try_get("rolsuper").unwrap_or(false),
     }
 }
 
+/// `rolvaliduntil` is cast to text so it can be shown and re-rendered as a `VALID UNTIL` literal.
 const ACCOUNT_COLUMNS: &str = "rolname, rolsuper, rolcreaterole, rolcreatedb, rolcanlogin, \
-     rolreplication, rolbypassrls, rolconnlimit, rolvaliduntil, \
+     rolreplication, rolbypassrls, rolconnlimit, rolvaliduntil::text AS valid_until, \
      rolpassword IS NOT NULL AS has_password";
 
 pub(crate) async fn list_users(connection: &PostgresConnection) -> Result<Vec<UserAccount>> {
@@ -101,27 +219,31 @@ pub(crate) async fn user_details(
     .ok_or_else(|| Error::Query(format!("role {user} not found")))?;
     let account = account_from_row(&row);
 
-    let mut server_privileges = BTreeSet::new();
+    let mut server_privileges: BTreeSet<PrivilegeId> = BTreeSet::new();
     if row.try_get::<bool, _>("rolsuper").unwrap_or(false) {
-        server_privileges.insert(Privilege::Super);
+        server_privileges.insert(PrivilegeId::new("SUPERUSER"));
     }
     if row.try_get::<bool, _>("rolcreaterole").unwrap_or(false) {
-        server_privileges.insert(Privilege::CreateUser);
+        server_privileges.insert(PrivilegeId::new("CREATEROLE"));
     }
     if row.try_get::<bool, _>("rolcreatedb").unwrap_or(false) {
-        server_privileges.insert(Privilege::Create);
+        server_privileges.insert(PrivilegeId::new("CREATEDB"));
     }
     if row.try_get::<bool, _>("rolreplication").unwrap_or(false) {
-        server_privileges.insert(Privilege::ReplicationSlave);
+        server_privileges.insert(PrivilegeId::new("REPLICATION"));
+    }
+    if row.try_get::<bool, _>("rolbypassrls").unwrap_or(false) {
+        server_privileges.insert(PrivilegeId::new("BYPASSRLS"));
     }
 
     let roles = role_edges(&pool, "am.member", user).await?;
     let members = role_edges(&pool, "am.roleid", user).await?;
-    let grants = object_grants(&pool, user).await?;
+    let grants = object_grants(&pool, connection.default_database_name(), user).await?;
 
     Ok(UserDetails {
         account,
         server_privileges,
+        denied_server_privileges: BTreeSet::new(),
         grants,
         roles,
         members,
@@ -155,8 +277,13 @@ async fn role_edges(pool: &sqlx::PgPool, column: &str, user: &str) -> Result<Vec
         .collect())
 }
 
-/// Object grants visible in the relation ACLs for `user`, grouped by object.
-async fn object_grants(pool: &sqlx::PgPool, user: &str) -> Result<Vec<ObjectGrant>> {
+/// Object grants visible in the relation ACLs for `user`, grouped by object. `database` is the
+/// database the ACLs live in (PostgreSQL grants are per-database), `schema` the object's namespace.
+async fn object_grants(
+    pool: &sqlx::PgPool,
+    database: &str,
+    user: &str,
+) -> Result<Vec<ObjectGrant>> {
     let rows = sqlx::query(
         "SELECT n.nspname, c.relname, a.privilege_type \
          FROM pg_class c \
@@ -176,14 +303,22 @@ async fn object_grants(pool: &sqlx::PgPool, user: &str) -> Result<Vec<ObjectGran
         let schema: String = row.try_get(0).unwrap_or_default();
         let name: String = row.try_get(1).unwrap_or_default();
         let privilege_type: String = row.try_get(2).unwrap_or_default();
-        let object = format!("{schema}.{name}");
-        let Some(privilege) = Privilege::from_sql_name(&privilege_type) else {
+        let privilege = PrivilegeId::new(privilege_type.trim().to_ascii_uppercase());
+        if privilege.as_str().is_empty() {
             continue;
-        };
-        if let Some(existing) = grants.iter_mut().find(|grant| grant.name == object) {
+        }
+        if let Some(existing) = grants
+            .iter_mut()
+            .find(|grant| grant.schema == schema && grant.name == name)
+        {
             existing.privileges.insert(privilege);
         } else {
-            let mut grant = ObjectGrant::new(String::new(), object);
+            let mut grant = ObjectGrant {
+                database: database.to_string(),
+                schema,
+                name,
+                privileges: BTreeSet::new(),
+            };
             grant.privileges.insert(privilege);
             grants.push(grant);
         }
@@ -259,7 +394,7 @@ fn role_attributes(edit: &UserEdit) -> String {
         .to_string(),
     );
     parts.push(
-        if edit.server_privileges.contains(&Privilege::CreateUser) {
+        if has(&edit.server_privileges, "CREATEROLE") {
             "CREATEROLE"
         } else {
             "NOCREATEROLE"
@@ -267,7 +402,7 @@ fn role_attributes(edit: &UserEdit) -> String {
         .to_string(),
     );
     parts.push(
-        if edit.server_privileges.contains(&Privilege::Create) {
+        if has(&edit.server_privileges, "CREATEDB") {
             "CREATEDB"
         } else {
             "NOCREATEDB"
@@ -275,16 +410,38 @@ fn role_attributes(edit: &UserEdit) -> String {
         .to_string(),
     );
     parts.push(
-        if edit
-            .server_privileges
-            .contains(&Privilege::ReplicationSlave)
-        {
+        if has(&edit.server_privileges, "REPLICATION") {
             "REPLICATION"
         } else {
             "NOREPLICATION"
         }
         .to_string(),
     );
+    parts.push(
+        if has(&edit.server_privileges, "BYPASSRLS") {
+            "BYPASSRLS"
+        } else {
+            "NOBYPASSRLS"
+        }
+        .to_string(),
+    );
+    // PostgreSQL's password expiry. Only emit it when it changes: setting a value, or clearing a
+    // previously-set one with `infinity`.
+    let valid_until = account
+        .password_valid_until
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let had_valid_until = edit
+        .original
+        .as_ref()
+        .and_then(|original| original.account.password_valid_until.as_deref())
+        .is_some_and(|value| !value.trim().is_empty());
+    if let Some(value) = valid_until {
+        parts.push(format!("VALID UNTIL {}", quote_literal(value)));
+    } else if had_valid_until {
+        parts.push("VALID UNTIL 'infinity'".to_string());
+    }
     if account.max_connections > 0 {
         parts.push(format!("CONNECTION LIMIT {}", account.max_connections));
     }
@@ -298,26 +455,33 @@ fn role_attributes(edit: &UserEdit) -> String {
 fn grant_statements(edit: &UserEdit) -> Vec<String> {
     let user = quote_identifier(&edit.account.user);
     let mut statements = Vec::new();
-    let original: BTreeMap<&str, &BTreeSet<Privilege>> = edit
+    let original: BTreeMap<String, &BTreeSet<PrivilegeId>> = edit
         .original
         .as_ref()
         .map(|details| {
             details
                 .grants
                 .iter()
-                .map(|grant| (grant.name.as_str(), &grant.privileges))
+                .map(|grant| (grant.object_name(), &grant.privileges))
                 .collect()
         })
         .unwrap_or_default();
     let empty = BTreeSet::new();
     for grant in &edit.grants {
-        let before = original.get(grant.name.as_str()).copied().unwrap_or(&empty);
-        let (schema, name) = object_parts(&grant.name);
+        let before = original
+            .get(&grant.object_name())
+            .copied()
+            .unwrap_or(&empty);
+        let (schema, name) = if grant.schema.is_empty() {
+            object_parts(&grant.name)
+        } else {
+            (grant.schema.clone(), grant.name.clone())
+        };
         let qualified = qualify(&schema, &name);
-        let added: Vec<&str> = grant
+        let added: Vec<String> = grant
             .privileges
             .difference(before)
-            .filter_map(|privilege| object_privilege(*privilege))
+            .map(|privilege| privilege.as_str().to_string())
             .collect();
         if !added.is_empty() {
             statements.push(format!(
@@ -325,9 +489,9 @@ fn grant_statements(edit: &UserEdit) -> Vec<String> {
                 added.join(", ")
             ));
         }
-        let removed: Vec<&str> = before
+        let removed: Vec<String> = before
             .difference(&grant.privileges)
-            .filter_map(|privilege| object_privilege(*privilege))
+            .map(|privilege| privilege.as_str().to_string())
             .collect();
         if !removed.is_empty() {
             statements.push(format!(
@@ -397,37 +561,86 @@ pub(crate) async fn rename_user(
     connection.run_text(Some(database), &sql).await.map(|_| ())
 }
 
+/// The privilege manager's selected target: the whole database, a schema (`name` = `schema.*`), or
+/// a table/view (`name` = `schema.table`).
+enum Target {
+    Database,
+    Schema(String),
+    Table(String, String),
+}
+
+fn classify(name: &str) -> Target {
+    if name.is_empty() {
+        Target::Database
+    } else if let Some(schema) = name.strip_suffix(".*") {
+        Target::Schema(schema.to_string())
+    } else {
+        let (schema, table) = object_parts(name);
+        Target::Table(schema, table)
+    }
+}
+
+/// The `ON <target>` clause: `DATABASE db`, `SCHEMA s`, or `TABLE s.t`.
+fn grant_target(database: &str, name: &str) -> String {
+    match classify(name) {
+        Target::Database => format!("DATABASE {}", quote_identifier(database)),
+        Target::Schema(schema) => format!("SCHEMA {}", quote_identifier(&schema)),
+        Target::Table(schema, table) => format!("TABLE {}", qualify(&schema, &table)),
+    }
+}
+
 pub(crate) async fn object_privilege_matrix(
     connection: &PostgresConnection,
     database: &str,
     name: &str,
 ) -> Result<Vec<ObjectPrivilegeRow>> {
-    let (schema, bare) = connection
-        .resolve_object(database, name)
-        .await
-        .unwrap_or_else(|_| object_parts(name));
     let pool = connection.pool_for(database).await?;
-    let rows = sqlx::query(
-        "SELECT r.rolname, a.privilege_type \
-         FROM pg_class c \
-         JOIN pg_namespace n ON n.oid = c.relnamespace \
-         CROSS JOIN LATERAL aclexplode(c.relacl) AS a \
-         JOIN pg_roles r ON r.oid = a.grantee \
-         WHERE n.nspname = $1 AND c.relname = $2",
-    )
-    .bind(&schema)
-    .bind(&bare)
-    .fetch_all(&pool)
-    .await
-    .map_err(map_query_error)?;
+    let rows = match classify(name) {
+        Target::Database => sqlx::query(
+            "SELECT r.rolname, a.privilege_type \
+             FROM pg_database d \
+             CROSS JOIN LATERAL aclexplode(d.datacl) AS a \
+             JOIN pg_roles r ON r.oid = a.grantee \
+             WHERE d.datname = $1",
+        )
+        .bind(database)
+        .fetch_all(&pool)
+        .await
+        .map_err(map_query_error)?,
+        Target::Schema(schema) => sqlx::query(
+            "SELECT r.rolname, a.privilege_type \
+             FROM pg_namespace n \
+             CROSS JOIN LATERAL aclexplode(n.nspacl) AS a \
+             JOIN pg_roles r ON r.oid = a.grantee \
+             WHERE n.nspname = $1",
+        )
+        .bind(&schema)
+        .fetch_all(&pool)
+        .await
+        .map_err(map_query_error)?,
+        Target::Table(schema, table) => sqlx::query(
+            "SELECT r.rolname, a.privilege_type \
+             FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             CROSS JOIN LATERAL aclexplode(c.relacl) AS a \
+             JOIN pg_roles r ON r.oid = a.grantee \
+             WHERE n.nspname = $1 AND c.relname = $2",
+        )
+        .bind(&schema)
+        .bind(&table)
+        .fetch_all(&pool)
+        .await
+        .map_err(map_query_error)?,
+    };
 
     let mut result: Vec<ObjectPrivilegeRow> = Vec::new();
     for row in &rows {
         let role: String = row.try_get(0).unwrap_or_default();
         let privilege_type: String = row.try_get(1).unwrap_or_default();
-        let Some(privilege) = Privilege::from_sql_name(&privilege_type) else {
+        let privilege = PrivilegeId::new(privilege_type.trim().to_ascii_uppercase());
+        if privilege.as_str().is_empty() {
             continue;
-        };
+        }
         match result.iter_mut().find(|entry| entry.user == role) {
             Some(entry) => {
                 entry.privileges.insert(privilege);
@@ -443,13 +656,12 @@ pub(crate) async fn object_privilege_matrix(
 }
 
 pub(crate) fn object_privileges_sql(
-    _database: &str,
+    database: &str,
     name: &str,
     original: &[ObjectPrivilegeRow],
     rows: &[ObjectPrivilegeRow],
 ) -> String {
-    let (schema, bare) = object_parts(name);
-    let qualified = qualify(&schema, &bare);
+    let target = grant_target(database, name);
     let mut statements = Vec::new();
     for row in rows {
         let before = original
@@ -459,24 +671,21 @@ pub(crate) fn object_privileges_sql(
             .cloned()
             .unwrap_or_default();
         let role = quote_identifier(&row.user);
-        let added: Vec<&str> = row
+        let added: Vec<String> = row
             .privileges
             .difference(&before)
-            .filter_map(|privilege| object_privilege(*privilege))
+            .map(|privilege| privilege.as_str().to_string())
             .collect();
         if !added.is_empty() {
-            statements.push(format!(
-                "GRANT {} ON TABLE {qualified} TO {role}",
-                added.join(", ")
-            ));
+            statements.push(format!("GRANT {} ON {target} TO {role}", added.join(", ")));
         }
-        let removed: Vec<&str> = before
+        let removed: Vec<String> = before
             .difference(&row.privileges)
-            .filter_map(|privilege| object_privilege(*privilege))
+            .map(|privilege| privilege.as_str().to_string())
             .collect();
         if !removed.is_empty() {
             statements.push(format!(
-                "REVOKE {} ON TABLE {qualified} FROM {role}",
+                "REVOKE {} ON {target} FROM {role}",
                 removed.join(", ")
             ));
         }
@@ -496,4 +705,21 @@ pub(crate) async fn set_object_privileges(
         return Ok(());
     }
     connection.run_text(Some(database), &sql).await.map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grant_targets_cover_database_schema_and_table() {
+        assert_eq!(grant_target("shop", ""), "DATABASE \"shop\"");
+        assert_eq!(grant_target("shop", "public.*"), "SCHEMA \"public\"");
+        assert_eq!(
+            grant_target("shop", "public.users"),
+            "TABLE \"public\".\"users\""
+        );
+        // A bare table name defaults to the `public` schema.
+        assert_eq!(grant_target("shop", "users"), "TABLE \"public\".\"users\"");
+    }
 }

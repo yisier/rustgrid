@@ -13,7 +13,7 @@ pub mod view;
 pub use capability::{DriverCapabilities, DriverCapability};
 pub use descriptor::{ConnectionFormSpec, DriverDescriptor, DriverIconStyle};
 pub use dialect::DriverDialect;
-pub use driver::{Connection, DatabaseEditorSpec, DatabaseEditorTab, Driver};
+pub use driver::{Connection, DatabaseEditorSpec, DatabaseEditorTab, Driver, UserEditorSpec};
 pub use error::{Error, Result};
 pub use model::{
     BackupObjectKind, CellValue, ColumnDef, ColumnInfo, ConnectionConfig, ConnectionProfile,
@@ -26,7 +26,8 @@ pub use options::{ConnectionOptions, TlsMode, TlsOptions, TunnelAuth, TunnelKind
 pub use registry::{BuiltinDriverSource, DriverRegistry, DriverSource};
 pub use routine::{RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind};
 pub use user::{
-    ObjectGrant, ObjectPrivilegeRow, Privilege, RoleMembership, UserAccount, UserDetails, UserEdit,
+    ObjectGrant, ObjectPrivilegeRow, PrivilegeCatalog, PrivilegeGroup, PrivilegeId, PrivilegeInfo,
+    PrivilegePreset, PrivilegeScope, RoleMembership, UserAccount, UserDetails, UserEdit,
     UserEditSection,
 };
 pub use view::{ViewDetails, ViewEdit, ViewInfo};

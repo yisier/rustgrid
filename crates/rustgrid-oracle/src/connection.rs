@@ -5,9 +5,10 @@ use async_trait::async_trait;
 use oracledb::{Connection as OracleRawConnection, ToDbValue};
 use rustgrid_core::{
     BackupObjectKind, ColumnInfo, Connection, DatabaseInfo, DatabaseOptions, DriverId, Error,
-    ObjectDump, ObjectKind, ObjectPrivilegeRow, PageRequest, QueryResult, Result, RoutineDetails,
-    RoutineEdit, RoutineInfo, RoutineKind, RowInsert, RowUpdate, TableInfo, TablePage, TableSchema,
-    TableStatus, UserAccount, UserDetails, UserEdit, UserEditSection, ViewDetails, ViewEdit,
+    ObjectDump, ObjectKind, ObjectPrivilegeRow, PageRequest, PrivilegeCatalog, QueryResult, Result,
+    RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind, RowInsert, RowUpdate, TableInfo,
+    TablePage, TableSchema, TableStatus, UserAccount, UserDetails, UserEdit, UserEditSection,
+    ViewDetails, ViewEdit,
 };
 
 use crate::helpers::{
@@ -900,6 +901,10 @@ impl Connection for OracleConnection {
         Err(Error::Query(
             "Oracle does not support renaming a user".to_string(),
         ))
+    }
+
+    fn privilege_catalog(&self) -> PrivilegeCatalog {
+        crate::user::privilege_catalog()
     }
 
     fn authentication_plugins(&self) -> Vec<&'static str> {

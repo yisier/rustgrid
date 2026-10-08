@@ -23,10 +23,11 @@ use rustgrid_core::{
     BackupObjectKind, CellValue, Connection, ConnectionConfig, DatabaseEditorSpec,
     DatabaseEditorTab, DatabaseOptions, DriverCapability, DriverIconStyle, DriverId,
     DriverRegistry, Error, FilterCondition, FilterConjunction, FilterGroup, FilterNode,
-    FilterOperator, ObjectGrant, ObjectPrivilegeRow, PageRequest, Privilege, QueryResult,
-    RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind, RowInsert, RowUpdate, SavedBackup,
-    SavedQuery, TableStatus, TlsMode, TunnelAuth, TunnelKind, TunnelLayer, UserAccount,
-    UserDetails, UserEdit, UserEditSection, ViewEdit,
+    FilterOperator, ObjectGrant, ObjectPrivilegeRow, PageRequest, PrivilegeCatalog, PrivilegeId,
+    PrivilegePreset, PrivilegeScope, QueryResult, RoutineDetails, RoutineEdit, RoutineInfo,
+    RoutineKind, RowInsert, RowUpdate, SavedBackup, SavedQuery, TableStatus, TlsMode, TunnelAuth,
+    TunnelKind, TunnelLayer, UserAccount, UserDetails, UserEdit, UserEditSection, UserEditorSpec,
+    ViewEdit,
 };
 use rustgrid_export::ExportFormat;
 
@@ -1697,6 +1698,14 @@ pub struct AppView {
     create_user_expiry_combo: Option<Entity<ComboBox>>,
     /// The dialog's password-expiry interval (days) field, shown for the INTERVAL policy.
     create_user_expiry_days: Option<Entity<TextInput>>,
+    /// The dialog's password-valid-until field (PostgreSQL's `VALID UNTIL`).
+    create_user_password_valid_until: Option<Entity<TextInput>>,
+    /// The dialog's Oracle DEFAULT TABLESPACE field.
+    create_user_default_tablespace: Option<Entity<TextInput>>,
+    /// The dialog's Oracle PROFILE field.
+    create_user_profile: Option<Entity<TextInput>>,
+    /// The dialog's Oracle tablespace-quota field.
+    create_user_tablespace_quota: Option<Entity<TextInput>>,
     /// The dialog's resource-limit fields.
     create_user_max_questions: Option<Entity<TextInput>>,
     create_user_max_updates: Option<Entity<TextInput>>,
@@ -2153,6 +2162,10 @@ impl AppView {
             create_user_plugin_combo: None,
             create_user_expiry_combo: None,
             create_user_expiry_days: None,
+            create_user_password_valid_until: None,
+            create_user_default_tablespace: None,
+            create_user_profile: None,
+            create_user_tablespace_quota: None,
             create_user_max_questions: None,
             create_user_max_updates: None,
             create_user_max_connections: None,
@@ -2307,6 +2320,22 @@ impl AppView {
             .get(connection_index)
             .and_then(|node| self.registry.get(&node.profile.driver))
             .map(|driver| driver.database_editor())
+            .unwrap_or_default()
+    }
+
+    /// The engine's user-editor layout for `connection_index` (falls back to MySQL's model).
+    fn user_editor_spec(&self, connection_index: usize) -> UserEditorSpec {
+        self.connections
+            .get(connection_index)
+            .and_then(|node| self.registry.get(&node.profile.driver))
+            .map(|driver| driver.user_editor())
+            .unwrap_or_else(UserEditorSpec::mysql)
+    }
+
+    /// The privilege catalog of the connection behind `connection_index` (empty when unknown).
+    fn user_privilege_catalog(&self, connection_index: usize) -> PrivilegeCatalog {
+        self.connection_arc(connection_index)
+            .map(|connection| connection.privilege_catalog())
             .unwrap_or_default()
     }
 

@@ -66,79 +66,62 @@ fn expiry_value(expiry: CreateExpiry) -> &'static str {
     }
 }
 
-/// A one-click preset for the 服务器权限 section. Picking one replaces the ticked set, which can
-/// then be adjusted by hand.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum ServerTemplate {
-    None,
-    ReadOnly,
-    ReadWrite,
-    Developer,
-    Admin,
+/// The privileges of a preset (empty when `index` is out of range). Used by the editor's one-click
+/// preset buttons.
+pub(super) fn preset_privileges(
+    presets: &[PrivilegePreset],
+    index: usize,
+) -> BTreeSet<PrivilegeId> {
+    presets
+        .get(index)
+        .map(|preset| preset.privileges.iter().cloned().collect())
+        .unwrap_or_default()
 }
 
-impl ServerTemplate {
-    const ALL: [ServerTemplate; 5] = [
-        ServerTemplate::None,
-        ServerTemplate::ReadOnly,
-        ServerTemplate::ReadWrite,
-        ServerTemplate::Developer,
-        ServerTemplate::Admin,
-    ];
-
-    fn label_key(self) -> &'static str {
-        match self {
-            ServerTemplate::None => "user.create.template.none",
-            ServerTemplate::ReadOnly => "user.create.template.read_only",
-            ServerTemplate::ReadWrite => "user.create.template.read_write",
-            ServerTemplate::Developer => "user.create.template.developer",
-            ServerTemplate::Admin => "user.create.template.admin",
-        }
+/// Resolve a catalog label: its i18n key when the app knows one, else the literal fallback.
+pub(super) fn catalog_label(label_key: &Option<String>, label: &str) -> String {
+    match label_key {
+        Some(key) => t!(key.as_str()).to_string(),
+        None => label.to_string(),
     }
+}
 
-    /// The global privileges this template grants.
-    pub(super) fn privileges(self) -> BTreeSet<Privilege> {
-        let mut set = BTreeSet::new();
-        match self {
-            ServerTemplate::None => {}
-            ServerTemplate::ReadOnly => {
-                set.extend([Privilege::Select, Privilege::ShowView]);
-            }
-            ServerTemplate::ReadWrite => {
-                set.extend([
-                    Privilege::Select,
-                    Privilege::Insert,
-                    Privilege::Update,
-                    Privilege::Delete,
-                    Privilege::ShowView,
-                    Privilege::Execute,
-                ]);
-            }
-            ServerTemplate::Developer => {
-                set.extend([
-                    Privilege::Select,
-                    Privilege::Insert,
-                    Privilege::Update,
-                    Privilege::Delete,
-                    Privilege::ShowView,
-                    Privilege::Execute,
-                    Privilege::Create,
-                    Privilege::Alter,
-                    Privilege::Drop,
-                    Privilege::Index,
-                    Privilege::CreateView,
-                    Privilege::CreateRoutine,
-                    Privilege::AlterRoutine,
-                    Privilege::References,
-                    Privilege::Trigger,
-                    Privilege::Event,
-                    Privilege::CreateTemporaryTables,
-                    Privilege::LockTables,
-                ]);
-            }
-            ServerTemplate::Admin => set.extend(Privilege::ALL),
-        }
-        set
+/// The display label of one privilege from the catalog (its raw id when the catalog omits it).
+pub(super) fn privilege_label(catalog: &PrivilegeCatalog, id: &PrivilegeId) -> String {
+    catalog
+        .info(id)
+        .map(|info| catalog_label(&info.label_key, &info.label))
+        .unwrap_or_else(|| id.as_str().to_string())
+}
+
+/// The hover tooltip of a privilege check box. The box itself shows the engine's raw keyword (e.g.
+/// `CONTROL SERVER`); this shows the localized name, so a translated privilege is never ambiguous.
+pub(super) struct PrivilegeTooltip(pub(super) String);
+
+impl Render for PrivilegeTooltip {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let theme = gpui_kit::component::Theme::global(cx);
+        div()
+            .max_w(px(320.0))
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(theme.popover)
+            .border_1()
+            .border_color(theme.border)
+            .text_size(px(12.0))
+            .text_color(theme.popover_foreground)
+            .child(self.0.clone())
+    }
+}
+
+/// An account's display label: `user@host` for an engine that identifies accounts that way, else
+/// just the user name (SQL Server, PostgreSQL, Oracle have no host part).
+fn user_host_label(user: &str, host: &str, spec: &UserEditorSpec) -> String {
+    if spec.host && !host.is_empty() {
+        format!("{user}@{host}")
+    } else {
+        user.to_string()
     }
 }
 
@@ -190,6 +173,17 @@ impl UserSection {
             UserSection::Sql => "user-create-nav-sql",
         }
     }
+
+    /// Whether the section is shown for an engine's editor spec. 常规 and SQL 预览 are always
+    /// present; the privilege and role sections follow the engine's capabilities.
+    fn visible(self, spec: &UserEditorSpec) -> bool {
+        match self {
+            UserSection::General | UserSection::Sql => true,
+            UserSection::ServerPrivileges => spec.server_privileges,
+            UserSection::ObjectPrivileges => spec.object_privileges,
+            UserSection::Roles => spec.roles,
+        }
+    }
 }
 
 /// Whether a database's grant covers the whole database or only picked tables.
@@ -197,151 +191,6 @@ impl UserSection {
 pub(super) enum GrantScope {
     AllTables,
     SpecificTables,
-}
-
-/// A one-click database-level privilege preset, matching the reference layout's 快捷权限预设.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum DbTemplate {
-    None,
-    ReadOnly,
-    ReadWrite,
-    Full,
-}
-
-impl DbTemplate {
-    pub(super) const ALL: [DbTemplate; 4] = [
-        DbTemplate::None,
-        DbTemplate::ReadOnly,
-        DbTemplate::ReadWrite,
-        DbTemplate::Full,
-    ];
-
-    pub(super) fn label_key(self) -> &'static str {
-        match self {
-            DbTemplate::None => "user.create.db_template.none",
-            DbTemplate::ReadOnly => "user.create.db_template.read_only",
-            DbTemplate::ReadWrite => "user.create.db_template.read_write",
-            DbTemplate::Full => "user.create.db_template.full",
-        }
-    }
-
-    pub(super) fn privileges(self) -> BTreeSet<Privilege> {
-        let mut set = BTreeSet::new();
-        match self {
-            DbTemplate::None => {}
-            DbTemplate::ReadOnly => {
-                set.insert(Privilege::Select);
-            }
-            DbTemplate::ReadWrite => {
-                set.extend([
-                    Privilege::Select,
-                    Privilege::Insert,
-                    Privilege::Update,
-                    Privilege::Delete,
-                ]);
-            }
-            DbTemplate::Full => set.extend(Privilege::OBJECT),
-        }
-        set
-    }
-}
-
-/// The grouped object privileges the 权限 detail pane shows as check boxes.
-pub(super) fn db_privilege_groups() -> [(&'static str, Vec<Privilege>); 3] {
-    [
-        (
-            "user.create.priv_group.dml",
-            vec![
-                Privilege::Select,
-                Privilege::Insert,
-                Privilege::Update,
-                Privilege::Delete,
-            ],
-        ),
-        (
-            "user.create.priv_group.ddl",
-            vec![
-                Privilege::Create,
-                Privilege::Alter,
-                Privilege::Drop,
-                Privilege::Index,
-                Privilege::CreateView,
-                Privilege::CreateTemporaryTables,
-            ],
-        ),
-        (
-            "user.create.priv_group.routines",
-            vec![
-                Privilege::Execute,
-                Privilege::AlterRoutine,
-                Privilege::CreateRoutine,
-                Privilege::Trigger,
-                Privilege::References,
-                Privilege::LockTables,
-                Privilege::ShowView,
-                Privilege::GrantOption,
-            ],
-        ),
-    ]
-}
-
-/// The global (`*.*`) privileges grouped for the 服务器权限 section. Covers all of
-/// [`Privilege::ALL`], so the templates and the grid always agree.
-fn server_privilege_groups() -> [(&'static str, Vec<Privilege>); 6] {
-    [
-        (
-            "user.create.priv_group.dml",
-            vec![
-                Privilege::Select,
-                Privilege::Insert,
-                Privilege::Update,
-                Privilege::Delete,
-            ],
-        ),
-        (
-            "user.create.priv_group.ddl",
-            vec![
-                Privilege::Create,
-                Privilege::Alter,
-                Privilege::Drop,
-                Privilege::Index,
-                Privilege::CreateView,
-                Privilege::CreateTemporaryTables,
-                Privilege::CreateRoutine,
-                Privilege::AlterRoutine,
-                Privilege::References,
-                Privilege::Trigger,
-            ],
-        ),
-        (
-            "user.create.server_group.exec",
-            vec![
-                Privilege::Execute,
-                Privilege::ShowView,
-                Privilege::ShowDatabases,
-                Privilege::LockTables,
-            ],
-        ),
-        (
-            "user.create.server_group.admin",
-            vec![
-                Privilege::Process,
-                Privilege::Reload,
-                Privilege::Shutdown,
-                Privilege::Super,
-                Privilege::File,
-                Privilege::GrantOption,
-            ],
-        ),
-        (
-            "user.create.server_group.replication",
-            vec![Privilege::ReplicationClient, Privilege::ReplicationSlave],
-        ),
-        (
-            "user.create.server_group.account",
-            vec![Privilege::CreateUser, Privilege::Event],
-        ),
-    ]
 }
 
 /// One database row of the 权限 section: whether it is granted, its scope, and its privileges.
@@ -354,43 +203,34 @@ pub(super) struct DbGrant {
     /// The table whose privileges the detail pane edits (an index into `tables` by name).
     pub(super) active_table: Option<String>,
     /// The privileges granted on the whole database (the 全部表 scope).
-    pub(super) privileges: BTreeSet<Privilege>,
+    pub(super) privileges: BTreeSet<PrivilegeId>,
     /// The privileges granted per table (the 指定具体表 scope), keyed by table name.
-    pub(super) table_privileges: BTreeMap<String, BTreeSet<Privilege>>,
+    pub(super) table_privileges: BTreeMap<String, BTreeSet<PrivilegeId>>,
 }
 
-/// The i18n key naming a privilege set: the matching quick preset, or 自定义.
-pub(super) fn privilege_preset_key(privileges: &BTreeSet<Privilege>) -> &'static str {
-    if *privileges == DbTemplate::ReadOnly.privileges() {
-        "user.create.db_template.read_only"
-    } else if *privileges == DbTemplate::ReadWrite.privileges() {
-        "user.create.db_template.read_write"
-    } else if *privileges == DbTemplate::Full.privileges() {
-        "user.create.db_template.full"
-    } else {
-        "user.create.custom"
-    }
-}
-
-/// The badge for one privilege set: the preset name (with its count) or 未授权.
-pub(super) fn privilege_summary(privileges: &BTreeSet<Privilege>) -> (String, bool) {
+/// The badge for one privilege set: the matching preset's name (with its count) or 未授权.
+pub(super) fn privilege_summary(
+    privileges: &BTreeSet<PrivilegeId>,
+    presets: &[PrivilegePreset],
+) -> (String, bool) {
     if privileges.is_empty() {
         return (t!("user.create.unauthorized").to_string(), false);
     }
-    (
-        format!(
-            "{} ({})",
-            t!(privilege_preset_key(privileges)),
-            privileges.len()
-        ),
-        true,
-    )
+    let preset = presets.iter().find(|preset| {
+        let set: BTreeSet<PrivilegeId> = preset.privileges.iter().cloned().collect();
+        !set.is_empty() && set == *privileges
+    });
+    let label = match preset {
+        Some(preset) => catalog_label(&preset.label_key, &preset.label),
+        None => t!("user.create.custom").to_string(),
+    };
+    (format!("{} ({})", label, privileges.len()), true)
 }
 
 impl DbGrant {
     /// The privilege set the detail pane edits: the whole database for 全部表, otherwise the active
     /// table's own set (empty when no table is active).
-    fn active_privileges(&self) -> BTreeSet<Privilege> {
+    fn active_privileges(&self) -> BTreeSet<PrivilegeId> {
         match self.scope {
             GrantScope::AllTables => self.privileges.clone(),
             GrantScope::SpecificTables => self
@@ -404,7 +244,7 @@ impl DbGrant {
 
     /// The set the detail pane mutates, for the active scope. `None` for 指定具体表 with no active
     /// table, so a stray toggle cannot silently change the wrong grant.
-    fn active_privileges_mut(&mut self) -> Option<&mut BTreeSet<Privilege>> {
+    fn active_privileges_mut(&mut self) -> Option<&mut BTreeSet<PrivilegeId>> {
         match self.scope {
             GrantScope::AllTables => Some(&mut self.privileges),
             GrantScope::SpecificTables => {
@@ -427,7 +267,7 @@ impl DbGrant {
 
     /// Every privilege set this row actually applies, for the list badge: one per picked table for
     /// 指定具体表, else the single whole-database set.
-    fn effective_sets(&self) -> Vec<BTreeSet<Privilege>> {
+    fn effective_sets(&self) -> Vec<BTreeSet<PrivilegeId>> {
         if self.scope == GrantScope::SpecificTables && !self.tables.is_empty() {
             self.tables
                 .iter()
@@ -445,17 +285,18 @@ impl DbGrant {
 
     /// The badge shown in the database list: the preset name (with its privilege count) or 未授权,
     /// plus whether the database is granted (for its colour). Per-table differences read 自定义.
-    fn summary(&self) -> (String, bool) {
+    fn summary(&self, presets: &[PrivilegePreset]) -> (String, bool) {
         if !self.enabled {
             return (t!("user.create.unauthorized").to_string(), false);
         }
         let sets = self.effective_sets();
-        let union: BTreeSet<Privilege> = sets.iter().flat_map(|set| set.iter().copied()).collect();
+        let union: BTreeSet<PrivilegeId> =
+            sets.iter().flat_map(|set| set.iter().cloned()).collect();
         if union.is_empty() {
             return (t!("user.create.unauthorized").to_string(), false);
         }
         if sets.iter().all(|set| *set == sets[0]) {
-            privilege_summary(&sets[0])
+            privilege_summary(&sets[0], presets)
         } else {
             (
                 format!("{} ({})", t!("user.create.custom"), union.len()),
@@ -469,6 +310,13 @@ impl DbGrant {
 pub(super) struct UserCreateDialog {
     /// The connection the account lives on.
     pub(super) connection_index: usize,
+    /// Which fields, sections and privileges this engine's editor shows.
+    pub(super) spec: UserEditorSpec,
+    /// The engine's privilege catalog (groups, privileges and presets).
+    pub(super) catalog: PrivilegeCatalog,
+    /// Whether the engine qualifies object names with a schema (`schema.name`), so a picked table
+    /// name is split into its parts.
+    pub(super) schemas: bool,
     /// The active navigation section.
     pub(super) section: UserSection,
     /// The account being described. Owned here so create and edit share one source of truth.
@@ -517,6 +365,9 @@ impl UserCreateDialog {
     pub(super) fn new(
         connection_index: usize,
         plugin: String,
+        spec: UserEditorSpec,
+        catalog: PrivilegeCatalog,
+        schemas: bool,
         account: Option<(String, String)>,
     ) -> Self {
         let user = account
@@ -542,6 +393,9 @@ impl UserCreateDialog {
         });
         Self {
             connection_index,
+            spec,
+            catalog,
+            schemas,
             section: UserSection::General,
             editor,
             expiry: CreateExpiry::Default,
@@ -673,14 +527,14 @@ impl UserCreateDialog {
                 // into one set shared by the whole scope.
                 let tables: Vec<String> = table_grants
                     .iter()
-                    .map(|grant| grant.name.clone())
+                    .map(|grant| grant.object_name())
                     .collect();
-                let mut table_privileges: BTreeMap<String, BTreeSet<Privilege>> = BTreeMap::new();
+                let mut table_privileges: BTreeMap<String, BTreeSet<PrivilegeId>> = BTreeMap::new();
                 for grant in &table_grants {
                     table_privileges
-                        .entry(grant.name.clone())
+                        .entry(grant.object_name())
                         .or_default()
-                        .extend(grant.privileges.iter().copied());
+                        .extend(grant.privileges.iter().cloned());
                 }
                 rows.push(DbGrant {
                     name: database.clone(),
@@ -707,15 +561,22 @@ impl UserCreateDialog {
             }
             if row.scope == GrantScope::SpecificTables && !row.tables.is_empty() {
                 for table in &row.tables {
+                    let (schema, name) = if self.schemas {
+                        ObjectGrant::split_object_name(table)
+                    } else {
+                        (String::new(), table.clone())
+                    };
                     grants.push(ObjectGrant {
                         database: row.name.clone(),
-                        name: table.clone(),
+                        schema,
+                        name,
                         privileges: row.table_privileges.get(table).cloned().unwrap_or_default(),
                     });
                 }
             } else {
                 grants.push(ObjectGrant {
                     database: row.name.clone(),
+                    schema: String::new(),
                     name: String::new(),
                     privileges: row.privileges.clone(),
                 });
@@ -733,6 +594,10 @@ pub(super) enum CreateField {
     Password,
     Confirm,
     ExpiryDays,
+    PasswordValidUntil,
+    DefaultTablespace,
+    Profile,
+    TablespaceQuota,
     MaxQuestions,
     MaxUpdates,
     MaxConnections,
@@ -757,7 +622,9 @@ pub(super) struct UserEditorState {
     pub(super) account: UserAccount,
     pub(super) password: String,
     pub(super) guard_password: String,
-    pub(super) server_privileges: BTreeSet<Privilege>,
+    pub(super) server_privileges: BTreeSet<PrivilegeId>,
+    /// Server-wide privileges explicitly denied (SQL Server).
+    pub(super) denied_server_privileges: BTreeSet<PrivilegeId>,
     pub(super) grants: Vec<ObjectGrant>,
 }
 
@@ -774,6 +641,7 @@ impl UserEditorState {
             password: String::new(),
             guard_password: String::new(),
             server_privileges: BTreeSet::new(),
+            denied_server_privileges: BTreeSet::new(),
             grants: Vec::new(),
         }
     }
@@ -781,6 +649,7 @@ impl UserEditorState {
     fn apply_details(&mut self, details: UserDetails) {
         self.account = details.account.clone();
         self.server_privileges = details.server_privileges.clone();
+        self.denied_server_privileges = details.denied_server_privileges.clone();
         self.grants = details.grants.clone();
         self.original_account = Some((details.account.user.clone(), details.account.host.clone()));
         self.original = Some(details);
@@ -989,6 +858,7 @@ impl AppView {
             cx.notify();
             return;
         };
+        let spec = self.user_editor_spec(connection_index);
         let plugins = connection.authentication_plugins();
         let plugin = plugins
             .first()
@@ -1044,6 +914,38 @@ impl AppView {
             "30".to_string(),
             false,
             CreateField::ExpiryDays,
+            &weak,
+            cx,
+        ));
+        self.create_user_password_valid_until = Some(make_create_field_input(
+            theme,
+            String::new(),
+            false,
+            CreateField::PasswordValidUntil,
+            &weak,
+            cx,
+        ));
+        self.create_user_default_tablespace = Some(make_create_field_input(
+            theme,
+            String::new(),
+            false,
+            CreateField::DefaultTablespace,
+            &weak,
+            cx,
+        ));
+        self.create_user_profile = Some(make_create_field_input(
+            theme,
+            String::new(),
+            false,
+            CreateField::Profile,
+            &weak,
+            cx,
+        ));
+        self.create_user_tablespace_quota = Some(make_create_field_input(
+            theme,
+            String::new(),
+            false,
+            CreateField::TablespaceQuota,
             &weak,
             cx,
         ));
@@ -1112,7 +1014,10 @@ impl AppView {
             cx,
         ));
 
-        let dialog = UserCreateDialog::new(connection_index, plugin, account);
+        let catalog = self.user_privilege_catalog(connection_index);
+        let schemas = self.driver_supports(connection_index, DriverCapability::Schemas);
+        let dialog =
+            UserCreateDialog::new(connection_index, plugin, spec, catalog, schemas, account);
         self.create_user_dialog = Some(dialog);
         if editing {
             self.load_edit_account(cx);
@@ -1297,12 +1202,21 @@ impl AppView {
         let weak = cx.weak_entity();
         let app_entity = cx.entity();
         let focus = self.create_user_focus.clone();
+        let spec = self
+            .create_user_dialog
+            .as_ref()
+            .map(|dialog| dialog.spec.clone())
+            .unwrap_or_else(UserEditorSpec::mysql);
         let title = match self
             .create_user_dialog
             .as_ref()
             .and_then(|dialog| dialog.original_account())
         {
-            Some((user, host)) => format!("{user}@{host} - {}", t!("user.create.edit_title")),
+            Some((user, host)) => format!(
+                "{} - {}",
+                user_host_label(user, host, &spec),
+                t!("user.create.edit_title")
+            ),
             None => t!("user.create.title").to_string(),
         };
         cx.defer(move |cx: &mut App| {
@@ -1373,6 +1287,10 @@ impl AppView {
         self.create_user_plugin_combo = None;
         self.create_user_expiry_combo = None;
         self.create_user_expiry_days = None;
+        self.create_user_password_valid_until = None;
+        self.create_user_default_tablespace = None;
+        self.create_user_profile = None;
+        self.create_user_tablespace_quota = None;
         self.create_user_max_questions = None;
         self.create_user_max_updates = None;
         self.create_user_max_connections = None;
@@ -1407,6 +1325,21 @@ impl AppView {
                     if let Ok(days) = text.trim().parse::<u32>() {
                         dialog.expiry_days = days;
                     }
+                }
+                CreateField::PasswordValidUntil => {
+                    let value = text.trim();
+                    dialog.editor.account.password_valid_until = if value.is_empty() {
+                        None
+                    } else {
+                        Some(value.to_string())
+                    };
+                }
+                CreateField::DefaultTablespace => {
+                    dialog.editor.account.default_tablespace = text.trim().to_string()
+                }
+                CreateField::Profile => dialog.editor.account.profile = text.trim().to_string(),
+                CreateField::TablespaceQuota => {
+                    dialog.editor.account.tablespace_quota = text.trim().to_string()
                 }
                 CreateField::MaxQuestions => {
                     dialog.editor.account.max_questions = parse_limit(text)
@@ -1477,28 +1410,51 @@ impl AppView {
         cx.notify();
     }
 
-    /// Toggle one server privilege.
+    /// Toggle one server privilege. Granting clears any deny of the same privilege.
     pub(super) fn toggle_create_server_privilege(
         &mut self,
-        privilege: Privilege,
+        privilege: PrivilegeId,
         cx: &mut Context<'_, Self>,
     ) {
-        if let Some(dialog) = self.create_user_dialog.as_mut()
-            && !dialog.editor.server_privileges.remove(&privilege)
-        {
-            dialog.editor.server_privileges.insert(privilege);
+        if let Some(dialog) = self.create_user_dialog.as_mut() {
+            let granted_now = !dialog.editor.server_privileges.remove(&privilege);
+            if granted_now {
+                dialog.editor.server_privileges.insert(privilege.clone());
+                dialog.editor.denied_server_privileges.remove(&privilege);
+            }
         }
         cx.notify();
     }
 
-    /// Replace the server privileges with a template's set.
-    pub(super) fn apply_create_server_template(
+    /// Toggle the explicit deny of one server privilege. Denying clears any grant of it.
+    pub(super) fn toggle_create_server_privilege_deny(
         &mut self,
-        template: ServerTemplate,
+        privilege: PrivilegeId,
         cx: &mut Context<'_, Self>,
     ) {
         if let Some(dialog) = self.create_user_dialog.as_mut() {
-            dialog.editor.server_privileges = template.privileges();
+            let denied_now = !dialog.editor.denied_server_privileges.remove(&privilege);
+            if denied_now {
+                dialog
+                    .editor
+                    .denied_server_privileges
+                    .insert(privilege.clone());
+                dialog.editor.server_privileges.remove(&privilege);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Replace the server privileges with a preset's set (index into `catalog.server_presets`).
+    pub(super) fn apply_create_server_template(
+        &mut self,
+        index: usize,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(dialog) = self.create_user_dialog.as_mut() {
+            let privileges = preset_privileges(&dialog.catalog.server_presets, index);
+            dialog.editor.server_privileges = privileges;
+            dialog.editor.denied_server_privileges.clear();
         }
         cx.notify();
     }
@@ -1633,26 +1589,27 @@ impl AppView {
     /// table.
     pub(super) fn apply_create_database_template(
         &mut self,
-        template: DbTemplate,
+        index: usize,
         cx: &mut Context<'_, Self>,
     ) {
-        if let Some(dialog) = self.create_user_dialog.as_mut()
-            && let Some(index) = dialog.active_database
-            && let Some(row) = dialog.db_grants.get_mut(index)
-        {
-            if row.scope == GrantScope::SpecificTables && row.active_table.is_none() {
-                // A preset needs a table to land on; default to the first picked one.
-                if let Some(first) = row.tables.first().cloned() {
-                    row.activate_table(&first);
+        if let Some(dialog) = self.create_user_dialog.as_mut() {
+            let privileges = preset_privileges(&dialog.catalog.object_presets, index);
+            if let Some(index) = dialog.active_database
+                && let Some(row) = dialog.db_grants.get_mut(index)
+            {
+                if row.scope == GrantScope::SpecificTables && row.active_table.is_none() {
+                    // A preset needs a table to land on; default to the first picked one.
+                    if let Some(first) = row.tables.first().cloned() {
+                        row.activate_table(&first);
+                    }
                 }
-            }
-            let privileges = template.privileges();
-            let is_all_tables = row.scope == GrantScope::AllTables;
-            if let Some(target) = row.active_privileges_mut() {
-                *target = privileges.clone();
-            }
-            if is_all_tables {
-                row.enabled = !privileges.is_empty();
+                let is_all_tables = row.scope == GrantScope::AllTables;
+                if let Some(target) = row.active_privileges_mut() {
+                    *target = privileges.clone();
+                }
+                if is_all_tables {
+                    row.enabled = !privileges.is_empty();
+                }
             }
         }
         cx.notify();
@@ -1661,7 +1618,7 @@ impl AppView {
     /// Toggle one privilege on the active target (whole database or active table).
     pub(super) fn toggle_create_database_privilege(
         &mut self,
-        privilege: Privilege,
+        privilege: PrivilegeId,
         cx: &mut Context<'_, Self>,
     ) {
         if let Some(dialog) = self.create_user_dialog.as_mut()
@@ -1681,24 +1638,29 @@ impl AppView {
 
     /// Select every object privilege on the active target, or clear them if all are already set.
     pub(super) fn toggle_create_database_privileges_all(&mut self, cx: &mut Context<'_, Self>) {
-        if let Some(dialog) = self.create_user_dialog.as_mut()
-            && let Some(index) = dialog.active_database
-            && let Some(row) = dialog.db_grants.get_mut(index)
-        {
-            let is_all_tables = row.scope == GrantScope::AllTables;
-            let mut cleared = false;
-            if let Some(target) = row.active_privileges_mut() {
-                let all: BTreeSet<Privilege> = Privilege::OBJECT.into_iter().collect();
-                if *target == all {
-                    target.clear();
-                    cleared = true;
-                } else {
-                    *target = all;
+        if let Some(dialog) = self.create_user_dialog.as_mut() {
+            let all: BTreeSet<PrivilegeId> = dialog
+                .catalog
+                .object()
+                .map(|info| info.id.clone())
+                .collect();
+            if let Some(index) = dialog.active_database
+                && let Some(row) = dialog.db_grants.get_mut(index)
+            {
+                let is_all_tables = row.scope == GrantScope::AllTables;
+                let mut cleared = false;
+                if let Some(target) = row.active_privileges_mut() {
+                    if *target == all {
+                        target.clear();
+                        cleared = true;
+                    } else {
+                        *target = all;
+                    }
                 }
+                // Clearing a whole-database grant leaves the database unconfigured; a table scope
+                // stays selected so its revoke is still emitted.
+                row.enabled = !(cleared && is_all_tables);
             }
-            // Clearing a whole-database grant leaves the database unconfigured; a table scope stays
-            // selected so its revoke is still emitted.
-            row.enabled = !(cleared && is_all_tables);
         }
         cx.notify();
     }
@@ -1888,6 +1850,23 @@ impl AppView {
                 combo.set_selected(expiry_value(expiry).to_string(), cx)
             });
         }
+        if let Some(input) = self.create_user_password_valid_until.clone() {
+            let text = account.password_valid_until.clone().unwrap_or_default();
+            input.update(cx, |input, cx| input.set_text(text, cx));
+        }
+        if let Some(input) = self.create_user_default_tablespace.clone() {
+            input.update(cx, |input, cx| {
+                input.set_text(account.default_tablespace.clone(), cx)
+            });
+        }
+        if let Some(input) = self.create_user_profile.clone() {
+            input.update(cx, |input, cx| input.set_text(account.profile.clone(), cx));
+        }
+        if let Some(input) = self.create_user_tablespace_quota.clone() {
+            input.update(cx, |input, cx| {
+                input.set_text(account.tablespace_quota.clone(), cx)
+            });
+        }
         if let Some(dialog) = self.create_user_dialog.as_mut() {
             dialog.expiry = expiry;
             dialog.expiry_days = expiry_days;
@@ -1975,6 +1954,7 @@ impl AppView {
                 None
             },
             server_privileges: dialog.editor.server_privileges.clone(),
+            denied_server_privileges: dialog.editor.denied_server_privileges.clone(),
             grants: dialog.object_grants(),
             roles,
             members,
@@ -2171,10 +2151,11 @@ impl AppView {
             return String::new();
         };
         let subject = match dialog.original_account() {
-            Some((user, host)) => format!("{user}@{host}"),
-            None => format!(
-                "{}@{}",
-                dialog.editor.account.user, dialog.editor.account.host
+            Some((user, host)) => user_host_label(user, host, &dialog.spec),
+            None => user_host_label(
+                &dialog.editor.account.user,
+                &dialog.editor.account.host,
+                &dialog.spec,
             ),
         };
         let mut out = String::new();
@@ -2324,7 +2305,11 @@ impl AppView {
             return div().into_any_element();
         };
         let title = match dialog.original_account() {
-            Some((user, host)) => format!("{user}@{host} - {}", t!("user.create.edit_title")),
+            Some((user, host)) => format!(
+                "{} - {}",
+                user_host_label(user, host, &dialog.spec),
+                t!("user.create.edit_title")
+            ),
             None => t!("user.create.title").to_string(),
         };
 
@@ -2533,7 +2518,10 @@ impl AppView {
             .bg(rgb(theme.sidebar_bg))
             .border_r_1()
             .border_color(rgb(theme.border));
-        for section in UserSection::ALL {
+        for section in UserSection::ALL
+            .into_iter()
+            .filter(|section| section.visible(&dialog.spec))
+        {
             let active = dialog.section == section;
             let icon_color = if active {
                 theme.tree_selected_text
@@ -2595,58 +2583,65 @@ impl AppView {
         let account = &dialog.editor.account;
 
         let mut identity = div().flex().flex_col().gap_2().w_full();
-        identity = identity
-            .child(create_row(
-                t!("user.field.username").to_string(),
-                sized_text(self.create_user_user.as_ref(), theme),
-                theme,
-            ))
-            .child(create_row(
+        identity = identity.child(create_row(
+            t!("user.field.username").to_string(),
+            sized_text(self.create_user_user.as_ref(), theme),
+            theme,
+        ));
+
+        // MySQL/MariaDB have a user@host identity with quick host chips; other engines identify an
+        // account by name alone.
+        if dialog.spec.host {
+            identity = identity.child(create_row(
                 t!("user.field.host").to_string(),
                 sized_text(self.create_user_host.as_ref(), theme),
                 theme,
             ));
-
-        // 主机地址 quick chips, like the prototype's `% (任意网络)` / `localhost` shortcuts.
-        let mut host_choices = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .child(div().w(px(CREATE_LABEL_WIDTH)).flex_none());
-        for (label_key, value) in [
-            ("user.create.host_any", "%"),
-            ("user.create.host_local", "localhost"),
-            ("user.create.host_lan", "192.168.1.%"),
-        ] {
-            let host = value.to_string();
-            host_choices = host_choices.child(
-                div()
-                    .id(SharedString::from(format!("user-create-host-{value}")))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .h(px(20.0))
-                    .px_2()
-                    .rounded(px(4.0))
-                    .text_size(px(11.0))
-                    .bg(rgb(theme.button_bg))
-                    .border_1()
-                    .border_color(rgb(theme.border))
-                    .text_color(rgb(theme.text_muted))
-                    .cursor_pointer()
-                    .hover(move |style| style.text_color(rgb(theme.text)))
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.set_create_host(host.clone(), cx)
-                    }))
-                    .child(t!(label_key).to_string()),
-            );
+            // 主机地址 quick chips, like the prototype's `% (任意网络)` / `localhost` shortcuts.
+            let mut host_choices = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(div().w(px(CREATE_LABEL_WIDTH)).flex_none());
+            for (label_key, value) in [
+                ("user.create.host_any", "%"),
+                ("user.create.host_local", "localhost"),
+                ("user.create.host_lan", "192.168.1.%"),
+            ] {
+                let host = value.to_string();
+                host_choices = host_choices.child(
+                    div()
+                        .id(SharedString::from(format!("user-create-host-{value}")))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .h(px(20.0))
+                        .px_2()
+                        .rounded(px(4.0))
+                        .text_size(px(11.0))
+                        .bg(rgb(theme.button_bg))
+                        .border_1()
+                        .border_color(rgb(theme.border))
+                        .text_color(rgb(theme.text_muted))
+                        .cursor_pointer()
+                        .hover(move |style| style.text_color(rgb(theme.text)))
+                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                            this.set_create_host(host.clone(), cx)
+                        }))
+                        .child(t!(label_key).to_string()),
+                );
+            }
+            identity = identity.child(host_choices);
         }
-        identity = identity.child(host_choices).child(create_row(
-            t!("user.field.plugin").to_string(),
-            sized_combo(self.create_user_plugin_combo.as_ref(), theme),
-            theme,
-        ));
+
+        if dialog.spec.authentication_plugin {
+            identity = identity.child(create_row(
+                t!("user.field.plugin").to_string(),
+                sized_combo(self.create_user_plugin_combo.as_ref(), theme),
+                theme,
+            ));
+        }
 
         if dialog.is_edit() {
             identity = identity.child(create_row(
@@ -2699,17 +2694,19 @@ impl AppView {
             );
         }
 
+        let show_status = dialog.spec.password_expiry
+            || dialog.spec.password_valid_until
+            || dialog.spec.account_lock;
         let mut status = div().flex().flex_col().gap_2().w_full();
-        // 锁定该账号 sits beside the expiry dropdown, like the prototype.
-        status = status.child(create_row(
-            t!("user.field.password_expiry").to_string(),
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_4()
-                .child(sized_combo(self.create_user_expiry_combo.as_ref(), theme))
-                .child(
+        if show_status {
+            // 锁定该账号 sits beside the expiry dropdown, like the prototype.
+            let mut controls = div().flex().flex_row().items_center().gap_4();
+            if dialog.spec.password_expiry {
+                controls =
+                    controls.child(sized_combo(self.create_user_expiry_combo.as_ref(), theme));
+            }
+            if dialog.spec.account_lock {
+                controls = controls.child(
                     check_row(
                         "user-create-locked",
                         t!("user.field.locked_account").to_string(),
@@ -2718,39 +2715,97 @@ impl AppView {
                         cx.listener(|this, _event, _window, cx| this.toggle_create_locked(cx)),
                     )
                     .into_any_element(),
-                )
-                .into_any_element(),
-            theme,
-        ));
-        if dialog.expiry == CreateExpiry::Interval {
+                );
+            }
+            status = status.child(create_row(
+                if dialog.spec.password_expiry {
+                    t!("user.field.password_expiry").to_string()
+                } else {
+                    String::new()
+                },
+                controls.into_any_element(),
+                theme,
+            ));
+        }
+        if dialog.spec.password_expiry && dialog.expiry == CreateExpiry::Interval {
             status = status.child(create_row(
                 String::new(),
                 sized_text(self.create_user_expiry_days.as_ref(), theme),
                 theme,
             ));
         }
+        if dialog.spec.password_valid_until {
+            status = status.child(create_row(
+                t!("user.field.password_valid_until").to_string(),
+                sized_text(self.create_user_password_valid_until.as_ref(), theme),
+                theme,
+            ));
+        }
+
+        // Oracle's storage/profile settings.
+        let show_storage =
+            dialog.spec.default_tablespace || dialog.spec.profile || dialog.spec.tablespace_quota;
+        let mut storage = div().flex().flex_col().gap_2().w_full();
+        if dialog.spec.default_tablespace {
+            storage = storage.child(create_row(
+                t!("user.field.default_tablespace").to_string(),
+                sized_text(self.create_user_default_tablespace.as_ref(), theme),
+                theme,
+            ));
+        }
+        if dialog.spec.tablespace_quota {
+            storage = storage.child(create_row(
+                t!("user.field.tablespace_quota").to_string(),
+                sized_text(self.create_user_tablespace_quota.as_ref(), theme),
+                theme,
+            ));
+        }
+        if dialog.spec.profile {
+            storage = storage.child(create_row(
+                t!("user.field.profile").to_string(),
+                sized_text(self.create_user_profile.as_ref(), theme),
+                theme,
+            ));
+        }
 
         let mut limits = div().flex().flex_col().gap_2().w_full();
-        for (label_key, input) in [
-            ("user.field.max_questions", &self.create_user_max_questions),
-            ("user.field.max_updates", &self.create_user_max_updates),
+        for (enabled, label_key, input) in [
             (
+                dialog.spec.max_questions,
+                "user.field.max_questions",
+                &self.create_user_max_questions,
+            ),
+            (
+                dialog.spec.max_updates,
+                "user.field.max_updates",
+                &self.create_user_max_updates,
+            ),
+            (
+                dialog.spec.max_connections,
                 "user.field.max_connections",
                 &self.create_user_max_connections,
             ),
             (
+                dialog.spec.max_user_connections,
                 "user.field.max_user_connections",
                 &self.create_user_max_user_connections,
             ),
         ] {
+            if !enabled {
+                continue;
+            }
             limits = limits.child(create_row(
                 t!(label_key).to_string(),
                 sized_text_w(input.as_ref(), theme, CREATE_LIMIT_WIDTH),
                 theme,
             ));
         }
+        let show_limits = dialog.spec.max_questions
+            || dialog.spec.max_updates
+            || dialog.spec.max_connections
+            || dialog.spec.max_user_connections;
 
-        div()
+        let mut general = div()
             .id("user-create-general")
             .flex()
             .flex_col()
@@ -2761,20 +2816,32 @@ impl AppView {
                 None,
                 identity.into_any_element(),
                 theme,
-            ))
-            .child(section(
+            ));
+        if show_status {
+            general = general.child(section(
                 t!("user.create.status").to_string(),
                 None,
                 status.into_any_element(),
                 theme,
-            ))
-            .child(section(
+            ));
+        }
+        if show_limits {
+            general = general.child(section(
                 t!("user.create.limits").to_string(),
                 Some(t!("user.create.limits_hint").to_string()),
                 limits.into_any_element(),
                 theme,
-            ))
-            .into_any_element()
+            ));
+        }
+        if show_storage {
+            general = general.child(section(
+                t!("user.create.storage").to_string(),
+                None,
+                storage.into_any_element(),
+                theme,
+            ));
+        }
+        general.into_any_element()
     }
 
     /// 服务器权限: the global privilege grid with one-click templates.
@@ -2783,17 +2850,21 @@ impl AppView {
         let Some(dialog) = self.create_user_dialog.as_ref() else {
             return div().into_any_element();
         };
-        let checked_count = dialog.editor.server_privileges.len();
+        let checked_count = dialog
+            .editor
+            .server_privileges
+            .iter()
+            .filter(|privilege| dialog.catalog.is_server(privilege))
+            .count();
 
         let mut templates = div().flex().flex_row().items_center().gap_2().w_full();
-        for template in ServerTemplate::ALL {
-            let active = dialog.editor.server_privileges == template.privileges();
+        for (index, preset) in dialog.catalog.server_presets.iter().enumerate() {
+            let active = dialog.editor.server_privileges
+                == preset_privileges(&dialog.catalog.server_presets, index);
+            let label = catalog_label(&preset.label_key, &preset.label);
             templates = templates.child(
                 div()
-                    .id(SharedString::from(format!(
-                        "user-create-template-{}",
-                        template.label_key()
-                    )))
+                    .id(SharedString::from(format!("user-create-template-{index}")))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -2820,41 +2891,80 @@ impl AppView {
                             .hover(move |style| style.text_color(rgb(theme.text)))
                     })
                     .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.apply_create_server_template(template, cx)
+                        this.apply_create_server_template(index, cx)
                     }))
-                    .child(t!(template.label_key()).to_string()),
+                    .child(label),
             );
         }
 
-        // Grouped like the prototype, so the global set reads as categories instead of one long grid.
+        // Grouped by the catalog, so the global set reads as categories instead of one long grid.
         let mut groups = div().flex().flex_col().gap_3().w_full();
-        for (group_key, privileges) in server_privilege_groups() {
+        for group in &dialog.catalog.groups {
+            let offered = dialog
+                .catalog
+                .group_privileges(&group.id, PrivilegeScope::Server);
+            if offered.is_empty() {
+                continue;
+            }
+            let group_label = catalog_label(&group.label_key, &group.label);
+            let group_key = group.id.clone();
             let mut grid = div().flex().flex_row().flex_wrap().w_full();
-            for (position, privilege) in privileges.into_iter().enumerate() {
+            for (position, privilege) in offered.into_iter().enumerate() {
                 let checked = dialog.editor.server_privileges.contains(&privilege);
-                grid = grid.child(
-                    div()
-                        .id(SharedString::from(format!(
-                            "user-create-server-priv-{group_key}-{position}"
-                        )))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_2()
-                        .w(px(210.0))
-                        .h(px(CREATE_ROW_HEIGHT))
-                        .cursor_pointer()
-                        .on_click(cx.listener(move |this, _event, _window, cx| {
-                            this.toggle_create_server_privilege(privilege, cx)
-                        }))
-                        .child(checkbox_box(checked, theme))
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(rgb(theme.text))
-                                .child(t!(privilege.label_key()).to_string()),
-                        ),
-                );
+                let is_denied = dialog.editor.denied_server_privileges.contains(&privilege);
+                let keyword = privilege.as_str().to_string();
+                let description = privilege_label(&dialog.catalog, &privilege);
+                let deny_key = privilege.clone();
+                let mut cell = div()
+                    .id(SharedString::from(format!(
+                        "user-create-server-priv-{group_key}-{position}"
+                    )))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .w(px(210.0))
+                    .h(px(CREATE_ROW_HEIGHT))
+                    .cursor_pointer()
+                    .tooltip(move |_, cx| cx.new(|_| PrivilegeTooltip(description.clone())).into())
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.toggle_create_server_privilege(privilege.clone(), cx)
+                    }))
+                    .child(checkbox_box(checked, theme))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(theme.text))
+                            .child(keyword),
+                    );
+                if dialog.catalog.deny_supported {
+                    let label = t!("user.privilege.deny").to_string();
+                    cell = cell.child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "user-create-server-deny-{group_key}-{position}"
+                            )))
+                            .flex_none()
+                            .px_1()
+                            .rounded(px(3.0))
+                            .text_size(px(10.0))
+                            .cursor_pointer()
+                            .when(is_denied, move |style| {
+                                style.bg(rgb(theme.danger)).text_color(rgb(0xffffff))
+                            })
+                            .when(!is_denied, move |style| {
+                                style
+                                    .text_color(rgb(theme.text_muted))
+                                    .hover(move |style| style.text_color(rgb(theme.danger)))
+                            })
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                cx.stop_propagation();
+                                this.toggle_create_server_privilege_deny(deny_key.clone(), cx);
+                            }))
+                            .child(label),
+                    );
+                }
+                grid = grid.child(cell);
             }
             groups = groups.child(
                 div()
@@ -2866,7 +2976,7 @@ impl AppView {
                         div()
                             .text_size(px(11.0))
                             .text_color(rgb(theme.text_muted))
-                            .child(t!(group_key).to_string()),
+                            .child(group_label),
                     )
                     .child(grid),
             );
@@ -2975,7 +3085,7 @@ impl AppView {
             let active = dialog.active_database == Some(index);
             let enabled = row.enabled;
             let name = row.name.clone();
-            let (badge, authorized) = row.summary();
+            let (badge, authorized) = row.summary(&dialog.catalog.object_presets);
             let mut entry = div()
                 .id(SharedString::from(format!("user-create-db-{index}")))
                 .flex()
@@ -3202,17 +3312,18 @@ impl AppView {
 
         // The quick presets, matched against the active target's own set.
         let mut presets = div().flex().flex_row().items_center().gap_2().w_full();
-        for template in DbTemplate::ALL {
-            let active = if template == DbTemplate::None {
+        for (index, preset) in dialog.catalog.object_presets.iter().enumerate() {
+            let preset_set = preset_privileges(&dialog.catalog.object_presets, index);
+            let active = if preset_set.is_empty() {
                 privileges.is_empty()
             } else {
-                !privileges.is_empty() && privileges == template.privileges()
+                !privileges.is_empty() && privileges == preset_set
             };
+            let label = catalog_label(&preset.label_key, &preset.label);
             presets = presets.child(
                 div()
                     .id(SharedString::from(format!(
-                        "user-create-db-template-{}",
-                        template.label_key()
+                        "user-create-db-template-{index}"
                     )))
                     .flex()
                     .items_center()
@@ -3239,18 +3350,28 @@ impl AppView {
                             .text_color(rgb(theme.text_muted))
                     })
                     .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.apply_create_database_template(template, cx)
+                        this.apply_create_database_template(index, cx)
                     }))
-                    .child(t!(template.label_key()).to_string()),
+                    .child(label),
             );
         }
 
-        // The grouped fine-grained privileges.
+        // The grouped fine-grained privileges from the catalog.
         let mut groups = div().flex().flex_col().gap_3().w_full();
-        for (group_key, group_privileges) in db_privilege_groups() {
+        for group in &dialog.catalog.groups {
+            let offered = dialog
+                .catalog
+                .group_privileges(&group.id, PrivilegeScope::Object);
+            if offered.is_empty() {
+                continue;
+            }
+            let group_label = catalog_label(&group.label_key, &group.label);
+            let group_key = group.id.clone();
             let mut grid = div().flex().flex_row().flex_wrap().w_full();
-            for (position, privilege) in group_privileges.into_iter().enumerate() {
+            for (position, privilege) in offered.into_iter().enumerate() {
                 let checked = privileges.contains(&privilege);
+                let keyword = privilege.as_str().to_string();
+                let description = privilege_label(&dialog.catalog, &privilege);
                 grid = grid.child(
                     div()
                         .id(SharedString::from(format!(
@@ -3263,15 +3384,18 @@ impl AppView {
                         .w(px(210.0))
                         .h(px(CREATE_ROW_HEIGHT))
                         .cursor_pointer()
+                        .tooltip(move |_, cx| {
+                            cx.new(|_| PrivilegeTooltip(description.clone())).into()
+                        })
                         .on_click(cx.listener(move |this, _event, _window, cx| {
-                            this.toggle_create_database_privilege(privilege, cx)
+                            this.toggle_create_database_privilege(privilege.clone(), cx)
                         }))
                         .child(checkbox_box(checked, theme))
                         .child(
                             div()
                                 .text_size(px(12.0))
                                 .text_color(rgb(theme.text))
-                                .child(t!(privilege.label_key()).to_string()),
+                                .child(keyword),
                         ),
                 );
             }
@@ -3285,7 +3409,7 @@ impl AppView {
                         div()
                             .text_size(px(11.0))
                             .text_color(rgb(theme.text_muted))
-                            .child(t!(group_key).to_string()),
+                            .child(group_label),
                     )
                     .child(grid),
             );
@@ -3393,7 +3517,7 @@ impl AppView {
         database: &str,
         selected: &[String],
         active: Option<&str>,
-        privileges: &BTreeMap<String, BTreeSet<Privilege>>,
+        privileges: &BTreeMap<String, BTreeSet<PrivilegeId>>,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let theme = self.theme;
@@ -3423,7 +3547,10 @@ impl AppView {
             let checked = selected.iter().any(|picked| picked == table);
             let is_active = active == Some(table.as_str());
             let empty = BTreeSet::new();
-            let (badge, authorized) = privilege_summary(privileges.get(table).unwrap_or(&empty));
+            let (badge, authorized) = privilege_summary(
+                privileges.get(table).unwrap_or(&empty),
+                &dialog.catalog.object_presets,
+            );
             let activate_name = table.clone();
             let toggle_name = table.clone();
             let mut entry = div()
@@ -3601,7 +3728,7 @@ impl AppView {
             let key = (user.clone(), host.clone());
             let member = edges.contains_key(&key);
             let admin = edges.get(&key).copied().unwrap_or(false);
-            let label = format!("{user}@{host}");
+            let label = user_host_label(user, host, &dialog.spec);
             let grant_key = key.clone();
             let admin_key = key.clone();
             let row = shown;
@@ -3795,7 +3922,7 @@ impl AppView {
         let disabled = busy || !self.create_user_has_changes();
         let is_edit = dialog.is_edit();
         let subject = match dialog.original_account() {
-            Some((user, host)) => format!("{user}@{host}"),
+            Some((user, host)) => user_host_label(user, host, &dialog.spec),
             None => dialog.editor.account.user.trim().to_string(),
         };
         let save_label = if dialog.saving {
@@ -3885,35 +4012,71 @@ impl AppView {
 mod tests {
     use super::*;
 
-    #[test]
-    fn templates_are_progressive() {
-        assert!(ServerTemplate::None.privileges().is_empty());
-        assert!(
-            ServerTemplate::ReadWrite
-                .privileges()
-                .is_superset(&ServerTemplate::ReadOnly.privileges())
-        );
-        assert!(
-            ServerTemplate::Developer
-                .privileges()
-                .is_superset(&ServerTemplate::ReadWrite.privileges())
-        );
-        assert_eq!(
-            ServerTemplate::Admin.privileges().len(),
-            Privilege::ALL.len()
-        );
+    fn p(name: &str) -> PrivilegeId {
+        PrivilegeId::new(name)
     }
 
     #[test]
-    fn server_groups_cover_every_privilege_exactly_once() {
-        let mut grouped: Vec<Privilege> = server_privilege_groups()
-            .into_iter()
-            .flat_map(|(_, privileges)| privileges)
-            .collect();
-        grouped.sort();
-        let mut all = Privilege::ALL.to_vec();
-        all.sort();
-        assert_eq!(grouped, all);
+    fn a_spec_hides_sections_its_engine_lacks() {
+        let mysql = UserEditorSpec::mysql();
+        assert!(UserSection::ServerPrivileges.visible(&mysql));
+        assert!(UserSection::ObjectPrivileges.visible(&mysql));
+        assert!(UserSection::Roles.visible(&mysql));
+        assert!(UserSection::General.visible(&mysql));
+        assert!(UserSection::Sql.visible(&mysql));
+
+        // An engine without object-grant management hides the 权限 section.
+        let sqlserver = UserEditorSpec {
+            object_privileges: false,
+            ..UserEditorSpec::mysql()
+        };
+        assert!(!UserSection::ObjectPrivileges.visible(&sqlserver));
+        assert!(UserSection::ServerPrivileges.visible(&sqlserver));
+        assert!(UserSection::General.visible(&sqlserver));
+        assert!(UserSection::Sql.visible(&sqlserver));
+    }
+
+    #[test]
+    fn a_preset_resolves_to_its_privilege_set() {
+        let presets = vec![PrivilegePreset {
+            id: "read".to_string(),
+            label_key: None,
+            label: "Read".to_string(),
+            privileges: vec![p("SELECT")],
+        }];
+        assert_eq!(
+            preset_privileges(&presets, 0),
+            BTreeSet::from([p("SELECT")])
+        );
+        assert!(preset_privileges(&presets, 9).is_empty());
+    }
+
+    #[test]
+    fn catalog_label_resolves_a_known_key_and_falls_back() {
+        assert_eq!(
+            catalog_label(&Some("user.priv.select".to_string()), "SELECT"),
+            t!("user.priv.select").to_string()
+        );
+        assert_eq!(catalog_label(&None, "RAW"), "RAW");
+    }
+
+    #[test]
+    fn privilege_summary_names_a_matching_preset() {
+        let presets = vec![PrivilegePreset {
+            id: "read".to_string(),
+            label_key: None,
+            label: "Read".to_string(),
+            privileges: vec![p("SELECT")],
+        }];
+        assert_eq!(
+            privilege_summary(&BTreeSet::from([p("SELECT")]), &presets).0,
+            "Read (1)"
+        );
+        assert_eq!(
+            privilege_summary(&BTreeSet::from([p("INSERT")]), &presets).0,
+            format!("{} (1)", t!("user.create.custom"))
+        );
+        assert!(!privilege_summary(&BTreeSet::new(), &presets).1);
     }
 
     #[test]
@@ -3921,6 +4084,9 @@ mod tests {
         let dialog = UserCreateDialog::new(
             0,
             "caching_sha2_password".to_string(),
+            UserEditorSpec::mysql(),
+            PrivilegeCatalog::default(),
+            false,
             Some(("root".to_string(), "localhost".to_string())),
         );
         assert!(dialog.is_edit());
@@ -3932,7 +4098,14 @@ mod tests {
 
     #[test]
     fn a_new_dialog_is_not_an_edit() {
-        let dialog = UserCreateDialog::new(0, "caching_sha2_password".to_string(), None);
+        let dialog = UserCreateDialog::new(
+            0,
+            "caching_sha2_password".to_string(),
+            UserEditorSpec::mysql(),
+            PrivilegeCatalog::default(),
+            false,
+            None,
+        );
         assert!(!dialog.is_edit());
         assert_eq!(dialog.original_account(), None);
     }
@@ -3946,20 +4119,32 @@ mod tests {
     }
 
     fn grant(database: &str, name: &str) -> ObjectGrant {
-        grant_with(database, name, &[Privilege::Select])
+        grant_with(database, name, &[p("SELECT")])
     }
 
-    fn grant_with(database: &str, name: &str, privileges: &[Privilege]) -> ObjectGrant {
+    fn grant_with(database: &str, name: &str, privileges: &[PrivilegeId]) -> ObjectGrant {
         ObjectGrant {
             database: database.to_string(),
+            schema: String::new(),
             name: name.to_string(),
-            privileges: privileges.iter().copied().collect(),
+            privileges: privileges.iter().cloned().collect(),
         }
+    }
+
+    fn new_dialog(account: Option<(String, String)>) -> UserCreateDialog {
+        UserCreateDialog::new(
+            0,
+            "caching_sha2_password".to_string(),
+            UserEditorSpec::mysql(),
+            PrivilegeCatalog::default(),
+            false,
+            account,
+        )
     }
 
     #[test]
     fn rebuild_maps_whole_database_table_and_ungranted_rows() {
-        let mut dialog = UserCreateDialog::new(0, "caching_sha2_password".to_string(), None);
+        let mut dialog = new_dialog(None);
         dialog.databases = vec!["a".to_string(), "b".to_string(), "c".to_string()];
         dialog.editor.grants = vec![
             grant("a", ""),
@@ -3967,12 +4152,7 @@ mod tests {
             grant_with(
                 "b",
                 "t2",
-                &[
-                    Privilege::Select,
-                    Privilege::Insert,
-                    Privilege::Update,
-                    Privilege::Delete,
-                ],
+                &[p("SELECT"), p("INSERT"), p("UPDATE"), p("DELETE")],
             ),
         ];
         dialog.rebuild_db_grants();
@@ -3993,19 +4173,14 @@ mod tests {
 
     #[test]
     fn per_table_privileges_are_kept_apart() {
-        let mut dialog = UserCreateDialog::new(0, "caching_sha2_password".to_string(), None);
+        let mut dialog = new_dialog(None);
         dialog.databases = vec!["shop".to_string()];
         dialog.editor.grants = vec![
             grant("shop", "account"),
             grant_with(
                 "shop",
                 "orders",
-                &[
-                    Privilege::Select,
-                    Privilege::Insert,
-                    Privilege::Update,
-                    Privilege::Delete,
-                ],
+                &[p("SELECT"), p("INSERT"), p("UPDATE"), p("DELETE")],
             ),
         ];
         dialog.rebuild_db_grants();
@@ -4013,23 +4188,21 @@ mod tests {
         let row = &dialog.db_grants[0];
         assert_eq!(
             row.table_privileges.get("account"),
-            Some(&[Privilege::Select].into_iter().collect())
+            Some(&[p("SELECT")].into_iter().collect())
         );
         assert_eq!(
             row.table_privileges.get("orders"),
             Some(
-                &[
-                    Privilege::Select,
-                    Privilege::Insert,
-                    Privilege::Update,
-                    Privilege::Delete,
-                ]
-                .into_iter()
-                .collect()
+                &[p("SELECT"), p("INSERT"), p("UPDATE"), p("DELETE")]
+                    .into_iter()
+                    .collect()
             )
         );
         // A mixed set is no longer flattened into one preset shared by both tables.
-        assert_eq!(row.summary().0, format!("{} (4)", t!("user.create.custom")));
+        assert_eq!(
+            row.summary(&[]).0,
+            format!("{} (4)", t!("user.create.custom"))
+        );
 
         let grants = dialog.object_grants();
         let account = grants
@@ -4040,16 +4213,13 @@ mod tests {
             .iter()
             .find(|grant| grant.name == "orders")
             .expect("the orders grant");
-        assert_eq!(
-            account.privileges,
-            [Privilege::Select].into_iter().collect()
-        );
+        assert_eq!(account.privileges, [p("SELECT")].into_iter().collect());
         assert_eq!(orders.privileges.len(), 4);
     }
 
     #[test]
     fn editing_one_table_does_not_touch_another() {
-        let mut dialog = UserCreateDialog::new(0, "caching_sha2_password".to_string(), None);
+        let mut dialog = new_dialog(None);
         dialog.databases = vec!["shop".to_string()];
         dialog.rebuild_db_grants();
         dialog.db_grants[0].activate_table("account");
@@ -4058,32 +4228,32 @@ mod tests {
         dialog.db_grants[0]
             .active_privileges_mut()
             .expect("an active table")
-            .insert(Privilege::Select);
+            .insert(p("SELECT"));
         dialog.db_grants[0].active_table = Some("account".to_string());
         dialog.db_grants[0]
             .active_privileges_mut()
             .expect("an active table")
-            .insert(Privilege::Insert);
+            .insert(p("INSERT"));
 
         let row = &dialog.db_grants[0];
         assert_eq!(
             row.table_privileges.get("orders"),
-            Some(&[Privilege::Select].into_iter().collect())
+            Some(&[p("SELECT")].into_iter().collect())
         );
         assert_eq!(
             row.table_privileges.get("account"),
-            Some(&[Privilege::Insert].into_iter().collect())
+            Some(&[p("INSERT")].into_iter().collect())
         );
     }
 
     #[test]
     fn specific_scope_without_tables_falls_back_to_a_database_grant() {
-        let mut dialog = UserCreateDialog::new(0, "caching_sha2_password".to_string(), None);
+        let mut dialog = new_dialog(None);
         dialog.databases = vec!["a".to_string()];
         dialog.rebuild_db_grants();
         dialog.db_grants[0].enabled = true;
         dialog.db_grants[0].scope = GrantScope::SpecificTables;
-        dialog.db_grants[0].privileges.insert(Privilege::Select);
+        dialog.db_grants[0].privileges.insert(p("SELECT"));
 
         let grants = dialog.object_grants();
         assert_eq!(grants.len(), 1);
@@ -4093,7 +4263,7 @@ mod tests {
 
     #[test]
     fn rebuild_keeps_granted_databases_missing_from_the_listing() {
-        let mut dialog = UserCreateDialog::new(0, "caching_sha2_password".to_string(), None);
+        let mut dialog = new_dialog(None);
         dialog.databases = vec!["a".to_string()];
         dialog.editor.grants = vec![grant("only_in_grants", "")];
         dialog.rebuild_db_grants();
@@ -4114,11 +4284,7 @@ mod tests {
     fn loading_details_populates_the_role_lists() {
         use rustgrid_core::RoleMembership;
 
-        let mut dialog = UserCreateDialog::new(
-            0,
-            "caching_sha2_password".to_string(),
-            Some(("test".to_string(), "%".to_string())),
-        );
+        let mut dialog = new_dialog(Some(("test".to_string(), "%".to_string())));
         dialog.apply_details(UserDetails {
             account: UserAccount {
                 user: "test".to_string(),
