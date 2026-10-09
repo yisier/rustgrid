@@ -195,7 +195,21 @@ impl AppView {
         cx.notify();
     }
 
+    /// Close a query tab, asking first when it has unsaved edits.
     pub(super) fn close_query(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        if index >= self.queries.len() {
+            return;
+        }
+        if self.queries[index].is_dirty() {
+            self.unsaved_confirm = Some(PendingAction::CloseQuery { index });
+            cx.notify();
+            return;
+        }
+        self.close_query_now(index, cx);
+    }
+
+    /// Close a query tab unconditionally (guard already passed).
+    pub(super) fn close_query_now(&mut self, index: usize, cx: &mut Context<'_, Self>) {
         if index >= self.queries.len() {
             return;
         }
@@ -261,14 +275,23 @@ impl AppView {
 
     pub(super) fn close_other_tabs(&mut self, target: TabTarget, cx: &mut Context<'_, Self>) {
         self.tab_menu = None;
+        if self.has_unsaved_changes(cx) {
+            self.unsaved_confirm = Some(PendingAction::CloseOtherTabs { keep: target });
+            cx.notify();
+            return;
+        }
+        self.close_other_tabs_now(target, cx);
+    }
+
+    pub(super) fn close_other_tabs_now(&mut self, target: TabTarget, cx: &mut Context<'_, Self>) {
         match target {
             TabTarget::Grid(keep) => {
                 let keep_id = self.grids.get(keep).map(|grid| grid.read(cx).state.id);
                 while !self.queries.is_empty() {
-                    self.close_query(self.queries.len() - 1, cx);
+                    self.close_query_now(self.queries.len() - 1, cx);
                 }
                 while !self.designs.is_empty() {
-                    self.close_design(self.designs.len() - 1, cx);
+                    self.close_design_now(self.designs.len() - 1, cx);
                 }
                 let mut index = self.grids.len();
                 while index > 0 {
@@ -292,13 +315,13 @@ impl AppView {
                     self.close_grid(self.grids.len() - 1, cx);
                 }
                 while !self.designs.is_empty() {
-                    self.close_design(self.designs.len() - 1, cx);
+                    self.close_design_now(self.designs.len() - 1, cx);
                 }
                 let mut index = self.queries.len();
                 while index > 0 {
                     index -= 1;
                     if Some(self.queries[index].id) != keep_id {
-                        self.close_query(index, cx);
+                        self.close_query_now(index, cx);
                     }
                 }
                 if let Some(id) = keep_id
@@ -310,7 +333,7 @@ impl AppView {
             TabTarget::Design(keep) => {
                 let keep_id = self.designs.get(keep).map(|design| design.read(cx).id);
                 while !self.queries.is_empty() {
-                    self.close_query(self.queries.len() - 1, cx);
+                    self.close_query_now(self.queries.len() - 1, cx);
                 }
                 while !self.grids.is_empty() {
                     self.close_grid(self.grids.len() - 1, cx);
@@ -319,7 +342,7 @@ impl AppView {
                 while index > 0 {
                     index -= 1;
                     if Some(self.designs[index].read(cx).id) != keep_id {
-                        self.close_design(index, cx);
+                        self.close_design_now(index, cx);
                     }
                 }
                 if let Some(id) = keep_id
@@ -336,14 +359,23 @@ impl AppView {
 
     pub(super) fn close_all_tabs(&mut self, cx: &mut Context<'_, Self>) {
         self.tab_menu = None;
+        if self.has_unsaved_changes(cx) {
+            self.unsaved_confirm = Some(PendingAction::CloseAllTabs);
+            cx.notify();
+            return;
+        }
+        self.close_all_tabs_now(cx);
+    }
+
+    pub(super) fn close_all_tabs_now(&mut self, cx: &mut Context<'_, Self>) {
         while !self.queries.is_empty() {
-            self.close_query(self.queries.len() - 1, cx);
+            self.close_query_now(self.queries.len() - 1, cx);
         }
         while !self.grids.is_empty() {
             self.close_grid(self.grids.len() - 1, cx);
         }
         while !self.designs.is_empty() {
-            self.close_design(self.designs.len() - 1, cx);
+            self.close_design_now(self.designs.len() - 1, cx);
         }
     }
 
@@ -683,6 +715,10 @@ impl AppView {
         let Some(tab) = self.queries.get(index) else {
             return;
         };
+        // A run in progress cannot be started again; the Stop button cancels it.
+        if tab.running {
+            return;
+        }
 
         // The wrapped editor owns the real selection; `QueryTab::caret/anchor` is only a mirror
         // that may lag behind (gpui does not notify the app of selection changes). Read the live
@@ -728,10 +764,16 @@ impl AppView {
 
         if let Some(tab) = self.queries.get_mut(index) {
             tab.running = true;
+            tab.run_generation = tab.run_generation.wrapping_add(1);
             tab.result_error = None;
             tab.last_sql = executable.clone();
             tab.last_elapsed = None;
         }
+        let generation = self
+            .queries
+            .get(index)
+            .map(|tab| tab.run_generation)
+            .unwrap_or(0);
         cx.notify();
 
         let runtime = self.runtime.clone();
@@ -828,7 +870,15 @@ impl AppView {
             };
 
             let _ = this.update(cx, |view, cx| {
-                view.apply_query_results(index, connection_name, executable, elapsed, plans, cx);
+                view.apply_query_results(
+                    index,
+                    generation,
+                    connection_name,
+                    executable,
+                    elapsed,
+                    plans,
+                    cx,
+                );
             });
         })
         .detach();
@@ -904,15 +954,21 @@ impl AppView {
 
     /// Install the result sets of a query run: one grid per result set, plus the per-entry state
     /// that drives the bottom result tabs and the 信息 panel.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn apply_query_results(
         &mut self,
         index: usize,
+        generation: u64,
         connection_name: String,
         sql: String,
         elapsed: std::time::Duration,
         result: Result<Vec<QueryResultPlan>, Error>,
         cx: &mut Context<'_, Self>,
     ) {
+        // A stopped (or superseded) run's late result must not overwrite the tab.
+        if self.queries.get(index).map(|tab| tab.run_generation) != Some(generation) {
+            return;
+        }
         let active_id = self.active_grid_id(cx);
 
         // Drop the previous run's grids for this tab.
@@ -979,6 +1035,7 @@ impl AppView {
                             selection: None,
                             edits: BTreeMap::new(),
                             undo: Vec::new(),
+                            redo: Vec::new(),
                             sql: Some(result.statement.clone()),
                             show_toolbar: false,
                             show_footer: true,
@@ -1058,7 +1115,15 @@ impl AppView {
             return;
         };
         if let Some(tab) = self.queries.get_mut(index) {
+            if !tab.running {
+                return;
+            }
+            // Invalidate the in-flight run so its late result is discarded (drivers have no
+            // server-side cancel); the 信息 tab reports that the run was stopped.
+            tab.run_generation = tab.run_generation.wrapping_add(1);
             tab.running = false;
+            tab.last_elapsed = None;
+            tab.result_error = Some(t!("query.stopped").to_string());
         }
         cx.notify();
     }
@@ -1225,6 +1290,9 @@ impl AppView {
             self.error_dialog = Some(error.to_string());
             cx.notify();
             return;
+        }
+        if let Some(tab) = self.queries.get_mut(tab_index) {
+            tab.baseline = tab.sql.clone();
         }
         self.refresh_query_files(cx);
         if let Some(index) = self.query_files.iter().position(|file| file.path == path) {
@@ -1456,6 +1524,7 @@ impl AppView {
             // duplicate it under the tab's previous connection.
             tab.connection_index = connection_index;
             tab.database = (!database.is_empty()).then(|| database.clone());
+            tab.baseline = tab.sql.clone();
         }
         if let Some(connection_index) = connection_index
             && !matches!(
@@ -1708,6 +1777,7 @@ impl AppView {
             && let Some(tab) = self.queries.get_mut(active)
         {
             tab.sql = sql;
+            tab.baseline = tab.sql.clone();
             tab.name = Some(name);
             tab.saved_path = Some(saved_path);
             tab.caret = tab.sql.len();

@@ -128,8 +128,10 @@ impl GridView {
             block.push(values);
             lines.push(text_cells.join("\t"));
         }
-        cx.write_to_clipboard(ClipboardItem::new_string(lines.join("\n")));
+        let text = lines.join("\n");
+        cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
         self.clipboard = Some(block);
+        self.clipboard_text = Some(text);
         cx.notify();
     }
 
@@ -172,7 +174,11 @@ impl GridView {
                 values.join(", ")
             ));
         }
-        cx.write_to_clipboard(ClipboardItem::new_string(sql));
+        cx.write_to_clipboard(ClipboardItem::new_string(sql.clone()));
+        // An INSERT copy is not a cell block; make paste treat the matching OS text as unusable
+        // rather than replaying the previous cell copy.
+        self.clipboard = None;
+        self.clipboard_text = Some(sql);
         cx.notify();
     }
 
@@ -183,11 +189,14 @@ impl GridView {
         if !self.state.editable || self.state.columns.is_empty() {
             return;
         }
-        let block = self.clipboard.clone().or_else(|| {
-            cx.read_from_clipboard()
-                .and_then(|item| item.text())
-                .map(|text| parse_clipboard_text(&text))
-        });
+        // Prefer the OS clipboard when it changed since our own copy (so external / other-app
+        // data pastes); otherwise use the in-app block, which preserves NULLs.
+        let system_text = cx.read_from_clipboard().and_then(|item| item.text());
+        let block = match system_text {
+            Some(text) if Some(&text) == self.clipboard_text.as_ref() => self.clipboard.clone(),
+            Some(text) => Some(parse_clipboard_text(&text)),
+            None => self.clipboard.clone(),
+        };
         let Some(block) = block else {
             return;
         };
@@ -207,7 +216,7 @@ impl GridView {
             .map(|selection| selection.row_indices())
             .unwrap_or_default();
         let map_rows = !selected_rows.is_empty() && selected_rows.len() == block.len();
-        let row_count = self.display_row_count();
+        let data_rows = self.state.rows.len();
         let mut action = Vec::new();
         for (index, values) in block.iter().enumerate() {
             let target_row = if map_rows {
@@ -215,8 +224,16 @@ impl GridView {
             } else {
                 start_row + index
             };
-            if target_row >= row_count {
-                break;
+            if target_row >= data_rows {
+                // A one-to-one paste onto selected records never creates rows; a free paste that
+                // runs past the page grows pending insert rows to hold the overflow.
+                if map_rows {
+                    break;
+                }
+                let needed = target_row - data_rows + 1;
+                while self.inserts.len() < needed {
+                    self.inserts.push(BTreeMap::new());
+                }
             }
             for (offset, value) in values.iter().enumerate() {
                 let target_col = start_col + offset;
@@ -227,6 +244,7 @@ impl GridView {
             }
         }
         if !action.is_empty() {
+            self.state.redo.clear();
             self.state.undo.push(action);
             if self.state.undo.len() > 256 {
                 self.state.undo.remove(0);

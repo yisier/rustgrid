@@ -141,7 +141,7 @@ impl AppView {
                         t!("connection.disconnect").to_string(),
                         cx.listener(move |this, _event, _window, cx| {
                             this.context_menu = None;
-                            this.disconnect(index, cx);
+                            this.request_disconnect(index, cx);
                         }),
                     ));
                 }
@@ -614,6 +614,27 @@ impl AppView {
                         }),
                     ));
             }
+            ContextTarget::ObjectCategory {
+                connection_index,
+                database_index,
+                category,
+            } => {
+                let ci = *connection_index;
+                let di = *database_index;
+                let category = *category;
+                items = items.child(self.context_item(
+                    "objcat-refresh",
+                    t!("connection.refresh").to_string(),
+                    cx.listener(move |this, _event, _window, cx| {
+                        this.context_menu = None;
+                        match category {
+                            Category::Queries => this.refresh_query_files(cx),
+                            Category::Backups => this.refresh_backups(cx),
+                            other => this.refresh_object_category(other, ci, di, cx),
+                        }
+                    }),
+                ));
+            }
             ContextTarget::Routine {
                 connection_index,
                 database_index,
@@ -947,7 +968,7 @@ impl AppView {
                         (
                             g.state.selection.is_some(),
                             g.state.editable,
-                            g.state.sql.is_none()
+                            g.state.editable
                                 && g.state.selection.is_some()
                                 && !g.state.rows.is_empty(),
                         )
@@ -957,6 +978,8 @@ impl AppView {
                     let for_insert = grid.clone();
                     let for_paste = grid.clone();
                     let for_refresh = grid.clone();
+                    let for_insert_row = grid.clone();
+                    let for_null = grid.clone();
                     items = items.child(if deletable {
                         self.context_item(
                             "grid-ctx-delete",
@@ -1021,6 +1044,40 @@ impl AppView {
                         .into_any_element()
                     } else {
                         self.context_item_disabled("grid-ctx-paste", t!("grid.paste").to_string())
+                            .into_any_element()
+                    });
+                    items = items.child(if editable {
+                        self.context_item(
+                            "grid-ctx-insert-row",
+                            t!("grid.insert_row").to_string(),
+                            cx.listener(move |this, _event, window, cx| {
+                                this.context_menu = None;
+                                for_insert_row
+                                    .update(cx, |grid, cx| grid.add_insert_row(window, cx));
+                                cx.notify();
+                            }),
+                        )
+                        .into_any_element()
+                    } else {
+                        self.context_item_disabled(
+                            "grid-ctx-insert-row",
+                            t!("grid.insert_row").to_string(),
+                        )
+                        .into_any_element()
+                    });
+                    items = items.child(if editable && has_selection {
+                        self.context_item(
+                            "grid-ctx-null",
+                            t!("grid.set_null").to_string(),
+                            cx.listener(move |this, _event, _window, cx| {
+                                this.context_menu = None;
+                                for_null.update(cx, |grid, cx| grid.set_selection_null(cx));
+                                cx.notify();
+                            }),
+                        )
+                        .into_any_element()
+                    } else {
+                        self.context_item_disabled("grid-ctx-null", t!("grid.set_null").to_string())
                             .into_any_element()
                     });
                     items = items
@@ -1117,7 +1174,7 @@ impl AppView {
         &self,
         id: impl Into<ElementId>,
         label: String,
-    ) -> impl IntoElement {
+    ) -> Stateful<Div> {
         let theme = self.theme;
         div()
             .id(id)

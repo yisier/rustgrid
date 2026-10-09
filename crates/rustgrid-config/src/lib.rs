@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 const CURRENT_VERSION: u32 = 2;
 const PROFILES_FILE: &str = "connections.json";
-const SETTINGS_VERSION: u32 = 5;
+const SETTINGS_VERSION: u32 = 6;
 const SETTINGS_FILE: &str = "settings.json";
 const QUERIES_VERSION: u32 = 1;
 const QUERIES_FILE: &str = "queries.json";
@@ -110,6 +110,12 @@ struct SettingsFile {
     editor_line_numbers: bool,
     #[serde(default = "default_true")]
     editor_word_wrap: bool,
+    /// Connection-profile ids whose tree node is expanded.
+    #[serde(default)]
+    expanded_connections: Vec<String>,
+    /// Expanded database names per connection-profile id, for restoring the tree.
+    #[serde(default)]
+    expanded_databases: BTreeMap<String, Vec<String>>,
 }
 
 /// The default SQL editor font size, in px (VS Code's default `editor.fontSize`).
@@ -135,6 +141,10 @@ pub struct AppSettings {
     pub editor_font_size: u32,
     pub editor_line_numbers: bool,
     pub editor_word_wrap: bool,
+    /// Connection-profile ids whose tree node is expanded.
+    pub expanded_connections: Vec<String>,
+    /// Expanded database names per connection-profile id.
+    pub expanded_databases: BTreeMap<String, Vec<String>>,
 }
 
 impl Default for AppSettings {
@@ -148,6 +158,8 @@ impl Default for AppSettings {
             editor_font_size: DEFAULT_EDITOR_FONT_SIZE,
             editor_line_numbers: true,
             editor_word_wrap: true,
+            expanded_connections: Vec::new(),
+            expanded_databases: BTreeMap::new(),
         }
     }
 }
@@ -319,6 +331,8 @@ impl ConfigStore {
             editor_font_size: file.editor_font_size,
             editor_line_numbers: file.editor_line_numbers,
             editor_word_wrap: file.editor_word_wrap,
+            expanded_connections: file.expanded_connections,
+            expanded_databases: file.expanded_databases,
         })
     }
 
@@ -334,6 +348,8 @@ impl ConfigStore {
             editor_font_size: settings.editor_font_size,
             editor_line_numbers: settings.editor_line_numbers,
             editor_word_wrap: settings.editor_word_wrap,
+            expanded_connections: settings.expanded_connections.clone(),
+            expanded_databases: settings.expanded_databases.clone(),
         };
         let contents = serde_json::to_string_pretty(&file)?;
         fs::write(self.settings_path(), contents)?;

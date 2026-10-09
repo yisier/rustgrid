@@ -23,6 +23,8 @@ struct TreeConnection {
     /// schema create/drop actions are not offered.
     supports_schemas: bool,
     status: TreeStatus,
+    /// The error from the last failed connect, shown as a tooltip on the node.
+    failed_error: Option<String>,
     expanded: bool,
     databases: Loadable<Vec<TreeDatabase>>,
     /// Saved queries belonging to this connection, across all its databases.
@@ -106,6 +108,10 @@ fn snapshot_connections(app: &AppView) -> Vec<TreeConnection> {
                 ConnectionStatus::Connecting => TreeStatus::Connecting,
                 ConnectionStatus::Failed(_) => TreeStatus::Failed,
                 ConnectionStatus::Disconnected => TreeStatus::Disconnected,
+            };
+            let failed_error = match &node.status {
+                ConnectionStatus::Failed(message) => Some(message.clone()),
+                _ => None,
             };
             let databases = match &node.databases {
                 Loadable::Idle => Loadable::Idle,
@@ -210,6 +216,7 @@ fn snapshot_connections(app: &AppView) -> Vec<TreeConnection> {
                     descriptor.capabilities.has(DriverCapability::Schemas)
                 }),
                 status,
+                failed_error,
                 expanded: node.expanded,
                 databases,
                 saved_queries: app
@@ -228,8 +235,108 @@ fn snapshot_connections(app: &AppView) -> Vec<TreeConnection> {
         .collect()
 }
 
+/// Keep only the connections/databases/objects whose name matches `query` (case-insensitive),
+/// forcing matched ancestors open so the result is visible.
+fn filter_tree(connections: &mut Vec<TreeConnection>, query: &str) {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return;
+    }
+    let matches = |name: &str| name.to_lowercase().contains(&query);
+    connections.retain_mut(|conn| {
+        if matches(&conn.name) {
+            conn.expanded = true;
+            return true;
+        }
+        let mut db_any = false;
+        if let Loadable::Loaded(databases) = &mut conn.databases {
+            databases.retain_mut(|db| {
+                let db_match = matches(&db.name);
+                let mut leaf_any = false;
+                if !db_match {
+                    if let Loadable::Loaded(tables) = &mut db.tables {
+                        tables.retain(|table| matches(&table.name));
+                        leaf_any |= !tables.is_empty();
+                    }
+                    if let Loadable::Loaded(routines) = &mut db.routines {
+                        routines.retain(|routine| matches(&routine.name));
+                        leaf_any |= !routines.is_empty();
+                    }
+                }
+                let keep = db_match || leaf_any;
+                if keep {
+                    db.expanded = true;
+                }
+                keep
+            });
+            db_any = !databases.is_empty();
+        }
+        let query_match = conn.saved_queries.iter().any(|saved| matches(&saved.name));
+        let keep = db_any || query_match;
+        if keep {
+            conn.expanded = true;
+        }
+        keep
+    });
+}
+
+/// The ids of the tree rows that are currently visible, in draw order, for keyboard navigation.
+fn collect_visible_ids(connections: &[TreeConnection], out: &mut Vec<String>) {
+    for conn in connections {
+        out.push(format!("conn-{}", conn.index));
+        if !conn.expanded {
+            continue;
+        }
+        let Loadable::Loaded(databases) = &conn.databases else {
+            continue;
+        };
+        for db in databases {
+            out.push(format!("db-{}-{}", conn.index, db.index));
+            if !db.expanded {
+                continue;
+            }
+            let schema_engine = !db.schemas.is_empty();
+            if let Loadable::Loaded(tables) = &db.tables {
+                for table in tables {
+                    let visible = if schema_engine {
+                        table
+                            .schema
+                            .as_ref()
+                            .is_some_and(|schema| db.expanded_schemas.contains(schema))
+                    } else {
+                        db.categories.tables
+                    };
+                    if visible {
+                        out.push(format!("tbl-{}-{}-{}", conn.index, db.index, table.name));
+                    }
+                }
+            }
+        }
+    }
+}
+
 impl TreePane {
     pub(super) fn new(app: WeakEntity<AppView>, cx: &mut Context<'_, Self>) -> Self {
+        let self_weak = cx.weak_entity();
+        let search_input = cx.new(move |cx| {
+            TextInput::new(
+                Theme::dark(),
+                "",
+                TextInputOptions {
+                    placeholder: t!("sidebar.search").to_string().into(),
+                    icon: Some("icons/search.svg"),
+                    clearable: true,
+                    ..Default::default()
+                },
+                cx,
+            )
+            .on_change(Rc::new(move |text, _window, cx| {
+                let _ = self_weak.update(cx, |pane, cx| {
+                    pane.search = text.to_string();
+                    cx.notify();
+                });
+            }))
+        });
         Self {
             app,
             scroll: ScrollHandle::new(),
@@ -238,6 +345,9 @@ impl TreePane {
             rename_row: None,
             focus: cx.focus_handle(),
             theme: Theme::dark(),
+            search: String::new(),
+            search_input,
+            visible_ids: Vec::new(),
         }
     }
 
@@ -245,36 +355,117 @@ impl TreePane {
         self.focus.clone()
     }
 
-    /// F2 starts editing the selected table's name in place.
+    /// Tree keyboard handling: arrow/Home/End navigation, Enter to open, and F2 to rename.
     fn tree_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<'_, Self>) {
         let keystroke = &event.keystroke;
-        if keystroke.modifiers.control
-            || keystroke.modifiers.platform
-            || keystroke.modifiers.alt
-            || !keystroke.key.eq_ignore_ascii_case("f2")
-        {
+        if keystroke.modifiers.control || keystroke.modifiers.platform || keystroke.modifiers.alt {
             return;
         }
-        let Some((connection_index, database_index, name, is_view)) = self.selected_table.clone()
-        else {
+        match keystroke.key.as_str() {
+            "up" | "down" | "home" | "end" => {
+                if self.visible_ids.is_empty() {
+                    return;
+                }
+                cx.stop_propagation();
+                let current = self
+                    .selected
+                    .as_ref()
+                    .and_then(|selected| self.visible_ids.iter().position(|id| id == selected));
+                let next = match keystroke.key.as_str() {
+                    "up" => current.map(|index| index.saturating_sub(1)).unwrap_or(0),
+                    "down" => current
+                        .map(|index| (index + 1).min(self.visible_ids.len() - 1))
+                        .unwrap_or(0),
+                    "home" => 0,
+                    "end" => self.visible_ids.len() - 1,
+                    _ => return,
+                };
+                self.selected = Some(self.visible_ids[next].clone());
+                self.selected_table = None;
+                self.scroll_selected_into_view(cx);
+                cx.notify();
+            }
+            "enter" => {
+                if let Some(id) = self.selected.clone() {
+                    cx.stop_propagation();
+                    self.activate_tree_id(&id, cx);
+                }
+            }
+            _ => {
+                if !keystroke.key.eq_ignore_ascii_case("f2") {
+                    return;
+                }
+                let Some((connection_index, database_index, name, is_view)) =
+                    self.selected_table.clone()
+                else {
+                    return;
+                };
+                cx.stop_propagation();
+                let Some(app) = self.app.upgrade() else {
+                    return;
+                };
+                app.update(cx, |app, cx| {
+                    app.begin_rename_table(
+                        RowPane::Tree,
+                        connection_index,
+                        database_index,
+                        name,
+                        is_view,
+                        window,
+                        cx,
+                    );
+                    app.notify_rename_pane(RowPane::Tree, cx);
+                });
+                cx.notify();
+            }
+        }
+    }
+
+    /// Scroll the selected tree row into view after a keyboard move.
+    fn scroll_selected_into_view(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(selected) = self.selected.as_ref() else {
             return;
         };
-        cx.stop_propagation();
+        let Some(index) = self.visible_ids.iter().position(|id| id == selected) else {
+            return;
+        };
+        let _ = cx;
+        // Rough row offset (22px rows); enough to keep the moved selection on screen.
+        let offset = (index as f32 * 22.0 - 40.0).max(0.0);
+        self.scroll.set_offset(Point::new(px(0.0), px(offset)));
+    }
+
+    /// Enter/click activation for a structural tree row.
+    fn activate_tree_id(&mut self, id: &str, cx: &mut Context<'_, Self>) {
         let Some(app) = self.app.upgrade() else {
             return;
         };
-        app.update(cx, |app, cx| {
-            app.begin_rename_table(
-                RowPane::Tree,
-                connection_index,
-                database_index,
-                name,
-                is_view,
-                window,
-                cx,
-            );
-            app.notify_rename_pane(RowPane::Tree, cx);
-        });
+        if let Some(rest) = id.strip_prefix("conn-") {
+            if let Ok(index) = rest.parse::<usize>() {
+                app.update(cx, |app, cx| {
+                    let connected = matches!(
+                        app.connections.get(index).map(|node| &node.status),
+                        Some(ConnectionStatus::Connected(_))
+                    );
+                    if connected {
+                        app.toggle_expand(index, cx);
+                    } else {
+                        app.connect(index, cx);
+                    }
+                });
+            }
+        } else if let Some(rest) = id.strip_prefix("db-") {
+            let mut parts = rest.split('-');
+            let connection_index = parts.next().and_then(|value| value.parse::<usize>().ok());
+            let database_index = parts.next().and_then(|value| value.parse::<usize>().ok());
+            if let (Some(connection_index), Some(database_index)) =
+                (connection_index, database_index)
+            {
+                app.update(cx, |app, cx| {
+                    app.open_database(connection_index, database_index, cx)
+                });
+            }
+        }
         cx.notify();
     }
 
@@ -353,7 +544,7 @@ impl TreePane {
                             Some(ConnectionStatus::Connected(_))
                         );
                         if connected {
-                            app.toggle_expand(index);
+                            app.toggle_expand(index, cx);
                         } else {
                             app.connect(index, cx);
                         }
@@ -392,7 +583,23 @@ impl TreePane {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .child(connection.name.clone()),
-            );
+            )
+            .when(matches!(connection.status, TreeStatus::Connecting), |row| {
+                row.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(11.0))
+                        .text_color(rgb(theme.warning))
+                        .child(t!("connection.connecting").to_string()),
+                )
+            });
+
+        // A failed connection keeps its error, surfaced when the row is hovered (the dialog from
+        // the attempt is long gone by then).
+        let row = match connection.failed_error.clone() {
+            Some(error) => row.tooltip(ui::text_tooltip(error)),
+            None => row,
+        };
 
         let body = div().flex().flex_col().w_full().child(row);
 
@@ -760,10 +967,8 @@ impl TreePane {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    // Only the Tables category offers New Table / Import / Export / Refresh.
-                    if category != Category::Tables {
-                        return;
-                    }
+                    // Tables offer New Table / Import / Export / Refresh; the other categories
+                    // offer Refresh.
                     window.focus(&this.focus, cx);
                     this.selected_table = None;
                     this.selected = Some(format!(
@@ -771,13 +976,22 @@ impl TreePane {
                         menu_schema.clone().unwrap_or_default(),
                         category.id()
                     ));
+                    let target = if category == Category::Tables {
+                        ContextTarget::TableCategory {
+                            connection_index,
+                            database_index,
+                            schema: menu_schema.clone(),
+                        }
+                    } else {
+                        ContextTarget::ObjectCategory {
+                            connection_index,
+                            database_index,
+                            category,
+                        }
+                    };
                     let _ = menu_app.update(cx, |app, cx| {
                         app.context_menu = Some(ContextMenu {
-                            target: ContextTarget::TableCategory {
-                                connection_index,
-                                database_index,
-                                schema: menu_schema.clone(),
-                            },
+                            target,
                             position: event.position,
                         });
                         cx.notify();
@@ -1186,7 +1400,7 @@ impl TreePane {
 
 impl Render for TreePane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let (theme, connections, rename) = {
+        let (theme, mut connections, rename) = {
             let Some(app) = self.app.upgrade() else {
                 return div().into_any_element();
             };
@@ -1197,8 +1411,17 @@ impl Render for TreePane {
                 app.rename_row(RowPane::Tree),
             )
         };
+        let theme_changed = self.theme != theme;
         self.theme = theme;
         self.rename_row = rename;
+        if theme_changed {
+            let input = self.search_input.clone();
+            input.update(cx, |input, cx| input.set_theme(theme, cx));
+        }
+
+        filter_tree(&mut connections, &self.search);
+        self.visible_ids.clear();
+        collect_visible_ids(&connections, &mut self.visible_ids);
 
         let mut list = div().flex().flex_col().w_full();
         if connections.is_empty() {
@@ -1207,7 +1430,11 @@ impl Render for TreePane {
                     .w_full()
                     .p_2()
                     .text_color(rgb(theme.text_muted))
-                    .child(t!("sidebar.no_connections").to_string()),
+                    .child(if self.search.is_empty() {
+                        t!("sidebar.no_connections").to_string()
+                    } else {
+                        t!("sidebar.no_match").to_string()
+                    }),
             );
         }
         for connection in &connections {
@@ -1215,29 +1442,45 @@ impl Render for TreePane {
         }
 
         div()
-            .id("sidebar-scroll")
             .flex()
             .flex_col()
             .w_full()
             .flex_1()
             .min_h(px(0.0))
-            .py_1()
-            .overflow_y_scroll()
-            .track_scroll(&self.scroll)
-            .track_focus(&self.focus)
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                this.tree_key(event, window, cx);
-            }))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _event: &MouseDownEvent, window, cx| {
-                    // Clicking outside the in-place rename commits it (the editor swallows clicks
-                    // on itself), then the tree takes focus so F2 works.
-                    this.commit_pending_rename(cx);
-                    window.focus(&this.focus, cx);
-                }),
+            .child(
+                div()
+                    .flex_none()
+                    .px_2()
+                    .pt_1()
+                    .pb_1()
+                    .child(div().h(px(24.0)).w_full().child(self.search_input.clone())),
             )
-            .child(list)
+            .child(
+                div()
+                    .id("sidebar-scroll")
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .py_1()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
+                    .track_focus(&self.focus)
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                        this.tree_key(event, window, cx);
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _event: &MouseDownEvent, window, cx| {
+                            // Clicking outside the in-place rename commits it (the editor swallows
+                            // clicks on itself), then the tree takes focus so F2 works.
+                            this.commit_pending_rename(cx);
+                            window.focus(&this.focus, cx);
+                        }),
+                    )
+                    .child(list),
+            )
             .into_any_element()
     }
 }

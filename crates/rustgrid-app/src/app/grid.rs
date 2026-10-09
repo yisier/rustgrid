@@ -240,6 +240,8 @@ impl GridView {
         self.state.selection = None;
         self.state.edits.clear();
         self.inserts.clear();
+        self.state.undo.clear();
+        self.state.redo.clear();
 
         let connection = self.state.connection.clone();
         let database = self.state.database.clone();
@@ -345,6 +347,8 @@ impl GridView {
         self.state.selection = None;
         self.state.edits.clear();
         self.inserts.clear();
+        self.state.undo.clear();
+        self.state.redo.clear();
         self.cell_editor = None;
         self.cell_editor_blur_subscription = None;
         self.date_picker = None;
@@ -439,6 +443,13 @@ impl GridView {
     }
 
     pub(super) fn next_page(&mut self, cx: &mut Context<'_, Self>) {
+        if self.guard_pending(GridNav::Next, cx) {
+            return;
+        }
+        self.next_page_now(cx);
+    }
+
+    pub(super) fn next_page_now(&mut self, cx: &mut Context<'_, Self>) {
         if self.state.has_next() {
             self.state.page_index += 1;
         }
@@ -447,18 +458,39 @@ impl GridView {
     }
 
     pub(super) fn prev_page(&mut self, cx: &mut Context<'_, Self>) {
+        if self.guard_pending(GridNav::Prev, cx) {
+            return;
+        }
+        self.prev_page_now(cx);
+    }
+
+    pub(super) fn prev_page_now(&mut self, cx: &mut Context<'_, Self>) {
         self.state.page_index = self.state.page_index.saturating_sub(1);
         self.sync_page_input();
         self.load_page(cx);
     }
 
     pub(super) fn first_page(&mut self, cx: &mut Context<'_, Self>) {
+        if self.guard_pending(GridNav::First, cx) {
+            return;
+        }
+        self.first_page_now(cx);
+    }
+
+    pub(super) fn first_page_now(&mut self, cx: &mut Context<'_, Self>) {
         self.state.page_index = 0;
         self.sync_page_input();
         self.load_page(cx);
     }
 
     pub(super) fn last_page(&mut self, cx: &mut Context<'_, Self>) {
+        if self.guard_pending(GridNav::Last, cx) {
+            return;
+        }
+        self.last_page_now(cx);
+    }
+
+    pub(super) fn last_page_now(&mut self, cx: &mut Context<'_, Self>) {
         if let Some(last) = self.state.last_page() {
             self.state.page_index = last;
         }
@@ -476,6 +508,10 @@ impl GridView {
             Some(last) => (requested - 1).min(last),
             None => requested - 1,
         };
+        if self.guard_pending(GridNav::Page(target), cx) {
+            self.sync_page_input();
+            return;
+        }
         self.state.page_index = target;
         self.sync_page_input();
         self.load_page(cx);
@@ -507,6 +543,9 @@ impl GridView {
     }
 
     pub(super) fn refresh(&mut self, cx: &mut Context<'_, Self>) {
+        if self.guard_pending(GridNav::Refresh, cx) {
+            return;
+        }
         self.reload_after_write(cx);
     }
 
@@ -669,6 +708,13 @@ impl GridView {
     }
 
     pub(super) fn sort_apply(&mut self, cx: &mut Context<'_, Self>) {
+        if self.guard_pending(GridNav::Sort, cx) {
+            return;
+        }
+        self.sort_apply_now(cx);
+    }
+
+    pub(super) fn sort_apply_now(&mut self, cx: &mut Context<'_, Self>) {
         self.state.sort_rules = self.state.sort_draft.clone();
         self.state.page_index = 0;
         self.sync_page_input();
@@ -690,6 +736,15 @@ impl GridView {
             .unwrap_or(false);
         let mut rule = SortRule::new(column);
         rule.descending = descending;
+        if self.guard_pending(
+            GridNav::HeaderSort {
+                column: rule.column.clone(),
+                descending,
+            },
+            cx,
+        ) {
+            return;
+        }
         self.state.sort_rules = vec![rule];
         if self.state.sort_open {
             self.state.sort_draft = self.state.sort_rules.clone();
@@ -1038,6 +1093,13 @@ impl GridView {
     }
 
     pub(super) fn filter_apply(&mut self, cx: &mut Context<'_, Self>) {
+        if self.guard_pending(GridNav::Filter, cx) {
+            return;
+        }
+        self.filter_apply_now(cx);
+    }
+
+    pub(super) fn filter_apply_now(&mut self, cx: &mut Context<'_, Self>) {
         self.state.filters = self.state.filter_draft.clone();
         self.filter_active = None;
         self.state.page_index = 0;
@@ -1108,6 +1170,13 @@ impl GridView {
         if self.state.sql.is_some() {
             return;
         }
+        if self.guard_pending(GridNav::PageSize, cx) {
+            return;
+        }
+        self.page_size_apply_now(cx);
+    }
+
+    pub(super) fn page_size_apply_now(&mut self, cx: &mut Context<'_, Self>) {
         let requested = self.page_size_input.trim().parse::<u64>().unwrap_or(1000);
         let size = if self.limit_records(cx) {
             requested.clamp(1, NO_LIMIT_PAGE_SIZE)
@@ -1125,5 +1194,56 @@ impl GridView {
         self.page_size_menu_open = false;
         self.sync_page_input();
         self.load_page(cx);
+    }
+
+    /// Whether the grid holds edits/inserts that have not been written yet.
+    pub(super) fn has_pending_edits(&self) -> bool {
+        !self.state.edits.is_empty() || !self.inserts.is_empty()
+    }
+
+    /// If there are pending edits, ask the app to confirm before `nav` discards them. Returns
+    /// `true` when the action was deferred (and must not run now).
+    fn guard_pending(&mut self, nav: GridNav, cx: &mut Context<'_, Self>) -> bool {
+        if !self.has_pending_edits() {
+            return false;
+        }
+        let app = self.app.clone();
+        let grid_id = self.state.id;
+        let _ = app.update(cx, |app, cx| {
+            app.unsaved_confirm = Some(PendingAction::GridDiscard { grid_id, nav });
+            cx.notify();
+        });
+        true
+    }
+
+    /// Run a deferred grid navigation after the user confirmed discarding pending edits.
+    pub(super) fn run_grid_nav(&mut self, nav: GridNav, cx: &mut Context<'_, Self>) {
+        match nav {
+            GridNav::First => self.first_page_now(cx),
+            GridNav::Prev => self.prev_page_now(cx),
+            GridNav::Next => self.next_page_now(cx),
+            GridNav::Last => self.last_page_now(cx),
+            GridNav::Page(target) => {
+                self.state.page_index = target;
+                self.sync_page_input();
+                self.load_page(cx);
+            }
+            GridNav::Sort => self.sort_apply_now(cx),
+            GridNav::HeaderSort { column, descending } => {
+                let mut rule = SortRule::new(column);
+                rule.descending = descending;
+                self.state.sort_rules = vec![rule];
+                if self.state.sort_open {
+                    self.state.sort_draft = self.state.sort_rules.clone();
+                    self.state.sort_selected = Some(0);
+                }
+                self.state.page_index = 0;
+                self.sync_page_input();
+                self.load_page(cx);
+            }
+            GridNav::Filter => self.filter_apply_now(cx),
+            GridNav::Refresh => self.reload_after_write(cx),
+            GridNav::PageSize => self.page_size_apply_now(cx),
+        }
     }
 }

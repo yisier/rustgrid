@@ -100,6 +100,7 @@ impl AppView {
         tab.name = Some(name.clone());
         tab.connection_index = Some(connection_index);
         tab.database = Some(database);
+        tab.baseline = template.clone();
         tab.sql = template;
         tab.routine = Some(RoutineTabState::new(kind, name));
         self.queries.push(tab);
@@ -184,6 +185,7 @@ impl AppView {
                     Ok(details) => {
                         if let Some(tab) = app.queries.get_mut(index) {
                             tab.sql = details.definition.clone();
+                            tab.baseline = tab.sql.clone();
                             tab.caret = 0;
                             tab.anchor = 0;
                             if let Some(routine) = tab.routine.as_mut() {
@@ -389,8 +391,10 @@ impl AppView {
             let _ = this.update(cx, |app, cx| {
                 match result {
                     Ok(()) => {
+                        let mut notify: Option<String> = None;
                         if let Some(tab) = app.queries.get_mut(index) {
                             tab.name = Some(name.clone());
+                            tab.baseline = tab.sql.clone();
                             if let Some(routine) = tab.routine.as_mut() {
                                 routine.name = name.clone();
                                 routine.kind = kind;
@@ -398,9 +402,13 @@ impl AppView {
                                 routine.original_kind = Some(kind);
                                 routine.saving = false;
                             }
+                            notify = Some(t!("routine.saved", name = name.clone()).to_string());
                         }
                         app.reload_routines(&list_connection, &list_database, cx);
                         app.refresh_routine_details(index, cx);
+                        if let Some(message) = notify {
+                            app.toast(ToastKind::Success, message, cx);
+                        }
                     }
                     Err(error) => {
                         if let Some(routine) = app
@@ -481,6 +489,7 @@ impl AppView {
         tab.connection_index = Some(connection_index);
         tab.database = Some(database);
         tab.sql = call;
+        tab.baseline = tab.sql.clone();
         tab.caret = 0;
         tab.anchor = 0;
         self.queries.push(tab);

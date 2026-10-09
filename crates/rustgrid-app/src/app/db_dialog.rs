@@ -1,5 +1,7 @@
 use super::*;
 use gpui_kit::component::WindowExt;
+use gpui_kit::component::dialog::DialogButtonProps;
+use std::cell::Cell;
 
 impl AppView {
     /// Opens the database dialog as a `Root`-managed modal.
@@ -13,16 +15,41 @@ impl AppView {
                 )
             });
             let on_close = app.downgrade();
+            let ok_app = app.downgrade();
+            let cancel_app = app.downgrade();
             let content_app = app.clone();
+            let focused = Rc::new(Cell::new(false));
             dialog
                 .title(title)
                 .w(px(560.0))
-                .content(move |content, _window, cx| {
+                .content(move |content, window, cx| {
                     let body =
                         content_app.update(cx, |app, cx| app.db_dialog_body(cx).into_any_element());
+                    if !focused.get() {
+                        focused.set(true);
+                        if let Some(input) = content_app.read(cx).db_name_input.clone() {
+                            input.update(cx, |input, cx| input.focus_state(window, cx));
+                        }
+                    }
                     content.child(body)
                 })
                 .footer(footer)
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text(t!("form.ok").to_string())
+                        .cancel_text(t!("form.cancel").to_string())
+                        .show_cancel(true)
+                        // Enter must submit, never dismiss (the dialog closes only when its state
+                        // goes back to `None`).
+                        .on_ok(move |_, _, cx| {
+                            let _ = ok_app.update(cx, |app, cx| app.db_submit(cx));
+                            false
+                        })
+                        .on_cancel(move |_, _, cx| {
+                            let _ = cancel_app.update(cx, |app, cx| app.db_cancel(cx));
+                            true
+                        }),
+                )
                 .on_close(move |_, _, cx| {
                     let _ = on_close.update(cx, |app, cx| app.db_cancel(cx));
                 })
@@ -159,10 +186,39 @@ impl AppView {
             Some(_) => true,
             None => false,
         };
-        let ok_label = if matches!(self.db_dialog, Some(DbDialog::Delete { .. })) {
+        let deleting = matches!(self.db_dialog, Some(DbDialog::Delete { .. }));
+        let ok_label = if deleting {
             t!("database.delete").to_string()
         } else {
             t!("form.ok").to_string()
+        };
+        let theme = self.theme;
+        let ok_button: AnyElement = if deleting {
+            // Destructive action: use the danger variant, matching every other confirm dialog.
+            ui::button(
+                "db-ok",
+                ok_label,
+                ButtonKind::Danger,
+                theme,
+                cx.listener(move |this, _event, _window, cx| {
+                    if allow_ok {
+                        this.db_submit(cx);
+                    }
+                }),
+            )
+            .into_any_element()
+        } else {
+            self.dialog_button(
+                "db-ok",
+                ok_label,
+                true,
+                cx.listener(move |this, _event, _window, cx| {
+                    if allow_ok {
+                        this.db_submit(cx);
+                    }
+                }),
+            )
+            .into_any_element()
         };
         div()
             .flex()
@@ -178,16 +234,7 @@ impl AppView {
                 false,
                 cx.listener(|this, _event, _window, cx| this.db_cancel(cx)),
             ))
-            .child(self.dialog_button(
-                "db-ok",
-                ok_label,
-                true,
-                cx.listener(move |this, _event, _window, cx| {
-                    if allow_ok {
-                        this.db_submit(cx);
-                    }
-                }),
-            ))
+            .child(ok_button)
     }
 
     fn db_dialog_body(&self, cx: &mut Context<'_, Self>) -> AnyElement {

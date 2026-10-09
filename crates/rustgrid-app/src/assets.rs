@@ -41,6 +41,7 @@ impl AssetSource for Assets {
             "icons/chevron-down.svg" => Some(include_bytes!("../assets/icons/chevron-down.svg")),
             "icons/arrow-up.svg" => Some(include_bytes!("../assets/icons/arrow-up.svg")),
             "icons/arrow-down.svg" => Some(include_bytes!("../assets/icons/arrow-down.svg")),
+            "icons/update.svg" => Some(include_bytes!("../assets/icons/update.svg")),
             "icons/sort-none.svg" => Some(include_bytes!("../assets/icons/sort-none.svg")),
             "icons/tab-prev.svg" => Some(include_bytes!("../assets/icons/tab-prev.svg")),
             "icons/tab-next.svg" => Some(include_bytes!("../assets/icons/tab-next.svg")),

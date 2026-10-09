@@ -65,6 +65,7 @@ impl AppView {
         tab.name = Some(name.clone());
         tab.connection_index = Some(connection_index);
         tab.database = Some(database);
+        tab.baseline = template.clone();
         tab.sql = template;
         tab.view = Some(ViewTabState::new(name));
         self.queries.push(tab);
@@ -141,6 +142,7 @@ impl AppView {
                     Ok(details) => {
                         if let Some(tab) = app.queries.get_mut(index) {
                             tab.sql = details.definition.clone();
+                            tab.baseline = tab.sql.clone();
                             tab.caret = 0;
                             tab.anchor = 0;
                             if let Some(view) = tab.view.as_mut() {
@@ -245,16 +247,22 @@ impl AppView {
             let _ = this.update(cx, |app, cx| {
                 match result {
                     Ok(()) => {
+                        let mut notify: Option<String> = None;
                         if let Some(tab) = app.queries.get_mut(index) {
                             tab.name = Some(name.clone());
+                            tab.baseline = tab.sql.clone();
                             if let Some(view) = tab.view.as_mut() {
                                 view.name = name.clone();
                                 view.original_name = Some(name.clone());
                                 view.saving = false;
                             }
+                            notify = Some(t!("view.saved", name = name.clone()).to_string());
                         }
                         app.reload_database_tables(&list_connection, &list_database, cx);
                         app.refresh_view_details(index, cx);
+                        if let Some(message) = notify {
+                            app.toast(ToastKind::Success, message, cx);
+                        }
                     }
                     Err(error) => {
                         if let Some(view) =
@@ -440,6 +448,7 @@ impl AppView {
                 selection: None,
                 edits: BTreeMap::new(),
                 undo: Vec::new(),
+                redo: Vec::new(),
                 sql: Some(sql),
                 show_toolbar: false,
                 show_footer: false,

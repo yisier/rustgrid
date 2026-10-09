@@ -463,10 +463,16 @@ pub struct QueryTab {
     /// engine's default schema; it filters completion and resolves unqualified table references.
     pub schema: Option<String>,
     pub sql: String,
+    /// The text as last saved/loaded. `sql != baseline` means there are unsaved edits, which
+    /// drives the tab's dirty marker and the close confirmation.
+    pub baseline: String,
     pub caret: usize,
     pub anchor: usize,
     pub selecting: bool,
     pub running: bool,
+    /// Bumped on every run and on stop. A late result whose generation no longer matches the
+    /// tab's is discarded, so "Stop" is not silently overwritten by the query finishing.
+    pub run_generation: u64,
     /// One entry per statement the last run executed, in order. A lightweight summary (not the
     /// rows), so the 信息 tab can report each statement without duplicating the grid's data.
     pub results: Vec<QueryResultSummary>,
@@ -499,10 +505,12 @@ impl QueryTab {
             database: None,
             schema: None,
             sql: String::new(),
+            baseline: String::new(),
             caret: 0,
             anchor: 0,
             selecting: false,
             running: false,
+            run_generation: 0,
             results: Vec::new(),
             result_grids: Vec::new(),
             active_result: 0,
@@ -518,6 +526,11 @@ impl QueryTab {
     /// The byte range of the current selection, normalised to `start..end`.
     pub fn selection(&self) -> (usize, usize) {
         (self.anchor.min(self.caret), self.anchor.max(self.caret))
+    }
+
+    /// Whether this tab has edits that have not been saved (or that were never persisted).
+    pub fn is_dirty(&self) -> bool {
+        self.sql != self.baseline
     }
 }
 
@@ -587,6 +600,8 @@ pub struct GridState {
     pub edits: BTreeMap<(usize, usize), Option<String>>,
     /// Undo history: each entry restores the prior edit value (or lack thereof) for its cells.
     pub undo: Vec<EditAction>,
+    /// Redo history: inverse actions pushed by undo, cleared on any new edit.
+    pub redo: Vec<EditAction>,
     /// `Some` when this grid presents an ad-hoc query result instead of a table page.
     pub sql: Option<String>,
     /// Whether the grid toolbar (transaction/filter/sort/...) is shown.

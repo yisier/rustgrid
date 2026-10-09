@@ -338,7 +338,7 @@ impl AppView {
                     .cursor_pointer()
                     .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
             })
-            .on_click(on_click)
+            .when(enabled, |this| this.on_click(on_click))
             .child(
                 svg()
                     .path(icon)

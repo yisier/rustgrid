@@ -33,6 +33,7 @@ impl GridView {
             sort_hover: None,
             sort_field_combos: BTreeMap::new(),
             clipboard: None,
+            clipboard_text: None,
             filter_value_focus: Vec::new(),
             filter_value2_focus: Vec::new(),
             filter_active: None,
@@ -55,6 +56,7 @@ impl GridView {
             self_weak: cx.weak_entity(),
             ime_field: None,
             ime_marked: None,
+            sum_cache: RefCell::new(None),
         }
     }
 
@@ -605,6 +607,33 @@ impl Render for GridView {
             if self.state.sort_open {
                 root = root.child(self.render_sort_panel(cx));
             }
+        }
+        // Surface the load/error state the fetch paths set; without this a slow or failed
+        // refresh looked like nothing happened.
+        if let Some(error) = self.state.error.clone() {
+            root = root.child(
+                div()
+                    .id("grid-error")
+                    .flex_none()
+                    .px_3()
+                    .py_1()
+                    .bg(rgb(theme.danger))
+                    .text_color(rgb(0xFFFFFF))
+                    .text_size(px(12.0))
+                    .child(error),
+            );
+        } else if self.state.loading {
+            root = root.child(
+                div()
+                    .id("grid-loading")
+                    .flex_none()
+                    .px_3()
+                    .py_1()
+                    .bg(rgb(theme.toolbar_bg))
+                    .text_color(rgb(theme.text_muted))
+                    .text_size(px(12.0))
+                    .child(t!("common.loading").to_string()),
+            );
         }
         let wheel_weak = cx.weak_entity();
         root = root.child(

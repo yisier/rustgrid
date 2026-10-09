@@ -105,6 +105,17 @@ impl AppView {
         }
 
         if let Some(index) = self.editing.take() {
+            // Reconnecting resets the session (closes grids/designers and drops query results), so
+            // only do it when something that affects the connection actually changed.
+            let unchanged = self.connections.get(index).is_some_and(|node| {
+                let mut old = node.profile.clone();
+                let mut new = profile.clone();
+                old.id = String::new();
+                new.id = String::new();
+                format!("{old:?}") == format!("{new:?}")
+                    && node.password == password
+                    && node.password_saved == password_saved
+            });
             if let Some(node) = self.connections.get_mut(index) {
                 let mut profile = profile;
                 profile.id = node.profile.id.clone();
@@ -114,14 +125,19 @@ impl AppView {
             }
             self.close_connection_window(cx);
 
-            let profiles: Vec<_> = self
-                .connections
-                .iter()
-                .map(|node| node.profile.clone())
-                .collect();
-            let _ = self.config.save_profiles(&profiles);
-            self.persist_secrets();
+            self.persist_profiles(cx);
+            self.persist_secrets(cx);
 
+            if unchanged {
+                // Nothing the live connection depends on changed; keep the session intact.
+                cx.notify();
+                return;
+            }
+            self.toast(
+                ToastKind::Info,
+                t!("connection.session_reset").to_string(),
+                cx,
+            );
             self.disconnect(index, cx);
             self.connect(index, cx);
             cx.notify();
@@ -173,13 +189,8 @@ impl AppView {
                     });
                     let index = view.connections.len() - 1;
 
-                    let profiles: Vec<_> = view
-                        .connections
-                        .iter()
-                        .map(|node| node.profile.clone())
-                        .collect();
-                    let _ = view.config.save_profiles(&profiles);
-                    view.persist_secrets();
+                    view.persist_profiles(cx);
+                    view.persist_secrets(cx);
 
                     view.close_connection_window(cx);
                     view.load_databases(index, cx);
@@ -270,7 +281,7 @@ impl AppView {
             node.status = ConnectionStatus::Disconnected;
         }
 
-        self.persist_secrets();
+        self.persist_secrets(cx);
         self.connect(index, cx);
         cx.notify();
     }

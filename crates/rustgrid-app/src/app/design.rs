@@ -1998,7 +1998,20 @@ impl AppView {
         cx.notify();
     }
 
+    /// Close a table designer, asking first when it has unsaved structure changes.
     pub(super) fn close_design(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        if index >= self.designs.len() {
+            return;
+        }
+        if self.designs[index].read(cx).dirty {
+            self.unsaved_confirm = Some(PendingAction::CloseDesign { index });
+            cx.notify();
+            return;
+        }
+        self.close_design_now(index, cx);
+    }
+
+    pub(super) fn close_design_now(&mut self, index: usize, cx: &mut Context<'_, Self>) {
         if index >= self.designs.len() {
             return;
         }

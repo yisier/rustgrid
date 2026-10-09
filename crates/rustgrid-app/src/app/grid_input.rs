@@ -382,11 +382,16 @@ impl GridView {
             {
                 self.paste_clipboard(cx);
                 cx.stop_propagation();
-            } else if self.cell_editor.is_none()
-                && self.date_picker.is_none()
-                && keystroke.key.eq_ignore_ascii_case("z")
-            {
-                self.undo_edit(cx);
+            } else if self.cell_editor.is_none() && self.date_picker.is_none() {
+                if keystroke.key.eq_ignore_ascii_case("z") {
+                    if keystroke.modifiers.shift {
+                        self.redo_edit(cx);
+                    } else {
+                        self.undo_edit(cx);
+                    }
+                } else if keystroke.key.eq_ignore_ascii_case("y") {
+                    self.redo_edit(cx);
+                }
             }
             return;
         }
@@ -447,7 +452,27 @@ impl GridView {
         let Some(action) = self.state.undo.pop() else {
             return;
         };
+        let inverse = self.apply_edit_action(action);
+        self.state.redo.push(inverse);
+        cx.notify();
+    }
+
+    pub(super) fn redo_edit(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(action) = self.state.redo.pop() else {
+            return;
+        };
+        let inverse = self.apply_edit_action(action);
+        self.state.undo.push(inverse);
+        cx.notify();
+    }
+
+    /// Apply one undo/redo action to the pending edits and return the inverse action, so the
+    /// opposite direction can replay it.
+    fn apply_edit_action(&mut self, action: EditAction) -> EditAction {
+        let mut inverse: EditAction = Vec::with_capacity(action.len());
         for ((row, col), previous) in action {
+            let current = self.state.edits.get(&(row, col)).cloned();
+            inverse.push(((row, col), current));
             match previous {
                 Some(value) => {
                     self.state.edits.insert((row, col), value);
@@ -457,7 +482,7 @@ impl GridView {
                 }
             }
         }
-        cx.notify();
+        inverse
     }
 
     /// Select every displayed cell (Ctrl+A), like Navicat's "select all records".
@@ -511,6 +536,7 @@ impl GridView {
             self.state.edits.insert((row, col), None);
         }
         if !action.is_empty() {
+            self.state.redo.clear();
             self.state.undo.push(action);
             if self.state.undo.len() > 256 {
                 self.state.undo.remove(0);
@@ -734,7 +760,10 @@ impl GridView {
         // (the checkmark or Ctrl+S) so a whole new row is inserted in one statement.
         let only_data_rows = editor.row < data_rows;
         self.commit_editor(cx);
-        if !multi && only_data_rows {
+        // Auto-commit only when this single-cell edit is the *only* pending change. If other
+        // edits/inserts are staged, committing here would flush (and reload away) the batch the
+        // user is still assembling, so it waits for the commit button instead.
+        if !multi && only_data_rows && self.inserts.is_empty() && self.state.edits.len() == 1 {
             self.commit_edits(cx);
         }
     }
@@ -799,6 +828,7 @@ impl GridView {
             self.state.edits.insert((row, col), desired);
         }
         if !action.is_empty() {
+            self.state.redo.clear();
             self.state.undo.push(action);
             if self.state.undo.len() > 256 {
                 self.state.undo.remove(0);

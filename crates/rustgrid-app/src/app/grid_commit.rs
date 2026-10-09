@@ -169,6 +169,8 @@ impl GridView {
     pub(super) fn cancel_edits(&mut self, cx: &mut Context<'_, Self>) {
         self.state.edits.clear();
         self.inserts.clear();
+        self.state.undo.clear();
+        self.state.redo.clear();
         self.state.selection = None;
         self.cell_editor = None;
         self.cell_editor_blur_subscription = None;
@@ -177,7 +179,9 @@ impl GridView {
     }
 
     pub(super) fn open_delete_confirm(&mut self, cx: &mut Context<'_, Self>) {
-        if self.state.sql.is_some() {
+        // Deletion needs a real target table, which only editable grids (a table page, or a query
+        // grid with an inferred single table) have.
+        if !self.state.editable {
             return;
         }
         let selected_rows = match self.state.selection.as_ref() {

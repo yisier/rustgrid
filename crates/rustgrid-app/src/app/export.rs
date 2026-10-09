@@ -86,6 +86,7 @@ impl AppView {
             include_header: true,
             continue_on_error: true,
             running: false,
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             log: Vec::new(),
             log_scroll: ScrollHandle::new(),
             rows_total: 0,
@@ -197,9 +198,27 @@ impl AppView {
 
     /// Close the Export window (called from its footer, where the window is at hand).
     pub(super) fn export_close(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        // A running export is aborted rather than left writing in the background.
+        if let Some(wizard) = self.export_wizard.as_ref()
+            && wizard.running
+        {
+            wizard
+                .cancel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         self.export_wizard = None;
         self.export_window = None;
         window.remove_window();
+        cx.notify();
+    }
+
+    /// Ask the running export to stop between tables/pages.
+    pub(super) fn export_abort(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(wizard) = self.export_wizard.as_mut() {
+            wizard
+                .cancel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         cx.notify();
     }
 
@@ -756,6 +775,9 @@ impl AppView {
 
         if let Some(wizard) = self.export_wizard.as_mut() {
             wizard.running = true;
+            wizard
+                .cancel
+                .store(false, std::sync::atomic::Ordering::Relaxed);
             wizard.error = None;
             wizard.log.clear();
             wizard.rows_total = 0;
@@ -778,6 +800,11 @@ impl AppView {
         cx.notify();
 
         let runtime = self.runtime.clone();
+        let cancel = self
+            .export_wizard
+            .as_ref()
+            .map(|wizard| wizard.cancel.clone())
+            .unwrap_or_default();
         // The `.sql` writer quotes identifiers per engine; the other formats are engine-agnostic.
         let dialect = match self
             .registry
@@ -791,7 +818,11 @@ impl AppView {
         cx.spawn(async move |this, cx| {
             let mut exported = 0usize;
             let mut failed = 0usize;
+            let cancel_flag = cancel.clone();
             for plan in plans {
+                if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
                 let ExportPlan {
                     name,
                     path,
@@ -832,6 +863,10 @@ impl AppView {
                 let mut identity = false;
                 let mut error: Option<String> = None;
                 loop {
+                    if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                        error = Some(t!("export.log.cancelled").to_string());
+                        break;
+                    }
                     let connection = connection.clone();
                     let database = database.clone();
                     let table = name.clone();
@@ -915,6 +950,12 @@ impl AppView {
                         break;
                     }
                     page_index += 1;
+                }
+                let cancelled = cancel_flag.load(std::sync::atomic::Ordering::Relaxed);
+                if cancelled {
+                    let message = t!("export.log.cancelled").to_string();
+                    let _ = this.update(cx, |app, cx| app.export_log(message, cx));
+                    break;
                 }
 
                 let finish = match error {
@@ -1540,10 +1581,20 @@ impl AppView {
         if !finished {
             right = right.child(self.export_footer_button(
                 "export-cancel",
-                t!("export.cancel").to_string(),
+                if running {
+                    t!("export.stop").to_string()
+                } else {
+                    t!("export.cancel").to_string()
+                },
                 false,
-                !running,
-                cx.listener(|this, _event, window, cx| this.export_close(window, cx)),
+                true,
+                cx.listener(move |this, _event, window, cx| {
+                    if running {
+                        this.export_abort(cx);
+                    } else {
+                        this.export_close(window, cx);
+                    }
+                }),
             ));
         }
         if step != ExportStep::Format {

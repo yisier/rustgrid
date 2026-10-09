@@ -29,11 +29,17 @@ impl AppView {
         Some((connection_index, database_index))
     }
 
-    pub(super) fn toggle_expand(&mut self, index: usize) {
+    pub(super) fn toggle_expand(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        let mut changed = false;
         if let Some(node) = self.connections.get_mut(index)
             && matches!(&node.status, ConnectionStatus::Connected(_))
         {
             node.expanded = !node.expanded;
+            changed = true;
+        }
+        if changed {
+            self.persist_settings();
+            cx.notify();
         }
     }
 
@@ -258,13 +264,27 @@ impl AppView {
             .iter()
             .map(|node| node.profile.clone())
             .collect();
-        let _ = self.config.save_profiles(&profiles);
-        self.persist_secrets();
+        if let Err(error) = self.config.save_profiles(&profiles) {
+            self.warn_persist("connections", error, cx);
+        }
+        self.persist_secrets(cx);
 
         cx.notify();
     }
 
-    pub(super) fn persist_secrets(&self) {
+    /// Persist the connection profiles, reporting a write failure instead of dropping it.
+    pub(super) fn persist_profiles(&mut self, cx: &mut Context<'_, Self>) {
+        let profiles: Vec<_> = self
+            .connections
+            .iter()
+            .map(|node| node.profile.clone())
+            .collect();
+        if let Err(error) = self.config.save_profiles(&profiles) {
+            self.warn_persist("connections", error, cx);
+        }
+    }
+
+    pub(super) fn persist_secrets(&mut self, cx: &mut Context<'_, Self>) {
         let secrets: BTreeMap<String, String> = self
             .connections
             .iter()
@@ -275,7 +295,9 @@ impl AppView {
                     .map(|password| (node.profile.id.clone(), password))
             })
             .collect();
-        let _ = self.config.save_secrets(&secrets);
+        if let Err(error) = self.config.save_secrets(&secrets) {
+            self.warn_persist("passwords", error, cx);
+        }
     }
 
     pub(super) fn connect(&mut self, index: usize, cx: &mut Context<'_, Self>) {
@@ -363,6 +385,16 @@ impl AppView {
         .detach();
     }
 
+    /// Disconnect a connection, asking first when it has unsaved work (grids/designers/queries).
+    pub(super) fn request_disconnect(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        if self.connection_has_unsaved(index, cx) {
+            self.unsaved_confirm = Some(PendingAction::Disconnect { index });
+            cx.notify();
+            return;
+        }
+        self.disconnect(index, cx);
+    }
+
     pub(super) fn disconnect(&mut self, index: usize, cx: &mut Context<'_, Self>) {
         let connection = self.connection_arc(index);
 
@@ -406,6 +438,16 @@ impl AppView {
             };
 
             let _ = this.update(cx, |view, cx| {
+                let profile_id = view
+                    .connections
+                    .get(index)
+                    .map(|node| node.profile.id.clone())
+                    .unwrap_or_default();
+                let remembered: Vec<String> = view
+                    .remembered_db_expansion
+                    .get(&profile_id)
+                    .cloned()
+                    .unwrap_or_default();
                 if let Some(node) = view.connections.get_mut(index) {
                     // Keep databases that were already open/expanded (and their loaded tables)
                     // so refreshing the list does not close the user's databases.
@@ -445,13 +487,14 @@ impl AppView {
                                                 schemas: existing.schemas,
                                             }
                                         } else {
+                                            let expanded = remembered.contains(&database.name);
                                             DatabaseNode {
                                                 name: database.name,
                                                 tables: Loadable::Idle,
                                                 table_statuses: Loadable::Idle,
                                                 routines: Loadable::Idle,
                                                 opened: false,
-                                                expanded: false,
+                                                expanded,
                                                 categories: Default::default(),
                                                 expanded_schemas: Default::default(),
                                                 opened_schemas: Default::default(),
@@ -583,6 +626,7 @@ impl AppView {
             self.active_design = None;
         }
 
+        self.persist_settings();
         cx.notify();
     }
 
@@ -1069,6 +1113,7 @@ impl AppView {
             selection: None,
             edits: BTreeMap::new(),
             undo: Vec::new(),
+            redo: Vec::new(),
             sql: None,
             show_toolbar: true,
             show_footer: true,
@@ -1237,6 +1282,26 @@ impl AppView {
             return;
         };
         self.load_tables(connection_index, database_index, connection, database, cx);
+    }
+
+    /// Reload the objects behind the object list's current category (the toolbar refresh action).
+    pub(super) fn refresh_object_category(
+        &mut self,
+        category: Category,
+        connection_index: usize,
+        database_index: usize,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if category == Category::Functions {
+            if let (Some(connection), Some(database)) = (
+                self.connection_arc(connection_index),
+                self.database_name(connection_index, database_index),
+            ) {
+                self.reload_routines(&connection, &database, cx);
+            }
+        } else {
+            self.reload_tables(connection_index, database_index, cx);
+        }
     }
 
     /// Close every grid and designer tab for one table (used when the table is dropped/renamed).

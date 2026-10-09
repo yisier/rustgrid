@@ -133,6 +133,8 @@ impl AppView {
         let pane_for_new = pane.clone();
         let pane_for_export = pane.clone();
         let pane_for_import = pane.clone();
+        let pane_for_delete = pane.clone();
+        let pane_for_refresh = pane.clone();
         div()
             .flex()
             .flex_row()
@@ -212,8 +214,25 @@ impl AppView {
                         "obj-delete",
                         "icons/delete_table.svg",
                         t!("object.delete_table").to_string(),
-                        false,
-                        |_, _, _| {},
+                        design_enabled,
+                        cx.listener(move |this, _event, _window, cx| {
+                            let Some((connection_index, database_index, name, is_view)) =
+                                object_selection(&pane_for_delete, cx)
+                            else {
+                                return;
+                            };
+                            // Views are dropped from the Views toolbar; here only tables.
+                            if is_view {
+                                return;
+                            }
+                            this.delete_confirm = Some(DeleteConfirm::Table {
+                                connection_index,
+                                database_index,
+                                name,
+                                operation: TableOperation::Drop,
+                            });
+                            cx.notify();
+                        }),
                     ))
                     .child(toolbar_separator(theme))
                     .child(self.toolbar_item(
@@ -252,6 +271,20 @@ impl AppView {
                                 names
                             };
                             this.open_export_wizard(connection_index, database_index, &names, cx);
+                        }),
+                    ))
+                    .child(toolbar_separator(theme))
+                    .child(self.toolbar_item(
+                        "obj-refresh",
+                        "icons/refresh.svg",
+                        t!("common.refresh").to_string(),
+                        true,
+                        cx.listener(move |this, _event, _window, cx| {
+                            let (connection_index, database_index) = {
+                                let pane = pane_for_refresh.read(cx);
+                                (pane.connection_index, pane.database_index)
+                            };
+                            this.reload_tables(connection_index, database_index, cx);
                         }),
                     )),
             )
@@ -330,6 +363,7 @@ impl AppView {
         let pane_for_new = pane.clone();
         let pane_for_delete = pane.clone();
         let pane_for_run = pane.clone();
+        let pane_for_refresh = pane.clone();
 
         div()
             .flex()
@@ -431,6 +465,25 @@ impl AppView {
                             };
                             this.run_routine_by_name(connection_index, database, kind, name, cx);
                         }),
+                    ))
+                    .child(toolbar_separator(theme))
+                    .child(self.toolbar_item(
+                        "routine-refresh",
+                        "icons/refresh.svg",
+                        t!("common.refresh").to_string(),
+                        true,
+                        cx.listener(move |this, _event, _window, cx| {
+                            let (connection_index, database_index) = {
+                                let pane = pane_for_refresh.read(cx);
+                                (pane.connection_index, pane.database_index)
+                            };
+                            this.refresh_object_category(
+                                Category::Functions,
+                                connection_index,
+                                database_index,
+                                cx,
+                            );
+                        }),
                     )),
             )
             .child(self.render_object_view_controls(Category::Functions, cx))
@@ -460,6 +513,7 @@ impl AppView {
         let pane_for_new = pane.clone();
         let pane_for_delete = pane.clone();
         let pane_for_export = pane.clone();
+        let pane_for_refresh = pane.clone();
 
         div()
             .flex()
@@ -570,6 +624,25 @@ impl AppView {
                                 names
                             };
                             this.open_export_wizard(connection_index, database_index, &names, cx);
+                        }),
+                    ))
+                    .child(toolbar_separator(theme))
+                    .child(self.toolbar_item(
+                        "view-refresh",
+                        "icons/refresh.svg",
+                        t!("common.refresh").to_string(),
+                        true,
+                        cx.listener(move |this, _event, _window, cx| {
+                            let (connection_index, database_index) = {
+                                let pane = pane_for_refresh.read(cx);
+                                (pane.connection_index, pane.database_index)
+                            };
+                            this.refresh_object_category(
+                                Category::Views,
+                                connection_index,
+                                database_index,
+                                cx,
+                            );
                         }),
                     )),
             )
@@ -790,7 +863,10 @@ impl ObjectPane {
                 return div().into_any_element();
             };
             return match routines {
-                Loadable::Idle | Loadable::Loading => div().into_any_element(),
+                Loadable::Idle => div().into_any_element(),
+                Loadable::Loading => {
+                    object_message(theme.text_muted, t!("common.loading").to_string())
+                }
                 Loadable::Failed(error) => object_message(theme.danger, error),
                 Loadable::Loaded(routines) => {
                     let items: Vec<&RoutineInfo> = routines
@@ -803,6 +879,8 @@ impl ObjectPane {
                                     || routine.name.to_lowercase().contains(&query))
                         })
                         .collect();
+                    let mut items = items;
+                    items.sort_by_key(|routine| routine.name.to_lowercase());
                     self.visible_keys
                         .extend(items.iter().map(|routine| routine.name.clone()));
                     match mode {
@@ -818,7 +896,8 @@ impl ObjectPane {
             return div().into_any_element();
         };
         match tables {
-            Loadable::Idle | Loadable::Loading => div().into_any_element(),
+            Loadable::Idle => div().into_any_element(),
+            Loadable::Loading => object_message(theme.text_muted, t!("common.loading").to_string()),
             Loadable::Failed(error) => object_message(theme.danger, error),
             Loadable::Loaded(tables) => {
                 let want_view = match self.category {
@@ -839,6 +918,9 @@ impl ObjectPane {
                             && (query.is_empty() || table.name.to_lowercase().contains(&query))
                     })
                     .collect();
+                let mut items = items;
+                // Present objects in name order (Navicat's default), not the driver's catalog order.
+                items.sort_by_key(|table| table.name.to_lowercase());
                 self.visible_keys
                     .extend(items.iter().map(|table| table.name.clone()));
                 match mode {

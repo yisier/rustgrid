@@ -36,8 +36,9 @@ use crate::list_select::{ListSelection, MarqueeDrag, SelectMode, rects_intersect
 use crate::runtime::Runtime;
 use crate::session::{
     Category, CategoryExpansion, CellRange, CellSelection, ConnectionNode, ConnectionStatus,
-    DatabaseNode, GridState, Loadable, QueryResultPlan, QueryResultSummary, QueryTab, RoutineTab,
-    RoutineTabState, SortRule, ViewExplainTab, ViewTab, ViewTabState, compute_column_widths,
+    DatabaseNode, EditAction, GridState, Loadable, QueryResultPlan, QueryResultSummary, QueryTab,
+    RoutineTab, RoutineTabState, SortRule, ViewExplainTab, ViewTab, ViewTabState,
+    compute_column_widths,
 };
 use crate::sql::{self, SqlToken};
 use crate::theme::Theme;
@@ -68,14 +69,9 @@ gpui::actions!(backup, [CopyBackupFile, PasteBackupFile, RenameBackupFile]);
 // Saved-query file-list actions, mirroring the backup list's F2 / Ctrl+C / Ctrl+V handling.
 gpui::actions!(queryfile, [CopyQueryFile, PasteQueryFile, RenameQueryFile]);
 
-// Query-editor actions. `Root` binds `ctrl-z` (and `ctrl-c`/`ctrl-v`) in the `"Root"` context,
-// which would swallow the keystroke before `on_key_down`; binding our own actions in the editor's
-// deeper context takes precedence, so undo/redo actually reach the editor. `RunSelectedQuery` is
-// dispatched from the editor's right-click menu, and `SaveQuery` from `Ctrl+S`.
-gpui::actions!(
-    queryeditor,
-    [UndoQuery, RedoQuery, RunSelectedQuery, SaveQuery]
-);
+// Query-editor actions. The editor's own undo/redo bindings handle Ctrl+Z; `RunSelectedQuery`
+// is dispatched from the editor's right-click menu and Ctrl+Enter, and `SaveQuery` from Ctrl+S.
+gpui::actions!(queryeditor, [RunSelectedQuery, SaveQuery]);
 
 /// Key context applied to the cell that owns the in-place editor.
 const GRID_CELL_CONTEXT: &str = "GridCell";
@@ -330,6 +326,8 @@ struct NewBackupDialog {
     apply: Option<SavedBackup>,
     loading: bool,
     running: bool,
+    /// Set by 停止 to abort the run loop early (checked between objects/rows).
+    cancel: Arc<std::sync::atomic::AtomicBool>,
     log: Vec<String>,
     /// Keeps the info log scrolled to the newest line while the operation runs.
     log_scroll: ScrollHandle,
@@ -355,6 +353,8 @@ struct RestoreBackupDialog {
     tab: BackupDialogTab,
     objects: Vec<BackupObjectEntry>,
     running: bool,
+    /// Set by 停止 to abort the run loop early (checked between objects/rows).
+    cancel: Arc<std::sync::atomic::AtomicBool>,
     log: Vec<String>,
     /// Keeps the info log scrolled to the newest line while the operation runs.
     log_scroll: ScrollHandle,
@@ -380,6 +380,8 @@ struct ExtractSqlDialog {
     /// The `.sql` file the extract writes to, chosen through the system save dialog.
     output_path: Option<std::path::PathBuf>,
     running: bool,
+    /// Set by 停止 to abort the run loop early (checked between objects).
+    cancel: Arc<std::sync::atomic::AtomicBool>,
     log: Vec<String>,
     /// Keeps the info log scrolled to the newest line while the operation runs.
     log_scroll: ScrollHandle,
@@ -517,6 +519,8 @@ struct ExportWizard {
     include_header: bool,
     continue_on_error: bool,
     running: bool,
+    /// Set by 停止 to abort the run loop early (checked between tables/pages).
+    cancel: Arc<std::sync::atomic::AtomicBool>,
     log: Vec<String>,
     log_scroll: ScrollHandle,
     rows_total: usize,
@@ -670,6 +674,8 @@ struct ImportWizard {
     file_input: Option<Entity<TextInput>>,
     /// One row per worksheet in the file.
     sheets: Vec<ImportSheetPlan>,
+    /// Whether the chosen source file is being read (worksheet list loading).
+    loading_sheets: bool,
     /// When the wizard was opened from a table grid, the destination table a single source table
     /// should default to (instead of the source name).
     target_table: Option<String>,
@@ -685,6 +691,8 @@ struct ImportWizard {
     /// up front, so switching sheets never creates entities during a combo callback.
     mapping_rows: BTreeMap<String, Vec<ImportMappingRow>>,
     running: bool,
+    /// Set by 停止 to abort the run loop early (checked between sheets/batches).
+    cancel: Arc<std::sync::atomic::AtomicBool>,
     log: Vec<String>,
     log_scroll: ScrollHandle,
     rows_total: usize,
@@ -901,6 +909,12 @@ enum ContextTarget {
         database_index: usize,
         schema: Option<String>,
     },
+    /// A non-Tables category node in the connection tree (刷新).
+    ObjectCategory {
+        connection_index: usize,
+        database_index: usize,
+        category: Category,
+    },
     /// A stored routine in the connection tree's Functions category.
     Routine {
         connection_index: usize,
@@ -1088,6 +1102,12 @@ struct TreePane {
     /// Focus target for the tree, so F2 reaches [`AppView::begin_rename_table`].
     focus: FocusHandle,
     theme: Theme,
+    /// The tree's filter text.
+    search: String,
+    /// The filter field shown above the tree.
+    search_input: Entity<TextInput>,
+    /// The ids of the currently visible nodes, in draw order, for keyboard navigation.
+    visible_ids: Vec<String>,
 }
 
 /// Which text field of a grid owns the platform text input (IME / `WM_CHAR`). Grids keep several
@@ -1145,6 +1165,9 @@ struct GridView {
     /// Rows copied with Ctrl+C / the context menu's 复制, for 粘贴 to write into the selected
     /// records. Each cell is `None` for SQL `NULL`.
     clipboard: Option<Vec<Vec<Option<String>>>>,
+    /// The exact text last written to the OS clipboard by a cell copy, so paste can tell an
+    /// external clipboard change from our own and fall back to `clipboard` (which keeps NULLs).
+    clipboard_text: Option<String>,
 
     filter_value_focus: Vec<(Vec<usize>, FocusHandle)>,
     filter_value2_focus: Vec<(Vec<usize>, FocusHandle)>,
@@ -1182,6 +1205,9 @@ struct GridView {
     /// The field the platform IME is currently driving and its composing byte range.
     ime_field: Option<GridTextField>,
     ime_marked: Option<std::ops::Range<usize>>,
+    /// Cache of the status bar's numeric selection sum, keyed by a cheap state signature, so a
+    /// huge selection is not re-summed on every render.
+    sum_cache: RefCell<Option<(u64, Option<String>)>>,
 }
 
 /// The in-place editor over one grid cell. The text itself lives in a shared [`TextInput`] entity
@@ -1313,6 +1339,55 @@ enum DialogKind {
     SaveQuery,
     Error,
     Confirm,
+    /// "Discard unsaved changes?" confirmation guarding a close/navigate action.
+    Unsaved,
+}
+
+/// A transient notification queued by a path that has no `Window`, flushed through `Root` on the
+/// next render.
+#[derive(Clone, Copy)]
+enum ToastKind {
+    Success,
+    Info,
+    Error,
+}
+
+/// The action to run once the user confirms discarding unsaved changes.
+#[derive(Clone)]
+enum PendingAction {
+    /// Quit the application.
+    Quit,
+    /// Disconnect `index` and close its grids/designers.
+    Disconnect { index: usize },
+    /// Close the query tab at `index`.
+    CloseQuery { index: usize },
+    /// Close the table designer at `index`.
+    CloseDesign { index: usize },
+    /// Close every query/design tab (the tab menu's Close All).
+    CloseAllTabs,
+    /// Close every tab except `keep` (the tab menu's Close Others).
+    CloseOtherTabs { keep: TabTarget },
+    /// Discard a grid's pending edits and run one navigation action.
+    GridDiscard { grid_id: u64, nav: GridNav },
+}
+
+/// A grid navigation/refresh blocked by pending edits, deferred until the user confirms.
+#[derive(Clone)]
+enum GridNav {
+    First,
+    Prev,
+    Next,
+    Last,
+    Page(u64),
+    Sort,
+    /// A header-column sort toggle (not expressed through the sort draft).
+    HeaderSort {
+        column: String,
+        descending: bool,
+    },
+    Filter,
+    Refresh,
+    PageSize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1383,7 +1458,10 @@ const GRID_GUTTER_WIDTH: f32 = 22.0;
 /// Thickness of the app-drawn grid scrollbars (matches `ui::vscrollbar_track` / `hscrollbar_track`).
 const GRID_SCROLLBAR_THICKNESS: f32 = 14.0;
 /// Cap used when "Limit Records" is unchecked, standing in for an unlimited fetch.
-const NO_LIMIT_PAGE_SIZE: u64 = 1_000_000;
+/// The page size used when "Limit Records" is off. A finite cap rather than a truly unbounded
+/// fetch, so a huge table cannot exhaust memory in one query; the status bar reports the loaded
+/// count so the user can tell when the cap is hit.
+const NO_LIMIT_PAGE_SIZE: u64 = 200_000;
 
 /// The Options window's left-nav pages.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1578,6 +1656,11 @@ pub struct AppView {
     object_search_input: Entity<TextInput>,
     delete_confirm: Option<DeleteConfirm>,
     error_dialog: Option<String>,
+    /// Transient notifications queued for the next frame, which has the window needed to hand
+    /// them to `Root`.
+    pending_toasts: Vec<(ToastKind, String)>,
+    /// A close/navigate action waiting on the "discard unsaved changes?" confirmation.
+    unsaved_confirm: Option<PendingAction>,
     /// The kind of dialog last opened through `Root`, if any.
     opened_dialog: Option<DialogKind>,
     window_bounds_subscription: Option<Subscription>,
@@ -1630,6 +1713,9 @@ pub struct AppView {
     /// The remembered list layout per page (详细列表 / 平铺网格), keyed by a stable page id and
     /// persisted in settings so each page keeps its own choice.
     view_modes: BTreeMap<String, String>,
+    /// Remembered expanded databases per connection-profile id, restored when a connection's
+    /// database list first loads.
+    remembered_db_expansion: BTreeMap<String, Vec<String>>,
     /// The selection the info pane is currently loaded for, so async loads fire once per change.
     info_loaded_for: Option<String>,
     /// The connected server's `(version, sessions)` for the connection info pane.
@@ -1831,6 +1917,7 @@ impl AppView {
         cx: &mut Context<'_, Self>,
     ) -> Self {
         let secrets = config.load_secrets().unwrap_or_default();
+        let settings = load_startup_settings(&config);
 
         let connections = config
             .load_profiles()
@@ -1839,18 +1926,19 @@ impl AppView {
             .map(|profile| {
                 let password = secrets.get(&profile.id).cloned();
                 let password_saved = password.is_some();
+                let expanded = settings.expanded_connections.contains(&profile.id);
                 ConnectionNode {
                     profile,
                     password,
                     password_saved,
                     status: ConnectionStatus::Disconnected,
                     databases: Loadable::Idle,
-                    expanded: false,
+                    expanded,
                 }
             })
             .collect();
 
-        let settings = load_startup_settings(&config);
+        let remembered_db_expansion = settings.expanded_databases.clone();
         let theme_setting = settings.theme;
         let language = settings.language;
         let _ = config.migrate_legacy_queries();
@@ -1872,12 +1960,9 @@ impl AppView {
             KeyBinding::new("cmd-c", CopyQueryFile, Some(QUERY_LIST_CONTEXT)),
             KeyBinding::new("ctrl-v", PasteQueryFile, Some(QUERY_LIST_CONTEXT)),
             KeyBinding::new("cmd-v", PasteQueryFile, Some(QUERY_LIST_CONTEXT)),
-            // The query editor owns undo/redo, since `Root`'s `ctrl-z` would otherwise swallow it.
-            KeyBinding::new("ctrl-z", UndoQuery, Some(QUERY_EDITOR_CONTEXT)),
-            KeyBinding::new("ctrl-shift-z", RedoQuery, Some(QUERY_EDITOR_CONTEXT)),
-            KeyBinding::new("ctrl-y", RedoQuery, Some(QUERY_EDITOR_CONTEXT)),
-            KeyBinding::new("cmd-z", UndoQuery, Some(QUERY_EDITOR_CONTEXT)),
-            KeyBinding::new("cmd-shift-z", RedoQuery, Some(QUERY_EDITOR_CONTEXT)),
+            // Run the editor's selection (or whole script) and save it from the editor.
+            KeyBinding::new("ctrl-enter", RunSelectedQuery, Some(QUERY_EDITOR_CONTEXT)),
+            KeyBinding::new("cmd-enter", RunSelectedQuery, Some(QUERY_EDITOR_CONTEXT)),
             KeyBinding::new("ctrl-s", SaveQuery, Some(QUERY_EDITOR_CONTEXT)),
             KeyBinding::new("cmd-s", SaveQuery, Some(QUERY_EDITOR_CONTEXT)),
         ]);
@@ -2059,6 +2144,8 @@ impl AppView {
             },
             delete_confirm: None,
             error_dialog: None,
+            pending_toasts: Vec::new(),
+            unsaved_confirm: None,
             opened_dialog: None,
             window_bounds_subscription: None,
             theme_setting,
@@ -2092,6 +2179,7 @@ impl AppView {
             // settings, so it is restored here instead of being forced open on the Users tab.
             info_open: settings.show_info_pane,
             view_modes: settings.view_modes.clone(),
+            remembered_db_expansion,
             info_loaded_for: None,
             info_server: Loadable::Idle,
             info_database: Loadable::Idle,
@@ -2254,7 +2342,28 @@ impl AppView {
     /// Write the current settings to disk. Every preference change funnels through here so new
     /// fields are persisted once.
     fn persist_settings(&self) {
-        let _ = self.config.save_settings(&AppSettings {
+        // Derive the expanded connection/database sets from the live tree so the next launch can
+        // restore them.
+        let expanded_connections: Vec<String> = self
+            .connections
+            .iter()
+            .filter(|node| node.expanded)
+            .map(|node| node.profile.id.clone())
+            .collect();
+        let mut expanded_databases: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for node in &self.connections {
+            if let Loadable::Loaded(databases) = &node.databases {
+                let names: Vec<String> = databases
+                    .iter()
+                    .filter(|database| database.expanded)
+                    .map(|database| database.name.clone())
+                    .collect();
+                if !names.is_empty() {
+                    expanded_databases.insert(node.profile.id.clone(), names);
+                }
+            }
+        }
+        if let Err(error) = self.config.save_settings(&AppSettings {
             theme: self.theme_setting,
             language: self.language,
             show_info_pane: self.info_open,
@@ -2263,7 +2372,12 @@ impl AppView {
             editor_font_size: self.editor_font_size,
             editor_line_numbers: self.editor_line_numbers,
             editor_word_wrap: self.editor_word_wrap,
-        });
+            expanded_connections,
+            expanded_databases,
+        }) {
+            // Preferences failing to persist is not worth a modal; note it in the log line only.
+            let _ = error;
+        }
     }
 
     /// The SQL editor's font family (the built-in default when the setting is empty).
@@ -3108,6 +3222,8 @@ impl Render for AppView {
         // Dialogs are hosted by `Root` (opened imperatively); AppView state remains the source
         // of truth and this reconciles it with the Root dialog stack.
         self.sync_dialog(window, cx);
+        // Deliver any transient notifications queued during this frame.
+        self.flush_toasts(window, cx);
 
         root
     }

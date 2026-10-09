@@ -103,14 +103,16 @@ impl AppView {
                             toggle_maximize(window);
                         },
                     ))
-                    .child(titlebar_button(
-                        "titlebar-close",
-                        "✕",
-                        theme,
-                        |window, _cx| {
-                            window.remove_window();
-                        },
-                    )),
+                    .child(titlebar_button("titlebar-close", "✕", theme, {
+                        let weak = cx.weak_entity();
+                        move |window, cx| {
+                            if let Some(app) = weak.upgrade() {
+                                app.update(cx, |app, cx| app.request_quit(window, cx));
+                            } else {
+                                window.remove_window();
+                            }
+                        }
+                    })),
             )
     }
 
@@ -337,7 +339,10 @@ impl AppView {
                     }),
                 ));
             } else {
-                items = items.child(self.context_item_disabled(id.as_str().to_string(), label));
+                items = items.child(
+                    self.context_item_disabled(id.as_str().to_string(), label)
+                        .tooltip(ui::text_tooltip(t!("main.engine_planned").to_string())),
+                );
             }
         }
 
@@ -368,7 +373,7 @@ impl AppView {
                 | MainTab::Queries
                 | MainTab::Backups
         ) && self.main_tab_usable(tab, cx);
-        self.main_button(
+        let button = self.main_button(
             SharedString::from(format!("main-tab-{}", tab as usize)),
             icon,
             label,
@@ -382,7 +387,14 @@ impl AppView {
                     this.select_main_tab(tab, cx);
                 }
             }),
-        )
+        );
+        if enabled {
+            button
+        } else {
+            // Explain why a greyed-out tab cannot be used instead of leaving it a silent dead
+            // control.
+            button.tooltip(ui::text_tooltip(t!("main.tab_unavailable").to_string()))
+        }
     }
 
     /// Whether a main tab applies to the connection it would read from. Users/Functions are
@@ -392,13 +404,13 @@ impl AppView {
             MainTab::Users => self
                 .users_connection_index(cx)
                 .map(|index| self.driver_supports(index, DriverCapability::Users))
-                .unwrap_or(true),
+                .unwrap_or(false),
             MainTab::Functions => self
                 .object_pane
                 .as_ref()
                 .map(|pane| pane.read(cx).connection_index)
                 .map(|index| self.driver_supports(index, DriverCapability::Routines))
-                .unwrap_or(true),
+                .unwrap_or(false),
             _ => true,
         }
     }
@@ -410,7 +422,7 @@ impl AppView {
         label: String,
         state: MainButtonState,
         on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    ) -> impl IntoElement {
+    ) -> Stateful<Div> {
         let theme = self.theme;
         let MainButtonState {
             active,
@@ -440,13 +452,13 @@ impl AppView {
             .flex_none()
             .h(px(52.0))
             .rounded_sm()
-            .cursor_pointer()
+            .when(enabled, |style| style.cursor_pointer())
             .text_color(rgb(text_color))
             .when(active, move |style| style.bg(rgb(theme.brand_muted)))
             .when(!active && enabled, move |style| {
                 style.hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
             })
-            .on_click(on_click)
+            .when(enabled, |this| this.on_click(on_click))
             .child(
                 div()
                     .flex()
@@ -509,6 +521,23 @@ impl AppView {
         });
     }
 
+    /// Clear the object list's per-database state (schema scope, selection, search), shared by
+    /// every main-tab switch so Users/Backups do not leave a stale list behind.
+    fn clear_object_list_state(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(pane) = self.object_pane.as_ref() {
+            pane.update(cx, |pane, cx| {
+                pane.schema = None;
+                pane.selected = None;
+                pane.selected_routine = None;
+                cx.notify();
+            });
+        }
+        self.objects_selection.clear();
+        self.objects_row_rects.clear();
+        self.clear_object_search(cx);
+        self.clear_info_routine();
+    }
+
     pub(super) fn select_main_tab(&mut self, tab: MainTab, cx: &mut Context<'_, Self>) {
         self.main_tab = tab;
         if tab == MainTab::Users {
@@ -518,6 +547,7 @@ impl AppView {
             self.active_design = None;
             self.saved_query_selected = None;
             self.query_selection.clear();
+            self.clear_object_list_state(cx);
             cx.notify();
             return;
         }
@@ -529,6 +559,7 @@ impl AppView {
             self.active_design = None;
             self.saved_query_selected = None;
             self.query_selection.clear();
+            self.clear_object_list_state(cx);
             cx.notify();
             return;
         }

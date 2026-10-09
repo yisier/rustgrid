@@ -58,7 +58,7 @@ impl GridView {
                 "icons/sort.svg",
                 t!("grid.sort").to_string(),
                 theme.text,
-                true,
+                self.state.sql.is_none(),
                 self.state.sort_open,
                 false,
                 cx.listener(|this, _event, _window, cx| this.toggle_sort_panel(cx)),
@@ -161,7 +161,7 @@ impl GridView {
                     .cursor_pointer()
                     .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
             })
-            .on_click(on_click)
+            .when(enabled, |this| this.on_click(on_click))
             .child(
                 svg()
                     .path(icon)
@@ -1129,7 +1129,7 @@ impl GridView {
                         "grid-delete",
                         "icons/minus.svg",
                         theme.danger,
-                        self.state.sql.is_none()
+                        self.state.editable
                             && self.state.selection.is_some()
                             && !self.state.rows.is_empty(),
                         cx.listener(|this, _event, _window, cx| this.open_delete_confirm(cx)),
@@ -1158,13 +1158,6 @@ impl GridView {
                         active,
                         true,
                         cx.listener(|this, _event, _window, cx| this.refresh(cx)),
-                    ))
-                    .child(self.grid_icon_button(
-                        "grid-stop",
-                        "icons/stop.svg",
-                        muted,
-                        false,
-                        |_, _, _| {},
                     )),
             );
 
@@ -1243,7 +1236,7 @@ impl GridView {
                     .cursor_pointer()
                     .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
             })
-            .on_click(on_click)
+            .when(enabled, |this| this.on_click(on_click))
             .child(
                 svg()
                     .path(icon)
@@ -1316,6 +1309,9 @@ impl GridView {
                     .on_click(
                         cx.listener(|this, _event, _window, cx| this.toggle_limit_records(cx)),
                     )
+                    .tooltip(ui::text_tooltip(
+                        t!("grid.limit_records_hint", max = NO_LIMIT_PAGE_SIZE).to_string(),
+                    ))
                     .child(checkbox_box(limit_records, theme))
                     .child(
                         div()
@@ -1410,6 +1406,37 @@ impl GridView {
             return None;
         }
 
+        // The sum is O(selected cells); a whole-column selection over a large page would otherwise
+        // be recomputed on every frame. Cache it keyed by a cheap signature of the inputs.
+        let signature = self.selection_sum_signature(selection);
+        if let Some((cached_signature, cached)) = self.sum_cache.borrow().as_ref()
+            && *cached_signature == signature
+        {
+            return cached.clone();
+        }
+        let result = self.compute_selection_sum(selection);
+        *self.sum_cache.borrow_mut() = Some((signature, result.clone()));
+        result
+    }
+
+    /// A cheap hash of everything `selection_sum` depends on: the selected ranges, the loaded
+    /// rows, and the pending edits/inserts.
+    fn selection_sum_signature(&self, selection: &CellSelection) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        selection.ranges.len().hash(&mut hasher);
+        for range in &selection.ranges {
+            range.anchor.hash(&mut hasher);
+            range.cursor.hash(&mut hasher);
+        }
+        (Arc::as_ptr(&self.state.rows) as usize).hash(&mut hasher);
+        self.state.columns.len().hash(&mut hasher);
+        self.state.edits.hash(&mut hasher);
+        self.inserts.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn compute_selection_sum(&self, selection: &CellSelection) -> Option<String> {
         let mut total = NumericSum::default();
         match selection.ranges.as_slice() {
             // One rectangle cannot repeat a cell, so it needs no de-duplication.
@@ -1444,19 +1471,28 @@ impl GridView {
 
     pub(super) fn render_grid_status(&self) -> impl IntoElement {
         let theme = self.theme;
-        let total = self.state.total_rows.unwrap_or(0);
         let end = self
             .state
             .page_index
             .saturating_mul(self.state.page_size)
             .saturating_add(self.state.rows.len() as u64);
-        let info = t!(
-            "grid.page_info",
-            end = end,
-            total = total,
-            page = self.state.page_index + 1
-        )
-        .to_string();
+        // Some drivers do not report a total row count; then the "N total" half is omitted rather
+        // than shown as a misleading 0.
+        let info = match self.state.total_rows {
+            Some(total) => t!(
+                "grid.page_info",
+                end = end,
+                total = total,
+                page = self.state.page_index + 1
+            )
+            .to_string(),
+            None => t!(
+                "grid.page_info_unknown",
+                end = end,
+                page = self.state.page_index + 1
+            )
+            .to_string(),
+        };
         let timing = self.state.elapsed.map(|elapsed| {
             t!(
                 "grid.query_time",

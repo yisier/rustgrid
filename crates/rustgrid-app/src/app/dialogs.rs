@@ -32,6 +32,8 @@ impl AppView {
             Some(DialogKind::Password)
         } else if self.save_query_dialog.is_some() {
             Some(DialogKind::SaveQuery)
+        } else if self.unsaved_confirm.is_some() {
+            Some(DialogKind::Unsaved)
         } else if self.error_dialog.is_some() {
             Some(DialogKind::Error)
         } else if self.delete_confirm.is_some() {
@@ -56,6 +58,7 @@ impl AppView {
             Some(DialogKind::SaveQuery) => self.open_save_query_dialog(window, cx),
             Some(DialogKind::Error) => self.open_error_dialog(window, cx),
             Some(DialogKind::Confirm) => self.open_confirm_dialog(window, cx),
+            Some(DialogKind::Unsaved) => self.open_unsaved_dialog(window, cx),
             None => {}
         }
     }
@@ -64,6 +67,7 @@ impl AppView {
         let app = cx.entity();
         window.open_dialog(cx, move |dialog, window, cx| {
             let message = app.update(cx, |app, _| app.error_dialog.clone().unwrap_or_default());
+            let copy_message = message.clone();
             let theme = app.read(cx).theme;
             let on_ok = app.downgrade();
             let on_close = app.downgrade();
@@ -74,6 +78,9 @@ impl AppView {
                 .content(move |content, _window, _cx| {
                     content.child(
                         div()
+                            .id("error-scroll")
+                            .max_h(px(320.0))
+                            .overflow_y_scroll()
                             .flex()
                             .flex_row()
                             .items_start()
@@ -86,7 +93,13 @@ impl AppView {
                                     .flex_none()
                                     .text_color(rgb(theme.danger)),
                             )
-                            .child(div().flex_1().min_w(px(0.0)).child(message.clone())),
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .text_size(px(12.0))
+                                    .child(message.clone()),
+                            ),
                     )
                 })
                 .footer(
@@ -94,7 +107,19 @@ impl AppView {
                         .flex()
                         .flex_row()
                         .justify_end()
+                        .gap_2()
                         .w_full()
+                        .child(ui::button(
+                            "error-copy",
+                            t!("error.copy").to_string(),
+                            ButtonKind::Normal,
+                            theme,
+                            move |_event, _window, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                    copy_message.clone(),
+                                ));
+                            },
+                        ))
                         .child(ui::button(
                             "error-ok",
                             t!("form.ok").to_string(),
@@ -190,6 +215,192 @@ impl AppView {
                     let _ = on_close.update(cx, |app, cx| app.cancel_delete(cx));
                 })
         });
+    }
+
+    /// Opens the "discard unsaved changes?" confirmation.
+    fn open_unsaved_dialog(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let app = cx.entity();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let theme = app.read(cx).theme;
+            let on_ok = app.downgrade();
+            let on_cancel = app.downgrade();
+            let on_close = app.downgrade();
+            let footer_ok = app.downgrade();
+            let footer_cancel = app.downgrade();
+            dialog
+                .title(t!("unsaved.title").to_string())
+                .margin_top(centered_margin_top(window, 180.0))
+                .content(|content, _window, _cx| content.child(t!("unsaved.message").to_string()))
+                .footer(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .justify_end()
+                        .gap_2()
+                        .w_full()
+                        .child(ui::button(
+                            "unsaved-cancel",
+                            t!("form.cancel").to_string(),
+                            ButtonKind::Normal,
+                            theme,
+                            move |_event, _window, cx| {
+                                let _ = footer_cancel.update(cx, |app, cx| app.cancel_unsaved(cx));
+                            },
+                        ))
+                        .child(ui::button(
+                            "unsaved-ok",
+                            t!("unsaved.discard").to_string(),
+                            ButtonKind::Danger,
+                            theme,
+                            move |_event, window, cx| {
+                                let _ =
+                                    footer_ok.update(cx, |app, cx| app.confirm_unsaved(window, cx));
+                            },
+                        )),
+                )
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text(t!("unsaved.discard").to_string())
+                        .ok_variant(ButtonVariant::Danger)
+                        .cancel_text(t!("form.cancel").to_string())
+                        .show_cancel(true)
+                        .on_ok(move |_, window, cx| {
+                            let _ = on_ok.update(cx, |app, cx| app.confirm_unsaved(window, cx));
+                            true
+                        })
+                        .on_cancel(move |_, _, cx| {
+                            let _ = on_cancel.update(cx, |app, cx| app.cancel_unsaved(cx));
+                            true
+                        }),
+                )
+                .on_close(move |_, _, cx| {
+                    let _ = on_close.update(cx, |app, cx| app.cancel_unsaved(cx));
+                })
+        });
+    }
+
+    /// Cancel the pending "discard unsaved changes?" confirmation.
+    pub(super) fn cancel_unsaved(&mut self, cx: &mut Context<'_, Self>) {
+        self.unsaved_confirm = None;
+        cx.notify();
+    }
+
+    /// The user confirmed discarding unsaved changes: run the deferred action.
+    pub(super) fn confirm_unsaved(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let Some(action) = self.unsaved_confirm.take() else {
+            return;
+        };
+        self.run_pending_action(action, window, cx);
+        cx.notify();
+    }
+
+    /// Whether any open tab has unsaved work (query/design edits or grid pending rows).
+    pub(super) fn has_unsaved_changes(&self, cx: &App) -> bool {
+        self.queries.iter().any(|tab| tab.is_dirty())
+            || self.designs.iter().any(|design| design.read(cx).dirty)
+            || self.grids.iter().any(|grid| {
+                let grid = grid.read(cx);
+                !grid.state.edits.is_empty() || !grid.inserts.is_empty()
+            })
+    }
+
+    /// Whether one connection has unsaved work (its grids/designers or bound query tabs).
+    pub(super) fn connection_has_unsaved(&self, index: usize, cx: &App) -> bool {
+        let Some(connection) = self.connection_arc(index) else {
+            return false;
+        };
+        self.grids.iter().any(|grid| {
+            let grid = grid.read(cx);
+            Arc::ptr_eq(&grid.state.connection, &connection)
+                && (!grid.state.edits.is_empty() || !grid.inserts.is_empty())
+        }) || self.designs.iter().any(|design| {
+            let design = design.read(cx);
+            Arc::ptr_eq(&design.connection, &connection) && design.dirty
+        }) || self
+            .queries
+            .iter()
+            .any(|tab| tab.connection_index == Some(index) && tab.is_dirty())
+    }
+
+    /// Ask before closing the main window when there is unsaved work.
+    pub(super) fn request_quit(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        if self.has_unsaved_changes(cx) {
+            self.unsaved_confirm = Some(PendingAction::Quit);
+            cx.notify();
+            return;
+        }
+        window.remove_window();
+    }
+
+    /// Run the action a pending confirmation was guarding.
+    fn run_pending_action(
+        &mut self,
+        action: PendingAction,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        match action {
+            PendingAction::Quit => window.remove_window(),
+            PendingAction::Disconnect { index } => self.disconnect(index, cx),
+            PendingAction::CloseQuery { index } => self.close_query_now(index, cx),
+            PendingAction::CloseDesign { index } => self.close_design_now(index, cx),
+            PendingAction::CloseAllTabs => self.close_all_tabs_now(cx),
+            PendingAction::CloseOtherTabs { keep } => self.close_other_tabs_now(keep, cx),
+            PendingAction::GridDiscard { grid_id, nav } => {
+                let target = self
+                    .grids
+                    .iter()
+                    .find(|grid| grid.read(cx).state.id == grid_id)
+                    .cloned();
+                if let Some(grid) = target {
+                    grid.update(cx, |grid, cx| grid.run_grid_nav(nav, cx));
+                }
+            }
+        }
+    }
+
+    /// Hand queued notifications to `Root`. Called every render, which owns the window.
+    pub(super) fn flush_toasts(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        if self.pending_toasts.is_empty() {
+            return;
+        }
+        for (kind, message) in self.pending_toasts.drain(..) {
+            let notification = match kind {
+                ToastKind::Success => {
+                    gpui_kit::component::notification::Notification::success(message)
+                }
+                ToastKind::Info => gpui_kit::component::notification::Notification::info(message),
+                ToastKind::Error => gpui_kit::component::notification::Notification::error(message),
+            };
+            window.push_notification(notification, cx);
+        }
+    }
+
+    /// Queue a transient notification and schedule a frame to deliver it.
+    pub(super) fn toast(
+        &mut self,
+        kind: ToastKind,
+        message: impl Into<String>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.pending_toasts.push((kind, message.into()));
+        cx.notify();
+    }
+
+    /// Record a failed persistence, so it is not silently dropped.
+    pub(super) fn warn_persist(
+        &mut self,
+        what: &str,
+        error: impl std::fmt::Display,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let message = t!(
+            "toast.persist_failed",
+            what = what,
+            error = error.to_string()
+        )
+        .to_string();
+        self.toast(ToastKind::Error, message, cx);
     }
 
     fn open_password_prompt(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
@@ -332,6 +543,8 @@ impl AppView {
                 )
             });
             let on_close = app.downgrade();
+            let ok_app = app.downgrade();
+            let cancel_app = app.downgrade();
             let content_app = app.clone();
             let focused = Rc::new(Cell::new(false));
             dialog
@@ -351,6 +564,20 @@ impl AppView {
                     content.child(body)
                 })
                 .footer(footer)
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text(t!("form.ok").to_string())
+                        .cancel_text(t!("form.cancel").to_string())
+                        .show_cancel(true)
+                        .on_ok(move |_, _, cx| {
+                            let _ = ok_app.update(cx, |app, cx| app.submit_save_query(cx));
+                            false
+                        })
+                        .on_cancel(move |_, _, cx| {
+                            let _ = cancel_app.update(cx, |app, cx| app.cancel_save_query(cx));
+                            true
+                        }),
+                )
                 .on_close(move |_, _, cx| {
                     let _ = on_close.update(cx, |app, cx| app.cancel_save_query(cx));
                 })
@@ -460,6 +687,8 @@ impl AppView {
                 )
             });
             let on_close = app.downgrade();
+            let ok_app = app.downgrade();
+            let cancel_app = app.downgrade();
             let content_app = app.clone();
             let focused = Rc::new(Cell::new(false));
             dialog
@@ -479,6 +708,20 @@ impl AppView {
                     content.child(body)
                 })
                 .footer(footer)
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text(t!("form.ok").to_string())
+                        .cancel_text(t!("form.cancel").to_string())
+                        .show_cancel(true)
+                        .on_ok(move |_, _, cx| {
+                            let _ = ok_app.update(cx, |app, cx| app.submit_create_table(cx));
+                            false
+                        })
+                        .on_cancel(move |_, _, cx| {
+                            let _ = cancel_app.update(cx, |app, cx| app.cancel_create_table(cx));
+                            true
+                        }),
+                )
                 .on_close(move |_, _, cx| {
                     let _ = on_close.update(cx, |app, cx| app.cancel_create_table(cx));
                 })

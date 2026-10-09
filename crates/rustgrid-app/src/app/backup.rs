@@ -1280,7 +1280,9 @@ impl AppView {
         if index < self.backup_configs.len() {
             self.backup_configs.remove(index);
         }
-        let _ = self.config.save_backups(&self.backup_configs);
+        if let Err(error) = self.config.save_backups(&self.backup_configs) {
+            self.warn_persist("backup profiles", error, cx);
+        }
         self.backup_selected = None;
         self.clamp_backup_selection();
         cx.notify();
@@ -1310,6 +1312,7 @@ impl AppView {
             objects,
             output_path: None,
             running: false,
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             log: Vec::new(),
             log_scroll: ScrollHandle::new(),
             total: 0,
@@ -1411,6 +1414,11 @@ impl AppView {
         let default_dir = path.parent().map(|parent| parent.to_path_buf());
         let title = t!("backup.extract_sql").to_string();
         let runtime = self.runtime.clone();
+        let cancel = self
+            .extract_dialog
+            .as_ref()
+            .map(|dialog| dialog.cancel.clone())
+            .unwrap_or_default();
 
         cx.spawn(async move |this, cx| {
             // Choose the output file first (system dialog on rfd's own thread).
@@ -1431,6 +1439,9 @@ impl AppView {
                 if let Some(dialog) = app.extract_dialog.as_mut() {
                     dialog.output_path = Some(sql_path.clone());
                     dialog.running = true;
+                    dialog
+                        .cancel
+                        .store(false, std::sync::atomic::Ordering::Relaxed);
                     dialog.error = None;
                     dialog.tab = BackupDialogTab::Log;
                     dialog.log.clear();
@@ -1484,6 +1495,9 @@ impl AppView {
             };
 
             for (kind, name) in selected {
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
                 let reader = Arc::clone(&reader);
                 let read_name = name.clone();
                 let object = match runtime
@@ -1542,7 +1556,13 @@ impl AppView {
                 });
             }
             let _ = output.flush();
-            let _ = this.update(cx, |app, cx| app.finish_extract(None, cx));
+            let cancelled = cancel.load(std::sync::atomic::Ordering::Relaxed);
+            let _ = this.update(cx, |app, cx| {
+                if cancelled {
+                    app.backup_log(t!("backup.log.cancelled").to_string(), cx);
+                }
+                app.finish_extract(None, cx)
+            });
         })
         .detach();
     }
@@ -1598,6 +1618,11 @@ impl AppView {
 
     /// Close the Extract window.
     pub(super) fn close_extract(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        if let Some(dialog) = self.extract_dialog.as_mut() {
+            dialog
+                .cancel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         self.extract_dialog = None;
         self.backup_window = None;
         window.remove_window();
@@ -1682,6 +1707,7 @@ impl AppView {
             apply,
             loading: false,
             running: false,
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             log: Vec::new(),
             log_scroll: ScrollHandle::new(),
             total: 0,
@@ -1919,7 +1945,9 @@ impl AppView {
             self.backup_configs.push(saved);
             self.backup_selected = Some(BackupSelection::Config(self.backup_configs.len() - 1));
         }
-        let _ = self.config.save_backups(&self.backup_configs);
+        if let Err(error) = self.config.save_backups(&self.backup_configs) {
+            self.warn_persist("backup profiles", error, cx);
+        }
         if let Some(dialog) = self.new_backup_dialog.as_mut() {
             dialog.error = None;
             dialog
@@ -1983,6 +2011,9 @@ impl AppView {
 
         if let Some(dialog) = self.new_backup_dialog.as_mut() {
             dialog.running = true;
+            dialog
+                .cancel
+                .store(false, std::sync::atomic::Ordering::Relaxed);
             dialog.error = None;
             dialog.tab = BackupDialogTab::Log;
             dialog.log.clear();
@@ -2009,6 +2040,11 @@ impl AppView {
 
         let runtime = self.runtime.clone();
         let schema = database.clone();
+        let cancel = self
+            .new_backup_dialog
+            .as_ref()
+            .map(|dialog| dialog.cancel.clone())
+            .unwrap_or_default();
         let writer = match rustgrid_backup::BackupWriter::create(&path, &schema, &comment) {
             Ok(writer) => Arc::new(Mutex::new(writer)),
             Err(error) => {
@@ -2024,6 +2060,9 @@ impl AppView {
         cx.spawn(async move |this, cx| {
             let mut fatal: Option<String> = None;
             for (kind, name) in selected {
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
                 // Metadata first (DDL, columns, triggers), then stream the table's rows. A single
                 // object's failure is logged and skipped so the rest of the selection still runs.
                 let meta = {
@@ -2124,9 +2163,60 @@ impl AppView {
                 fatal = Some(error.to_string());
             }
 
-            let _ = this.update(cx, |app, cx| app.finish_backup(fatal, cx));
+            let cancelled = cancel.load(std::sync::atomic::Ordering::Relaxed);
+            let _ = this.update(cx, |app, cx| {
+                if cancelled {
+                    app.backup_log(t!("backup.log.cancelled").to_string(), cx);
+                }
+                app.finish_backup(fatal, cx)
+            });
         })
         .detach();
+    }
+
+    /// Append a line to whichever backup/restore/extract dialog is open, keeping it scrolled.
+    pub(super) fn backup_log(&mut self, message: String, cx: &mut Context<'_, Self>) {
+        if let Some(dialog) = self.new_backup_dialog.as_mut() {
+            dialog.log.push(message.clone());
+            dialog.log_scroll.scroll_to_bottom();
+        } else if let Some(dialog) = self.restore_dialog.as_mut() {
+            dialog.log.push(message.clone());
+            dialog.log_scroll.scroll_to_bottom();
+        } else if let Some(dialog) = self.extract_dialog.as_mut() {
+            dialog.log.push(message.clone());
+            dialog.log_scroll.scroll_to_bottom();
+        }
+        cx.notify();
+    }
+
+    /// Ask the running backup to stop after the current object.
+    pub(super) fn backup_abort(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(dialog) = self.new_backup_dialog.as_mut() {
+            dialog
+                .cancel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        cx.notify();
+    }
+
+    /// Ask the running restore to stop after the current object.
+    pub(super) fn restore_abort(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(dialog) = self.restore_dialog.as_mut() {
+            dialog
+                .cancel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        cx.notify();
+    }
+
+    /// Ask the running extract to stop after the current object.
+    pub(super) fn extract_abort(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(dialog) = self.extract_dialog.as_mut() {
+            dialog
+                .cancel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        cx.notify();
     }
 
     /// Record one object's outcome for the running backup and keep its log scrolled.
@@ -2194,6 +2284,13 @@ impl AppView {
     /// Close the Backup window. Called from its footer button, which has the window at hand, so
     /// the window is removed directly (updating it through its handle would re-borrow it).
     pub(super) fn close_new_backup(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        // Abort a running backup so it stops after the current object instead of continuing to
+        // write the archive with no window left to report to.
+        if let Some(dialog) = self.new_backup_dialog.as_mut() {
+            dialog
+                .cancel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         self.new_backup_dialog = None;
         self.backup_name_input = None;
         self.backup_window = None;
@@ -2237,6 +2334,7 @@ impl AppView {
             tab: BackupDialogTab::Objects,
             objects,
             running: false,
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             log: Vec::new(),
             log_scroll: ScrollHandle::new(),
             total: 0,
@@ -2349,6 +2447,9 @@ impl AppView {
 
         if let Some(dialog) = self.restore_dialog.as_mut() {
             dialog.running = true;
+            dialog
+                .cancel
+                .store(false, std::sync::atomic::Ordering::Relaxed);
             dialog.error = None;
             dialog.tab = BackupDialogTab::Log;
             dialog.log.clear();
@@ -2374,6 +2475,11 @@ impl AppView {
         }
 
         let runtime = self.runtime.clone();
+        let cancel = self
+            .restore_dialog
+            .as_ref()
+            .map(|dialog| dialog.cancel.clone())
+            .unwrap_or_default();
         cx.spawn(async move |this, cx| {
             // Open the archive once; each object is read (and decompressed) on demand so peak
             // memory stays at one table instead of every selected table.
@@ -2398,6 +2504,9 @@ impl AppView {
             };
 
             for (kind, name) in selected {
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
                 let reader = Arc::clone(&reader);
                 let read_name = name.clone();
                 let object = match runtime
@@ -2470,7 +2579,13 @@ impl AppView {
                     }
                 });
             }
-            let _ = this.update(cx, |app, cx| app.finish_restore(None, connection_index, cx));
+            let cancelled = cancel.load(std::sync::atomic::Ordering::Relaxed);
+            let _ = this.update(cx, |app, cx| {
+                if cancelled {
+                    app.backup_log(t!("backup.log.cancelled").to_string(), cx);
+                }
+                app.finish_restore(None, connection_index, cx)
+            });
         })
         .detach();
     }
@@ -2546,6 +2661,11 @@ impl AppView {
 
     /// Close the Restore window (see [`AppView::close_new_backup`]).
     pub(super) fn close_restore(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        if let Some(dialog) = self.restore_dialog.as_mut() {
+            dialog
+                .cancel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         self.restore_dialog = None;
         self.backup_window = None;
         window.remove_window();
@@ -2724,6 +2844,22 @@ impl AppView {
             .as_ref()
             .is_some_and(|handle| handle.window_id() == id)
         {
+            // Abort whatever is running so its task stops after the current object.
+            if let Some(dialog) = self.new_backup_dialog.as_mut() {
+                dialog
+                    .cancel
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            if let Some(dialog) = self.restore_dialog.as_mut() {
+                dialog
+                    .cancel
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            if let Some(dialog) = self.extract_dialog.as_mut() {
+                dialog
+                    .cancel
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             self.backup_window = None;
             self.new_backup_dialog = None;
             self.backup_name_input = None;
@@ -2737,6 +2873,11 @@ impl AppView {
             .as_ref()
             .is_some_and(|handle| handle.window_id() == id)
         {
+            if let Some(wizard) = self.export_wizard.as_ref() {
+                wizard
+                    .cancel
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             self.export_window = None;
             self.export_wizard = None;
             cx.notify();
@@ -2747,6 +2888,11 @@ impl AppView {
             .as_ref()
             .is_some_and(|handle| handle.window_id() == id)
         {
+            if let Some(wizard) = self.import_wizard.as_ref() {
+                wizard
+                    .cancel
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             self.import_window = None;
             self.import_wizard = None;
             cx.notify();
@@ -3019,6 +3165,19 @@ impl AppView {
                             }
                         }),
                     ))
+                    .when(
+                        self.new_backup_dialog
+                            .as_ref()
+                            .is_some_and(|dialog| dialog.running),
+                        |row| {
+                            row.child(self.dialog_button(
+                                "backup-stop",
+                                t!("backup.stop").to_string(),
+                                false,
+                                cx.listener(|this, _event, _window, cx| this.backup_abort(cx)),
+                            ))
+                        },
+                    )
                     .child(self.dialog_button(
                         "backup-close",
                         t!("backup.close").to_string(),
@@ -3234,6 +3393,19 @@ impl AppView {
             .w_full()
             .h(px(46.0))
             .gap_2()
+            .when(
+                self.restore_dialog
+                    .as_ref()
+                    .is_some_and(|dialog| dialog.running),
+                |row| {
+                    row.child(self.dialog_button(
+                        "restore-stop",
+                        t!("backup.stop").to_string(),
+                        false,
+                        cx.listener(|this, _event, _window, cx| this.restore_abort(cx)),
+                    ))
+                },
+            )
             .child(self.dialog_button(
                 "restore-run",
                 t!("backup.restore_button").to_string(),
@@ -3470,6 +3642,19 @@ impl AppView {
                             }
                         }),
                     ))
+                    .when(
+                        self.extract_dialog
+                            .as_ref()
+                            .is_some_and(|dialog| dialog.running),
+                        |row| {
+                            row.child(self.dialog_button(
+                                "extract-stop",
+                                t!("backup.stop").to_string(),
+                                false,
+                                cx.listener(|this, _event, _window, cx| this.extract_abort(cx)),
+                            ))
+                        },
+                    )
                     .child(self.dialog_button(
                         "extract-close",
                         t!("backup.close").to_string(),
@@ -3937,7 +4122,11 @@ fn render_object_picker(
                         .mx_1()
                         .rounded_sm()
                         .cursor_pointer()
-                        .when(selected, move |style| style.bg(rgb(theme.tree_hover_bg)))
+                        .when(selected, move |style| {
+                            style
+                                .bg(rgb(theme.tree_selected_bg))
+                                .text_color(rgb(theme.tree_selected_text))
+                        })
                         .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
                         .on_click(cx.listener(move |this, _event, _window, cx| match action {
                             ObjectPickerAction::Backup => this.backup_toggle_object(index, cx),

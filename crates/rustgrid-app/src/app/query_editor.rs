@@ -162,7 +162,20 @@ impl AppView {
                 // Bring the tab that owns this editor to the front, then save it (in place when it
                 // is already bound to a file, otherwise through the name/location dialog).
                 this.activate_query(index, cx);
-                this.begin_save_query(window, cx);
+                // A view/routine designer reuses this editor; Ctrl+S must save the definition
+                // (save_view/save_routine), not prompt to save a free-form query file.
+                let (is_routine, is_view) = this
+                    .queries
+                    .get(index)
+                    .map(|tab| (tab.routine.is_some(), tab.view.is_some()))
+                    .unwrap_or((false, false));
+                if is_routine {
+                    this.save_routine(cx);
+                } else if is_view {
+                    this.save_view(cx);
+                } else {
+                    this.begin_save_query(window, cx);
+                }
             }))
             .on_action(cx.listener(move |this, _: &RunSelectedQuery, _window, cx| {
                 // Bring the tab that owns this editor to the front, then run its selection.

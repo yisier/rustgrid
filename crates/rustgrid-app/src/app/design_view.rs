@@ -1905,6 +1905,9 @@ fn design_edit_cell(
     if let Some(editor) = editor {
         return cell
             .bg(rgb(theme.input_bg))
+            // The selected-cell text color (white) must not leak into the editor, or its text is
+            // invisible on the light input background.
+            .text_color(rgb(theme.text))
             .child(div().w(px(width)).h(px(DESIGN_ROW_HEIGHT)).child(editor))
             .into_any_element();
     }
@@ -1935,6 +1938,9 @@ fn index_edit_cell(
     if let Some(editor) = editor {
         return cell
             .bg(rgb(theme.input_bg))
+            // The selected-cell text color (white) must not leak into the editor, or its text is
+            // invisible on the light input background.
+            .text_color(rgb(theme.text))
             .child(div().w(px(width)).h(px(DESIGN_ROW_HEIGHT)).child(editor))
             .into_any_element();
     }
@@ -2230,6 +2236,9 @@ fn fk_edit_cell(
     if let Some(editor) = editor {
         return cell
             .bg(rgb(theme.input_bg))
+            // The selected-cell text color (white) must not leak into the editor, or its text is
+            // invisible on the light input background.
+            .text_color(rgb(theme.text))
             .child(div().w(px(width)).h(px(DESIGN_ROW_HEIGHT)).child(editor))
             .into_any_element();
     }

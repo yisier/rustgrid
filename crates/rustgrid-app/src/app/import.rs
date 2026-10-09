@@ -58,6 +58,7 @@ impl AppView {
             file: String::new(),
             file_input: Some(file_input),
             sheets: Vec::new(),
+            loading_sheets: false,
             target_table,
             existing_tables: Vec::new(),
             fields: BTreeMap::new(),
@@ -65,6 +66,7 @@ impl AppView {
             sheet_combo: None,
             mapping_rows: BTreeMap::new(),
             running: false,
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             log: Vec::new(),
             log_scroll: ScrollHandle::new(),
             rows_total: 0,
@@ -135,9 +137,27 @@ impl AppView {
 
     /// Close the Import window (called from its footer, where the window is at hand).
     pub(super) fn import_close(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        // Abort a running import rather than letting it keep writing in the background.
+        if let Some(wizard) = self.import_wizard.as_ref()
+            && wizard.running
+        {
+            wizard
+                .cancel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         self.import_wizard = None;
         self.import_window = None;
         window.remove_window();
+        cx.notify();
+    }
+
+    /// Ask the running import to stop between sheets/batches.
+    pub(super) fn import_abort(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(wizard) = self.import_wizard.as_mut() {
+            wizard
+                .cancel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         cx.notify();
     }
 
@@ -269,6 +289,7 @@ impl AppView {
 
     fn set_import_error(&mut self, error: String, cx: &mut Context<'_, Self>) {
         if let Some(wizard) = self.import_wizard.as_mut() {
+            wizard.loading_sheets = false;
             wizard.error = if error.is_empty() { None } else { Some(error) };
         }
         cx.notify();
@@ -400,6 +421,7 @@ impl AppView {
             wizard.sheet_combo = None;
             wizard.existing_tables = existing;
             wizard.error = None;
+            wizard.loading_sheets = true;
         }
         let runtime = self.runtime.clone();
         cx.spawn(async move |this, cx| {
@@ -426,6 +448,9 @@ impl AppView {
     }
 
     fn import_sheets_loaded(&mut self, names: Vec<String>, cx: &mut Context<'_, Self>) {
+        if let Some(wizard) = self.import_wizard.as_mut() {
+            wizard.loading_sheets = false;
+        }
         if names.is_empty() {
             self.set_import_error(t!("import.no_sheets").to_string(), cx);
             return;
@@ -887,6 +912,9 @@ impl AppView {
 
         if let Some(wizard) = self.import_wizard.as_mut() {
             wizard.running = true;
+            wizard
+                .cancel
+                .store(false, std::sync::atomic::Ordering::Relaxed);
             wizard.error = None;
             wizard.log.clear();
             wizard.rows_total = total_rows;
@@ -909,12 +937,21 @@ impl AppView {
         cx.notify();
 
         let runtime = self.runtime.clone();
+        let cancel = self
+            .import_wizard
+            .as_ref()
+            .map(|wizard| wizard.cancel.clone())
+            .unwrap_or_default();
         cx.spawn(async move |this, cx| {
             let mut imported_tables = 0usize;
             let mut added = 0usize;
             let mut errors = 0usize;
+            let cancel_flag = cancel.clone();
 
             for plan in plans {
+                if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
                 if plan.columns.is_empty() {
                     continue;
                 }
@@ -954,6 +991,10 @@ impl AppView {
                 let mut sheet_rows = 0usize;
                 let mut failed = false;
                 for chunk in plan.rows.chunks(IMPORT_BATCH_ROWS) {
+                    if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                        failed = true;
+                        break;
+                    }
                     let inserts: Vec<RowInsert> =
                         chunk.iter().map(|row| plan.insert_for(row)).collect();
                     if inserts.is_empty() {
@@ -1229,6 +1270,16 @@ impl AppView {
                     )
                     .child(div().flex_1().child(t!("import.create_table").to_string())),
             );
+        if wizard.loading_sheets {
+            list = list.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(t!("common.loading").to_string()),
+            );
+        }
         for (index, sheet) in wizard.sheets.iter().enumerate() {
             let selected = sheet.selected;
             let create = sheet.create;
@@ -1242,7 +1293,11 @@ impl AppView {
                     .gap_2()
                     .px_3()
                     .h(px(28.0))
-                    .when(selected, move |style| style.bg(rgb(theme.tree_hover_bg)))
+                    .when(selected, move |style| {
+                        style
+                            .bg(rgb(theme.tree_selected_bg))
+                            .text_color(rgb(theme.tree_selected_text))
+                    })
                     .child(
                         div()
                             .id(SharedString::from(format!("import-sheet-check-{index}")))
@@ -1392,98 +1447,105 @@ impl AppView {
             .map(|fields| fields.mapped.clone())
             .unwrap_or_default();
 
-        let mut list = div()
-            .id("import-mapping-list")
+        let header = div()
             .flex()
-            .flex_col()
-            .flex_1()
-            .min_h(px(0.0))
-            .overflow_y_scroll()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .py_1()
+            .text_size(px(11.0))
+            .text_color(rgb(theme.text_muted))
             .child(
                 div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .px_3()
-                    .py_1()
-                    .text_size(px(11.0))
-                    .text_color(rgb(theme.text_muted))
-                    .child(
-                        div()
-                            .w(px(220.0))
-                            .flex_none()
-                            .child(t!("import.source_field").to_string()),
-                    )
-                    .child(
-                        div()
-                            .w(px(200.0))
-                            .flex_none()
-                            .child(t!("import.target_field").to_string()),
-                    )
-                    .child(div().flex_1().child(t!("import.primary_key").to_string())),
-            );
-        match fields {
-            None => {}
-            Some(fields) if fields.loading => {
-                list = list.child(
-                    div()
-                        .px_3()
-                        .py_2()
-                        .text_size(px(12.0))
-                        .text_color(rgb(theme.text_muted))
-                        .child(t!("common.loading").to_string()),
-                );
-            }
-            Some(fields) if fields.error.is_some() => {
-                list = list.child(
-                    div()
-                        .px_3()
-                        .py_2()
-                        .text_size(px(12.0))
-                        .text_color(rgb(theme.danger))
-                        .child(fields.error.clone().unwrap_or_default()),
-                );
-            }
+                    .w(px(220.0))
+                    .flex_none()
+                    .child(t!("import.source_field").to_string()),
+            )
+            .child(
+                div()
+                    .w(px(200.0))
+                    .flex_none()
+                    .child(t!("import.target_field").to_string()),
+            )
+            .child(div().flex_1().child(t!("import.primary_key").to_string()));
+
+        let body: AnyElement = match fields {
+            None => div().into_any_element(),
+            Some(fields) if fields.loading => div()
+                .px_3()
+                .py_2()
+                .text_size(px(12.0))
+                .text_color(rgb(theme.text_muted))
+                .child(t!("common.loading").to_string())
+                .into_any_element(),
+            Some(fields) if fields.error.is_some() => div()
+                .px_3()
+                .py_2()
+                .text_size(px(12.0))
+                .text_color(rgb(theme.danger))
+                .child(fields.error.clone().unwrap_or_default())
+                .into_any_element(),
             Some(_) => {
-                for (index, row) in rows.into_iter().flatten().enumerate() {
-                    let is_key = mapped
-                        .get(index)
-                        .is_some_and(|target| primary_key.iter().any(|key| key == target));
-                    let key = if is_key {
-                        svg()
-                            .path("icons/primary_key.svg")
-                            .w(px(14.0))
-                            .h(px(14.0))
-                            .flex_none()
-                            .text_color(rgb(theme.icon_table))
-                            .into_any_element()
-                    } else {
-                        div().into_any_element()
-                    };
-                    list = list.child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_2()
-                            .px_3()
-                            .h(px(24.0))
-                            .child(
-                                div()
-                                    .w(px(220.0))
+                // Virtualize the mapping rows: a sheet with hundreds of columns would otherwise
+                // build (and lay out) every row's dropdown at once.
+                let rows: Arc<Vec<(String, Entity<ComboBox>)>> = Arc::new(
+                    rows.into_iter()
+                        .flatten()
+                        .map(|row| (row.source.clone(), row.combo.clone()))
+                        .collect(),
+                );
+                let mapped = Arc::new(mapped);
+                let primary_key = Arc::new(primary_key);
+                let count = rows.len();
+                uniform_list("import-mapping-rows", count, move |range, _window, _cx| {
+                    let rows = rows.clone();
+                    let mapped = mapped.clone();
+                    let primary_key = primary_key.clone();
+                    range
+                        .map(|index| {
+                            let (source, combo) = &rows[index];
+                            let is_key = mapped
+                                .get(index)
+                                .is_some_and(|target| primary_key.iter().any(|key| key == target));
+                            let key = if is_key {
+                                svg()
+                                    .path("icons/primary_key.svg")
+                                    .w(px(14.0))
+                                    .h(px(14.0))
                                     .flex_none()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_size(px(12.0))
-                                    .child(row.source.clone()),
-                            )
-                            .child(div().w(px(200.0)).flex_none().child(row.combo.clone()))
-                            .child(key),
-                    );
-                }
+                                    .text_color(rgb(theme.icon_table))
+                                    .into_any_element()
+                            } else {
+                                div().into_any_element()
+                            };
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .px_3()
+                                .h(px(24.0))
+                                .child(
+                                    div()
+                                        .w(px(220.0))
+                                        .flex_none()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_size(px(12.0))
+                                        .child(source.clone()),
+                                )
+                                .child(div().w(px(200.0)).flex_none().child(combo.clone()))
+                                .child(key)
+                                .into_any_element()
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .flex_1()
+                .min_h(px(0.0))
+                .into_any_element()
             }
-        }
+        };
 
         div()
             .flex()
@@ -1493,7 +1555,8 @@ impl AppView {
             .w_full()
             .child(source_row)
             .child(target_row)
-            .child(list)
+            .child(header)
+            .child(body)
             .into_any_element()
     }
 
@@ -1651,10 +1714,20 @@ impl AppView {
         if !finished {
             right = right.child(self.wizard_footer_button(
                 "import-cancel",
-                t!("import.cancel").to_string(),
+                if running {
+                    t!("import.stop").to_string()
+                } else {
+                    t!("import.cancel").to_string()
+                },
                 false,
-                !running,
-                cx.listener(|this, _event, window, cx| this.import_close(window, cx)),
+                true,
+                cx.listener(move |this, _event, window, cx| {
+                    if running {
+                        this.import_abort(cx);
+                    } else {
+                        this.import_close(window, cx);
+                    }
+                }),
             ));
         }
         if step != ImportStep::Format {

@@ -1,20 +1,22 @@
 use thiserror::Error;
 
+/// The message is the raw driver text; the UI layer supplies the localized category label, so no
+/// hard-coded English prefix leaks into the interface.
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("driver not found: {0}")]
+    #[error("{0}")]
     DriverNotFound(String),
 
-    #[error("connection failed: {0}")]
+    #[error("{0}")]
     Connection(String),
 
-    #[error("authentication failed: {0}")]
+    #[error("{0}")]
     Authentication(String),
 
-    #[error("query failed: {0}")]
+    #[error("{0}")]
     Query(String),
 
-    #[error("invalid configuration: {0}")]
+    #[error("{0}")]
     Config(String),
 
     #[error("{0}")]

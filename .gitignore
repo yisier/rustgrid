@@ -6,3 +6,5 @@
 .DS_Store
 # Generated build shim (see AGENTS.md "Gotchas"); the source `tools/fxc-shim/fxc.c` is tracked.
 fxc.exe
+# Local AI-assistant scratch/memory; not part of the project.
+.workbuddy-ai/

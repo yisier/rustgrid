@@ -6,8 +6,8 @@
 //! `AGENTS.md` under "UI conventions".
 
 use gpui::{
-    App, BoxShadow, ClickEvent, CursorStyle, Div, FontWeight, IntoElement, Point, SharedString,
-    Stateful, Window, div, prelude::*, px, relative, rgb, rgba, svg,
+    AnyView, App, BoxShadow, ClickEvent, Context, CursorStyle, Div, FontWeight, IntoElement, Point,
+    Render, SharedString, Stateful, Window, div, prelude::*, px, relative, rgb, rgba, svg,
 };
 
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -91,6 +91,31 @@ fn sized_button(
         .with_size(size)
         .label(label)
         .on_click(on_click)
+}
+
+/// A simple text bubble tooltip, shared by chrome items that would otherwise have none.
+pub(super) fn text_tooltip(
+    text: impl Into<SharedString>,
+) -> impl Fn(&mut Window, &mut App) -> AnyView {
+    let text = text.into();
+    move |_, cx| cx.new(|_| TextTooltip(text.clone())).into()
+}
+
+struct TextTooltip(SharedString);
+
+impl Render for TextTooltip {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let theme = gpui_kit::component::Theme::global(cx);
+        div()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(theme.popover)
+            .border_1()
+            .border_color(theme.border)
+            .text_size(px(12.0))
+            .child(self.0.clone())
+    }
 }
 
 /// A dialog push button; `primary` selects the default (accent-bordered) variant.

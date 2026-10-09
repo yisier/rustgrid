@@ -86,6 +86,8 @@ pub(super) struct PrivilegeManager {
     sql_scroll: ScrollHandle,
     /// Whether the change-preview popup is open (Save shows it before writing anything).
     confirm_open: bool,
+    /// Whether the "discard unsaved changes?" prompt is open.
+    discard_open: bool,
 }
 
 impl PrivilegeManager {
@@ -120,6 +122,7 @@ impl PrivilegeManager {
             error: None,
             sql_scroll: ScrollHandle::new(),
             confirm_open: false,
+            discard_open: false,
         }
     }
 
@@ -587,6 +590,12 @@ impl Render for PrivilegeManager {
                 // ESC dismisses the open change preview first, then closes the window.
                 if this.confirm_open {
                     this.close_confirm(cx);
+                } else if this.discard_open {
+                    this.discard_open = false;
+                    cx.notify();
+                } else if this.dirty {
+                    this.discard_open = true;
+                    cx.notify();
                 } else {
                     window.remove_window();
                 }
@@ -597,6 +606,9 @@ impl Render for PrivilegeManager {
             .child(self.render_footer(cx));
         if self.confirm_open {
             root = root.child(self.render_confirm(cx));
+        }
+        if self.discard_open {
+            root = root.child(self.render_discard(cx));
         }
         root
     }
@@ -759,6 +771,84 @@ impl PrivilegeManager {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _event, _window, cx| this.close_confirm(cx)),
+            )
+            .child(panel)
+            .into_any_element()
+    }
+
+    /// The "discard unsaved changes?" prompt shown when Esc closes a dirty manager window.
+    fn render_discard(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let panel = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_4()
+            .w(px(420.0))
+            .bg(rgb(theme.dialog_bg))
+            .border_1()
+            .border_color(rgb(theme.border))
+            .rounded(px(8.0))
+            .shadow(ui::dialog_shadow())
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(t!("unsaved.title").to_string()),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(t!("unsaved.message").to_string()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_end()
+                    .gap_2()
+                    .w_full()
+                    .child(ui::dialog_button(
+                        "op-discard-cancel",
+                        t!("form.cancel").to_string(),
+                        false,
+                        theme,
+                        cx.listener(|this, _event, _window, cx| {
+                            this.discard_open = false;
+                            cx.notify();
+                        }),
+                    ))
+                    .child(ui::dialog_button(
+                        "op-discard-ok",
+                        t!("unsaved.discard").to_string(),
+                        true,
+                        theme,
+                        cx.listener(|this, _event, window, _cx| {
+                            this.discard_open = false;
+                            window.remove_window();
+                        }),
+                    )),
+            )
+            .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
+                cx.stop_propagation();
+            });
+
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .occlude()
+            .bg(rgba(0x00000040))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _event, _window, cx| {
+                    this.discard_open = false;
+                    cx.notify();
+                }),
             )
             .child(panel)
             .into_any_element()

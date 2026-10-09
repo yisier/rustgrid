@@ -233,28 +233,23 @@ impl AppView {
         theme: Theme,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
+        // `label` is `None` for the available state: the update affordance is just a compact
+        // download icon, with the version available on hover.
         let (icon, label, color) = match &self.update_status {
-            UpdateStatus::Available => (
-                "icons/arrow-up.svg",
-                match &self.update_version {
-                    Some(version) => format!("v{version}"),
-                    None => t!("update.button").to_string(),
-                },
-                theme.brand,
-            ),
+            UpdateStatus::Available => ("icons/update.svg", None, theme.brand),
             UpdateStatus::Downloading => (
                 "icons/refresh.svg",
-                t!("update.downloading").to_string(),
+                Some(t!("update.downloading").to_string()),
                 theme.text_muted,
             ),
             UpdateStatus::Installed => (
                 "icons/check.svg",
-                t!("update.restarting").to_string(),
+                Some(t!("update.restarting").to_string()),
                 theme.brand,
             ),
             UpdateStatus::Failed(_) => (
                 "icons/warning_mark.svg",
-                t!("update.retry").to_string(),
+                Some(t!("update.retry").to_string()),
                 theme.danger,
             ),
             UpdateStatus::Idle | UpdateStatus::Checking | UpdateStatus::UpToDate => {
@@ -265,14 +260,21 @@ impl AppView {
             self.update_status,
             UpdateStatus::Downloading | UpdateStatus::Installed
         );
-        div()
+        let tooltip = match &self.update_version {
+            Some(version) => t!("about.available", version = version.clone()).to_string(),
+            None => t!("update.button").to_string(),
+        };
+        let mut button = div()
             .id("titlebar-update")
             .flex()
             .flex_row()
             .items_center()
+            .justify_center()
             .gap_1()
-            .h_full()
-            .px_2()
+            .h(px(26.0))
+            .rounded_full()
+            .when(label.is_some(), |style| style.px_2())
+            .when(label.is_none(), |style| style.w(px(26.0)))
             .text_size(px(12.0))
             .text_color(rgb(color))
             .when(!busy, move |style| {
@@ -291,13 +293,15 @@ impl AppView {
             .child(
                 svg()
                     .path(icon)
-                    .w(px(14.0))
-                    .h(px(14.0))
+                    .w(px(16.0))
+                    .h(px(16.0))
                     .flex_none()
                     .text_color(rgb(color)),
-            )
-            .child(label)
-            .into_any_element()
+            );
+        if let Some(label) = label {
+            button = button.child(label);
+        }
+        button.tooltip(ui::text_tooltip(tooltip)).into_any_element()
     }
 
     /// The 关于 page: app identity, current version and the manual update controls.

@@ -513,6 +513,8 @@ pub(super) struct UserCreateDialog {
     pub(super) change_password: bool,
     /// Whether the 确认并执行 dialog is open.
     pub(super) confirm_open: bool,
+    /// Whether the "discard unsaved changes?" prompt is open.
+    pub(super) discard_confirm: bool,
 }
 
 impl UserCreateDialog {
@@ -590,6 +592,7 @@ impl UserCreateDialog {
             saved: false,
             change_password: !editing,
             confirm_open: false,
+            discard_confirm: false,
         }
     }
 
@@ -3026,6 +3029,26 @@ impl AppView {
         cx.notify();
     }
 
+    /// Cancel the "discard unsaved changes?" prompt and keep editing.
+    pub(super) fn cancel_discard_confirm(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(dialog) = self.create_user_dialog.as_mut() {
+            dialog.discard_confirm = false;
+        }
+        cx.notify();
+    }
+
+    /// Discard the edits and close the account window.
+    pub(super) fn confirm_discard_close(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(dialog) = self.create_user_dialog.as_mut() {
+            dialog.discard_confirm = false;
+        }
+        self.create_user_close(window, cx);
+    }
+
     /// Run the save the 确认并执行 dialog previewed. Split from [`Self::submit_create_user`] so the
     /// user always sees the change diff before anything is executed.
     pub(super) fn execute_create_user(&mut self, cx: &mut Context<'_, Self>) {
@@ -3314,10 +3337,22 @@ impl AppView {
                     if dialog.saving {
                         return;
                     }
+                    if dialog.discard_confirm {
+                        this.cancel_discard_confirm(cx);
+                        return;
+                    }
                     if dialog.confirm_open {
                         this.close_create_confirm(cx);
                         return;
                     }
+                }
+                // Warn before discarding unsaved account/privilege edits.
+                if this.create_user_has_changes() {
+                    if let Some(dialog) = this.create_user_dialog.as_mut() {
+                        dialog.discard_confirm = true;
+                    }
+                    cx.notify();
+                    return;
                 }
                 // Close even when a nested control already cleared the dialog state, so the OS
                 // window never lingers blank.
@@ -3369,6 +3404,9 @@ impl AppView {
 
         if dialog.confirm_open {
             root = root.child(self.render_create_confirm(cx));
+        }
+        if dialog.discard_confirm {
+            root = root.child(self.render_discard_confirm(cx));
         }
         root.into_any_element()
     }
@@ -3480,6 +3518,75 @@ impl AppView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _event, _window, cx| this.close_create_confirm(cx)),
+            )
+            .child(panel)
+            .into_any_element()
+    }
+
+    /// The "discard unsaved changes?" prompt shown when Esc closes a dirty account window.
+    fn render_discard_confirm(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let panel = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_4()
+            .w(px(420.0))
+            .bg(rgb(theme.dialog_bg))
+            .border_1()
+            .border_color(rgb(theme.border))
+            .rounded(px(8.0))
+            .shadow(ui::dialog_shadow())
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(t!("unsaved.title").to_string()),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(t!("unsaved.message").to_string()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_end()
+                    .gap_2()
+                    .w_full()
+                    .child(self.dialog_button(
+                        "user-discard-cancel",
+                        t!("form.cancel").to_string(),
+                        false,
+                        cx.listener(|this, _event, _window, cx| this.cancel_discard_confirm(cx)),
+                    ))
+                    .child(self.dialog_button(
+                        "user-discard-ok",
+                        t!("unsaved.discard").to_string(),
+                        true,
+                        cx.listener(|this, _event, window, cx| {
+                            this.confirm_discard_close(window, cx)
+                        }),
+                    )),
+            )
+            .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
+                cx.stop_propagation();
+            });
+
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .occlude()
+            .bg(rgba(0x00000040))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _event, _window, cx| this.cancel_discard_confirm(cx)),
             )
             .child(panel)
             .into_any_element()
