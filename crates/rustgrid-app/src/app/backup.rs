@@ -485,8 +485,12 @@ impl AppView {
             .track_focus(&self.backup_focus)
             .key_context(BACKUP_LIST_CONTEXT)
             .on_action(cx.listener(|this, _: &RenameBackupFile, window, cx| {
-                if let Some(BackupEntry::File(index)) = this.backup_single_selection() {
-                    this.begin_rename_backup(index, window, cx);
+                if let Some(entry) = this.backup_single_selection() {
+                    let target = match entry {
+                        BackupEntry::File(index) => BackupSelection::File(index),
+                        BackupEntry::Config(index) => BackupSelection::Config(index),
+                    };
+                    this.begin_backup_rename(target, window, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &CopyBackupFile, _window, cx| {
@@ -630,7 +634,7 @@ impl AppView {
             let rename = self
                 .backup_rename
                 .as_ref()
-                .filter(|edit| edit.index == index)
+                .filter(|edit| edit.target == BackupSelection::File(index))
                 .map(|edit| edit.input.clone());
             let name: AnyElement = match rename {
                 Some(input) => div()
@@ -738,6 +742,38 @@ impl AppView {
             let selected = self.backups_selection.contains(&key);
             let click_key = key.clone();
             let menu_key = key.clone();
+            let rename = self
+                .backup_rename
+                .as_ref()
+                .filter(|edit| edit.target == BackupSelection::Config(index))
+                .map(|edit| edit.input.clone());
+            let name: AnyElement = match rename {
+                Some(input) => div()
+                    .w(px(widths[0]))
+                    .flex_none()
+                    .h(px(22.0))
+                    .child(ui::rename_field(theme, input))
+                    .into_any_element(),
+                None => div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .w(px(widths[0]))
+                    .flex_none()
+                    .overflow_hidden()
+                    .text_color(rgb(theme.text))
+                    .child(ui::leading_icon_badge(
+                        "icons/save.svg",
+                        theme.icon_queries,
+                        22.0,
+                    ))
+                    .child(ui::detail_cell_text(
+                        SharedString::from(format!("backup-config-cell-{index}-0")),
+                        config.name.clone(),
+                    ))
+                    .into_any_element(),
+            };
             let row = ui::detail_row(
                 SharedString::from(format!("backup-config-{index}")),
                 selected,
@@ -764,26 +800,7 @@ impl AppView {
                     cx.notify();
                 }),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .w(px(widths[0]))
-                    .flex_none()
-                    .overflow_hidden()
-                    .text_color(rgb(theme.text))
-                    .child(ui::leading_icon_badge(
-                        "icons/save.svg",
-                        theme.icon_queries,
-                        22.0,
-                    ))
-                    .child(ui::detail_cell_text(
-                        SharedString::from(format!("backup-config-cell-{index}-0")),
-                        config.name.clone(),
-                    )),
-            )
+            .child(name)
             .child(
                 div()
                     .w(px(widths[1]))
@@ -874,9 +891,13 @@ impl AppView {
                 BackupEntry::File(index) => self
                     .backup_rename
                     .as_ref()
-                    .filter(|edit| edit.index == index)
+                    .filter(|edit| edit.target == BackupSelection::File(index))
                     .map(|edit| edit.input.clone()),
-                BackupEntry::Config(_) => None,
+                BackupEntry::Config(index) => self
+                    .backup_rename
+                    .as_ref()
+                    .filter(|edit| edit.target == BackupSelection::Config(index))
+                    .map(|edit| edit.input.clone()),
             };
             let title: AnyElement = match rename {
                 Some(input) => div()
@@ -1032,21 +1053,29 @@ impl AppView {
         cx.notify();
     }
 
-    /// Start the in-place "rename backup" editor on the selected file's row.
-    pub(super) fn begin_rename_backup(
+    /// Start the in-place "rename" editor on the given entry's row.
+    pub(super) fn begin_backup_rename(
         &mut self,
-        index: usize,
+        target: BackupSelection,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
         if self.backup_rename.is_some() {
             return;
         }
-        let Some(file) = self.backup_files.get(index) else {
+        let old_name = match target {
+            BackupSelection::File(index) => {
+                self.backup_files.get(index).map(|file| file.name.clone())
+            }
+            BackupSelection::Config(index) => self
+                .backup_configs
+                .get(index)
+                .map(|config| config.name.clone()),
+        };
+        let Some(old_name) = old_name else {
             return;
         };
-        let old_name = file.name.clone();
-        self.backup_selected = Some(BackupSelection::File(index));
+        self.backup_selected = Some(target);
         let theme = self.theme;
         let weak = cx.weak_entity();
         let change = weak.clone();
@@ -1093,7 +1122,7 @@ impl AppView {
         });
         let focus = input.read(cx).focus_handle();
         self.backup_rename = Some(BackupRenameEdit {
-            index,
+            target,
             old_name: old_name.clone(),
             new_name: old_name,
             input,
@@ -1119,19 +1148,30 @@ impl AppView {
             cx.notify();
             return;
         }
-        let Some(file) = self.backup_files.get(edit.index) else {
-            cx.notify();
+        match edit.target {
+            BackupSelection::File(index) => self.submit_backup_file_rename(index, new_name, cx),
+            BackupSelection::Config(index) => self.submit_backup_config_rename(index, new_name),
+        }
+        cx.notify();
+    }
+
+    /// Rename a backup file on disk.
+    fn submit_backup_file_rename(
+        &mut self,
+        index: usize,
+        new_name: String,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(file) = self.backup_files.get(index) else {
             return;
         };
         let old_path = file.path.clone();
         let Some(dir) = old_path.parent() else {
-            cx.notify();
             return;
         };
         let new_path = dir.join(format!("{new_name}.{}", rustgrid_backup::FILE_EXTENSION));
         if new_path.exists() {
             self.error_dialog = Some(t!("backup.rename_exists", name = new_name).to_string());
-            cx.notify();
             return;
         }
         match std::fs::rename(&old_path, &new_path) {
@@ -1145,7 +1185,32 @@ impl AppView {
             }
             Err(error) => self.error_dialog = Some(error.to_string()),
         }
-        cx.notify();
+    }
+
+    /// Rename a saved backup configuration (the name is its key, kept unique per scope).
+    fn submit_backup_config_rename(&mut self, index: usize, new_name: String) {
+        let Some(config) = self.backup_configs.get(index) else {
+            return;
+        };
+        let connection_id = config.connection_id.clone();
+        let database = config.database.clone();
+        let exists = self
+            .backup_configs
+            .iter()
+            .enumerate()
+            .any(|(other_index, other)| {
+                other_index != index
+                    && other.name == new_name
+                    && other.connection_id == connection_id
+                    && other.database == database
+            });
+        if exists {
+            self.error_dialog = Some(t!("backup.rename_exists", name = new_name).to_string());
+            return;
+        }
+        self.backup_configs[index].name = new_name;
+        let _ = self.config.save_backups(&self.backup_configs);
+        self.backup_selected = Some(BackupSelection::Config(index));
     }
 
     /// Reveal a backup file in the OS file manager.

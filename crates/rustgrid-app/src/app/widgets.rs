@@ -327,23 +327,36 @@ impl AppView {
                 let new_query_schema = schema.clone();
                 let open_schema_name = schema.clone();
                 let close_schema_name = schema.clone();
-                items = items
-                    .child(self.context_item(
-                        "schema-open",
-                        t!("database.open_schema").to_string(),
-                        cx.listener(move |this, _event, _window, cx| {
-                            this.context_menu = None;
-                            this.open_schema(ci, di, open_schema_name.clone(), cx);
-                        }),
-                    ))
-                    .child(self.context_item(
+                // Show only the action that applies: an already-open schema can be closed, a closed
+                // one can be opened (mirrors the database row's menu).
+                let opened = self
+                    .connections
+                    .get(ci)
+                    .and_then(|node| match &node.databases {
+                        Loadable::Loaded(databases) => databases.get(di),
+                        _ => None,
+                    })
+                    .is_some_and(|database| database.opened_schemas.contains(&schema));
+                if opened {
+                    items = items.child(self.context_item(
                         "schema-close",
                         t!("database.close_schema").to_string(),
                         cx.listener(move |this, _event, _window, cx| {
                             this.context_menu = None;
                             this.close_schema(ci, di, close_schema_name.clone(), cx);
                         }),
-                    ))
+                    ));
+                } else {
+                    items = items.child(self.context_item(
+                        "schema-open",
+                        t!("database.open_schema").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.open_schema(ci, di, open_schema_name.clone(), cx);
+                        }),
+                    ));
+                }
+                items = items
                     .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
                     .child(self.context_item(
                         "schema-new",
@@ -728,7 +741,7 @@ impl AppView {
                         t!("backup.rename").to_string(),
                         cx.listener(move |this, _event, window, cx| {
                             this.context_menu = None;
-                            this.begin_rename_backup(index, window, cx);
+                            this.begin_backup_rename(BackupSelection::File(index), window, cx);
                         }),
                     ))
                     .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
@@ -769,6 +782,14 @@ impl AppView {
                             this.context_menu = None;
                             this.backup_selected = Some(BackupSelection::Config(index));
                             this.confirm_delete_backup(cx);
+                        }),
+                    ))
+                    .child(self.context_item(
+                        "backup-config-ctx-rename",
+                        t!("backup.rename").to_string(),
+                        cx.listener(move |this, _event, window, cx| {
+                            this.context_menu = None;
+                            this.begin_backup_rename(BackupSelection::Config(index), window, cx);
                         }),
                     ))
                     .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))

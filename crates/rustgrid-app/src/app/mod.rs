@@ -311,8 +311,8 @@ struct QueryRenameEdit {
 /// The in-place "rename backup" editor, drawn in the row it started from. `new_name` mirrors the
 /// input's text so `submit_backup_rename` never reads the entity back during its change callback.
 struct BackupRenameEdit {
-    /// Index into `AppView::backup_files`.
-    index: usize,
+    /// Which list entry is being renamed (a backup file or a saved configuration).
+    target: BackupSelection,
     old_name: String,
     new_name: String,
     input: Entity<TextInput>,
