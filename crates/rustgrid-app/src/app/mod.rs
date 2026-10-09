@@ -2854,19 +2854,14 @@ pub(super) fn default_editor_font() -> &'static str {
     }
 }
 
-/// Install the app's SQL palette into gpui-kit's editor highlight theme. The wrapped SQL editor
-/// (gpui-kit's `Editor`) takes its syntax colors and its line-number gutter from the global
-/// `highlight_theme`, so overriding it here keeps the query editor in step with the 选项 preview
-/// (which uses the same `Theme::sql_*` colors) and gives the gutter a visible background.
+/// Install the app's editor chrome (background, foreground, gutter, active line) into gpui-kit's
+/// editor highlight theme. The wrapped SQL editor (gpui-kit's `Editor`) takes these from the global
+/// `highlight_theme`. The SQL syntax colors are intentionally left at gpui-kit's default palette so
+/// the editor matches the table info pane's DDL view, which renders with that same palette.
 fn install_editor_highlight_theme(theme: Theme, cx: &mut App) {
     use gpui::Hsla;
     use gpui_kit::component::ThemeMode;
-    use gpui_kit::component::highlighter::{HighlightTheme, ThemeStyle};
-
-    // `ThemeStyle`'s fields are private, but it is `Deserialize`, so build one from JSON.
-    let style = |color: u32| -> Option<ThemeStyle> {
-        serde_json::from_str(&format!("{{\"color\":\"#{color:06x}\"}}")).ok()
-    };
+    use gpui_kit::component::highlighter::HighlightTheme;
 
     let dark = theme.is_dark();
     let base = if dark {
@@ -2882,32 +2877,11 @@ fn install_editor_highlight_theme(theme: Theme, cx: &mut App) {
     style_set.editor_active_line = Some(Hsla::from(rgb(theme.row_alt_bg)));
     // The gutter (line-number column) background, so it reads as a distinct column.
     style_set.editor_gutter_background = Some(Hsla::from(rgb(theme.header_bg)));
-    // The SQL grammar (tree-sitter-sequel) captures keywords as `@keyword`, calls as
-    // `@function.call`, and table/column references as `@type`/`@variable`. Give each a distinct
-    // color (identifiers fall back to the plain foreground) so the editor is not one flat color.
-    let plain = theme.text;
-    let function = theme.icon_functions;
-    style_set.syntax.keyword = style(theme.sql_keyword);
-    style_set.syntax.boolean = style(theme.sql_number);
-    style_set.syntax.constant = style(theme.sql_number);
-    style_set.syntax.number = style(theme.sql_number);
-    style_set.syntax.string = style(theme.sql_string);
-    style_set.syntax.string_escape = style(theme.sql_string);
-    style_set.syntax.string_regex = style(theme.sql_string);
-    style_set.syntax.comment = style(theme.sql_comment);
-    style_set.syntax.comment_doc = style(theme.sql_comment);
-    // Built-in functions/invocations read as "function calls".
-    style_set.syntax.function = style(function);
-    style_set.syntax.constructor = style(function);
-    // Object references (table/column names), aliases and fields keep the normal foreground.
-    style_set.syntax.type_ = style(plain);
-    style_set.syntax.variable = style(plain);
-    style_set.syntax.property = style(plain);
-    style_set.syntax.attribute = style(plain);
-    style_set.syntax.operator = style(plain);
-    style_set.syntax.punctuation = style(theme.text_muted);
-    style_set.syntax.punctuation_bracket = style(theme.text_muted);
-    style_set.syntax.punctuation_delimiter = style(theme.text_muted);
+    // The editor's SQL syntax colors deliberately stay at gpui-kit's default palette: the table
+    // info pane's DDL view renders its script with that same palette, so the query editor and the
+    // DDL view read identically. Overriding the syntax map here (as we once did with `Theme::sql_*`)
+    // gave the editor different keyword/identifier colors than the DDL script. Only the editor
+    // chrome (background, foreground, gutter, active line) is themed below.
 
     gpui_kit::component::Theme::global_mut(cx).highlight_theme = Arc::new(HighlightTheme {
         name: if dark {

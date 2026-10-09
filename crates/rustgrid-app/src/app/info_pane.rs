@@ -733,8 +733,15 @@ impl AppView {
     ) -> AnyElement {
         // A view reads as a view; a table's status is loaded from the server.
         let is_view = self.table_is_view(connection_index, database_index, name);
+        // The DDL view keeps the same 详细信息 / DDL toggle bar above it, so the pane can be
+        // switched back from the script. Returning the bare script here used to drop the bar and
+        // strand the user in the DDL view.
         if self.info_table_ddl_view {
-            return self.table_ddl_view(name, is_view, theme);
+            let body = self.table_ddl_view(name, is_view, theme);
+            return self
+                .table_info_view_bar(app, theme)
+                .child(body)
+                .into_any_element();
         }
         let empty = TableStatus::default();
         let status = match &self.info_table_status {

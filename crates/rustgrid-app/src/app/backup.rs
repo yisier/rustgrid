@@ -78,7 +78,15 @@ impl AppView {
                 }
             }
         }
-        files.sort_by(|left, right| right.name.cmp(&left.name));
+        // Backups list ascending by creation time (oldest first), so the newest file sits at the
+        // bottom just above the saved-configuration rows. Fall back to the name (a timestamp) to
+        // break ties and to order manifests with no recorded creation time.
+        files.sort_by(|left, right| {
+            left.manifest
+                .created_unix
+                .cmp(&right.manifest.created_unix)
+                .then_with(|| left.name.cmp(&right.name))
+        });
         self.backup_files = files;
         self.clamp_backup_selection();
     }
@@ -425,10 +433,27 @@ impl AppView {
     }
 
     /// The single selected backup entry, or `None` when zero or several are selected.
+    ///
+    /// The selection key only names the row (`file:<name>` / `config:<name>`), so its index has to
+    /// be resolved back into `backup_files` / `backup_configs`. Returning the key's placeholder
+    /// index made every single-selection action (F2 rename, copy, double-click restore) act on the
+    /// first row instead of the selected one.
     fn backup_single_selection(&self) -> Option<BackupEntry> {
-        self.backups_selection
-            .single()
-            .and_then(backup_entry_from_key)
+        let key = self.backups_selection.single()?;
+        let (kind, name) = key.split_once(':')?;
+        match kind {
+            "file" => self
+                .backup_files
+                .iter()
+                .position(|file| file.name == name)
+                .map(BackupEntry::File),
+            "config" => self
+                .backup_configs
+                .iter()
+                .position(|config| config.name == name)
+                .map(BackupEntry::Config),
+            _ => None,
+        }
     }
 
     fn render_backup_list(&self, cx: &mut Context<'_, Self>) -> AnyElement {

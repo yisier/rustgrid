@@ -56,6 +56,9 @@ pub struct Theme {
     pub warning: u32,
     pub danger: u32,
     pub neutral: u32,
+    /// SQL colors for the 选项 editor preview and other SQL snippets. They mirror gpui-kit's
+    /// default highlight palette, which is also what the SQL editor and the DDL view paint with,
+    /// so every SQL surface shares one set of colors.
     pub sql_keyword: u32,
     pub sql_string: u32,
     pub sql_number: u32,
@@ -113,10 +116,10 @@ impl Theme {
             warning: 0xd97706,
             danger: 0xef4444,
             neutral: 0xa1a1aa,
-            sql_keyword: 0x8250df,
-            sql_string: 0x0a7d33,
-            sql_number: 0x0550ae,
-            sql_comment: 0x8b949e,
+            sql_keyword: 0x0433ff,
+            sql_string: 0x036a07,
+            sql_number: 0x0433ff,
+            sql_comment: 0x007fff,
         }
     }
 
@@ -170,10 +173,10 @@ impl Theme {
             warning: 0xfbbf24,
             danger: 0xef4444,
             neutral: 0x52525b,
-            sql_keyword: 0xc4b5fd,
-            sql_string: 0x7ee787,
-            sql_number: 0x79c0ff,
-            sql_comment: 0x8b949e,
+            sql_keyword: 0x87b1f6,
+            sql_string: 0xa3e09f,
+            sql_number: 0xcc9e00,
+            sql_comment: 0x9d9d9d,
         }
     }
 
