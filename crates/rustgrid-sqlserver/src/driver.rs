@@ -81,6 +81,7 @@ impl Driver for SqlServerDriver {
             password_valid_until: false,
             account_lock: true,
             account_enabled: true,
+            ssl: false,
             max_questions: false,
             max_updates: false,
             max_connections: false,

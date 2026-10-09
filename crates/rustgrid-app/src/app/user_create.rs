@@ -150,6 +150,7 @@ fn default_object_type_key(object_type: DefaultObjectType) -> &'static str {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum UserSection {
     General,
+    Advanced,
     ServerPrivileges,
     ObjectPrivileges,
     DefaultPrivileges,
@@ -161,8 +162,9 @@ pub(super) enum UserSection {
 }
 
 impl UserSection {
-    const ALL: [UserSection; 9] = [
+    const ALL: [UserSection; 10] = [
         UserSection::General,
+        UserSection::Advanced,
         UserSection::ServerPrivileges,
         UserSection::ObjectPrivileges,
         UserSection::DefaultPrivileges,
@@ -176,6 +178,7 @@ impl UserSection {
     fn label_key(self) -> &'static str {
         match self {
             UserSection::General => "user.tab.general",
+            UserSection::Advanced => "user.tab.advanced",
             UserSection::ServerPrivileges => "user.tab.server_privileges",
             UserSection::ObjectPrivileges => "user.tab.privileges",
             UserSection::DefaultPrivileges => "user.tab.default_privileges",
@@ -190,6 +193,7 @@ impl UserSection {
     fn icon(self) -> &'static str {
         match self {
             UserSection::General => "icons/user.svg",
+            UserSection::Advanced => "icons/gear.svg",
             UserSection::ServerPrivileges => "icons/gear.svg",
             UserSection::ObjectPrivileges => "icons/database.svg",
             UserSection::DefaultPrivileges => "icons/tables.svg",
@@ -204,6 +208,7 @@ impl UserSection {
     fn id(self) -> &'static str {
         match self {
             UserSection::General => "user-create-nav-general",
+            UserSection::Advanced => "user-create-nav-advanced",
             UserSection::ServerPrivileges => "user-create-nav-server",
             UserSection::ObjectPrivileges => "user-create-nav-object",
             UserSection::DefaultPrivileges => "user-create-nav-default",
@@ -220,6 +225,7 @@ impl UserSection {
     fn visible(self, spec: &UserEditorSpec) -> bool {
         match self {
             UserSection::General | UserSection::Sql => true,
+            UserSection::Advanced => spec.ssl,
             UserSection::ServerPrivileges => spec.server_privileges,
             UserSection::ObjectPrivileges => spec.object_privileges,
             UserSection::DefaultPrivileges => spec.default_privileges,
@@ -876,6 +882,9 @@ pub(super) enum CreateField {
     Certificate,
     AsymmetricKey,
     Credential,
+    SslCipher,
+    SslIssuer,
+    SslSubject,
 }
 
 /// Which dropdown a change came from.
@@ -885,6 +894,7 @@ enum CreateCombo {
     Expiry,
     Verification,
     DefaultDatabase,
+    Ssl,
 }
 
 /// The account-level state the window edits: the attributes, the server privileges, the individual
@@ -1378,6 +1388,49 @@ impl AppView {
             &weak,
             cx,
         ));
+        let ssl_options = connection
+            .ssl_types()
+            .into_iter()
+            .map(|ssl_type| {
+                if ssl_type.is_empty() {
+                    ComboOption::new("NONE", t!("user.ssl.none").to_string())
+                } else {
+                    ComboOption::new(ssl_type, ssl_type)
+                }
+            })
+            .collect();
+        self.create_user_ssl_combo = Some(make_create_combo(
+            theme,
+            ssl_options,
+            "NONE".to_string(),
+            CreateCombo::Ssl,
+            &weak,
+            cx,
+        ));
+        self.create_user_ssl_cipher = Some(make_create_field_input(
+            theme,
+            String::new(),
+            false,
+            CreateField::SslCipher,
+            &weak,
+            cx,
+        ));
+        self.create_user_ssl_issuer = Some(make_create_field_input(
+            theme,
+            String::new(),
+            false,
+            CreateField::SslIssuer,
+            &weak,
+            cx,
+        ));
+        self.create_user_ssl_subject = Some(make_create_field_input(
+            theme,
+            String::new(),
+            false,
+            CreateField::SslSubject,
+            &weak,
+            cx,
+        ));
 
         let plugin_options = plugins
             .iter()
@@ -1762,6 +1815,10 @@ impl AppView {
         self.create_user_certificate = None;
         self.create_user_asymmetric_key = None;
         self.create_user_credential = None;
+        self.create_user_ssl_combo = None;
+        self.create_user_ssl_cipher = None;
+        self.create_user_ssl_issuer = None;
+        self.create_user_ssl_subject = None;
         self.create_user_window = None;
         cx.notify();
     }
@@ -1843,6 +1900,15 @@ impl AppView {
                 CreateField::Credential => {
                     dialog.editor.account.credential = text.trim().to_string()
                 }
+                CreateField::SslCipher => {
+                    dialog.editor.account.ssl_cipher = text.trim().to_string()
+                }
+                CreateField::SslIssuer => {
+                    dialog.editor.account.x509_issuer = text.trim().to_string()
+                }
+                CreateField::SslSubject => {
+                    dialog.editor.account.x509_subject = text.trim().to_string()
+                }
             }
         }
         cx.notify();
@@ -1862,6 +1928,13 @@ impl AppView {
                 CreateCombo::Verification => dialog.editor.account.login_type = value.to_string(),
                 CreateCombo::DefaultDatabase => {
                     dialog.editor.account.default_database = value.to_string()
+                }
+                CreateCombo::Ssl => {
+                    dialog.editor.account.ssl_type = if value == "NONE" {
+                        String::new()
+                    } else {
+                        value.to_string()
+                    };
                 }
             }
         }
@@ -2720,6 +2793,23 @@ impl AppView {
                 input.update(cx, |input, cx| input.set_text(value, cx));
             }
         }
+        if let Some(combo) = self.create_user_ssl_combo.clone() {
+            let selected = if account.ssl_type.is_empty() {
+                "NONE".to_string()
+            } else {
+                account.ssl_type.clone()
+            };
+            combo.update(cx, |combo, cx| combo.set_selected(selected, cx));
+        }
+        for (input, value) in [
+            (&self.create_user_ssl_cipher, account.ssl_cipher.clone()),
+            (&self.create_user_ssl_issuer, account.x509_issuer.clone()),
+            (&self.create_user_ssl_subject, account.x509_subject.clone()),
+        ] {
+            if let Some(input) = input.clone() {
+                input.update(cx, |input, cx| input.set_text(value, cx));
+            }
+        }
         if let Some(input) = self.create_user_old_password.clone() {
             input.update(cx, |input, cx| input.set_text(String::new(), cx));
         }
@@ -3461,6 +3551,7 @@ impl AppView {
         let section = dialog.section;
         match section {
             UserSection::General => self.render_create_general(cx),
+            UserSection::Advanced => self.render_create_advanced(cx),
             UserSection::ServerPrivileges => self.render_create_server_privileges(cx),
             UserSection::ObjectPrivileges => self.render_create_grants(cx),
             UserSection::DefaultPrivileges => self.render_create_default_privileges(cx),
@@ -3873,6 +3964,55 @@ impl AppView {
             ));
         }
         general.into_any_element()
+    }
+
+    /// 高级: MySQL's `REQUIRE`/SSL settings.
+    fn render_create_advanced(&self, _cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let Some(dialog) = self.create_user_dialog.as_ref() else {
+            return div().into_any_element();
+        };
+        let account = &dialog.editor.account;
+        let specified = account.ssl_type.eq_ignore_ascii_case("SPECIFIED");
+
+        let mut ssl = div().flex().flex_col().gap_2().w_full();
+        ssl = ssl.child(create_row(
+            t!("user.field.ssl_type").to_string(),
+            sized_combo(self.create_user_ssl_combo.as_ref(), theme),
+            theme,
+        ));
+        if specified {
+            ssl = ssl
+                .child(create_row(
+                    t!("user.field.ssl_cipher").to_string(),
+                    sized_text(self.create_user_ssl_cipher.as_ref(), theme),
+                    theme,
+                ))
+                .child(create_row(
+                    t!("user.field.ssl_issuer").to_string(),
+                    sized_text(self.create_user_ssl_issuer.as_ref(), theme),
+                    theme,
+                ))
+                .child(create_row(
+                    t!("user.field.ssl_subject").to_string(),
+                    sized_text(self.create_user_ssl_subject.as_ref(), theme),
+                    theme,
+                ));
+        }
+
+        div()
+            .id("user-create-advanced")
+            .flex()
+            .flex_col()
+            .gap_5()
+            .w_full()
+            .child(section(
+                t!("user.ssl.section").to_string(),
+                None,
+                ssl.into_any_element(),
+                theme,
+            ))
+            .into_any_element()
     }
 
     /// 服务器权限: the global privilege grid with one-click templates.
@@ -5944,6 +6084,7 @@ mod tests {
         assert!(UserSection::General.visible(&mysql));
         assert!(UserSection::Sql.visible(&mysql));
         assert!(!UserSection::UserMapping.visible(&mysql));
+        assert!(UserSection::Advanced.visible(&mysql));
 
         // An engine without object-grant management hides the 权限 section.
         let sqlserver = UserEditorSpec {

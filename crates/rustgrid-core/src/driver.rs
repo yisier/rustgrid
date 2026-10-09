@@ -171,6 +171,8 @@ pub struct UserEditorSpec {
     /// When set, the account-lock checkbox is labelled 已启用 and reads `!account_locked`
     /// (SQL Server's login `is_disabled`, which is the inverse of a lock).
     pub account_enabled: bool,
+    /// Whether the 高级 section (MySQL's `REQUIRE`/SSL type, cipher, issuer, subject) is shown.
+    pub ssl: bool,
     /// The 最大问题数 resource limit (MySQL).
     pub max_questions: bool,
     /// The 最大更新数 resource limit (MySQL).
@@ -224,6 +226,7 @@ impl UserEditorSpec {
             password_valid_until: false,
             account_lock: true,
             account_enabled: false,
+            ssl: true,
             max_questions: true,
             max_updates: true,
             max_connections: true,

@@ -74,6 +74,7 @@ impl Driver for OracleDriver {
             password_valid_until: false,
             account_lock: true,
             account_enabled: false,
+            ssl: false,
             max_questions: false,
             max_updates: false,
             max_connections: false,

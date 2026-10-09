@@ -75,7 +75,8 @@ UI 层**不**出现任何引擎判断或原始 SQL：所有差异通过 `UserEdi
 `password_expiry`、`password_valid_until`、`default_tablespace`、`tablespace_quota`、`profile`、
 `server_privileges`、`object_privileges`（账号编辑器里的对象级分区）、`default_privileges`
 （默认权限分区）、`user_mapping`（SQL Server 用户映射分区）、`endpoint_permissions` /
-`login_permissions`（SQL Server 服务器安全对象分区）、`object_privilege_manager`（对象权限
+`login_permissions`（SQL Server 服务器安全对象分区）、`ssl`（MySQL 高级/`REQUIRE` 分区）、
+`object_privilege_manager`（对象权限
 管理器工具栏项，可独立开启）、`roles`、`account_enabled`、`list_super_user`。默认
 `UserEditorSpec::mysql()`。
 
@@ -123,12 +124,15 @@ UI 层**不**出现任何引擎判断或原始 SQL：所有差异通过 `UserEdi
 
 ### 新建/编辑用户窗口（`user_create.rs`，独立 OS 窗口）
 
-左导航分区（按 `UserEditorSpec` 显示）：常规 / 服务器权限 / 权限 / 默认权限 / 角色 / 用户映射 /
-终端节点权限 / 登录权限 / SQL 预览。
+左导航分区（按 `UserEditorSpec` 显示）：常规 / 高级 / 服务器权限 / 权限 / 默认权限 / 角色 /
+用户映射 / 终端节点权限 / 登录权限 / SQL 预览。
 - 常规：身份（`user`、`host` + 快捷芯片、认证插件、SQL Server 验证类型）、密码（含“指定旧
   密码”）、账号状态（过期策略 / 密码有效期至 / 锁定或已启用）、资源限制、存储与配置（Oracle 的
   默认表空间 / 配额 / PROFILE）、登录选项（SQL Server 的密码策略 / 过期 / 下次登录改密、默认
   数据库 / 语言、证书 / 非对称密钥 / 凭据）。
+- 高级（MySQL）：SSL 类型（无 / `ANY` / `X509` / `SPECIFIED`）；选 `SPECIFIED` 时显示密码套件 /
+  颁发者 / 主题，写入 `REQUIRE SSL` / `REQUIRE X509` /
+  `REQUIRE CIPHER … AND ISSUER … AND SUBJECT …`。
 - 服务器权限：Navicat 风格的三列表格（`权限 | 授予 | 含授予选项 | 拒绝`）。`grant_option_supported`
   时显示「含授予选项」（勾选即同时授予，可转授），`deny_supported` 时显示「拒绝」；授予/含授予
   选项/拒绝三态互斥，模板一键替换整组授予。
@@ -171,13 +175,13 @@ UI 层**不**出现任何引擎判断或原始 SQL：所有差异通过 `UserEdi
 | 含授予选项 | — | ✅（服务器级，`state = 'W'`） | — | — |
 | 默认权限 | — | — | `pg_default_acl`（按 schema / 对象类型 / 角色） | — |
 | 专属属性 | plugin/ssl/资源限制 | 验证类型 / 默认库 / 默认语言 / 密码策略 / 证书 / 凭据 | `VALID UNTIL` | PROFILE / 默认表空间 / 配额 |
-
 ### 驱动实现要点
 
 - **MySQL**（`rustgrid-mysql/src/user.rs`）：账户在 `mysql.user`；服务器权限取
   `information_schema.USER_PRIVILEGES`，对象授权取 `SCHEMA_/TABLE_/ROUTINE_PRIVILEGES`；
   写入回放 `CREATE/ALTER USER`、`GRANT/REVOKE`、`RENAME USER` 脚本（文本协议），结尾
-  `FLUSH PRIVILEGES`。
+  `FLUSH PRIVILEGES`。高级/SSL 读 `mysql.user.ssl_type`/`ssl_cipher`/`x509_issuer`/
+  `x509_subject`，按类型生成 `REQUIRE NONE|SSL|X509|CIPHER … AND ISSUER … AND SUBJECT …`。
 - **SQL Server**（`rustgrid-sqlserver/src/user.rs`）：账户是**登录**（无 host）；完整属性
   （默认库/语言、密码策略/过期、验证类型、凭据）取自 `sys.server_principals` 连接
   `sys.sql_logins`；服务器权限取 `sys.server_permissions`（`class = 100`，`G`→授予，

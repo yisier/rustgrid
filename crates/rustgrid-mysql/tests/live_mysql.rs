@@ -347,6 +347,34 @@ async fn live_account_editor_round_trip() {
         details.roles
     );
 
+    // 高级: the SSL/`REQUIRE` setting round-trips.
+    let details = connection
+        .user_details(user, host)
+        .await
+        .expect("reload for ssl");
+    let mut edit = edit_from(&details);
+    edit.account.ssl_type = "X509".to_string();
+    connection.save_user(&edit).await.expect("set REQUIRE X509");
+    let details = connection
+        .user_details(user, host)
+        .await
+        .expect("reload after REQUIRE X509");
+    assert_eq!(details.account.ssl_type, "X509");
+
+    let mut edit = edit_from(&details);
+    edit.account.ssl_type = "SPECIFIED".to_string();
+    edit.account.ssl_cipher = "AES128-SHA".to_string();
+    connection
+        .save_user(&edit)
+        .await
+        .expect("set REQUIRE CIPHER");
+    let details = connection
+        .user_details(user, host)
+        .await
+        .expect("reload after REQUIRE CIPHER");
+    assert_eq!(details.account.ssl_type, "SPECIFIED");
+    assert_eq!(details.account.ssl_cipher, "AES128-SHA");
+
     // Rename keeps the grants.
     let details = connection.user_details(user, host).await.expect("reload");
     let mut edit = edit_from(&details);

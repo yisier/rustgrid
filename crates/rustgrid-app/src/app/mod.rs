@@ -1725,6 +1725,11 @@ pub struct AppView {
     create_user_certificate: Option<Entity<TextInput>>,
     create_user_asymmetric_key: Option<Entity<TextInput>>,
     create_user_credential: Option<Entity<TextInput>>,
+    /// The MySQL 高级 section's SSL type dropdown and its cipher/issuer/subject fields.
+    create_user_ssl_combo: Option<Entity<ComboBox>>,
+    create_user_ssl_cipher: Option<Entity<TextInput>>,
+    create_user_ssl_issuer: Option<Entity<TextInput>>,
+    create_user_ssl_subject: Option<Entity<TextInput>>,
     /// The OS window hosting the "New User" dialog, if open.
     create_user_window: Option<WindowHandle<gpui_kit::component::Root>>,
     /// Focus target for the account window: focusing it at open keeps ESC (and any key handler on
@@ -2192,6 +2197,10 @@ impl AppView {
             create_user_certificate: None,
             create_user_asymmetric_key: None,
             create_user_credential: None,
+            create_user_ssl_combo: None,
+            create_user_ssl_cipher: None,
+            create_user_ssl_issuer: None,
+            create_user_ssl_subject: None,
             create_user_window: None,
             create_user_focus: cx.focus_handle(),
             object_privileges: None,

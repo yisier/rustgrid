@@ -54,6 +54,7 @@ impl Driver for PostgresDriver {
             password_valid_until: true,
             account_lock: true,
             account_enabled: false,
+            ssl: false,
             max_questions: false,
             max_updates: false,
             max_connections: true,
