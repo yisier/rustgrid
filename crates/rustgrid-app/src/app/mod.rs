@@ -1694,6 +1694,10 @@ pub struct AppView {
     update_status: update::UpdateStatus,
     /// The newest release's version, once a check has found one.
     update_version: Option<String>,
+    /// Live download progress for the in-flight install: `(bytes_downloaded, total_bytes)`.
+    /// `total_bytes` is `None` until the server's `Content-Length` is known. Cleared when the
+    /// install ends. Drives the titlebar percentage and the 关于 progress bar.
+    update_progress: Option<(u64, Option<u64>)>,
     /// Whether the once-per-launch startup update check has been kicked off.
     update_checked: bool,
     /// Last data revision handed to the cached `TreePane` / `TabBar`, so they re-render only when
@@ -2169,6 +2173,7 @@ impl AppView {
             options_focus: cx.focus_handle(),
             update_status: update::UpdateStatus::Idle,
             update_version: None,
+            update_progress: None,
             update_checked: false,
             tree_revision: 0,
             tab_revision: 0,

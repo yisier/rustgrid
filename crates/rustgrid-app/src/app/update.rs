@@ -94,7 +94,14 @@ fn check_latest() -> Result<Option<String>, String> {
 
 /// Blocking: download and install the newest release, returning the installed version. The caller
 /// relaunches the process afterwards.
-fn install_latest() -> Result<String, String> {
+///
+/// Every chunk the transport reads is forwarded over `progress` as
+/// `(bytes_downloaded_so_far, total_bytes)` so the UI can show a live progress bar; `total_bytes`
+/// is `None` when the server sends no `Content-Length` (the bar then runs indeterminate). The
+/// callback is `Fn` and the sender is `Send + Sync`, so it can be moved into `self_update`.
+fn install_latest(
+    progress: tokio::sync::mpsc::UnboundedSender<(u64, Option<u64>)>,
+) -> Result<String, String> {
     let status = self_update::backends::github::Update::configure()
         .repo_owner(REPO_OWNER)
         .repo_name(REPO_NAME)
@@ -105,11 +112,41 @@ fn install_latest() -> Result<String, String> {
         .no_confirm(true)
         .show_output(false)
         .show_download_progress(false)
+        .progress_callback(move |downloaded, total| {
+            // A closed receiver (the About window / app is gone) just drops the sample.
+            let _ = progress.send((downloaded, total));
+        })
         .build()
         .map_err(|error| error.to_string())?
         .update()
         .map_err(|error| error.to_string())?;
     Ok(status.version().to_string())
+}
+
+/// Human-readable byte count for the download progress caption (e.g. `12.3 MB`).
+pub(super) fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+/// The download progress as a 0–100 percentage, when the server sent a positive `Content-Length`.
+pub(super) fn progress_percent(downloaded: u64, total: Option<u64>) -> Option<u32> {
+    match total {
+        Some(total) if total > 0 => {
+            Some(((downloaded.min(total) as f64 / total as f64) * 100.0).round() as u32)
+        }
+        _ => None,
+    }
 }
 
 /// Relaunch the freshly replaced executable and exit this process. The child is marked with
@@ -172,20 +209,42 @@ impl AppView {
     }
 
     /// Download and install the newest release, then relaunch into it. Ignored while busy.
+    ///
+    /// The blocking install reports each read chunk over an unbounded channel; a second task
+    /// drains it into `update_progress` so the titlebar and the 关于 page reflect the download
+    /// live. The channel closes when the install finishes, which also ends the drain task.
     pub(super) fn install_update(&mut self, cx: &mut Context<'_, Self>) {
         if self.update_status.is_busy() || matches!(self.update_status, UpdateStatus::Installed) {
             return;
         }
         self.update_status = UpdateStatus::Downloading;
+        self.update_progress = None;
         cx.notify();
         let runtime = self.runtime.clone();
+        let (progress_tx, mut progress_rx) =
+            tokio::sync::mpsc::unbounded_channel::<(u64, Option<u64>)>();
+
+        // Drain download progress into the UI while the install runs on the blocking pool.
         cx.spawn(async move |this, cx| {
-            let result = runtime.spawn_blocking(install_latest).await;
+            while let Some((downloaded, total)) = progress_rx.recv().await {
+                let _ = this.update(cx, |app, cx| {
+                    app.update_progress = Some((downloaded, total));
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+
+        cx.spawn(async move |this, cx| {
+            let result = runtime
+                .spawn_blocking(move || install_latest(progress_tx))
+                .await;
             match result {
                 Ok(Ok(version)) => {
                     let _ = this.update(cx, move |app, cx| {
                         app.update_version = Some(version);
                         app.update_status = UpdateStatus::Installed;
+                        app.update_progress = None;
                         cx.notify();
                     });
                     // The on-disk executable has been replaced; hand over to it.
@@ -194,6 +253,7 @@ impl AppView {
                 Ok(Err(error)) => {
                     let _ = this.update(cx, move |app, cx| {
                         app.update_status = UpdateStatus::Failed(error);
+                        app.update_progress = None;
                         cx.notify();
                     });
                 }
@@ -201,6 +261,7 @@ impl AppView {
                     let message = error.to_string();
                     let _ = this.update(cx, move |app, cx| {
                         app.update_status = UpdateStatus::Failed(message);
+                        app.update_progress = None;
                         cx.notify();
                     });
                 }
@@ -237,11 +298,18 @@ impl AppView {
         // download icon, with the version available on hover.
         let (icon, label, color) = match &self.update_status {
             UpdateStatus::Available => ("icons/update.svg", None, theme.brand),
-            UpdateStatus::Downloading => (
-                "icons/refresh.svg",
-                Some(t!("update.downloading").to_string()),
-                theme.text_muted,
-            ),
+            UpdateStatus::Downloading => {
+                let label = match self
+                    .update_progress
+                    .and_then(|(downloaded, total)| progress_percent(downloaded, total))
+                {
+                    Some(percent) => {
+                        t!("update.downloading_percent", percent = percent).to_string()
+                    }
+                    None => t!("update.downloading").to_string(),
+                };
+                ("icons/refresh.svg", Some(label), theme.text_muted)
+            }
             UpdateStatus::Installed => (
                 "icons/check.svg",
                 Some(t!("update.restarting").to_string()),
@@ -385,5 +453,51 @@ impl AppView {
                     .text_color(rgb(status_color))
                     .child(self.update_status_text()),
             )
+            .when_some(
+                self.download_progress_element(theme),
+                |element, progress| element.child(progress),
+            )
+    }
+
+    /// The live download progress bar and byte caption for the 关于 page. `None` unless an install
+    /// is running; the bar is indeterminate until the server's `Content-Length` gives a percentage.
+    fn download_progress_element(&self, theme: Theme) -> Option<AnyElement> {
+        if !matches!(self.update_status, UpdateStatus::Downloading) {
+            return None;
+        }
+        let (downloaded, total) = self.update_progress.unwrap_or((0, None));
+        let percent = progress_percent(downloaded, total);
+        let caption = match (total, percent) {
+            (Some(total), Some(percent)) if total > 0 => t!(
+                "about.progress",
+                percent = percent,
+                done = format_bytes(downloaded),
+                total = format_bytes(total)
+            )
+            .to_string(),
+            _ => t!("about.progress_unknown", done = format_bytes(downloaded)).to_string(),
+        };
+        let bar = gpui_kit::component::progress::Progress::new("about-update-progress")
+            .with_size(gpui_kit::component::Size::XSmall)
+            .color(rgb(theme.brand))
+            .value(percent.map(|percent| percent as f32).unwrap_or(0.0))
+            // No total yet: run the indeterminate sliding animation (the byte caption still
+            // advances), so the UI never looks frozen while the archive streams in.
+            .loading(percent.is_none());
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .w_full()
+                .child(bar)
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(theme.text_muted))
+                        .child(caption),
+                )
+                .into_any_element(),
+        )
     }
 }
