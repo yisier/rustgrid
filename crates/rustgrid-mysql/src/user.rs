@@ -364,7 +364,7 @@ fn read_account(row: &MySqlRow) -> UserAccount {
         plugin: text(row, "plugin"),
         password_set: !text(row, "authentication_string").is_empty(),
         password_expired: flag(row, "password_expired"),
-        password_lifetime: int(row, "password_lifetime").map(|value| value.max(0) as u32),
+        password_lifetime: opt_uint(row, "password_lifetime").map(|value| value as u32),
         password_valid_until: None,
         account_locked: flag(row, "account_locked"),
         max_questions: uint(row, "max_questions"),
@@ -919,8 +919,16 @@ fn flag(row: &MySqlRow, name: &str) -> bool {
     text(row, name).eq_ignore_ascii_case("Y")
 }
 
-fn int(row: &MySqlRow, name: &str) -> Option<i64> {
-    row.try_get::<Option<i64>, _>(name).ok().flatten()
+/// An unsigned nullable integer column. SQLx's checked `try_get::<i64>` rejects an unsigned
+/// column, so the `unsigned`-aware decoders are tried first (see `decode_cell`).
+fn opt_uint(row: &MySqlRow, name: &str) -> Option<u64> {
+    if let Ok(value) = row.try_get::<Option<u64>, _>(name) {
+        return value;
+    }
+    if let Ok(value) = row.try_get::<Option<i64>, _>(name) {
+        return value.map(|value| value.max(0) as u64);
+    }
+    None
 }
 
 fn uint(row: &MySqlRow, name: &str) -> u64 {
