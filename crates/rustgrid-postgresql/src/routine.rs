@@ -54,11 +54,11 @@ async fn routine_rows(
 ) -> Result<Vec<(String, RoutineKind, String, String, String, String, String)>> {
     let pool = connection.pool_for(database).await?;
     let rows = sqlx::query(
-        "SELECT n.nspname, p.proname, p.prokind, \
+        "SELECT n.nspname, p.proname, p.prokind::text, \
                 pg_get_function_identity_arguments(p.oid), \
                 pg_get_function_result(p.oid), \
                 COALESCE(obj_description(p.oid, 'pg_proc'), ''), \
-                p.provolatile, p.prosecdef \
+                p.provolatile::text, p.prosecdef \
          FROM pg_proc p \
          JOIN pg_namespace n ON n.oid = p.pronamespace \
          WHERE p.prokind IN ('f','p') \

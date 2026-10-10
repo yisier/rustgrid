@@ -160,7 +160,7 @@ impl PostgresConnection {
     ) -> Result<Option<char>> {
         let pool = self.pool(Some(database)).await?;
         let row = sqlx::query(
-            "SELECT c.relkind FROM pg_class c \
+            "SELECT c.relkind::text FROM pg_class c \
              JOIN pg_namespace n ON n.oid = c.relnamespace \
              WHERE n.nspname = $1 AND c.relname = $2",
         )
@@ -263,7 +263,7 @@ impl Connection for PostgresConnection {
         // current user has privileges on. Names are returned `schema.name`.
         let pool = self.pool(Some(database)).await?;
         let rows = sqlx::query(
-            "SELECT n.nspname, c.relname, c.relkind, \
+            "SELECT n.nspname, c.relname, c.relkind::text, \
                     COALESCE(v.is_updatable, 'NO') \
              FROM pg_class c \
              JOIN pg_namespace n ON n.oid = c.relnamespace \

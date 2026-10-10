@@ -196,7 +196,8 @@ async fn round_trips_a_live_postgresql() {
         .as_display()
         .parse()
         .unwrap();
-    assert_eq!(count, 3);
+    // Two initial rows, the `carol` insert and the transaction's `dave`.
+    assert_eq!(count, 4);
 
     connection
         .execute_query(
@@ -293,6 +294,15 @@ async fn round_trips_a_live_postgresql() {
     let users = connection.list_users().await.unwrap();
     assert!(!users.is_empty());
 
+    // The view depends on the table, so drop it before the table is restored (PostgreSQL refuses
+    // to drop a table another object depends on).
+    let _ = connection
+        .execute_query(
+            Some(&database),
+            "DROP VIEW IF EXISTS public.rustgrid_live_view",
+        )
+        .await;
+
     // Backup metadata + restore (including sequence reset).
     let dump = connection
         .backup_object_metadata(&database, BackupObjectKind::Table, table)
@@ -306,7 +316,7 @@ async fn round_trips_a_live_postgresql() {
         })
         .await
         .unwrap();
-    assert_eq!(rows.len(), 3);
+    assert_eq!(rows.len(), 4);
     let mut restored = dump;
     restored.rows = rows;
     connection

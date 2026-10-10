@@ -144,7 +144,7 @@ pub(crate) async fn table_schema(
                 NOT a.attnotnull AS nullable, \
                 pg_get_expr(d.adbin, d.adrelid) AS default_expr, \
                 col_description(a.attrelid, a.attnum) AS comment, \
-                a.attidentity, \
+                a.attidentity::text, \
                 EXISTS (SELECT 1 FROM pg_index i \
                         WHERE i.indrelid = a.attrelid AND i.indisprimary \
                           AND a.attnum = ANY(i.indkey)) AS primary_key \
@@ -244,7 +244,7 @@ pub(crate) async fn table_schema(
                 (SELECT array_agg(a.attname ORDER BY k.ord) \
                  FROM unnest(con.confkey) WITH ORDINALITY AS k(attnum, ord) \
                  JOIN pg_attribute a ON a.attrelid = con.confrelid AND a.attnum = k.attnum) AS ref_columns, \
-                con.confupdtype, con.confdeltype \
+                con.confupdtype::text, con.confdeltype::text \
          FROM pg_constraint con \
          JOIN pg_class c ON c.oid = con.conrelid \
          JOIN pg_namespace n ON n.oid = c.relnamespace \
