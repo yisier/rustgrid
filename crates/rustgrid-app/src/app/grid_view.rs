@@ -512,6 +512,8 @@ impl Render for GridView {
                             if editing_here {
                                 let next_weak = action_weak.clone();
                                 let prev_weak = action_weak.clone();
+                                let up_weak = action_weak.clone();
+                                let down_weak = action_weak.clone();
                                 cell_element = cell_element
                                     .key_context(GRID_CELL_CONTEXT)
                                     .on_action(move |_: &NextCell, window, cx| {
@@ -522,6 +524,16 @@ impl Render for GridView {
                                     .on_action(move |_: &PrevCell, window, cx| {
                                         let _ = prev_weak.update(cx, |grid, cx| {
                                             grid.cell_editor_tab(true, window, cx);
+                                        });
+                                    })
+                                    .on_action(move |_: &MoveCellUp, window, cx| {
+                                        let _ = up_weak.update(cx, |grid, cx| {
+                                            grid.cell_editor_move(-1, 0, window, cx);
+                                        });
+                                    })
+                                    .on_action(move |_: &MoveCellDown, window, cx| {
+                                        let _ = down_weak.update(cx, |grid, cx| {
+                                            grid.cell_editor_move(1, 0, window, cx);
                                         });
                                     });
                             }

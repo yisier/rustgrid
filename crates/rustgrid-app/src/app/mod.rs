@@ -59,7 +59,9 @@ use ui::{
 // Cell-navigation actions for the in-place grid editor. gpui-kit's `Root` binds `tab`/`shift-tab`
 // to focus traversal in the `"Root"` context, and key bindings run before `on_key_down`; binding
 // the same keys in a deeper context (the editing cell) takes precedence and moves the editor.
-gpui::actions!(grid, [NextCell, PrevCell]);
+// Up/Down are additionally bound to `GridCell > Input` because the kit's own `MoveUp`/`MoveDown`
+// handlers consume those keys for a single-line field without propagating.
+gpui::actions!(grid, [NextCell, PrevCell, MoveCellUp, MoveCellDown]);
 
 // Backup-list actions. `Root` binds `ctrl-c` to a copy action in the `"Root"` context, which
 // would swallow the keystroke before `on_key_down`; binding our own actions in a deeper context
@@ -75,6 +77,10 @@ gpui::actions!(queryeditor, [RunSelectedQuery, SaveQuery]);
 
 /// Key context applied to the cell that owns the in-place editor.
 const GRID_CELL_CONTEXT: &str = "GridCell";
+
+/// The in-place editor's own `Input` context as seen from the editing cell, for key bindings that
+/// must outrank the kit's text-input bindings (up/down cell movement).
+const GRID_CELL_INPUT_CONTEXT: &str = "GridCell > Input";
 
 /// Key context applied to the backup list, so F2 / Ctrl+C / Ctrl+V reach it.
 const BACKUP_LIST_CONTEXT: &str = "BackupList";
@@ -191,6 +197,8 @@ struct SaveQueryDialog {
     /// The selected connection, indexed into `AppView::connections`.
     connection_index: Option<usize>,
     database: String,
+    /// The schema to file the query under, when the query's run target has one selected.
+    schema: Option<String>,
     error: Option<String>,
 }
 
@@ -257,6 +265,8 @@ struct QueryFileInfo {
     connection_id: String,
     /// The database folder holding the file.
     database: String,
+    /// The schema folder holding the file, when the query was filed under one.
+    schema: Option<String>,
     size: u64,
     created: Option<std::time::SystemTime>,
     modified: Option<std::time::SystemTime>,
@@ -1102,10 +1112,6 @@ struct TreePane {
     /// Focus target for the tree, so F2 reaches [`AppView::begin_rename_table`].
     focus: FocusHandle,
     theme: Theme,
-    /// The tree's filter text.
-    search: String,
-    /// The filter field shown above the tree.
-    search_input: Entity<TextInput>,
     /// The ids of the currently visible nodes, in draw order, for keyboard navigation.
     visible_ids: Vec<String>,
 }
@@ -1954,6 +1960,11 @@ impl AppView {
         cx.bind_keys([
             KeyBinding::new("tab", NextCell, Some(GRID_CELL_CONTEXT)),
             KeyBinding::new("shift-tab", PrevCell, Some(GRID_CELL_CONTEXT)),
+            // Vertical cell movement while the in-place editor holds focus. The `GridCell > Input`
+            // predicate ties with the kit's own `Input` binding at the same depth, and later
+            // bindings win, so the grid's action takes over the keystroke.
+            KeyBinding::new("up", MoveCellUp, Some(GRID_CELL_INPUT_CONTEXT)),
+            KeyBinding::new("down", MoveCellDown, Some(GRID_CELL_INPUT_CONTEXT)),
             KeyBinding::new("f2", RenameBackupFile, Some(BACKUP_LIST_CONTEXT)),
             KeyBinding::new("ctrl-c", CopyBackupFile, Some(BACKUP_LIST_CONTEXT)),
             KeyBinding::new("cmd-c", CopyBackupFile, Some(BACKUP_LIST_CONTEXT)),
@@ -2812,8 +2823,8 @@ impl AppView {
             )
     }
 
-    /// The window's fixed bottom status bar: driver count on the left, the active view's status in
-    /// the middle, and the side-pane toggles in the bottom-right corner.
+    /// The window's fixed bottom status bar: the active view's status in the middle and the
+    /// side-pane toggles in the bottom-right corner.
     fn render_status_bar(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
         let center: AnyElement = if self.main_tab == MainTab::Backups {
@@ -2857,17 +2868,6 @@ impl AppView {
             .border_t_1()
             .border_color(rgb(theme.border))
             .text_size(px(12.0))
-            .child(
-                div()
-                    .flex_none()
-                    .text_xs()
-                    .text_color(rgb(theme.text_muted))
-                    .child(format!(
-                        "{}: {}",
-                        t!("sidebar.drivers"),
-                        self.registry.len()
-                    )),
-            )
             .child(center)
             .child(
                 div()

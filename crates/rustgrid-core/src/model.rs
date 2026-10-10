@@ -59,7 +59,8 @@ pub struct ConnectionConfig {
 }
 
 /// A named SQL query saved by the user. Queries are filed under a connection (by profile id, so
-/// they survive reordering/renaming the connection) and a database name.
+/// they survive reordering/renaming the connection) and a database name, optionally narrowed to a
+/// schema (SQL Server/PostgreSQL).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedQuery {
     pub name: String,
@@ -69,6 +70,10 @@ pub struct SavedQuery {
     /// The database the query is filed under. Empty when the connection has no database.
     #[serde(default)]
     pub database: String,
+    /// The schema the query is filed under, when it was saved while a schema was selected. `None`
+    /// files the query directly under the database (schema-less engines, or a database-level query).
+    #[serde(default)]
+    pub schema: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

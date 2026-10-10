@@ -602,28 +602,39 @@ impl AppView {
         }
 
         if just_opened {
-            let existing = self.object_pane.as_ref().map(|pane| {
-                let pane = pane.read(cx);
-                (pane.connection_index, pane.database_index, pane.category)
-            });
-            let category = match existing {
-                Some((pane_connection, pane_database, category))
-                    if pane_connection == connection_index && pane_database == database_index =>
-                {
-                    category
-                }
-                _ => match self.main_tab {
-                    MainTab::Views => Category::Views,
-                    MainTab::Functions if supports_routines => Category::Functions,
-                    MainTab::Queries => Category::Queries,
-                    _ => Category::Tables,
-                },
-            };
-            self.open_object_pane(connection_index, database_index, None, category, cx);
-            self.clear_object_search(cx);
-            self.active_grid = None;
-            self.active_query = None;
-            self.active_design = None;
+            if supports_schemas {
+                // A schema-qualified engine shows objects only once a schema is opened: opening
+                // the database just reveals its schemas in the tree and clears the content pane.
+                self.object_pane = None;
+                self.clear_object_search(cx);
+                self.active_grid = None;
+                self.active_query = None;
+                self.active_design = None;
+            } else {
+                let existing = self.object_pane.as_ref().map(|pane| {
+                    let pane = pane.read(cx);
+                    (pane.connection_index, pane.database_index, pane.category)
+                });
+                let category = match existing {
+                    Some((pane_connection, pane_database, category))
+                        if pane_connection == connection_index
+                            && pane_database == database_index =>
+                    {
+                        category
+                    }
+                    _ => match self.main_tab {
+                        MainTab::Views => Category::Views,
+                        MainTab::Functions if supports_routines => Category::Functions,
+                        MainTab::Queries => Category::Queries,
+                        _ => Category::Tables,
+                    },
+                };
+                self.open_object_pane(connection_index, database_index, None, category, cx);
+                self.clear_object_search(cx);
+                self.active_grid = None;
+                self.active_query = None;
+                self.active_design = None;
+            }
         }
 
         self.persist_settings();
@@ -843,6 +854,28 @@ impl AppView {
         self.active_query = None;
         self.active_design = None;
         cx.notify();
+    }
+
+    /// Handle a click on a schema tree row: open the schema (highlight it, expand it and show its
+    /// objects) when it is not already showing, otherwise collapse/expand it like a plain node.
+    pub(super) fn select_schema(
+        &mut self,
+        connection_index: usize,
+        database_index: usize,
+        schema: String,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let already_open = self.object_pane.as_ref().is_some_and(|pane| {
+            let pane = pane.read(cx);
+            pane.connection_index == connection_index
+                && pane.database_index == database_index
+                && pane.schema.as_deref() == Some(schema.as_str())
+        });
+        if already_open {
+            self.toggle_schema(connection_index, database_index, schema, cx);
+        } else {
+            self.open_schema(connection_index, database_index, schema, cx);
+        }
     }
 
     /// Close a schema (SQL Server): un-highlight it, collapse it and clear the content pane when it

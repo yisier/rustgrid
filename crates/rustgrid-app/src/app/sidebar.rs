@@ -92,6 +92,8 @@ fn build_schema_nodes(
 struct TreeSavedQuery {
     /// The database folder the query belongs to, matching a `TreeDatabase`'s name.
     database: String,
+    /// The schema folder the query was filed under, when it has one.
+    schema: Option<String>,
     /// The query's display name.
     name: String,
     /// The index into `AppView::query_files`, used to open it.
@@ -226,6 +228,7 @@ fn snapshot_connections(app: &AppView) -> Vec<TreeConnection> {
                     .filter(|(_, file)| file.connection_id == node.profile.id)
                     .map(|(index, file)| TreeSavedQuery {
                         database: file.database.clone(),
+                        schema: file.schema.clone(),
                         name: file.name.clone(),
                         index,
                     })
@@ -233,51 +236,6 @@ fn snapshot_connections(app: &AppView) -> Vec<TreeConnection> {
             }
         })
         .collect()
-}
-
-/// Keep only the connections/databases/objects whose name matches `query` (case-insensitive),
-/// forcing matched ancestors open so the result is visible.
-fn filter_tree(connections: &mut Vec<TreeConnection>, query: &str) {
-    let query = query.trim().to_lowercase();
-    if query.is_empty() {
-        return;
-    }
-    let matches = |name: &str| name.to_lowercase().contains(&query);
-    connections.retain_mut(|conn| {
-        if matches(&conn.name) {
-            conn.expanded = true;
-            return true;
-        }
-        let mut db_any = false;
-        if let Loadable::Loaded(databases) = &mut conn.databases {
-            databases.retain_mut(|db| {
-                let db_match = matches(&db.name);
-                let mut leaf_any = false;
-                if !db_match {
-                    if let Loadable::Loaded(tables) = &mut db.tables {
-                        tables.retain(|table| matches(&table.name));
-                        leaf_any |= !tables.is_empty();
-                    }
-                    if let Loadable::Loaded(routines) = &mut db.routines {
-                        routines.retain(|routine| matches(&routine.name));
-                        leaf_any |= !routines.is_empty();
-                    }
-                }
-                let keep = db_match || leaf_any;
-                if keep {
-                    db.expanded = true;
-                }
-                keep
-            });
-            db_any = !databases.is_empty();
-        }
-        let query_match = conn.saved_queries.iter().any(|saved| matches(&saved.name));
-        let keep = db_any || query_match;
-        if keep {
-            conn.expanded = true;
-        }
-        keep
-    });
 }
 
 /// The ids of the tree rows that are currently visible, in draw order, for keyboard navigation.
@@ -317,26 +275,6 @@ fn collect_visible_ids(connections: &[TreeConnection], out: &mut Vec<String>) {
 
 impl TreePane {
     pub(super) fn new(app: WeakEntity<AppView>, cx: &mut Context<'_, Self>) -> Self {
-        let self_weak = cx.weak_entity();
-        let search_input = cx.new(move |cx| {
-            TextInput::new(
-                Theme::dark(),
-                "",
-                TextInputOptions {
-                    placeholder: t!("sidebar.search").to_string().into(),
-                    icon: Some("icons/search.svg"),
-                    clearable: true,
-                    ..Default::default()
-                },
-                cx,
-            )
-            .on_change(Rc::new(move |text, _window, cx| {
-                let _ = self_weak.update(cx, |pane, cx| {
-                    pane.search = text.to_string();
-                    cx.notify();
-                });
-            }))
-        });
         Self {
             app,
             scroll: ScrollHandle::new(),
@@ -345,8 +283,6 @@ impl TreePane {
             rename_row: None,
             focus: cx.focus_handle(),
             theme: Theme::dark(),
-            search: String::new(),
-            search_input,
             visible_ids: Vec::new(),
         }
     }
@@ -844,7 +780,7 @@ impl TreePane {
                 this.selected = Some(click_id.clone());
                 let name = click_name.clone();
                 let _ = app.update(cx, |app, cx| {
-                    app.toggle_schema(connection_index, database_index, name, cx);
+                    app.select_schema(connection_index, database_index, name, cx);
                 });
             }))
             .on_mouse_down(
@@ -1064,10 +1000,16 @@ impl TreePane {
                     }
                 },
                 Category::Queries => {
-                    for query in saved_queries
-                        .iter()
-                        .filter(|query| query.database == database.name)
-                    {
+                    for query in saved_queries.iter().filter(|query| {
+                        query.database == database.name
+                            && match schema {
+                                // A schema shows its own queries plus the database-level ones.
+                                Some(scope) => {
+                                    query.schema.is_none() || query.schema.as_deref() == Some(scope)
+                                }
+                                None => query.schema.is_none(),
+                            }
+                    }) {
                         sub = sub.child(self.render_saved_query(
                             connection_index,
                             database_index,
@@ -1400,7 +1342,7 @@ impl TreePane {
 
 impl Render for TreePane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let (theme, mut connections, rename) = {
+        let (theme, connections, rename) = {
             let Some(app) = self.app.upgrade() else {
                 return div().into_any_element();
             };
@@ -1411,15 +1353,9 @@ impl Render for TreePane {
                 app.rename_row(RowPane::Tree),
             )
         };
-        let theme_changed = self.theme != theme;
         self.theme = theme;
         self.rename_row = rename;
-        if theme_changed {
-            let input = self.search_input.clone();
-            input.update(cx, |input, cx| input.set_theme(theme, cx));
-        }
 
-        filter_tree(&mut connections, &self.search);
         self.visible_ids.clear();
         collect_visible_ids(&connections, &mut self.visible_ids);
 
@@ -1430,11 +1366,7 @@ impl Render for TreePane {
                     .w_full()
                     .p_2()
                     .text_color(rgb(theme.text_muted))
-                    .child(if self.search.is_empty() {
-                        t!("sidebar.no_connections").to_string()
-                    } else {
-                        t!("sidebar.no_match").to_string()
-                    }),
+                    .child(t!("sidebar.no_connections").to_string()),
             );
         }
         for connection in &connections {
@@ -1447,14 +1379,6 @@ impl Render for TreePane {
             .w_full()
             .flex_1()
             .min_h(px(0.0))
-            .child(
-                div()
-                    .flex_none()
-                    .px_2()
-                    .pt_1()
-                    .pb_1()
-                    .child(div().h(px(24.0)).w_full().child(self.search_input.clone())),
-            )
             .child(
                 div()
                     .id("sidebar-scroll")

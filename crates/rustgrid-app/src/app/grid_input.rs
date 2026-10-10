@@ -395,7 +395,32 @@ impl GridView {
             }
             return;
         }
-        if self.cell_editor.is_some() || self.date_picker.is_some() {
+        if self.date_picker.is_some() {
+            return;
+        }
+        if self.cell_editor.is_some() {
+            // The in-place editor owns the caret keys while its text still has room; the kit
+            // propagates left/right once the caret sits at the edge, so the grid moves to the
+            // adjacent cell (spreadsheet-like). Up/down arrive as `MoveCellUp`/`MoveCellDown`.
+            match keystroke.key.as_str() {
+                "left" => {
+                    self.cell_editor_move(0, -1, window, cx);
+                    cx.stop_propagation();
+                }
+                "right" => {
+                    self.cell_editor_move(0, 1, window, cx);
+                    cx.stop_propagation();
+                }
+                "up" => {
+                    self.cell_editor_move(-1, 0, window, cx);
+                    cx.stop_propagation();
+                }
+                "down" => {
+                    self.cell_editor_move(1, 0, window, cx);
+                    cx.stop_propagation();
+                }
+                _ => {}
+            }
             return;
         }
         let Some((row, col)) = self
@@ -880,6 +905,43 @@ impl GridView {
             return;
         }
 
+        self.state.selection = Some(CellSelection::new(next_row, next_col));
+        if next_row != row {
+            self.list_scroll
+                .scroll_to_item(next_row, ScrollStrategy::Nearest);
+        }
+        self.begin_edit((next_row, next_col), None, window, cx);
+        cx.notify();
+    }
+
+    /// Arrow in a cell editor: stage the current value and move the editor to the adjacent cell
+    /// (`d_row`/`d_col` are a single step). Left/right reach here only when the caret is already at
+    /// the text edge, so ordinary caret movement is preserved; up/down always move vertically.
+    pub(super) fn cell_editor_move(
+        &mut self,
+        d_row: isize,
+        d_col: isize,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(editor) = self.cell_editor.as_ref() else {
+            return;
+        };
+        let (row, col) = (editor.row, editor.col);
+        self.commit_editor(cx);
+
+        let column_count = self.state.columns.len();
+        let row_count = self.display_row_count();
+        if column_count == 0 || row_count == 0 {
+            return;
+        }
+        let next_row = (row as isize + d_row).clamp(0, row_count as isize - 1) as usize;
+        let next_col = (col as isize + d_col).clamp(0, column_count as isize - 1) as usize;
+        if (next_row, next_col) == (row, col) {
+            // At the grid edge there is no adjacent cell: commit and keep the selection in place.
+            cx.notify();
+            return;
+        }
         self.state.selection = Some(CellSelection::new(next_row, next_col));
         if next_row != row {
             self.list_scroll

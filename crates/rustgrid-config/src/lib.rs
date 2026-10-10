@@ -230,22 +230,38 @@ impl ConfigStore {
     }
 
     /// The root directory of saved queries. Each query is a `.sql` file under
-    /// `<root>/queries/<connection_id>/<database>/<name>.sql`, mirroring the backups tree.
+    /// `<root>/queries/<connection_id>/<database>/<name>.sql`, or under an extra
+    /// `<schema>/` segment when the query was saved while a schema was selected.
     pub fn queries_dir(&self) -> PathBuf {
         self.root.join(QUERIES_DIR)
     }
 
-    /// The file a saved query is written to.
-    pub fn query_file_path(&self, connection_id: &str, database: &str, name: &str) -> PathBuf {
-        self.queries_dir()
+    /// The file a saved query is written to. A `schema` files the query one level deeper.
+    pub fn query_file_path(
+        &self,
+        connection_id: &str,
+        database: &str,
+        schema: Option<&str>,
+        name: &str,
+    ) -> PathBuf {
+        let mut path = self
+            .queries_dir()
             .join(sanitize_component(connection_id))
-            .join(sanitize_component(database))
-            .join(format!("{}.sql", sanitize_component(name)))
+            .join(sanitize_component(database));
+        if let Some(schema) = schema.filter(|schema| !schema.is_empty()) {
+            path = path.join(sanitize_component(schema));
+        }
+        path.join(format!("{}.sql", sanitize_component(name)))
     }
 
     /// Write (or overwrite) one saved query's `.sql` file.
     pub fn save_query_file(&self, query: &SavedQuery) -> ConfigResult<PathBuf> {
-        let path = self.query_file_path(&query.connection_id, &query.database, &query.name);
+        let path = self.query_file_path(
+            &query.connection_id,
+            &query.database,
+            query.schema.as_deref(),
+            &query.name,
+        );
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;
         }
@@ -255,7 +271,12 @@ impl ConfigStore {
 
     /// Remove one saved query's `.sql` file.
     pub fn delete_query_file(&self, query: &SavedQuery) -> ConfigResult<()> {
-        let path = self.query_file_path(&query.connection_id, &query.database, &query.name);
+        let path = self.query_file_path(
+            &query.connection_id,
+            &query.database,
+            query.schema.as_deref(),
+            &query.name,
+        );
         if path.exists() {
             fs::remove_file(path)?;
         }
