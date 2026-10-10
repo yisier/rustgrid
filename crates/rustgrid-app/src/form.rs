@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rustgrid_core::{ConnectionOptions, ConnectionProfile, DriverId};
+use rustgrid_core::{
+    ConnectionFieldLabel, ConnectionFieldSpec, ConnectionFormSpec, ConnectionHomePage,
+    ConnectionOptions, ConnectionPage, ConnectionProfile, ConnectionStandardField, DriverId,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum FormField {
@@ -33,42 +36,13 @@ pub const FORM_FIELDS: [FormField; 10] = [
 /// Default query timeout (seconds) pre-filled on the 高级 page.
 const DEFAULT_QUERY_TIMEOUT: u64 = 30;
 
-/// The four pages of the connection window.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
-pub enum FormTab {
-    #[default]
-    General,
-    Tls,
-    Tunnel,
-    Advanced,
-}
-
-impl FormTab {
-    /// Every tab, in the order the tab strip shows them.
-    pub const ALL: [FormTab; 4] = [
-        FormTab::General,
-        FormTab::Tls,
-        FormTab::Tunnel,
-        FormTab::Advanced,
-    ];
-
-    pub fn label_key(self) -> &'static str {
-        match self {
-            FormTab::General => "form.tab.general",
-            FormTab::Tls => "form.tab.tls",
-            FormTab::Tunnel => "form.tab.tunnel",
-            FormTab::Advanced => "form.tab.advanced",
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct ConnectionForm {
     /// The engine this connection targets. Chosen from the New Connection dropdown and preserved
     /// when an existing connection is edited.
     pub driver: DriverId,
-    /// Whether the engine is file-based (SQLite): the general page then edits a single database
-    /// file path instead of host/port/username/password. Resolved from the driver registry.
+    /// Whether the engine is file-based (SQLite): the 常规 page then edits a single database file
+    /// path instead of host/port/username/password. Derived from the driver's home page.
     pub file_based: bool,
     pub name: String,
     pub host: String,
@@ -77,16 +51,29 @@ pub struct ConnectionForm {
     pub password: String,
     pub save_password: bool,
     pub database: String,
-    /// Whether the engine uses the ODBC fields below (resolved from the driver registry).
+    /// Whether the engine uses the ODBC fields below (derived from the driver's home page).
     pub odbc: bool,
     pub odbc_driver: String,
     pub odbc_dsn: String,
     pub odbc_connection_string: String,
     pub odbc_engine: String,
-    /// The TLS / tunnel / timeout / read-only settings edited on the other tabs.
+    /// The TLS / tunnel / timeout / read-only settings edited on the other pages.
     pub settings: ConnectionOptions,
+    /// Engine-specific fields declared by the driver's `ConnectionFormSpec`, keyed by their
+    /// `ConnectionProfile::options` key. Preserved across an edit even for keys the current driver
+    /// does not declare, so switching engines never silently drops an option.
+    pub extra: BTreeMap<String, String>,
+    /// The shape of the 常规 page, resolved from the driver's spec.
+    pub home: ConnectionHomePage,
+    /// The pages to show, in tab order (`pages[0]` is always the 常规 page), resolved from the
+    /// driver's spec.
+    pub pages: Vec<ConnectionPage>,
     /// The page currently shown.
-    pub tab: FormTab,
+    pub page: ConnectionPage,
+    /// Per-engine renames of the standard fields, resolved from the driver's spec.
+    pub labels: Vec<ConnectionFieldLabel>,
+    /// The engine's option fields (each with its page), resolved from the driver's spec.
+    pub option_fields: Vec<ConnectionFieldSpec>,
 }
 
 impl Default for ConnectionForm {
@@ -113,7 +100,18 @@ impl Default for ConnectionForm {
                 keepalive: Some(60),
                 ..Default::default()
             },
-            tab: FormTab::General,
+            extra: BTreeMap::new(),
+            // The standard network layout until a driver's spec is applied.
+            home: ConnectionHomePage::Network,
+            pages: vec![
+                ConnectionPage::General,
+                ConnectionPage::Tls,
+                ConnectionPage::Tunnel,
+                ConnectionPage::Advanced,
+            ],
+            page: ConnectionPage::General,
+            labels: Vec::new(),
+            option_fields: Vec::new(),
         }
     }
 }
@@ -170,8 +168,69 @@ impl ConnectionForm {
                 .get("odbc.engine")
                 .cloned()
                 .unwrap_or_default(),
+            // The ODBC keys have dedicated fields above; every other option is an engine-specific
+            // field owned by `extra` and round-tripped untouched.
+            extra: profile
+                .options
+                .iter()
+                .filter(|(key, _)| !key.starts_with("odbc."))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
             settings,
-            tab: FormTab::General,
+            // The driver's spec is applied by `show_form` once the registry is consulted.
+            home: ConnectionHomePage::Network,
+            pages: vec![
+                ConnectionPage::General,
+                ConnectionPage::Tls,
+                ConnectionPage::Tunnel,
+                ConnectionPage::Advanced,
+            ],
+            page: ConnectionPage::General,
+            labels: Vec::new(),
+            option_fields: Vec::new(),
+        }
+    }
+
+    /// Adopt a driver's connection-form spec: the 常规 page's shape, which pages (tabs) are shown,
+    /// the standard-field renames and the engine's option fields with their placement.
+    pub fn apply_spec(&mut self, spec: &ConnectionFormSpec) {
+        self.home = spec.home;
+        self.file_based = spec.home == ConnectionHomePage::File;
+        self.odbc = spec.home == ConnectionHomePage::Odbc;
+        self.labels = spec.labels.clone();
+        self.option_fields = spec.options.clone();
+        self.pages = std::iter::once(ConnectionPage::General)
+            .chain(spec.tabs.iter().copied())
+            .collect();
+        if !self.pages.contains(&self.page) {
+            self.page = ConnectionPage::General;
+        }
+    }
+
+    /// The per-engine rename/hint of a standard field, if the driver declares one.
+    pub fn label_override(&self, field: ConnectionStandardField) -> Option<&ConnectionFieldLabel> {
+        self.labels.iter().find(|label| label.field == field)
+    }
+
+    /// The option fields shown on `page`, in declaration order.
+    pub fn page_option_fields(
+        &self,
+        page: ConnectionPage,
+    ) -> impl Iterator<Item = &ConnectionFieldSpec> {
+        self.option_fields
+            .iter()
+            .filter(move |field| field.page == page)
+    }
+
+    /// Whether an option field is currently visible. A field with a `visible_when` condition is
+    /// shown while its controlling option has the matching value — or whenever the field itself
+    /// already holds a value, so a legacy profile can never hide an active option.
+    pub fn option_visible(&self, field: &ConnectionFieldSpec) -> bool {
+        match field.visible_when {
+            None => true,
+            Some((key, value)) => {
+                self.option_value(key) == value || !self.option_value(field.key).is_empty()
+            }
         }
     }
 
@@ -204,6 +263,16 @@ impl ConnectionForm {
             FormField::OdbcConnectionString => &self.odbc_connection_string,
             FormField::OdbcEngine => &self.odbc_engine,
         }
+    }
+
+    /// The current text of one engine-specific option field.
+    pub fn option_value(&self, key: &str) -> &str {
+        self.extra.get(key).map(String::as_str).unwrap_or("")
+    }
+
+    /// Store one engine-specific option field.
+    pub fn set_option(&mut self, key: &str, value: String) {
+        self.extra.insert(key.to_string(), value);
     }
 
     /// The required general-page fields that are currently empty. A network engine needs alias,
@@ -262,7 +331,14 @@ impl ConnectionForm {
             )
         };
 
-        let mut options = BTreeMap::new();
+        let mut options: BTreeMap<String, String> = self
+            .extra
+            .iter()
+            // Drop blank values so an empty field never overrides a driver's own default (e.g.
+            // `oracle.service_name` falls back to the database field when it is absent).
+            .filter(|(key, value)| !key.starts_with("odbc.") && !value.trim().is_empty())
+            .map(|(key, value)| (key.clone(), value.trim().to_string()))
+            .collect();
         if self.odbc {
             if !self.odbc_driver.trim().is_empty() {
                 options.insert(
@@ -315,4 +391,144 @@ fn now_nanos() -> u128 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn profile(options: BTreeMap<String, String>) -> ConnectionProfile {
+        ConnectionProfile {
+            id: "conn-1".to_string(),
+            name: "oracle".to_string(),
+            driver: DriverId::new("oracle"),
+            host: "127.0.0.1".to_string(),
+            port: 1521,
+            username: "scott".to_string(),
+            database: Some("FREEPDB1".to_string()),
+            options,
+            settings: ConnectionOptions::default(),
+        }
+    }
+
+    /// Engine options survive a load/save round-trip; the ODBC keys stay in their own fields.
+    #[test]
+    fn engine_options_round_trip_without_odbc_keys() {
+        let mut options = BTreeMap::new();
+        options.insert("oracle.tns_alias".to_string(), "ORCL".to_string());
+        options.insert("odbc.driver".to_string(), "SQLite3".to_string());
+
+        let form = ConnectionForm::from_profile(&profile(options), None, false);
+        assert_eq!(form.option_value("oracle.tns_alias"), "ORCL");
+        assert_eq!(form.option_value("odbc.driver"), "");
+
+        let saved = form.to_profile();
+        assert_eq!(
+            saved.options.get("oracle.tns_alias").map(String::as_str),
+            Some("ORCL")
+        );
+        assert!(!saved.options.contains_key("odbc.driver"));
+    }
+
+    /// A blank engine field is dropped, so it cannot override the driver's own default.
+    #[test]
+    fn blank_engine_options_are_not_persisted() {
+        let mut form = ConnectionForm::default();
+        form.set_option("oracle.wallet_password", "   ".to_string());
+        form.set_option("oracle.config_dir", " /etc/oracle ".to_string());
+
+        let options = form.to_profile().options;
+        assert!(!options.contains_key("oracle.wallet_password"));
+        assert_eq!(
+            options.get("oracle.config_dir").map(String::as_str),
+            Some("/etc/oracle")
+        );
+    }
+
+    /// The driver's spec is applied to the form: the page list, the 常规 shape, the standard-field
+    /// renames, the option placement and the `visible_when` gating.
+    #[test]
+    fn apply_spec_resolves_pages_labels_and_option_visibility() {
+        use rustgrid_core::{ConnectionFieldKind, ConnectionFieldSpec};
+
+        let spec = ConnectionFormSpec {
+            home: ConnectionHomePage::Odbc,
+            tabs: vec![ConnectionPage::Tls, ConnectionPage::Advanced],
+            labels: vec![ConnectionFieldLabel {
+                field: ConnectionStandardField::Database,
+                label_key: "test.database",
+                hint_key: Some("test.database_hint"),
+            }],
+            options: vec![
+                ConnectionFieldSpec {
+                    key: "test.mode",
+                    label_key: "test.mode",
+                    hint_key: None,
+                    kind: ConnectionFieldKind::Select(Vec::new()),
+                    page: ConnectionPage::General,
+                    visible_when: None,
+                },
+                ConnectionFieldSpec {
+                    key: "test.gated",
+                    label_key: "test.gated",
+                    hint_key: None,
+                    kind: ConnectionFieldKind::Text,
+                    page: ConnectionPage::Tls,
+                    visible_when: Some(("test.mode", "on")),
+                },
+            ],
+        };
+
+        let mut form = ConnectionForm::default();
+        form.apply_spec(&spec);
+
+        // The spec's page list and 常规 shape win over the default.
+        assert_eq!(
+            form.pages,
+            vec![
+                ConnectionPage::General,
+                ConnectionPage::Tls,
+                ConnectionPage::Advanced
+            ]
+        );
+        assert_eq!(form.home, ConnectionHomePage::Odbc);
+        assert!(form.odbc);
+        assert!(!form.file_based);
+        assert_eq!(form.page, ConnectionPage::General);
+
+        // Label overrides are found by standard field; unlisted fields keep the app default.
+        assert_eq!(
+            form.label_override(ConnectionStandardField::Database)
+                .map(|label| label.label_key),
+            Some("test.database")
+        );
+        assert!(form.label_override(ConnectionStandardField::Host).is_none());
+
+        // Options belong to their page.
+        let general: Vec<_> = form
+            .page_option_fields(ConnectionPage::General)
+            .map(|field| field.key)
+            .collect();
+        assert_eq!(general, vec!["test.mode"]);
+        let tls: Vec<_> = form
+            .page_option_fields(ConnectionPage::Tls)
+            .map(|field| field.key)
+            .collect();
+        assert_eq!(tls, vec!["test.gated"]);
+
+        // `visible_when`: hidden until the control matches — but never hidden once it holds a value.
+        let gated = form
+            .option_fields
+            .iter()
+            .find(|field| field.key == "test.gated")
+            .cloned()
+            .expect("gated field");
+        assert!(!form.option_visible(&gated));
+        form.set_option("test.mode", "on".to_string());
+        assert!(form.option_visible(&gated));
+        form.set_option("test.mode", "off".to_string());
+        assert!(!form.option_visible(&gated));
+        form.set_option("test.gated", "/tmp/x".to_string());
+        assert!(form.option_visible(&gated));
+    }
 }

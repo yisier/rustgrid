@@ -18,5 +18,12 @@ futures-util.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 uuid.workspace = true
 
+# Windows authentication uses tiberius' Windows-only SSPI backend (`winauth`). tiberius' Unix
+# backend (`sspi-rs`, via the `sspi` crate) cannot be enabled: it pins `crypto-bigint =0.7.0-rc.8`,
+# which conflicts with the release `crypto-bigint 0.7.5` that `russh` (the SSH tunnel) requires in
+# the same 0.7.x slot. Unix therefore keeps SQL Server authentication only.
+[target.'cfg(windows)'.dependencies]
+tiberius = { workspace = true, features = ["winauth"] }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

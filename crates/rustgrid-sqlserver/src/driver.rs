@@ -2,9 +2,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rustgrid_core::{
-    Connection, ConnectionConfig, DatabaseEditorSpec, DatabaseEditorTab, Driver,
-    DriverCapabilities, DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle,
-    DriverId, Error, Result, TlsMode, UserEditorSpec,
+    Connection, ConnectionConfig, ConnectionFieldChoice, ConnectionFieldKind, ConnectionFieldLabel,
+    ConnectionFieldSpec, ConnectionFormSpec, ConnectionHomePage, ConnectionPage,
+    ConnectionStandardField, DatabaseEditorSpec, DatabaseEditorTab, Driver, DriverCapabilities,
+    DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle, DriverId, Error, Result,
+    TlsMode, UserEditorSpec,
 };
 use tiberius::{AuthMethod, Config};
 
@@ -131,7 +133,49 @@ impl Driver for SqlServerDriver {
                 .with(DriverCapability::Routines)
                 .with(DriverCapability::Schemas),
             database_editor: self.database_editor(),
-            connection_form: Default::default(),
+            connection_form: ConnectionFormSpec {
+                // 常规 + TLS + 隧道 + 高级. SQL Server's own fields: 验证 on 常规, and the named
+                // instance / application name on 高级. All three option keys are honored by
+                // `connect` below. Navicat's Active Directory modes need an MSAL/OAuth flow
+                // tiberius does not provide.
+                home: ConnectionHomePage::Network,
+                tabs: vec![
+                    ConnectionPage::Tls,
+                    ConnectionPage::Tunnel,
+                    ConnectionPage::Advanced,
+                ],
+                labels: vec![ConnectionFieldLabel {
+                    field: ConnectionStandardField::Database,
+                    label_key: "form.sqlserver.database",
+                    hint_key: None,
+                }],
+                options: vec![
+                    ConnectionFieldSpec {
+                        key: "sqlserver.authentication",
+                        label_key: "form.sqlserver.authentication",
+                        hint_key: None,
+                        kind: ConnectionFieldKind::Select(authentication_choices()),
+                        page: ConnectionPage::General,
+                        visible_when: None,
+                    },
+                    ConnectionFieldSpec {
+                        key: "sqlserver.instance_name",
+                        label_key: "form.sqlserver.instance_name",
+                        hint_key: Some("form.sqlserver.instance_name_hint"),
+                        kind: ConnectionFieldKind::Text,
+                        page: ConnectionPage::Advanced,
+                        visible_when: None,
+                    },
+                    ConnectionFieldSpec {
+                        key: "sqlserver.application_name",
+                        label_key: "form.sqlserver.application_name",
+                        hint_key: Some("form.sqlserver.application_name_hint"),
+                        kind: ConnectionFieldKind::Text,
+                        page: ConnectionPage::Advanced,
+                        visible_when: None,
+                    },
+                ],
+            },
             order: 50,
         }
     }
@@ -147,17 +191,25 @@ impl Driver for SqlServerDriver {
         let mut server = Config::new();
         server.host(host);
         server.port(config.port.max(1));
-        server.application_name("RustGrid");
-        if let Some(instance) = instance {
+        server.application_name(
+            option(config, "sqlserver.application_name").unwrap_or_else(|| "RustGrid".to_string()),
+        );
+        // An explicit instance name wins over the `host\instance` form.
+        if let Some(instance) = option(config, "sqlserver.instance_name").or(instance) {
             server.instance_name(instance);
         }
         if let Some(database) = config.database.as_deref().filter(|value| !value.is_empty()) {
             server.database(database);
         }
-        server.authentication(AuthMethod::sql_server(
-            config.username.as_str(),
-            config.password.as_deref().unwrap_or(""),
-        ));
+        let user = config.username.as_str();
+        let password = config.password.as_deref().unwrap_or("");
+        server.authentication(
+            if option(config, "sqlserver.authentication").as_deref() == Some("windows") {
+                windows_authentication(user, password)
+            } else {
+                AuthMethod::sql_server(user, password)
+            },
+        );
         server.encryption(encryption_level(settings.tls.mode));
         server.readonly(settings.read_only);
 
@@ -218,6 +270,48 @@ fn split_host(host: &str) -> (String, Option<String>) {
     }
 }
 
+/// The authentication choices the connection form offers. `windows` is only offered where a
+/// Windows-auth backend is compiled in (see [`windows_authentication`]).
+fn authentication_choices() -> Vec<ConnectionFieldChoice> {
+    let mut choices = vec![ConnectionFieldChoice {
+        value: "sqlserver",
+        label_key: "form.sqlserver.auth.sqlserver",
+    }];
+    if cfg!(windows) {
+        choices.push(ConnectionFieldChoice {
+            value: "windows",
+            label_key: "form.sqlserver.auth.windows",
+        });
+    }
+    choices
+}
+
+/// A trimmed non-empty profile option.
+fn option(config: &ConnectionConfig, key: &str) -> Option<String> {
+    config
+        .options
+        .get(key)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// Windows (SSPI) authentication with an explicit Windows account. tiberius exposes
+/// `AuthMethod::Windows` through its Windows-only `winauth` feature, enabled per target in this
+/// crate's `Cargo.toml`.
+#[cfg(windows)]
+fn windows_authentication(user: &str, password: &str) -> AuthMethod {
+    AuthMethod::windows(user, password)
+}
+
+/// Fallback for a platform with no Windows-auth backend. tiberius' Unix backend (`sspi-rs`)
+/// conflicts with the workspace's `russh` dependency, so Unix has no Windows authentication; the
+/// form does not offer it there (`descriptor()` adds the choice only on Windows). This path exists
+/// for a hand-edited profile that names it anyway.
+#[cfg(not(windows))]
+fn windows_authentication(user: &str, password: &str) -> AuthMethod {
+    AuthMethod::sql_server(user, password)
+}
+
 /// Map a tiberius error to a core error, flagging login failures as authentication errors.
 pub(crate) fn map_connect_error(error: tiberius::error::Error) -> Error {
     if is_authentication_error(&error) {
@@ -241,4 +335,57 @@ fn is_authentication_error(error: &tiberius::error::Error) -> bool {
     // 18456 login failed, 18452 login from untrusted domain, 18470 account disabled,
     // 4060 cannot open the requested database, 916 insufficient permission on login.
     matches!(error.code(), Some(18456 | 18452 | 18470 | 4060 | 916))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every declared field maps to a `sqlserver.*` option the connect path reads.
+    #[test]
+    fn declared_connection_fields_are_honored_options() {
+        let descriptor = SqlServerDriver::new().descriptor();
+        let form = &descriptor.connection_form;
+
+        let keys: Vec<_> = form.options.iter().map(|field| field.key).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "sqlserver.authentication",
+                "sqlserver.instance_name",
+                "sqlserver.application_name",
+            ]
+        );
+
+        let ConnectionFieldKind::Select(choices) = &form.options[0].kind else {
+            panic!("authentication must be a select");
+        };
+        assert_eq!(
+            choices.first().map(|choice| choice.value),
+            Some("sqlserver")
+        );
+        // Windows authentication is only offered where its backend is compiled in.
+        assert_eq!(
+            choices.iter().any(|choice| choice.value == "windows"),
+            cfg!(windows)
+        );
+        // 验证 is on 常规; the two text fields are on 高级.
+        assert_eq!(form.options[0].page, ConnectionPage::General);
+        assert_eq!(form.options[1].page, ConnectionPage::Advanced);
+        assert_eq!(form.options[2].page, ConnectionPage::Advanced);
+        assert_eq!(
+            form.labels.first().map(|label| label.field),
+            Some(ConnectionStandardField::Database)
+        );
+    }
+
+    #[test]
+    fn splits_host_instance() {
+        assert_eq!(
+            split_host("db\\SQLEXPRESS"),
+            ("db".to_string(), Some("SQLEXPRESS".to_string()))
+        );
+        assert_eq!(split_host("db"), ("db".to_string(), None));
+        assert_eq!(split_host("db\\"), ("db\\".to_string(), None));
+    }
 }

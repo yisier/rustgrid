@@ -20,18 +20,20 @@ use rustgrid_config::{
     AppSettings, ConfigStore, DEFAULT_EDITOR_FONT_SIZE, LanguageSetting, ThemeSetting,
 };
 use rustgrid_core::{
-    BackupObjectKind, CellValue, Connection, ConnectionConfig, DatabaseEditorSpec,
-    DatabaseEditorTab, DatabaseOptions, DefaultObjectType, DefaultPrivilege, DriverCapability,
-    DriverIconStyle, DriverId, DriverRegistry, Error, FilterCondition, FilterConjunction,
-    FilterGroup, FilterNode, FilterOperator, ObjectGrant, ObjectPrivilegeRow, PageRequest,
-    PrivilegeCatalog, PrivilegeId, PrivilegePreset, PrivilegeScope, QueryResult, RoutineDetails,
-    RoutineEdit, RoutineInfo, RoutineKind, RowInsert, RowUpdate, SavedBackup, SavedQuery,
-    ServerSecurableGrant, TableStatus, TlsMode, TunnelAuth, TunnelKind, TunnelLayer, UserAccount,
-    UserDetails, UserEdit, UserEditSection, UserEditorSpec, UserMapping, ViewEdit,
+    BackupObjectKind, CellValue, Connection, ConnectionConfig, ConnectionFieldChoice,
+    ConnectionFieldKind, ConnectionFieldSpec, ConnectionHomePage, ConnectionPage,
+    ConnectionStandardField, DatabaseEditorSpec, DatabaseEditorTab, DatabaseOptions,
+    DefaultObjectType, DefaultPrivilege, DriverCapability, DriverIconStyle, DriverId,
+    DriverRegistry, Error, FilterCondition, FilterConjunction, FilterGroup, FilterNode,
+    FilterOperator, ObjectGrant, ObjectPrivilegeRow, PageRequest, PrivilegeCatalog, PrivilegeId,
+    PrivilegePreset, PrivilegeScope, QueryResult, RoutineDetails, RoutineEdit, RoutineInfo,
+    RoutineKind, RowInsert, RowUpdate, SavedBackup, SavedQuery, ServerSecurableGrant, TableStatus,
+    TlsMode, TunnelAuth, TunnelKind, TunnelLayer, UserAccount, UserDetails, UserEdit,
+    UserEditSection, UserEditorSpec, UserMapping, ViewEdit,
 };
 use rustgrid_export::ExportFormat;
 
-use crate::form::{ConnectionForm, FORM_FIELDS, FormField, FormTab};
+use crate::form::{ConnectionForm, FORM_FIELDS, FormField};
 use crate::list_select::{ListSelection, MarqueeDrag, SelectMode, rects_intersect, selection_mode};
 use crate::runtime::Runtime;
 use crate::session::{
@@ -1642,6 +1644,12 @@ pub struct AppView {
     form_tunnel_errors: BTreeSet<connection_form::TunnelField>,
     /// The TLS / advanced text inputs of the connection window, keyed by field.
     form_extra_inputs: BTreeMap<connection_form::FormExtra, Entity<TextInput>>,
+    /// The engine-specific connection inputs, keyed by their `ConnectionProfile::options` key.
+    form_engine_inputs: BTreeMap<String, Entity<TextInput>>,
+    /// The engine-specific `Select` field whose dropdown is open, keyed by its option key.
+    form_engine_select_open: Option<String>,
+    /// Where the open engine `Select`'s trigger sits, so its menu can be positioned.
+    form_engine_select_anchor: Rc<RefCell<Point<Pixels>>>,
     /// The per-layer text inputs of the tunnel/proxy chain, parallel to `form.settings.tunnel`.
     form_tunnel_inputs: Vec<connection_form::TunnelInputs>,
     /// The connection window's custom select (TLS mode): whether its menu is open and where its
@@ -2126,6 +2134,9 @@ impl AppView {
             form_errors: BTreeSet::new(),
             form_tunnel_errors: BTreeSet::new(),
             form_extra_inputs: BTreeMap::new(),
+            form_engine_inputs: BTreeMap::new(),
+            form_engine_select_open: None,
+            form_engine_select_anchor: Rc::new(RefCell::new(Point::default())),
             form_tunnel_inputs: Vec::new(),
             form_select_open: false,
             form_select_anchor: Rc::new(RefCell::new(Point::default())),

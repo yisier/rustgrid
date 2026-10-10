@@ -116,12 +116,11 @@ impl AppView {
             .registry
             .get(&form.driver)
             .map(|driver| driver.descriptor());
-        form.file_based = descriptor
-            .as_ref()
-            .is_some_and(|driver| driver.is_file_based);
-        form.odbc = descriptor
-            .as_ref()
-            .is_some_and(|driver| driver.connection_form.odbc);
+        // The driver's spec decides the tabs, the 常规 page's shape, the standard-field renames and
+        // where the engine's own option fields go.
+        if let Some(descriptor) = descriptor.as_ref() {
+            form.apply_spec(&descriptor.connection_form);
+        }
         let weak = cx.weak_entity();
         let theme = self.theme;
         let inputs = FormInputs {
@@ -218,6 +217,7 @@ impl AppView {
         self.test_status = TestStatus::Idle;
         self.context_menu = None;
         self.rebuild_form_extra_inputs(cx);
+        self.rebuild_form_engine_inputs(cx);
         self.rebuild_tunnel_inputs(cx);
         self.open_connection_window(name_focus, cx);
         cx.notify();

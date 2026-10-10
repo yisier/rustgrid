@@ -28,27 +28,41 @@ RustGrid 的 Oracle 支持是一个**原生 Rust 引擎**（`crates/rustgrid-ora
 
 ## 新建连接
 
-Oracle 的常规连接表单字段：
+Oracle 的页面由驱动的 `ConnectionFormSpec` 声明(通用表单按声明组页,不匹配引擎 id):
 
-| 字段 | 存入 profile | 说明 |
-|---|---|---|
-| 网络地址 / 端口 | `host` / `port` | 默认端口 **1521** |
-| 用户名 / 密码 | `username` + 加密的 `secrets.json` | 密码**不写入 profile** |
-| 数据库 | `database` | 这里填 **service / PDB 名**（如 `FREEPDB1`）；也可用下面的 `oracle.service_name` |
+- **常规**:连接别名 / 网络地址 / 端口 / 用户名 / 密码,以及 **服务名 / SID**(即核心的
+  `database` 字段,标签按引擎改名为"服务名 / SID")与 **连接类型** 下拉。默认端口 **1521**。
+  密码**不写入 profile**(加密存 `secrets.json`)。
+- **TLS/SSL**:TLS 模式 + 证书,外加 Oracle 的 **TCPS 钱包**(`oracle.wallet_location` /
+  `oracle.wallet_password`)。
+- **隧道/代理**、**高级**(超时 / 只读 / 初始 SQL,外加 `oracle.config_dir`)。
 
-`ConnectionProfile::options`（`BTreeMap`）里可选的 Oracle 专用项，**无需迁移
-`connections.json`**：
+常规页的 **连接类型**(`oracle.connect_type`)决定如何解析"服务名 / SID":
 
-| 键 | 说明 |
+| 连接类型 | 含义 |
 |---|---|
-| `oracle.service_name` | service / PDB 名（优先于 `database` 字段） |
-| `oracle.tns_alias` | `tnsnames.ora` 中的 TNS 别名 |
-| `oracle.connect_string` | 完整连接串或双引号描述的 connect descriptor（**优先级最高**） |
-| `oracle.wallet_location` | 钱包（`ewallet.pem`）目录，用于 TCPS |
-| `oracle.wallet_password` | 钱包口令 |
-| `oracle.config_dir` | 查找 `tnsnames.ora` 的目录 |
+| `service`(默认) | 填 service / PDB 名,Easy Connect 拼成 `host:port/service`(如 `FREEPDB1`) |
+| `sid` | 填 SID,驱动拼成 `(DESCRIPTION=…(CONNECT_DATA=(SID=<sid>)))` 描述符 |
+| `tns` | 使用 `oracle.tns_alias`(显示在同页) |
+| `connect_string` | 使用 `oracle.connect_string` / 完整描述符(显示在同页) |
 
-未填连接串 / 别名时，驱动按 **Easy Connect** 语法拼装：
+`ConnectionProfile::options`(`BTreeMap`)里可选的 Oracle 专用项,**无需迁移
+`connections.json`**。这些项由驱动的 `ConnectionFormSpec` 声明(每个 `ConnectionFieldSpec`
+带 `key` / `label_key` / `hint_key` / `kind` / `page`,可带 `visible_when`),表单只读取声明、
+不匹配引擎 id:
+
+| 键 | 页面 | 说明 |
+|---|---|---|
+| `oracle.connect_type` | 常规 | service / sid / tns / connect_string(默认 service) |
+| `oracle.tns_alias` | 常规(`tns` 时显示) | `tnsnames.ora` 中的 TNS 别名 |
+| `oracle.connect_string` | 常规(`connect_string` 时显示) | 完整连接串或 connect descriptor(**优先级最高**) |
+| `oracle.wallet_location` | TLS/SSL | 钱包(`ewallet.pem`)目录,用于 TCPS |
+| `oracle.wallet_password` | TLS/SSL | 钱包口令(掩码输入) |
+| `oracle.config_dir` | 高级 | 查找 `tnsnames.ora` 的目录 |
+
+连接串的优先级与连接类型无关,保证旧 profile 继续可用:
+`oracle.connect_string` > `oracle.tns_alias` >(`sid` 描述符)> `oracle.service_name` >
+`database`。未填时按 **Easy Connect** 语法拼装:
 
 - 明文：`host:port/service`
 - TLS：`tcps://host:port/service`

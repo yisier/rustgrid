@@ -6,10 +6,14 @@
 //! ```text
 //! cargo test -p rustgrid-sqlserver -- --ignored
 //! ```
+//!
+//! The test runs in a scratch **user** database (default `rustgrid_live`, created on demand): the
+//! driver's `list_databases`/`user_mappings` intentionally hide the system databases, so a
+//! `master` default would make the listing assertions fail.
 
 use rustgrid_core::{
-    BackupObjectKind, ConnectionConfig, Driver, DriverId, ObjectKind, PageRequest, Result,
-    RowInsert, RowUpdate, UserAccount, UserDetails, UserEdit, ViewEdit,
+    BackupObjectKind, Connection, ConnectionConfig, Driver, DriverId, ObjectKind, PageRequest,
+    Result, RowInsert, RowUpdate, UserAccount, UserDetails, UserEdit, ViewEdit,
 };
 use rustgrid_sqlserver::SqlServerDriver;
 
@@ -17,7 +21,7 @@ fn env(name: &str, fallback: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| fallback.to_string())
 }
 
-fn config() -> ConnectionConfig {
+fn config(database: &str) -> ConnectionConfig {
     ConnectionConfig {
         driver: DriverId::new("sqlserver"),
         host: env("RUSTGRID_SQLSERVER_HOST", "localhost"),
@@ -26,24 +30,38 @@ fn config() -> ConnectionConfig {
             .expect("RUSTGRID_SQLSERVER_PORT must be a number"),
         username: env("RUSTGRID_SQLSERVER_USER", "sa"),
         password: Some(env("RUSTGRID_SQLSERVER_PASSWORD", "")),
-        database: Some(env("RUSTGRID_SQLSERVER_DATABASE", "master")),
+        database: Some(database.to_string()),
         options: Default::default(),
         settings: Default::default(),
     }
 }
 
+/// Connect to `master`, create the scratch database when it is missing, and hand back a connection
+/// opened on it together with its name.
+async fn scratch_database() -> (Box<dyn Connection>, String) {
+    let database = env("RUSTGRID_SQLSERVER_DATABASE", "rustgrid_live");
+    let admin = SqlServerDriver::new()
+        .connect(&config("master"))
+        .await
+        .expect("connect (master)");
+    admin
+        .execute_query(
+            None,
+            &format!("IF DB_ID(N'{database}') IS NULL CREATE DATABASE [{database}]"),
+        )
+        .await
+        .expect("create the scratch database");
+    let connection = SqlServerDriver::new()
+        .connect(&config(&database))
+        .await
+        .expect("connect");
+    (connection, database)
+}
+
 #[tokio::test]
 #[ignore = "requires a live SQL Server (RUSTGRID_SQLSERVER_*)"]
 async fn round_trips_a_live_sql_server() {
-    let config = config();
-    let database = config
-        .database
-        .clone()
-        .unwrap_or_else(|| "master".to_string());
-    let connection = SqlServerDriver::new()
-        .connect(&config)
-        .await
-        .expect("connect");
+    let (connection, database) = scratch_database().await;
 
     let table = "rustgrid_live_users";
     let _ = connection
@@ -306,15 +324,7 @@ async fn manages_a_login_with_mapping_and_securables() {
     use rustgrid_core::PrivilegeId;
     use std::collections::BTreeSet;
 
-    let config = config();
-    let database = config
-        .database
-        .clone()
-        .unwrap_or_else(|| "master".to_string());
-    let connection = SqlServerDriver::new()
-        .connect(&config)
-        .await
-        .expect("connect");
+    let (connection, database) = scratch_database().await;
     let login = "rustgrid_live_login";
 
     // Clean any leftovers from a previous run.

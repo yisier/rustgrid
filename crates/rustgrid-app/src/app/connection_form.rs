@@ -155,9 +155,11 @@ impl AppView {
         self.form_errors.clear();
         self.form_tunnel_errors.clear();
         self.form_extra_inputs.clear();
+        self.form_engine_inputs.clear();
         self.form_tunnel_inputs.clear();
         self.form_select_open = false;
         self.form_tunnel_select_open = false;
+        self.form_engine_select_open = None;
         self.editing = None;
         self.test_status = TestStatus::Idle;
     }
@@ -253,6 +255,9 @@ impl AppView {
         }
         if self.form_tunnel_select_open {
             root = root.child(self.render_tunnel_auth_menu(cx));
+        }
+        if self.form_engine_select_open.is_some() {
+            root = root.child(self.render_engine_select_menu(cx));
         }
 
         root.into_any_element()
@@ -357,16 +362,10 @@ impl AppView {
             ))
     }
 
-    /// The tab bar with a black underline on the active tab.
+    /// The tab bar with a black underline on the active tab. The tabs come from the driver's spec
+    /// (`form.pages`), so each engine shows its own page set.
     fn form_tab_strip(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
-        let current = self.form.as_ref().map(|form| form.tab);
-        // A file-based engine has no TLS or tunnel, so those two pages are hidden.
-        let file_based = self
-            .form
-            .as_ref()
-            .map(|form| form.file_based)
-            .unwrap_or(false);
         let relay = self.relay_label();
         let mut strip = div()
             .flex()
@@ -380,15 +379,15 @@ impl AppView {
             .border_b_1()
             .border_color(rgb(theme.border));
 
-        for tab in FormTab::ALL {
-            if file_based && matches!(tab, FormTab::Tls | FormTab::Tunnel) {
-                continue;
-            }
-            let active = current == Some(tab);
+        let Some(form) = self.form.as_ref() else {
+            return strip;
+        };
+        for tab in form.pages.iter().copied() {
+            let active = form.page == tab;
             let relay = relay.clone();
             strip = strip.child(
                 div()
-                    .id(SharedString::from(format!("form-tab-{}", tab as usize)))
+                    .id(SharedString::from(format!("form-tab-{}", tab.id())))
                     .flex()
                     .flex_row()
                     .items_center()
@@ -412,14 +411,14 @@ impl AppView {
                         style.hover(move |style| style.text_color(rgb(theme.text)))
                     })
                     .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.set_form_tab(tab, cx);
+                        this.set_form_page(tab, cx);
                     }))
                     .child(
                         div()
                             .text_size(px(13.5))
                             .child(t!(tab.label_key()).to_string()),
                     )
-                    .when(tab == FormTab::Tunnel, move |row| {
+                    .when(tab == ConnectionPage::Tunnel, move |row| {
                         row.child(small_pill(relay.clone(), theme))
                     }),
             );
@@ -441,12 +440,13 @@ impl AppView {
         }
     }
 
-    fn set_form_tab(&mut self, tab: FormTab, cx: &mut Context<'_, Self>) {
+    fn set_form_page(&mut self, page: ConnectionPage, cx: &mut Context<'_, Self>) {
         if let Some(form) = self.form.as_mut() {
-            form.tab = tab;
+            form.page = page;
         }
         self.form_select_open = false;
         self.form_tunnel_select_open = false;
+        self.form_engine_select_open = None;
         cx.notify();
     }
 
@@ -455,11 +455,11 @@ impl AppView {
         let Some(form) = self.form.as_ref() else {
             return div().into_any_element();
         };
-        match form.tab {
-            FormTab::General => self.render_general_page(form, cx).into_any_element(),
-            FormTab::Tls => self.render_tls_page(form, cx).into_any_element(),
-            FormTab::Tunnel => self.render_tunnel_page(form, cx).into_any_element(),
-            FormTab::Advanced => self.render_advanced_page(form, cx).into_any_element(),
+        match form.page {
+            ConnectionPage::General => self.render_general_page(form, cx).into_any_element(),
+            ConnectionPage::Tls => self.render_tls_page(form, cx).into_any_element(),
+            ConnectionPage::Tunnel => self.render_tunnel_page(form, cx).into_any_element(),
+            ConnectionPage::Advanced => self.render_advanced_page(form, cx).into_any_element(),
         }
     }
 
@@ -511,207 +511,440 @@ impl AppView {
                     .into_any_element()
             })
         };
+        // Standard-field labels, renamed per engine (Oracle's database field is a service name,
+        // SQL Server's is the initial database, ...).
+        let label = |field: ConnectionStandardField, default_key: &str| -> String {
+            form.label_override(field)
+                .map(|label| t!(label.label_key).to_string())
+                .unwrap_or_else(|| t!(default_key).to_string())
+        };
+        let label_hint = |field: ConnectionStandardField| -> Option<AnyElement> {
+            form.label_override(field)
+                .and_then(|label| label.hint_key)
+                .map(|key| {
+                    div()
+                        .text_size(px(11.5))
+                        .text_color(rgb(theme.text_muted))
+                        .child(t!(key).to_string())
+                        .into_any_element()
+                })
+        };
 
-        // A file-based engine (SQLite) has no host/port/user/password: it edits one database file.
-        if form.file_based {
-            return div()
-                .flex()
-                .flex_col()
-                .gap_4()
-                .child(form_field(
-                    t!("form.engine").to_string(),
-                    false,
-                    None,
-                    engine_box(driver_name),
-                    theme,
-                ))
-                .child(form_field(
-                    t!("form.alias").to_string(),
-                    true,
-                    error_hint(FormField::Name),
-                    input(FormField::Name),
-                    theme,
-                ))
-                .child(form_field(
-                    t!("form.database_file").to_string(),
-                    true,
-                    error_hint(FormField::Database).or_else(|| {
-                        Some(
-                            div()
-                                .text_size(px(11.5))
-                                .text_color(rgb(theme.text_muted))
-                                .child(t!("form.database_file_hint").to_string())
-                                .into_any_element(),
-                        )
-                    }),
-                    database_file_row(theme, input(FormField::Database), cx),
-                    theme,
-                ))
-                .into_any_element();
-        }
+        let mut page = div().flex().flex_col().gap_4();
 
-        div()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .child(form_field(
-                t!("form.engine").to_string(),
-                false,
-                None,
-                engine_box(driver_name),
-                theme,
-            ))
-            .child(form_field(
-                t!("form.alias").to_string(),
-                true,
-                error_hint(FormField::Name),
-                input(FormField::Name),
-                theme,
-            ))
-            .when(form.odbc, |page| {
-                page.child(form_field(
-                    t!("form.odbc.driver").to_string(),
-                    false,
-                    error_hint(FormField::OdbcDriver),
-                    match self.form_odbc_driver.clone() {
-                        Some(combo) => div().w_full().child(combo).into_any_element(),
-                        None => div().into_any_element(),
-                    },
-                    theme,
-                ))
-                .child(form_field(
-                    t!("form.odbc.connection_string").to_string(),
-                    false,
-                    None,
-                    input(FormField::OdbcConnectionString),
-                    theme,
-                ))
-                .child(form_field(
-                    t!("form.odbc.dsn").to_string(),
-                    false,
-                    None,
-                    input(FormField::OdbcDsn),
-                    theme,
-                ))
-                .child(form_field(
-                    t!("form.odbc.engine").to_string(),
-                    false,
-                    None,
-                    input(FormField::OdbcEngine),
-                    theme,
-                ))
-            })
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap_3()
-                    .child(
-                        div().flex_1().min_w(px(0.0)).child(form_field(
-                            t!("form.network").to_string(),
-                            true,
-                            error_hint(FormField::Host),
-                            match self
-                                .form_inputs
-                                .as_ref()
-                                .map(|inputs| inputs.get(FormField::Host).clone())
-                            {
-                                Some(input) => input.into_any_element(),
-                                None => div().into_any_element(),
-                            },
-                            theme,
-                        )),
-                    )
-                    .child(
-                        div().w(px(150.0)).flex_none().child(form_field(
-                            t!("form.port").to_string(),
-                            true,
-                            error_hint(FormField::Port),
-                            match self
-                                .form_inputs
-                                .as_ref()
-                                .map(|inputs| inputs.get(FormField::Port).clone())
-                            {
-                                Some(input) => input.into_any_element(),
-                                None => div().into_any_element(),
-                            },
-                            theme,
-                        )),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap_4()
+        match form.home {
+            // A file-based engine (SQLite) has no host/port/user/password: it edits one file.
+            ConnectionHomePage::File => {
+                page = page
                     .child(form_field(
-                        t!("form.username").to_string(),
-                        true,
-                        error_hint(FormField::Username),
-                        input(FormField::Username),
+                        t!("form.engine").to_string(),
+                        false,
+                        None,
+                        engine_box(driver_name),
                         theme,
                     ))
                     .child(form_field(
-                        t!("form.password").to_string(),
-                        false,
-                        error_hint(FormField::Password),
-                        input(FormField::Password),
+                        label(ConnectionStandardField::Name, "form.alias"),
+                        true,
+                        error_hint(FormField::Name),
+                        input(FormField::Name),
                         theme,
-                    )),
-            )
-            .child(form_field(
-                t!("form.database_optional").to_string(),
-                false,
-                error_hint(FormField::Database),
-                input(FormField::Database),
-                theme,
-            ))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
+                    ))
+                    .child(form_field(
+                        label(ConnectionStandardField::File, "form.database_file"),
+                        true,
+                        error_hint(FormField::Database).or_else(|| {
+                            label_hint(ConnectionStandardField::File).or_else(|| {
+                                Some(
+                                    div()
+                                        .text_size(px(11.5))
+                                        .text_color(rgb(theme.text_muted))
+                                        .child(t!("form.database_file_hint").to_string())
+                                        .into_any_element(),
+                                )
+                            })
+                        }),
+                        database_file_row(theme, input(FormField::Database), cx),
+                        theme,
+                    ));
+            }
+            // The generic ODBC driver: the plain form, plus the ODBC fields.
+            ConnectionHomePage::Odbc => {
+                page = page
+                    .child(form_field(
+                        t!("form.engine").to_string(),
+                        false,
+                        None,
+                        engine_box(driver_name),
+                        theme,
+                    ))
+                    .child(form_field(
+                        label(ConnectionStandardField::Name, "form.alias"),
+                        true,
+                        error_hint(FormField::Name),
+                        input(FormField::Name),
+                        theme,
+                    ))
+                    .child(form_field(
+                        t!("form.odbc.driver").to_string(),
+                        false,
+                        error_hint(FormField::OdbcDriver),
+                        match self.form_odbc_driver.clone() {
+                            Some(combo) => div().w_full().child(combo).into_any_element(),
+                            None => div().into_any_element(),
+                        },
+                        theme,
+                    ))
+                    .child(form_field(
+                        t!("form.odbc.connection_string").to_string(),
+                        false,
+                        None,
+                        input(FormField::OdbcConnectionString),
+                        theme,
+                    ))
+                    .child(form_field(
+                        t!("form.odbc.dsn").to_string(),
+                        false,
+                        None,
+                        input(FormField::OdbcDsn),
+                        theme,
+                    ))
+                    .child(form_field(
+                        t!("form.odbc.engine").to_string(),
+                        false,
+                        None,
+                        input(FormField::OdbcEngine),
+                        theme,
+                    ))
+                    .child(self.save_password_row(form, theme, cx));
+            }
+            // A network engine: alias + address/port + credentials + default database.
+            ConnectionHomePage::Network => {
+                page = page
+                    .child(form_field(
+                        t!("form.engine").to_string(),
+                        false,
+                        None,
+                        engine_box(driver_name),
+                        theme,
+                    ))
+                    .child(form_field(
+                        label(ConnectionStandardField::Name, "form.alias"),
+                        true,
+                        error_hint(FormField::Name),
+                        input(FormField::Name),
+                        theme,
+                    ))
                     .child(
                         div()
-                            .id("form-save-password")
                             .flex()
                             .flex_row()
-                            .items_center()
-                            .gap_2()
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                if let Some(form) = this.form.as_mut() {
-                                    form.save_password = !form.save_password;
-                                }
-                                cx.notify();
-                            }))
-                            .child(checkbox_box(form.save_password, theme))
+                            .gap_3()
                             .child(
-                                div()
-                                    .text_size(px(12.5))
-                                    .child(t!("form.remember_password").to_string()),
+                                div().flex_1().min_w(px(0.0)).child(form_field(
+                                    label(ConnectionStandardField::Host, "form.network"),
+                                    true,
+                                    error_hint(FormField::Host),
+                                    match self
+                                        .form_inputs
+                                        .as_ref()
+                                        .map(|inputs| inputs.get(FormField::Host).clone())
+                                    {
+                                        Some(input) => input.into_any_element(),
+                                        None => div().into_any_element(),
+                                    },
+                                    theme,
+                                )),
+                            )
+                            .child(
+                                div().w(px(150.0)).flex_none().child(form_field(
+                                    label(ConnectionStandardField::Port, "form.port"),
+                                    true,
+                                    error_hint(FormField::Port),
+                                    match self
+                                        .form_inputs
+                                        .as_ref()
+                                        .map(|inputs| inputs.get(FormField::Port).clone())
+                                    {
+                                        Some(input) => input.into_any_element(),
+                                        None => div().into_any_element(),
+                                    },
+                                    theme,
+                                )),
                             ),
                     )
                     .child(
                         div()
                             .flex()
                             .flex_row()
-                            .items_center()
-                            .gap_1()
-                            .text_size(px(12.0))
-                            .text_color(rgb(theme.text_muted))
-                            .child(
-                                svg()
-                                    .path("icons/lock.svg")
-                                    .w(px(14.0))
-                                    .h(px(14.0))
-                                    .text_color(rgb(theme.text_muted)),
-                            )
-                            .child(t!("form.keyring_hint").to_string()),
+                            .gap_4()
+                            .child(form_field(
+                                label(ConnectionStandardField::Username, "form.username"),
+                                true,
+                                error_hint(FormField::Username),
+                                input(FormField::Username),
+                                theme,
+                            ))
+                            .child(form_field(
+                                label(ConnectionStandardField::Password, "form.password"),
+                                false,
+                                error_hint(FormField::Password),
+                                input(FormField::Password),
+                                theme,
+                            )),
+                    )
+                    .child(form_field(
+                        label(ConnectionStandardField::Database, "form.database_optional"),
+                        false,
+                        error_hint(FormField::Database)
+                            .or_else(|| label_hint(ConnectionStandardField::Database)),
+                        input(FormField::Database),
+                        theme,
+                    ))
+                    .child(self.save_password_row(form, theme, cx));
+            }
+        }
+
+        // The engine's own fields for this page, in declaration order.
+        for option in self.page_option_elements(form, ConnectionPage::General, cx) {
+            page = page.child(option);
+        }
+
+        page.into_any_element()
+    }
+
+    /// The 记住密码 / keyring row shared by the network and ODBC 常规 layouts.
+    fn save_password_row(
+        &self,
+        form: &ConnectionForm,
+        theme: Theme,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .id("form-save-password")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        if let Some(form) = this.form.as_mut() {
+                            form.save_password = !form.save_password;
+                        }
+                        cx.notify();
+                    }))
+                    .child(checkbox_box(form.save_password, theme))
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .child(t!("form.remember_password").to_string()),
                     ),
             )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(
+                        svg()
+                            .path("icons/lock.svg")
+                            .w(px(14.0))
+                            .h(px(14.0))
+                            .text_color(rgb(theme.text_muted)),
+                    )
+                    .child(t!("form.keyring_hint").to_string()),
+            )
             .into_any_element()
+    }
+
+    /// The engine option rows shown on `page`, in declaration order, honouring each field's
+    /// `visible_when` condition. Empty for a page the engine declares no options on.
+    fn page_option_elements(
+        &self,
+        form: &ConnectionForm,
+        page: ConnectionPage,
+        cx: &mut Context<'_, Self>,
+    ) -> Vec<AnyElement> {
+        let theme = self.theme;
+        let mut rows = Vec::new();
+        for field in form.page_option_fields(page) {
+            if !form.option_visible(field) {
+                continue;
+            }
+            let hint = field.hint_key.map(|key| {
+                div()
+                    .text_size(px(11.5))
+                    .text_color(rgb(theme.text_muted))
+                    .child(t!(key).to_string())
+                    .into_any_element()
+            });
+            let control = match &field.kind {
+                ConnectionFieldKind::Select(choices) => {
+                    self.engine_select_trigger(field.key, choices, form, theme, cx)
+                }
+                ConnectionFieldKind::Folder => {
+                    engine_folder_row(field.key, theme, self.engine_input(field.key), cx)
+                        .into_any_element()
+                }
+                ConnectionFieldKind::Text | ConnectionFieldKind::Secret => div()
+                    .w_full()
+                    .child(self.engine_input(field.key))
+                    .into_any_element(),
+            };
+            rows.push(
+                form_field(t!(field.label_key).to_string(), false, hint, control, theme)
+                    .into_any_element(),
+            );
+        }
+        rows
+    }
+
+    /// The input element of one engine-specific text/secret/folder field.
+    fn engine_input(&self, key: &str) -> AnyElement {
+        match self.form_engine_inputs.get(key).cloned() {
+            Some(input) => input.into_any_element(),
+            None => div().into_any_element(),
+        }
+    }
+
+    /// The closed trigger of one engine-specific `Select` field.
+    fn engine_select_trigger(
+        &self,
+        key: &'static str,
+        choices: &[ConnectionFieldChoice],
+        form: &ConnectionForm,
+        theme: Theme,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let selected = engine_select_value(form, key, choices);
+        let label = choices
+            .iter()
+            .find(|choice| choice.value == selected)
+            .map(|choice| t!(choice.label_key).to_string())
+            .unwrap_or_default();
+        let anchor = self.form_engine_select_anchor.clone();
+
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .w_full()
+            .px_4()
+            .rounded(px(8.0))
+            .border_1()
+            .border_color(rgb(theme.border))
+            .bg(rgb(theme.input_bg))
+            .h(px(32.0))
+            .on_children_prepainted(move |bounds, _window, _cx| {
+                if let (Some(first), Some(last)) = (bounds.first(), bounds.last()) {
+                    *anchor.borrow_mut() = Point::new(first.left(), last.bottom());
+                }
+            })
+            .id(SharedString::from(format!("{key}-select")))
+            .cursor_pointer()
+            .hover(move |style| style.border_color(rgb(theme.button_default_border)))
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                this.form_engine_select_open =
+                    if this.form_engine_select_open.as_deref() == Some(key) {
+                        None
+                    } else {
+                        Some(key.to_string())
+                    };
+                cx.notify();
+            }))
+            .child(div().text_size(px(13.0)).child(label))
+            .child(
+                svg()
+                    .path("icons/chevron-down.svg")
+                    .w(px(15.0))
+                    .h(px(15.0))
+                    .flex_none()
+                    .text_color(rgb(theme.text_muted)),
+            )
+            .into_any_element()
+    }
+
+    /// The open engine `Select`'s option menu.
+    fn render_engine_select_menu(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let Some(key) = self.form_engine_select_open.clone() else {
+            return div().into_any_element();
+        };
+        let Some(form) = self.form.as_ref() else {
+            return div().into_any_element();
+        };
+        let Some(field) = form.option_fields.iter().find(|field| field.key == key) else {
+            return div().into_any_element();
+        };
+        let ConnectionFieldKind::Select(choices) = field.kind.clone() else {
+            return div().into_any_element();
+        };
+        let selected = engine_select_value(form, &key, &choices);
+        let anchor = *self.form_engine_select_anchor.borrow();
+
+        let mut items = div().flex().flex_col().w(px(300.0)).p_1();
+        for choice in &choices {
+            let choice_value = choice.value;
+            let is_selected = choice_value == selected;
+            let option_key = key.clone();
+            items = items.child(
+                div()
+                    .id(SharedString::from(format!("{key}-option-{choice_value}")))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .h(px(32.0))
+                    .px_3()
+                    .rounded(px(6.0))
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.set_engine_option(&option_key, choice_value, cx);
+                    }))
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .child(t!(choice.label_key).to_string()),
+                    )
+                    .when(is_selected, |row| {
+                        row.child(
+                            svg()
+                                .path("icons/check.svg")
+                                .w(px(14.0))
+                                .h(px(14.0))
+                                .text_color(rgb(theme.brand)),
+                        )
+                    }),
+            );
+        }
+
+        ui::popup_panel(theme)
+            .left(anchor.x)
+            .top(anchor.y + px(4.0))
+            .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
+                this.form_engine_select_open = None;
+                cx.notify();
+            }))
+            .child(items)
+            .into_any_element()
+    }
+
+    /// Apply one engine `Select` choice and close its menu.
+    fn set_engine_option(&mut self, key: &str, value: &str, cx: &mut Context<'_, Self>) {
+        self.set_form_option(key, value, cx);
+        self.form_engine_select_open = None;
+        cx.notify();
     }
 
     // ----- TLS / SSL ---------------------------------------------------------------------------
@@ -732,7 +965,7 @@ impl AppView {
             }
         };
 
-        div()
+        let mut page = div()
             .flex()
             .flex_col()
             .gap_4()
@@ -800,7 +1033,13 @@ impl AppView {
                                 ),
                         ),
                 )
-            })
+            });
+        // The engine's own TLS-page fields (e.g. Oracle's TCPS wallet).
+        for option in self.page_option_elements(form, ConnectionPage::Tls, cx) {
+            page = page.child(option);
+        }
+
+        page
     }
 
     /// The custom select that shows the TLS mode and opens its option menu.
@@ -960,6 +1199,25 @@ impl AppView {
                     .as_ref()
                     .map(|inputs| inputs.get(FormField::Database).clone())
                 {
+                    input.update(cx, |input, cx| input.set_text(path.clone(), cx));
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Open the native folder picker for one engine-specific `Folder` field.
+    fn browse_engine_folder(&mut self, key: &'static str, cx: &mut Context<'_, Self>) {
+        let title = t!("form.browse").to_string();
+        cx.spawn(async move |this, cx| {
+            let Some(handle) = AsyncFileDialog::new().set_title(title).pick_folder().await else {
+                return;
+            };
+            let path = handle.path().to_string_lossy().into_owned();
+            let _ = this.update(cx, move |app, cx| {
+                app.set_form_option(key, &path, cx);
+                if let Some(input) = app.form_engine_inputs.get(key).cloned() {
                     input.update(cx, |input, cx| input.set_text(path.clone(), cx));
                 }
                 cx.notify();
@@ -1444,7 +1702,7 @@ impl AppView {
             }
         };
 
-        div()
+        let mut page = div()
             .flex()
             .flex_col()
             .gap_3()
@@ -1546,7 +1804,13 @@ impl AppView {
                     .font_family("Consolas")
                     .child(self.extra_input(FormExtra::InitSql)),
                 theme,
-            ))
+            ));
+        // The engine's own 高级 fields (e.g. SQL Server's named instance / application name).
+        for option in self.page_option_elements(form, ConnectionPage::Advanced, cx) {
+            page = page.child(option);
+        }
+
+        page
     }
 
     fn extra_input(&self, field: FormExtra) -> AnyElement {
@@ -1653,7 +1917,9 @@ impl AppView {
         self.form_tunnel_errors.clear();
         self.form_select_open = false;
         self.form_tunnel_select_open = false;
+        self.form_engine_select_open = None;
         self.rebuild_form_extra_inputs(cx);
+        self.rebuild_form_engine_inputs(cx);
         self.rebuild_tunnel_inputs(cx);
 
         let values: Vec<(FormField, String)> = self
@@ -1738,6 +2004,36 @@ impl AppView {
             };
             let input = make_extra_input(theme, value, placeholder, field, &weak, cx);
             self.form_extra_inputs.insert(field, input);
+        }
+    }
+
+    /// Build the engine option inputs declared by the current driver. The driver is fixed for a
+    /// form session, so this runs when the form opens or resets.
+    pub(super) fn rebuild_form_engine_inputs(&mut self, cx: &mut Context<'_, Self>) {
+        self.form_engine_inputs.clear();
+        let Some(form) = self.form.as_ref() else {
+            return;
+        };
+        let theme = self.theme;
+        let weak = cx.weak_entity();
+        // Snapshot the fields first: `form` borrows `self` immutably, and the loop below inserts
+        // into `self.form_engine_inputs`.
+        let entries: Vec<(ConnectionFieldSpec, String)> = form
+            .option_fields
+            .iter()
+            .map(|field| {
+                let value = form.option_value(field.key).to_string();
+                (field.clone(), value)
+            })
+            .collect();
+        for (field, value) in entries {
+            // A `Select` is drawn from its choices, not a text input.
+            if matches!(&field.kind, ConnectionFieldKind::Select(_)) {
+                continue;
+            }
+            let masked = field.kind == ConnectionFieldKind::Secret;
+            let input = make_option_input(theme, value, masked, field.key, &weak, cx);
+            self.form_engine_inputs.insert(field.key.to_string(), input);
         }
     }
 
@@ -1960,6 +2256,51 @@ fn file_row(
                 .hover(move |style| style.bg(rgb(theme.button_hover_bg)))
                 .on_click(cx.listener(move |this, _event, _window, cx| {
                     this.browse_form_file(field, cx);
+                }))
+                .child(
+                    svg()
+                        .path("icons/folder.svg")
+                        .w(px(14.0))
+                        .h(px(14.0))
+                        .text_color(rgb(theme.text_muted)),
+                )
+                .child(t!("form.browse").to_string()),
+        )
+}
+
+/// A text input with a trailing 浏览 button for one engine-specific `Folder` field.
+fn engine_folder_row(
+    key: &'static str,
+    theme: Theme,
+    input: AnyElement,
+    cx: &mut Context<'_, AppView>,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_3()
+        .child(div().flex_1().min_w(px(0.0)).child(input))
+        .child(
+            div()
+                .id(SharedString::from(format!("{key}-browse")))
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .h(px(32.0))
+                .px_4()
+                .flex_none()
+                .rounded(px(8.0))
+                .border_1()
+                .border_color(rgb(theme.border))
+                .bg(rgb(theme.dialog_bg))
+                .cursor_pointer()
+                .text_size(px(12.5))
+                .hover(move |style| style.bg(rgb(theme.button_hover_bg)))
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    this.browse_engine_folder(key, cx);
                 }))
                 .child(
                     svg()
@@ -2263,6 +2604,51 @@ fn make_extra_input(
         )
         .on_change(Rc::new(move |text, _window, cx| {
             let _ = change.update(cx, |app, cx| app.set_form_extra(field, text, cx));
+        }))
+    })
+}
+
+/// The value an engine `Select` currently resolves to: the stored option, or the first choice
+/// (the field's implicit default) when the option is unset.
+fn engine_select_value(
+    form: &ConnectionForm,
+    key: &str,
+    choices: &[ConnectionFieldChoice],
+) -> String {
+    let value = form.option_value(key);
+    if !value.is_empty() {
+        return value.to_string();
+    }
+    choices
+        .first()
+        .map(|choice| choice.value.to_string())
+        .unwrap_or_default()
+}
+
+/// Build one engine-specific connection input, keyed by its `profile.options` key.
+fn make_option_input(
+    theme: Theme,
+    value: String,
+    masked: bool,
+    key: &'static str,
+    app: &WeakEntity<AppView>,
+    cx: &mut Context<'_, AppView>,
+) -> Entity<TextInput> {
+    let change = app.clone();
+    cx.new(move |cx| {
+        TextInput::new(
+            theme,
+            value,
+            TextInputOptions {
+                masked,
+                size: Some(gpui_kit::component::Size::Medium),
+                text_size: Some(13.0),
+                ..Default::default()
+            },
+            cx,
+        )
+        .on_change(Rc::new(move |text, _window, cx| {
+            let _ = change.update(cx, |app, cx| app.set_form_option(key, text, cx));
         }))
     })
 }

@@ -150,3 +150,30 @@ fn edits_a_table() {
         connection.drop_table("", "APP.RG_T").await.expect("drop");
     });
 }
+
+/// The `连接类型 = SID` path: the database field carries a SID and the driver builds a connect
+/// descriptor (`(DESCRIPTION=…(CONNECT_DATA=(SID=…)))`), which the live listener must accept.
+#[test]
+#[ignore = "requires a live Oracle server (RUSTGRID_ORACLE_PASSWORD)"]
+fn connects_by_sid_descriptor() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let mut config = config();
+        // The CDB's SID (the container's `ORACLE_SID`), not the PDB service name.
+        config.database = Some(env("RUSTGRID_ORACLE_SID", "FREE"));
+        config
+            .options
+            .insert("oracle.connect_type".to_string(), "sid".to_string());
+
+        let driver = OracleDriver::new();
+        let connection = driver
+            .connect(&config)
+            .await
+            .expect("connect via a SID descriptor");
+
+        let version = connection.server_version().await.expect("version");
+        assert!(!version.is_empty());
+
+        connection.close().await.expect("close");
+    });
+}

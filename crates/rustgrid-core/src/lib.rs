@@ -11,7 +11,11 @@ pub mod user;
 pub mod view;
 
 pub use capability::{DriverCapabilities, DriverCapability};
-pub use descriptor::{ConnectionFormSpec, DriverDescriptor, DriverIconStyle};
+pub use descriptor::{
+    ConnectionFieldChoice, ConnectionFieldKind, ConnectionFieldLabel, ConnectionFieldSpec,
+    ConnectionFormSpec, ConnectionHomePage, ConnectionPage, ConnectionStandardField,
+    DriverDescriptor, DriverIconStyle,
+};
 pub use dialect::DriverDialect;
 pub use driver::{Connection, DatabaseEditorSpec, DatabaseEditorTab, Driver, UserEditorSpec};
 pub use error::{Error, Result};

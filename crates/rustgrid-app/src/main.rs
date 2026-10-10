@@ -42,18 +42,7 @@ fn main() {
         )
         .init();
 
-    let mut registry = DriverRegistry::new();
-    let drivers = BuiltinDriverSource::new()
-        .with(Arc::new(rustgrid_mysql::MysqlDriver::new()))
-        .with(Arc::new(rustgrid_mysql::MariaDbDriver::new()))
-        .with(Arc::new(rustgrid_sqlite::SqliteDriver::new()))
-        .with(Arc::new(rustgrid_sqlserver::SqlServerDriver::new()))
-        .with(Arc::new(rustgrid_postgresql::PostgresDriver::new()))
-        .with(Arc::new(rustgrid_oracle::OracleDriver::new()));
-    #[cfg(feature = "driver-odbc")]
-    let drivers = drivers.with(Arc::new(rustgrid_odbc::OdbcDriver::new()));
-    registry.register_source(&drivers);
-    let registry = Arc::new(registry);
+    let registry = Arc::new(builtin_registry());
 
     let config = Arc::new(
         rustgrid_config::ConfigStore::new().expect("failed to resolve the configuration directory"),
@@ -121,4 +110,135 @@ fn install_sql_language(cx: &mut gpui::App) {
             AutoClosingPair::new("`", "`"),
         ]);
     set_language_config("sql", rules, cx);
+}
+
+/// The driver registry this build ships with. `main` and the tests both use it, so the tests cover
+/// exactly the drivers a user gets.
+fn builtin_registry() -> DriverRegistry {
+    let mut registry = DriverRegistry::new();
+    let drivers = BuiltinDriverSource::new()
+        .with(Arc::new(rustgrid_mysql::MysqlDriver::new()))
+        .with(Arc::new(rustgrid_mysql::MariaDbDriver::new()))
+        .with(Arc::new(rustgrid_sqlite::SqliteDriver::new()))
+        .with(Arc::new(rustgrid_sqlserver::SqlServerDriver::new()))
+        .with(Arc::new(rustgrid_postgresql::PostgresDriver::new()))
+        .with(Arc::new(rustgrid_oracle::OracleDriver::new()));
+    #[cfg(feature = "driver-odbc")]
+    let drivers = drivers.with(Arc::new(rustgrid_odbc::OdbcDriver::new()));
+    registry.register_source(&drivers);
+    registry
+}
+
+#[cfg(test)]
+mod tests {
+    use super::builtin_registry;
+    use rustgrid_core::{ConnectionFieldKind, ConnectionHomePage, ConnectionPage};
+
+    /// Every built-in driver's connection-form spec must be internally consistent: each declared
+    /// option sits on a page the engine actually shows, keys are unique, and every `visible_when`
+    /// control is another declared option whose choice matches. This is exactly the class of bug
+    /// that would leave a field silently unreachable.
+    #[test]
+    fn builtin_connection_forms_are_consistent() {
+        let registry = builtin_registry();
+        // Guard against the test silently running on an empty/partial registry.
+        assert!(
+            registry.len() >= 6,
+            "expected the built-in drivers to be registered, got {}",
+            registry.len()
+        );
+        for driver in registry.drivers_sorted() {
+            let descriptor = driver.descriptor();
+            let spec = &descriptor.connection_form;
+            let label = format!("{} ({})", descriptor.display_name, descriptor.id);
+
+            let mut pages = vec![ConnectionPage::General];
+            pages.extend(spec.tabs.iter().copied());
+            let mut unique = pages.clone();
+            unique.sort();
+            unique.dedup();
+            assert_eq!(pages.len(), unique.len(), "{label}: duplicate page");
+            assert!(
+                !spec.tabs.contains(&ConnectionPage::General),
+                "{label}: General must be the first page only"
+            );
+
+            // The 常规 page's shape must agree with the driver's own file flag.
+            assert_eq!(
+                driver.is_file_based(),
+                spec.home == ConnectionHomePage::File,
+                "{label}: home page and is_file_based disagree"
+            );
+
+            let mut keys = Vec::new();
+            for option in &spec.options {
+                assert!(!option.key.is_empty(), "{label}: empty option key");
+                assert!(
+                    !keys.contains(&option.key),
+                    "{label}: duplicate option key {}",
+                    option.key
+                );
+                keys.push(option.key);
+                assert!(
+                    !option.label_key.is_empty(),
+                    "{label}: option {} has no label key",
+                    option.key
+                );
+                assert!(
+                    pages.contains(&option.page),
+                    "{label}: option {} is on an undeclared page",
+                    option.key
+                );
+                if let ConnectionFieldKind::Select(choices) = &option.kind {
+                    assert!(
+                        !choices.is_empty(),
+                        "{label}: select {} has no choices",
+                        option.key
+                    );
+                }
+            }
+
+            // A `visible_when` control must be another declared option whose value matches one of
+            // its choices, so the condition is actually reachable.
+            for option in &spec.options {
+                let Some((control, value)) = option.visible_when else {
+                    continue;
+                };
+                let Some(control_field) = spec.options.iter().find(|field| field.key == control)
+                else {
+                    panic!(
+                        "{label}: {} is gated on undeclared option {control}",
+                        option.key
+                    );
+                };
+                if let ConnectionFieldKind::Select(choices) = &control_field.kind {
+                    assert!(
+                        choices.iter().any(|choice| choice.value == value),
+                        "{label}: {} is gated on {control}={value}, not one of its choices",
+                        option.key
+                    );
+                }
+            }
+
+            // A standard field is renamed at most once.
+            let mut renamed = Vec::new();
+            for entry in &spec.labels {
+                assert!(!entry.label_key.is_empty(), "{label}: empty label key");
+                assert!(
+                    !renamed.contains(&entry.field),
+                    "{label}: standard field renamed twice"
+                );
+                renamed.push(entry.field);
+            }
+
+            // The engines that actually declare engine-specific fields must be covered here, so
+            // the assertions above are never vacuous.
+            if matches!(descriptor.id.as_str(), "oracle" | "sqlserver") {
+                assert!(
+                    !spec.options.is_empty(),
+                    "{label}: expected engine-specific options"
+                );
+            }
+        }
+    }
 }

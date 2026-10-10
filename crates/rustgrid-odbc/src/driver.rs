@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use rustgrid_core::{
-    Connection, ConnectionConfig, ConnectionFormSpec, DatabaseEditorSpec, Driver,
-    DriverCapabilities, DriverDescriptor, DriverDialect, DriverIconStyle, DriverId, Error, Result,
+    Connection, ConnectionConfig, ConnectionFormSpec, ConnectionHomePage, DatabaseEditorSpec,
+    Driver, DriverCapabilities, DriverDescriptor, DriverDialect, DriverIconStyle, DriverId, Error,
+    Result,
 };
 
 use crate::api;
@@ -69,7 +70,12 @@ impl Driver for OdbcDriver {
             icon_style: DriverIconStyle::Plain,
             capabilities: DriverCapabilities::none(),
             database_editor: DatabaseEditorSpec::default(),
-            connection_form: ConnectionFormSpec { odbc: true },
+            connection_form: ConnectionFormSpec {
+                // The generic ODBC driver is the one engine whose form IS the plain form: the
+                // ODBC fields on the 常规 page, nothing engine-specific beyond that.
+                home: ConnectionHomePage::Odbc,
+                ..Default::default()
+            },
             order: 80,
         }
     }

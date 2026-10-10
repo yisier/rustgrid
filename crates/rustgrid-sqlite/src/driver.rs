@@ -2,8 +2,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rustgrid_core::{
-    Connection, ConnectionConfig, DatabaseEditorSpec, Driver, DriverCapabilities, DriverDescriptor,
-    DriverDialect, DriverIconStyle, DriverId, Error, Result,
+    Connection, ConnectionConfig, ConnectionFormSpec, ConnectionHomePage, ConnectionPage,
+    DatabaseEditorSpec, Driver, DriverCapabilities, DriverDescriptor, DriverDialect,
+    DriverIconStyle, DriverId, Error, Result,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
@@ -66,7 +67,14 @@ impl Driver for SqliteDriver {
             // SQLite has no databases, server accounts, routines or schemas of its own.
             capabilities: DriverCapabilities::none(),
             database_editor: DatabaseEditorSpec::default(),
-            connection_form: Default::default(),
+            // A file-based engine: the 常规 page edits one database file, and there is no TLS or
+            // tunnel (a local file has no network endpoint), only 高级.
+            connection_form: ConnectionFormSpec {
+                home: ConnectionHomePage::File,
+                tabs: vec![ConnectionPage::Advanced],
+                labels: Vec::new(),
+                options: Vec::new(),
+            },
             order: 40,
         }
     }

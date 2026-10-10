@@ -17,6 +17,14 @@ impl AppView {
         cx.notify();
     }
 
+    /// Store one engine-specific connection option, keyed by its `profile.options` key.
+    pub(super) fn set_form_option(&mut self, key: &str, text: &str, cx: &mut Context<'_, Self>) {
+        if let Some(form) = self.form.as_mut() {
+            form.set_option(key, text.to_string());
+        }
+        cx.notify();
+    }
+
     /// The focus handle of the next (`shift == false`) or previous form field.
     pub(super) fn form_neighbor(
         &mut self,
@@ -62,16 +70,25 @@ impl AppView {
         // Validate the page the user is looking at first: stay on it when it is the one with the
         // error, and only jump to the first page that has one (常规 before 隧道) when the current
         // page is fine.
-        let current = self.form.as_ref().map(|form| form.tab).unwrap_or_default();
+        let current = self
+            .form
+            .as_ref()
+            .map(|form| form.page)
+            .unwrap_or(ConnectionPage::General);
         let target = match current {
-            FormTab::General if general_has_error => FormTab::General,
-            FormTab::Tunnel if tunnel_has_error => FormTab::Tunnel,
-            _ if general_has_error => FormTab::General,
-            _ if tunnel_has_error => FormTab::Tunnel,
+            ConnectionPage::General if general_has_error => ConnectionPage::General,
+            ConnectionPage::Tunnel if tunnel_has_error => ConnectionPage::Tunnel,
+            _ if general_has_error => ConnectionPage::General,
+            _ if tunnel_has_error => ConnectionPage::Tunnel,
             _ => current,
         };
         if let Some(form) = self.form.as_mut() {
-            form.tab = target;
+            // Never jump to a page this driver does not show.
+            form.page = if form.pages.contains(&target) {
+                target
+            } else {
+                ConnectionPage::General
+            };
         }
         cx.notify();
         true

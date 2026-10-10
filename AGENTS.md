@@ -37,7 +37,13 @@ not a later refactor.
   database user, default schema and database-role memberships) — while database/object privileges
   are managed through the 对象权限管理器. Statements use the
   text/batch path for DDL and `CREATE PROCEDURE`, and the parameterized RPC path for `SELECT`/DML so
-  row counts are available.
+  row counts are available. Its connection form declares SQL Server's own fields (验证 →
+  `sqlserver.authentication` = SQL Server / Windows, `sqlserver.instance_name`,
+  `sqlserver.application_name`) through the shared engine-field mechanism; Windows authentication is
+  compiled in on Windows only (`winauth` under `[target.'cfg(windows)'.dependencies]`; tiberius' Unix
+  `sspi-rs` backend is **not** enabled because it conflicts with the workspace's `russh`/`crypto-bigint`,
+  so Unix offers SQL Server authentication only), while Navicat's Active Directory modes need an
+  MSAL/OAuth flow tiberius does not provide.
 - `crates/rustgrid-postgresql` — the **PostgreSQL** driver, built on **sqlx 0.9** with its
   `postgres` feature (sharing the workspace's `tls-rustls-ring`). PostgreSQL cannot query across
   databases, so `PostgresConnection` keeps a **lazily-created `PgPool` per database** (`pools`,
@@ -125,7 +131,10 @@ not a later refactor.
   OCI / Instant Client; TLS reuses the workspace's `rustls 0.23` (already in the lock file), so it
   adds no native compilation. Its API is **synchronous**, so the driver bridges through
   `tokio::task::spawn_blocking` (see the `rustgrid-oracle` bullet).
-- SQL Server: **tiberius 0.13** (`tds80` + `rustls` + `chrono`, `default-features = false`) with
+- SQL Server: **tiberius 0.13** (`tds80` + `rustls` + `chrono`, `default-features = false`;
+  `winauth` added on Windows by `rustgrid-sqlserver` through a per-target dependency entry, for
+  Windows/SSPI authentication — the Unix `sspi-rs` backend is not enabled, as it pins
+  `crypto-bigint 0.7.0-rc.8` against `russh`'s `0.7.5`) with
   **bb8 0.9** and **tokio-util** (`compat`). tiberius is not sqlx-based, uses rustls (so no OpenSSL),
   and its `Client` is `Send` but not `Sync`, so every operation checks out a pooled client. tokio's
   `net` feature is enabled for `TcpStream`.
@@ -198,6 +207,17 @@ touching UI code.
 - **Driver loading.** `DriverRegistry` plus the `DriverSource` trait are the loader boundary.
   Future runtime driver installation adds a `DriverSource`; keep each driver in its own crate
   so it can be built/distributed independently. Do not assume a single bundled driver.
+- **Per-engine connection pages.** `DriverDescriptor::connection_form` (`ConnectionFormSpec`) is
+  the whole page spec: `home` (`ConnectionHomePage::{Network,File,Odbc}`) shapes the 常规 page,
+  `tabs` lists the pages shown after it (`ConnectionPage::Tls`/`Tunnel`/`Advanced`), `labels`
+  renames the standard fields per engine (Oracle's database field is a 服务名/SID, SQL Server's the
+  初始数据库), and `options` declares the engine's own fields — each a `ConnectionFieldSpec` with a
+  `profile.options` key, i18n `label_key`/`hint_key`, a `ConnectionFieldKind`
+  (`Text`/`Secret`/`Folder`/`Select`), the `page` it sits on and an optional `visible_when`
+  condition. The app renders each driver's pages generically (never matching an engine id) and
+  round-trips the options through `ConnectionProfile::options`, so an engine gets its own page set
+  without touching UI code and without migrating `connections.json`. The generic ODBC driver is the
+  one that keeps the plain form (`home: Odbc`).
 - **Internationalization.** Route every user-facing string through `t!`. Keys live in
   `crates/rustgrid-app/locales/{en,zh-CN}.yml` and must be added to **all** locale files.
   `t!` returns `Cow<'_, str>`; call `.to_string()` before handing it to a gpui element.

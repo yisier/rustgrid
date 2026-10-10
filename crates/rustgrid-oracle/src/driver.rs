@@ -4,7 +4,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use oracledb::PoolConfig;
 use rustgrid_core::{
-    Connection, ConnectionConfig, DatabaseEditorSpec, Driver, DriverCapabilities, DriverCapability,
+    Connection, ConnectionConfig, ConnectionFieldChoice, ConnectionFieldKind, ConnectionFieldLabel,
+    ConnectionFieldSpec, ConnectionFormSpec, ConnectionHomePage, ConnectionPage,
+    ConnectionStandardField, DatabaseEditorSpec, Driver, DriverCapabilities, DriverCapability,
     DriverDescriptor, DriverDialect, DriverIconStyle, DriverId, Error, Result, TlsMode,
     UserEditorSpec,
 };
@@ -109,7 +111,89 @@ impl Driver for OracleDriver {
                 .with(DriverCapability::Routines)
                 .with(DriverCapability::Schemas),
             database_editor: self.database_editor(),
-            connection_form: Default::default(),
+            connection_form: ConnectionFormSpec {
+                home: ConnectionHomePage::Network,
+                tabs: vec![
+                    ConnectionPage::Tls,
+                    ConnectionPage::Tunnel,
+                    ConnectionPage::Advanced,
+                ],
+                // The universal "default database" field is Oracle's service/SID target; 连接类型
+                // decides which. The wallet (TCPS credential) lives on TLS, the tnsnames.ora
+                // directory on 高级.
+                labels: vec![ConnectionFieldLabel {
+                    field: ConnectionStandardField::Database,
+                    label_key: "form.oracle.database",
+                    hint_key: Some("form.oracle.database_hint"),
+                }],
+                options: vec![
+                    ConnectionFieldSpec {
+                        key: "oracle.connect_type",
+                        label_key: "form.oracle.connect_type",
+                        hint_key: None,
+                        kind: ConnectionFieldKind::Select(vec![
+                            ConnectionFieldChoice {
+                                value: "service",
+                                label_key: "form.oracle.type.service",
+                            },
+                            ConnectionFieldChoice {
+                                value: "sid",
+                                label_key: "form.oracle.type.sid",
+                            },
+                            ConnectionFieldChoice {
+                                value: "tns",
+                                label_key: "form.oracle.type.tns",
+                            },
+                            ConnectionFieldChoice {
+                                value: "connect_string",
+                                label_key: "form.oracle.type.connect_string",
+                            },
+                        ]),
+                        page: ConnectionPage::General,
+                        visible_when: None,
+                    },
+                    ConnectionFieldSpec {
+                        key: "oracle.tns_alias",
+                        label_key: "form.oracle.tns_alias",
+                        hint_key: Some("form.oracle.tns_alias_hint"),
+                        kind: ConnectionFieldKind::Text,
+                        page: ConnectionPage::General,
+                        visible_when: Some(("oracle.connect_type", "tns")),
+                    },
+                    ConnectionFieldSpec {
+                        key: "oracle.connect_string",
+                        label_key: "form.oracle.connect_string",
+                        hint_key: Some("form.oracle.connect_string_hint"),
+                        kind: ConnectionFieldKind::Text,
+                        page: ConnectionPage::General,
+                        visible_when: Some(("oracle.connect_type", "connect_string")),
+                    },
+                    ConnectionFieldSpec {
+                        key: "oracle.wallet_location",
+                        label_key: "form.oracle.wallet_location",
+                        hint_key: Some("form.oracle.wallet_location_hint"),
+                        kind: ConnectionFieldKind::Folder,
+                        page: ConnectionPage::Tls,
+                        visible_when: None,
+                    },
+                    ConnectionFieldSpec {
+                        key: "oracle.wallet_password",
+                        label_key: "form.oracle.wallet_password",
+                        hint_key: None,
+                        kind: ConnectionFieldKind::Secret,
+                        page: ConnectionPage::Tls,
+                        visible_when: None,
+                    },
+                    ConnectionFieldSpec {
+                        key: "oracle.config_dir",
+                        label_key: "form.oracle.config_dir",
+                        hint_key: Some("form.oracle.config_dir_hint"),
+                        kind: ConnectionFieldKind::Folder,
+                        page: ConnectionPage::Advanced,
+                        visible_when: None,
+                    },
+                ],
+            },
             order: 30,
         }
     }
@@ -207,6 +291,28 @@ fn connect_string(config: &ConnectionConfig, host: &str, port: u16) -> String {
     if let Some(alias) = option(config, "oracle.tns_alias") {
         return alias;
     }
+    let protocol = if config.settings.tls.mode == TlsMode::Disabled {
+        "tcp"
+    } else {
+        "tcps"
+    };
+    // 连接类型 = SID: Easy Connect only takes a service name, so build a connect descriptor.
+    if option(config, "oracle.connect_type").as_deref() == Some("sid") {
+        let sid = option(config, "oracle.sid").or_else(|| {
+            config
+                .database
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        });
+        if let Some(sid) = sid {
+            return format!(
+                "(DESCRIPTION=(ADDRESS=(PROTOCOL={protocol})(HOST={})(PORT={port}))(CONNECT_DATA=(SID={sid})))",
+                host.trim()
+            );
+        }
+    }
     let service = option(config, "oracle.service_name")
         .or_else(|| config.database.clone())
         .filter(|service| !service.trim().is_empty())
@@ -245,4 +351,78 @@ fn map_connect_error(error: oracledb::Error) -> Error {
         ));
     }
     Error::Connection(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every declared field must map to an `oracle.*` option key the connect path reads, so a
+    /// field can never be a dead knob.
+    #[test]
+    fn declared_connection_fields_are_honored_options() {
+        let descriptor = OracleDriver::new().descriptor();
+        let form = &descriptor.connection_form;
+        let keys: Vec<_> = form.options.iter().map(|field| field.key).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "oracle.connect_type",
+                "oracle.tns_alias",
+                "oracle.connect_string",
+                "oracle.wallet_location",
+                "oracle.wallet_password",
+                "oracle.config_dir",
+            ]
+        );
+        // 连接类型 on 常规, the TCPS wallet on TLS, the tnsnames.ora directory on 高级.
+        assert_eq!(form.options[0].page, ConnectionPage::General);
+        assert_eq!(form.options[3].page, ConnectionPage::Tls);
+        assert_eq!(form.options[5].page, ConnectionPage::Advanced);
+        // The TNS alias / connect string are only shown for their connection type.
+        assert_eq!(
+            form.options[1].visible_when,
+            Some(("oracle.connect_type", "tns"))
+        );
+        assert_eq!(
+            form.options[2].visible_when,
+            Some(("oracle.connect_type", "connect_string"))
+        );
+    }
+
+    #[test]
+    fn builds_easy_connect_and_sid_connect_strings() {
+        let mut config = ConnectionConfig {
+            driver: DriverId::new("oracle"),
+            host: "db.example.com".to_string(),
+            port: 1521,
+            username: "scott".to_string(),
+            password: None,
+            database: Some("FREEPDB1".to_string()),
+            options: std::collections::BTreeMap::new(),
+            settings: rustgrid_core::ConnectionOptions::default(),
+        };
+        assert_eq!(
+            connect_string(&config, "db.example.com", 1521),
+            "db.example.com:1521/FREEPDB1"
+        );
+
+        config
+            .options
+            .insert("oracle.connect_type".to_string(), "sid".to_string());
+        config.database = Some("ORCL".to_string());
+        assert_eq!(
+            connect_string(&config, "db.example.com", 1521),
+            "(DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST=db.example.com)(PORT=1521))(CONNECT_DATA=(SID=ORCL)))"
+        );
+
+        // A TNS alias wins over the SID type (legacy profiles keep working).
+        config
+            .options
+            .insert("oracle.tns_alias".to_string(), "ORCL_ALIAS".to_string());
+        assert_eq!(
+            connect_string(&config, "db.example.com", 1521),
+            "ORCL_ALIAS"
+        );
+    }
 }
