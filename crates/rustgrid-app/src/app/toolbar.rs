@@ -509,11 +509,22 @@ impl AppView {
 
     /// Move the connection tree's cursor onto `category`'s node under the currently selected
     /// database, so switching main tabs also moves the tree highlight.
+    ///
+    /// A database, schema or category selection belongs to the user: a main-tab switch must not
+    /// steal it (doing so also cleared the Queries/Backups scope, leaving those tabs empty until
+    /// the database was clicked again). Only a connection or leaf selection is moved.
     fn select_tree_category(&mut self, category: Category, cx: &mut Context<'_, Self>) {
+        let selected = self.tree_pane.read(cx).selected.clone();
+        if selected.as_deref().is_some_and(|id| {
+            id.starts_with("db-") || id.starts_with("schema-") || id.starts_with("cat-")
+        }) {
+            return;
+        }
         let Some((connection_index, database_index)) = self.tree_selection_scope(cx) else {
             return;
         };
-        let id = format!("cat-{connection_index}-{database_index}-{}", category.id());
+        // Match the tree's own id shape (`cat-<ci>-<di>-<scope>-<id>`, scope empty here).
+        let id = format!("cat-{connection_index}-{database_index}--{}", category.id());
         self.tree_pane.update(cx, |pane, cx| {
             pane.selected = Some(id);
             pane.selected_table = None;
@@ -521,12 +532,12 @@ impl AppView {
         });
     }
 
-    /// Clear the object list's per-database state (schema scope, selection, search), shared by
-    /// every main-tab switch so Users/Backups do not leave a stale list behind.
+    /// Clear the object list's per-database state (selection, search), shared by every main-tab
+    /// switch so Users/Backups do not leave a stale list behind. The schema scope is kept: a
+    /// schema-qualified engine must not silently widen back to every schema.
     fn clear_object_list_state(&mut self, cx: &mut Context<'_, Self>) {
         if let Some(pane) = self.object_pane.as_ref() {
             pane.update(cx, |pane, cx| {
-                pane.schema = None;
                 pane.selected = None;
                 pane.selected_routine = None;
                 cx.notify();
@@ -573,8 +584,8 @@ impl AppView {
         if let Some(pane) = self.object_pane.as_ref() {
             pane.update(cx, |pane, cx| {
                 pane.category = category;
-                // Switching the main tab shows the whole database, not a single schema.
-                pane.schema = None;
+                // Keep the pane's schema: a schema engine must keep showing only the schema the
+                // user opened (resetting it to `None` would list every schema's objects).
                 pane.selected = None;
                 pane.selected_routine = None;
                 cx.notify();

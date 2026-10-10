@@ -652,8 +652,10 @@ impl GridView {
             .get(index)
             .map(|rule| rule.column.clone())
             .unwrap_or_default();
+        // The popup menu is widened to fit the longest column name; the trigger sizes to content.
+        let menu_width = self.field_menu_width();
         let entity = cx.new(move |cx| {
-            ComboBox::new(theme, options, selected, FILTER_FIELD_WIDTH, cx).on_select(Rc::new(
+            ComboBox::new(theme, options, selected, menu_width, cx).on_select(Rc::new(
                 move |value, _window, cx| {
                     let _ = weak.update(cx, |grid, cx| {
                         grid.sort_choose_column(index, value.to_string(), cx);
@@ -941,8 +943,10 @@ impl GridView {
             .first()
             .map(|column| column.name.clone())
             .unwrap_or_default();
+        // The popup menu is widened to fit the longest column name; the trigger stays compact.
+        let menu_width = self.field_menu_width();
         let entity = cx.new(move |cx| {
-            ComboBox::new(theme, options, selected, FILTER_FIELD_WIDTH, cx)
+            ComboBox::new(theme, options, selected, menu_width, cx)
                 .field_width(FILTER_FIELD_WIDTH)
                 .height(FILTER_CONTROL_HEIGHT)
                 .text_size(FILTER_CONTROL_TEXT_SIZE)
@@ -955,6 +959,18 @@ impl GridView {
         });
         self.filter_field_combos.insert(key, entity.clone());
         entity
+    }
+
+    /// The dropdown menu width that fits the longest column name, so field names are not
+    /// truncated. The trigger keeps its own fixed width; only the popup grows.
+    fn field_menu_width(&self) -> f32 {
+        let longest = self
+            .state
+            .columns
+            .iter()
+            .map(|column| ui::approx_text_width(&column.name))
+            .fold(FILTER_FIELD_WIDTH, f32::max);
+        (longest + 56.0).clamp(FILTER_FIELD_WIDTH, 420.0)
     }
 
     /// The shared drop-down for a condition's comparison operator, keyed by node path.

@@ -54,7 +54,7 @@ impl AppView {
     /// `(connection_index, database_index)`. `None` when any other row is selected.
     fn tree_selected_database(&self, cx: &App) -> Option<(usize, usize)> {
         let selected = self.tree_pane.read(cx).selected.clone()?;
-        tree_scope_indices(&selected).map(|(connection, database, _)| (connection, database))
+        parse_tree_scope(&selected).map(|(connection, database, _)| (connection, database))
     }
 
     /// The schema selected in the connection tree (`schema-…`), as
@@ -1644,7 +1644,7 @@ impl AppView {
     /// the database is opened.
     pub(super) fn query_scope(&self, cx: &App) -> Option<(String, String, Option<String>)> {
         let selected = self.tree_pane.read(cx).selected.clone()?;
-        let (connection_index, database_index, schema) = tree_scope_indices(&selected)?;
+        let (connection_index, database_index, schema) = parse_tree_scope(&selected)?;
         let node = self.connections.get(connection_index)?;
         if !matches!(node.status, ConnectionStatus::Connected(_)) {
             return None;
@@ -2038,29 +2038,6 @@ impl AppView {
     pub(super) fn refresh_selected_query(&mut self, cx: &mut Context<'_, Self>) {
         self.refresh_query_files(cx);
     }
-}
-
-/// The `(connection_index, database_index, schema)` a connection-tree row addresses, for rows that
-/// scope the content pane: a database row (`db-…`, no schema) or a category row (`cat-…`). Only
-/// the Queries category (`…-q`) scopes query lookups, and its schema is `Some` when it sits under a
-/// schema node. Any other row returns `None`.
-fn tree_scope_indices(selected: &str) -> Option<(usize, usize, Option<String>)> {
-    if let Some(rest) = selected.strip_prefix("db-") {
-        let mut parts = rest.splitn(2, '-');
-        return Some((
-            parts.next()?.parse().ok()?,
-            parts.next()?.parse().ok()?,
-            None,
-        ));
-    }
-    let rest = selected.strip_prefix("cat-")?;
-    let mut parts = rest.splitn(3, '-');
-    let connection_index = parts.next()?.parse().ok()?;
-    let database_index = parts.next()?.parse().ok()?;
-    // `tail` is `<schema>-q` (empty schema yields `-q`).
-    let scope = parts.next()?.strip_suffix("-q")?;
-    let schema = (!scope.is_empty()).then(|| scope.to_string());
-    Some((connection_index, database_index, schema))
 }
 
 /// Whether a saved query is part of a scope's list. A schema scope also shows database-level

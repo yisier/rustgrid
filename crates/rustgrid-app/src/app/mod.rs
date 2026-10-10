@@ -2923,6 +2923,40 @@ fn is_valid_identifier(name: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
+/// The `(connection_index, database_index, schema)` a connection-tree row addresses, for rows that
+/// scope a database: a database (`db-…`), a schema (`schema-…`) or a category (`cat-…`, which may
+/// carry a `<schema>` segment — or none, for a synthetic id). Any other row returns `None`.
+pub(super) fn parse_tree_scope(selected: &str) -> Option<(usize, usize, Option<String>)> {
+    if let Some(rest) = selected.strip_prefix("db-") {
+        let mut parts = rest.splitn(2, '-');
+        return Some((
+            parts.next()?.parse().ok()?,
+            parts.next()?.parse().ok()?,
+            None,
+        ));
+    }
+    if let Some(rest) = selected.strip_prefix("schema-") {
+        let mut parts = rest.splitn(3, '-');
+        let connection_index = parts.next()?.parse().ok()?;
+        let database_index = parts.next()?.parse().ok()?;
+        let schema = parts.next()?;
+        return Some((
+            connection_index,
+            database_index,
+            (!schema.is_empty()).then(|| schema.to_string()),
+        ));
+    }
+    let rest = selected.strip_prefix("cat-")?;
+    let mut parts = rest.splitn(3, '-');
+    let connection_index = parts.next()?.parse().ok()?;
+    let database_index = parts.next()?.parse().ok()?;
+    // The tail is `<schema>-<category>` or just `<category>` (a synthetic, scope-less id).
+    let tail = parts.next()?;
+    let scope = tail.rsplit_once('-').map(|(scope, _)| scope).unwrap_or("");
+    let schema = (!scope.is_empty()).then(|| scope.to_string());
+    Some((connection_index, database_index, schema))
+}
+
 /// The blue rounded "+" badge used by the sort panel's add bar.
 fn sort_plus_badge(theme: Theme) -> impl IntoElement {
     div()
@@ -3448,5 +3482,26 @@ mod tests {
         assert_eq!(selection.cells().len(), 6);
         assert!(selection.contains(2, 3));
         assert!(!selection.contains(0, 1));
+    }
+
+    #[test]
+    fn tree_scope_parses_databases_schemas_and_categories() {
+        // A database row, a schema row, a schema-qualified category and both category id shapes
+        // (the tree's own `cat-<ci>-<di>-<scope>-<id>` and a synthetic scope-less one).
+        assert_eq!(parse_tree_scope("db-0-2"), Some((0, 2, None)));
+        assert_eq!(
+            parse_tree_scope("schema-0-2-dbo"),
+            Some((0, 2, Some("dbo".to_string())))
+        );
+        assert_eq!(
+            parse_tree_scope("cat-0-2-dbo-q"),
+            Some((0, 2, Some("dbo".to_string())))
+        );
+        assert_eq!(parse_tree_scope("cat-0-2--q"), Some((0, 2, None)));
+        assert_eq!(parse_tree_scope("cat-0-2-q"), Some((0, 2, None)));
+        assert_eq!(parse_tree_scope("cat-0-2-t"), Some((0, 2, None)));
+        // A leaf row does not scope a database.
+        assert_eq!(parse_tree_scope("tbl-0-2-dbo.users"), None);
+        assert_eq!(parse_tree_scope("conn-1"), None);
     }
 }

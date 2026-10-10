@@ -123,18 +123,8 @@ impl AppView {
     /// Backups-category) database row whose connection is open and whose database is opened.
     pub(super) fn backup_scope(&self, cx: &App) -> Option<(usize, usize)> {
         let selected = self.tree_pane.read(cx).selected.clone()?;
-        // A database row scopes directly; the Backups category row scopes its database.
-        let parsed: Option<(usize, usize)> = if let Some(rest) = selected.strip_prefix("db-") {
-            let mut parts = rest.splitn(2, '-');
-            Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
-        } else if let Some(rest) = selected.strip_prefix("cat-") {
-            let mut parts = rest.splitn(3, '-');
-            let pair = (parts.next()?.parse().ok()?, parts.next()?.parse().ok()?);
-            (parts.next()? == "b").then_some(pair)
-        } else {
-            None
-        };
-        let (connection_index, database_index) = parsed?;
+        // A database, schema or category row scopes its database; backups are per database.
+        let (connection_index, database_index, _schema) = parse_tree_scope(&selected)?;
         let node = self.connections.get(connection_index)?;
         if !matches!(node.status, ConnectionStatus::Connected(_)) {
             return None;

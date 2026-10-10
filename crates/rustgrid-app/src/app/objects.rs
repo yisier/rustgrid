@@ -59,6 +59,9 @@ fn object_message(color: u32, text: String) -> AnyElement {
 struct ObjectRenderData {
     mode: ViewMode,
     schema: Option<String>,
+    /// Whether the engine is schema-qualified (SQL Server/PostgreSQL). When true, objects are only
+    /// listed once a schema is selected.
+    supports_schemas: bool,
     tables: Option<Loadable<Vec<rustgrid_core::TableInfo>>>,
     table_statuses: Option<Vec<(String, rustgrid_core::TableStatus)>>,
     routines: Option<Loadable<Vec<RoutineInfo>>>,
@@ -848,6 +851,7 @@ impl ObjectPane {
         let ObjectRenderData {
             mode,
             schema,
+            supports_schemas,
             tables,
             table_statuses,
             routines,
@@ -856,6 +860,12 @@ impl ObjectPane {
             rename,
         } = data;
         let theme = self.theme;
+        // A schema-qualified engine lists nothing until a schema is selected: showing every
+        // schema's objects would look like the schema was never opened.
+        if supports_schemas && schema.is_none() && self.category != Category::Queries {
+            self.visible_keys.clear();
+            return object_message(theme.text_muted, t!("object.select_schema").to_string());
+        }
         let query = search.trim().to_lowercase();
         self.visible_keys.clear();
         if self.category == Category::Functions {
@@ -1943,7 +1953,7 @@ impl Render for ObjectPane {
             app.update(cx, |app, _| app.clear_row_rects(MarqueeTarget::Objects));
         }
 
-        let (search, tables, table_statuses, routines, rename, mode, selected) = {
+        let (search, tables, table_statuses, routines, rename, mode, selected, supports_schemas) = {
             let Some(app) = self.app.upgrade() else {
                 return div().into_any_element();
             };
@@ -1974,6 +1984,8 @@ impl Render for ObjectPane {
             let mode = app.view_mode(view_page_for_category(self.category));
             let selected: std::collections::HashSet<String> =
                 app.objects_selection.items().into_iter().collect();
+            let supports_schemas =
+                app.driver_supports(self.connection_index, DriverCapability::Schemas);
             (
                 app.object_search.clone(),
                 tables,
@@ -1982,6 +1994,7 @@ impl Render for ObjectPane {
                 app.rename_row(RowPane::Objects),
                 mode,
                 selected,
+                supports_schemas,
             )
         };
 
@@ -1989,6 +2002,7 @@ impl Render for ObjectPane {
             ObjectRenderData {
                 mode,
                 schema: self.schema.clone(),
+                supports_schemas,
                 tables,
                 table_statuses,
                 routines,
