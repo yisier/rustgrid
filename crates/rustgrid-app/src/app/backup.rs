@@ -1695,6 +1695,8 @@ impl AppView {
             .as_ref()
             .map(|saved| saved.name.clone())
             .unwrap_or_default();
+        // Editing an existing configuration shows the "edit" title; a fresh one shows "new".
+        let apply_is_edit = apply.is_some();
         let weak = cx.weak_entity();
         let input = make_backup_name_input(self.theme, config_name.clone(), &weak, cx);
         self.backup_name_input = Some(input);
@@ -1705,6 +1707,7 @@ impl AppView {
             objects: Vec::new(),
             config_name,
             apply,
+            editing: apply_is_edit,
             loading: false,
             running: false,
             cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1718,10 +1721,16 @@ impl AppView {
             started: None,
             elapsed: None,
             error: None,
+            config_saved: false,
         });
         self.backup_name_focus_pending = true;
         self.load_backup_objects(cx);
-        self.open_backup_window(t!("backup.new_title").to_string(), cx);
+        let title = if apply_is_edit {
+            t!("backup.edit_title").to_string()
+        } else {
+            t!("backup.new_title").to_string()
+        };
+        self.open_backup_window(title, cx);
         cx.notify();
     }
 
@@ -1950,6 +1959,8 @@ impl AppView {
         }
         if let Some(dialog) = self.new_backup_dialog.as_mut() {
             dialog.error = None;
+            // Confirm the save in the footer: the log line alone is invisible on the Objects tab.
+            dialog.config_saved = true;
             dialog
                 .log
                 .push(t!("backup.log.saved_config", name = dialog.config_name.trim()).to_string());
@@ -2011,6 +2022,7 @@ impl AppView {
 
         if let Some(dialog) = self.new_backup_dialog.as_mut() {
             dialog.running = true;
+            dialog.config_saved = false;
             dialog
                 .cancel
                 .store(false, std::sync::atomic::Ordering::Relaxed);
@@ -2680,8 +2692,12 @@ impl AppView {
     /// so it matches the app's theme), the tab body and the footer.
     pub(super) fn backup_window_contents(&mut self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
-        let title: String = if self.new_backup_dialog.is_some() {
-            t!("backup.new_title").to_string()
+        let title: String = if let Some(dialog) = self.new_backup_dialog.as_ref() {
+            if dialog.editing {
+                t!("backup.edit_title").to_string()
+            } else {
+                t!("backup.new_title").to_string()
+            }
         } else if let Some(name) = self
             .restore_dialog
             .as_ref()
@@ -3081,6 +3097,7 @@ impl AppView {
         let picker = render_object_picker(
             &dialog.objects,
             dialog.loading,
+            &self.backup_objects_scroll,
             theme,
             ObjectPickerAction::Backup,
             cx,
@@ -3194,6 +3211,9 @@ impl AppView {
             Some(dialog) if dialog.running => (t!("backup.status.running").to_string(), 0x22b14c),
             Some(dialog) if dialog.error.is_some() => {
                 (t!("backup.status.failed").to_string(), theme.danger)
+            }
+            Some(dialog) if dialog.config_saved => {
+                (t!("backup.status.saved").to_string(), 0x22b14c)
             }
             Some(dialog) if dialog.total > 0 => (t!("backup.status.done").to_string(), 0x22b14c),
             _ => (t!("backup.status.idle").to_string(), theme.neutral),
@@ -3368,6 +3388,7 @@ impl AppView {
         let picker = render_object_picker(
             &dialog.objects,
             false,
+            &self.backup_objects_scroll,
             theme,
             ObjectPickerAction::Restore,
             cx,
@@ -3590,6 +3611,7 @@ impl AppView {
         let picker = render_object_picker(
             &dialog.objects,
             false,
+            &self.backup_objects_scroll,
             theme,
             ObjectPickerAction::Extract,
             cx,
@@ -3857,6 +3879,8 @@ fn make_backup_name_input(
             let _ = change.update(cx, |app, cx| {
                 if let Some(dialog) = app.new_backup_dialog.as_mut() {
                     dialog.config_name = text.to_string();
+                    // The saved confirmation no longer applies once the name is edited.
+                    dialog.config_saved = false;
                 }
                 cx.notify();
             });
@@ -4049,6 +4073,7 @@ enum ObjectPickerAction {
 fn render_object_picker(
     objects: &[BackupObjectEntry],
     loading: bool,
+    scroll: &ScrollHandle,
     theme: Theme,
     action: ObjectPickerAction,
     cx: &mut Context<'_, AppView>,
@@ -4160,8 +4185,10 @@ fn render_object_picker(
         .flex_1()
         .min_h(px(0.0))
         .overflow_y_scroll()
+        .track_scroll(scroll)
         .child(list);
     div()
+        .relative()
         .flex()
         .flex_col()
         .flex_1()
@@ -4174,6 +4201,13 @@ fn render_object_picker(
         .bg(rgb(theme.dialog_bg))
         .overflow_hidden()
         .child(inner)
+        // gpui does not paint a scrollbar for an overflow container, so the picker draws its own
+        // (always visible) vertical scrollbar over the list.
+        .child(
+            Scrollbar::vertical(scroll)
+                .mode(ScrollbarMode::Always)
+                .id("backup-object-picker-scrollbar"),
+        )
         .into_any_element()
 }
 

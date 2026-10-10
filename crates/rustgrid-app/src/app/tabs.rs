@@ -54,13 +54,14 @@ impl AppView {
                 div().into_any_element()
             };
 
-        let has_tabs = self.main_tab != MainTab::Backups
-            && (self.object_pane.is_some()
-                || !self.grids.is_empty()
-                || !self.designs.is_empty()
-                || !self.queries.is_empty()
-                || self.main_tab == MainTab::Queries
-                || self.main_tab == MainTab::Users);
+        // The open-tab strip stays visible on every main tab (including Backup), so the tabs a
+        // user already has open do not disappear when they switch views.
+        let has_tabs = self.object_pane.is_some()
+            || !self.grids.is_empty()
+            || !self.designs.is_empty()
+            || !self.queries.is_empty()
+            || self.main_tab == MainTab::Queries
+            || self.main_tab == MainTab::Users;
         let mut content = div()
             .flex()
             .flex_col()

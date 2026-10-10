@@ -225,14 +225,18 @@ impl GridView {
                 start_row + index
             };
             if target_row >= data_rows {
-                // A one-to-one paste onto selected records never creates rows; a free paste that
-                // runs past the page grows pending insert rows to hold the overflow.
+                // A one-to-one paste onto selected records never creates rows; it only fills the
+                // selected ones, which may include pending insert rows the user added. A free
+                // paste that runs past the page grows pending insert rows to hold the overflow.
                 if map_rows {
-                    break;
-                }
-                let needed = target_row - data_rows + 1;
-                while self.inserts.len() < needed {
-                    self.inserts.push(BTreeMap::new());
+                    if self.inserts.get(target_row - data_rows).is_none() {
+                        break;
+                    }
+                } else {
+                    let needed = target_row - data_rows + 1;
+                    while self.inserts.len() < needed {
+                        self.inserts.push(BTreeMap::new());
+                    }
                 }
             }
             for (offset, value) in values.iter().enumerate() {

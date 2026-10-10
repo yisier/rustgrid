@@ -48,6 +48,7 @@ use crate::theme::Theme;
 // half (segmented hours/minutes/seconds with keyboard editing).
 use gpui_kit::component::Sizable;
 use gpui_kit::component::calendar::CalendarState;
+use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::time_field::{TimeField, TimeFieldState, TimePrecision};
 
 use ui::{
@@ -334,6 +335,9 @@ struct NewBackupDialog {
     config_name: String,
     /// A saved configuration to apply to the object selection once it has finished loading.
     apply: Option<SavedBackup>,
+    /// Whether the dialog is editing an existing saved configuration (drives the window title).
+    /// Kept after `apply` is consumed so the title stays "Edit Backup".
+    editing: bool,
     loading: bool,
     running: bool,
     /// Set by 停止 to abort the run loop early (checked between objects/rows).
@@ -352,6 +356,9 @@ struct NewBackupDialog {
     started: Option<std::time::Instant>,
     elapsed: Option<std::time::Duration>,
     error: Option<String>,
+    /// Set after the Save button writes the configuration, so the footer can confirm it. Cleared
+    /// when the name changes or a run starts.
+    config_saved: bool,
 }
 
 /// State of the "Restore Backup" dialog.
@@ -1660,6 +1667,8 @@ pub struct AppView {
     limit_records: bool,
     object_search: String,
     object_search_input: Entity<TextInput>,
+    /// Scroll position of the backup/restore object picker, so it can show a vertical scrollbar.
+    backup_objects_scroll: ScrollHandle,
     delete_confirm: Option<DeleteConfirm>,
     error_dialog: Option<String>,
     /// Transient notifications queued for the next frame, which has the window needed to hand
@@ -2134,6 +2143,7 @@ impl AppView {
             page_size: 1000,
             limit_records: true,
             object_search: String::new(),
+            backup_objects_scroll: ScrollHandle::new(),
             object_search_input: {
                 let weak = app.clone();
                 cx.new(move |cx| {

@@ -86,8 +86,10 @@ pub(crate) struct TextInput {
     initial_text: String,
     /// A change reported by the inner input, waiting for the next render to reach the callback.
     pending_change: Option<String>,
-    /// Whether the next change event was caused by a programmatic `set_text`.
-    suppress_change: bool,
+    /// The value of the last programmatic `set_text`, so the change it may report is not echoed
+    /// back to `on_change` as if the user had typed it. The kit's `set_value` does not emit a
+    /// change event, so this normally stays pending until a real (different) edit clears it.
+    programmatic_value: Option<String>,
     /// An Enter press reported by the inner input, waiting for the next render.
     pending_submit: bool,
     on_change: Option<TextChangeCallback>,
@@ -120,7 +122,7 @@ impl TextInput {
             pending: Vec::new(),
             initial_text: text.into(),
             pending_change: None,
-            suppress_change: false,
+            programmatic_value: None,
             pending_submit: false,
             on_change: None,
             on_submit: None,
@@ -217,10 +219,13 @@ impl TextInput {
             .push(
                 cx.subscribe(&state, |this, state, event: &InputEvent, cx| match event {
                     InputEvent::Change => {
-                        if this.suppress_change {
-                            this.suppress_change = false;
+                        let value = state.read(cx).value().to_string();
+                        if this.programmatic_value.as_deref() == Some(value.as_str()) {
+                            // The echo of a programmatic set (the kit usually suppresses it): drop
+                            // it so it is not reported as a user edit.
+                            this.programmatic_value = None;
                         } else {
-                            this.pending_change = Some(state.read(cx).value().to_string());
+                            this.pending_change = Some(value);
                         }
                         cx.notify();
                     }
@@ -265,7 +270,7 @@ impl TextInput {
             match action {
                 Pending::SetText(text, suppress) => {
                     if suppress {
-                        self.suppress_change = true;
+                        self.programmatic_value = Some(text.clone());
                     }
                     state.update(cx, |state, cx| {
                         state.set_value(text.clone(), window, cx);
