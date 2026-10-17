@@ -217,9 +217,18 @@ async fn connect(config: &ConnectionConfig, engine: Engine) -> Result<Box<dyn Co
                     .await?;
                 }
                 if let Some(seconds) = query_timeout {
-                    sqlx::raw_sql(sqlx::AssertSqlSafe(engine.statement_timeout_sql(seconds)))
-                        .execute(&mut *connection)
-                        .await?;
+                    let applied =
+                        sqlx::raw_sql(sqlx::AssertSqlSafe(engine.statement_timeout_sql(seconds)))
+                            .execute(&mut *connection)
+                            .await;
+                    // MySQL before 5.7 and MariaDB before 10.1 have no per-statement timeout
+                    // and reject the variable as unknown: run without the cap there rather
+                    // than failing every connection to an older server.
+                    if let Err(error) = applied
+                        && !is_unknown_system_variable(&error)
+                    {
+                        return Err(error);
+                    }
                 }
                 Ok(())
             })
@@ -244,4 +253,15 @@ fn map_connect_error(error: sqlx::Error) -> Error {
     }
 
     Error::Connection(error.to_string())
+}
+
+/// Whether `error` is MySQL's `ER_UNKNOWN_SYSTEM_VARIABLE` (1193).
+fn is_unknown_system_variable(error: &sqlx::Error) -> bool {
+    if let sqlx::Error::Database(database_error) = error
+        && let Some(mysql_error) =
+            database_error.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
+    {
+        return mysql_error.number() == 1193;
+    }
+    false
 }

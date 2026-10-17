@@ -1,0 +1,69 @@
+[package]
+name = "sqlx-mysql"
+documentation = "https://docs.rs/sqlx"
+description = "MySQL driver implementation for SQLx. Not for direct use; see the `sqlx` crate for details."
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+json = ["sqlx-core/json", "serde"]
+any = ["sqlx-core/any"]
+offline = ["sqlx-core/offline", "serde/derive", "bitflags/serde"]
+migrate = ["sqlx-core/migrate", "dep:crc"]
+rsa = ["dep:rand", "dep:rsa"]
+
+# Type Integration features
+bigdecimal = ["dep:bigdecimal", "sqlx-core/bigdecimal"]
+chrono = ["dep:chrono", "sqlx-core/chrono"]
+rust_decimal = ["dep:rust_decimal", "rust_decimal/maths", "sqlx-core/rust_decimal"]
+time = ["dep:time", "sqlx-core/time"]
+uuid = ["dep:uuid", "sqlx-core/uuid"]
+
+[dependencies]
+sqlx-core = { workspace = true }
+
+# Futures crates
+futures-core = { version = "0.3.32", default-features = false }
+futures-util = { version = "0.3.32", default-features = false, features = ["alloc", "sink", "io"] }
+
+# Cryptographic Primitives
+crc = { workspace = true, optional = true }
+digest = { workspace = true }
+rand = { workspace = true, optional = true }
+rsa = { workspace = true, optional = true }
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+
+# Type Integrations (versions inherited from `[workspace.dependencies]`)
+bigdecimal = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
+rust_decimal = { workspace = true, optional = true }
+time = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+
+# Misc
+bitflags = { version = "2.4", default-features = false }
+byteorder = { version = "1.4.3", default-features = false, features = ["std"] }
+bytes = "1.2.0"
+either = "1.6.1"
+generic-array = { version = "0.14.4", default-features = false }
+log = "0.4.18"
+percent-encoding = "2.3.0"
+tracing = { version = "0.1.37", features = ["log"] }
+
+dotenvy.workspace = true
+thiserror.workspace = true
+
+serde = { version = "1.0.219", optional = true }
+
+[dev-dependencies]
+# FIXME: https://github.com/rust-lang/cargo/issues/15622
+sqlx = { path = "..", default-features = false, features = ["mysql"] }
+
+[lints]
+workspace = true

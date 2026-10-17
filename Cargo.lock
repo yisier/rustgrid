@@ -8395,8 +8395,6 @@ dependencies = [
 [[package]]
 name = "sqlx-mysql"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "90b8020fe17c5f2c245bfa2505d7ef59c5604839527c740266ad2214acebea27"
 dependencies = [
  "bitflags 2.13.2",
  "byteorder",
