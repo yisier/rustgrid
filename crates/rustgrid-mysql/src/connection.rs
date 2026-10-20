@@ -168,7 +168,8 @@ impl Connection for MysqlConnection {
     }
 
     async fn list_databases(&self) -> Result<Vec<DatabaseInfo>> {
-        let rows = sqlx::query("SHOW DATABASES")
+        // SHOW is not preparable on every MySQL-protocol server (e.g. StarRocks).
+        let rows = sqlx::raw_sql("SHOW DATABASES")
             .fetch_all(&self.pool)
             .await
             .map_err(map_query_error)?;

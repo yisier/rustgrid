@@ -51,6 +51,19 @@ the connection tree, object lists, toolbars and dialogs all behave the way you a
 | Oracle                     | Supported        |
 | DB2, Dameng, ...           | via generic ODBC |
 
+### Connecting to StarRocks through MySQL
+
+Create a **MySQL** connection, use your FE query port (normally `9030`), and select
+**Advanced → Compatibility mode → StarRocks**. This preserves the server's existing
+`sql_mode` instead of appending SQLx's MySQL modes during login. Existing MySQL
+connections use **Default (MySQL)**; MariaDB initialization is unchanged. The option
+is saved with the connection and applies to every pooled connection.
+
+This addresses connection initialization and uses the text protocol for database
+listing. It does not provide full StarRocks support for MySQL-specific table design,
+users, routines, or backup/restore. Session initialization SQL runs after driver
+login, so it cannot work around a failure in the driver's own login SQL.
+
 ## Features
 
 - **Connections** — create / edit / delete, connect, password prompt; passwords are encrypted

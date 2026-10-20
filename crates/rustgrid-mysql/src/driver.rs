@@ -2,9 +2,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rustgrid_core::{
-    Connection, ConnectionConfig, DatabaseEditorSpec, Driver, DriverCapabilities, DriverCapability,
-    DriverDescriptor, DriverDialect, DriverIconStyle, DriverId, Error, Result, TableDesignerSpec,
-    TlsMode,
+    Connection, ConnectionConfig, ConnectionFieldChoice, ConnectionFieldKind, ConnectionFieldSpec,
+    ConnectionFormSpec, ConnectionPage, DatabaseEditorSpec, Driver, DriverCapabilities,
+    DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle, DriverId, Error, Result,
+    TableDesignerSpec, TlsMode,
 };
 use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlSslMode};
 
@@ -60,7 +61,26 @@ impl Driver for MysqlDriver {
                 .with(DriverCapability::Users)
                 .with(DriverCapability::Routines),
             database_editor: self.database_editor(),
-            connection_form: Default::default(),
+            connection_form: ConnectionFormSpec {
+                options: vec![ConnectionFieldSpec {
+                    key: "mysql.compatibility",
+                    label_key: "form.mysql.compatibility",
+                    hint_key: Some("form.mysql.compatibility_hint"),
+                    kind: ConnectionFieldKind::Select(vec![
+                        ConnectionFieldChoice {
+                            value: "default",
+                            label_key: "form.mysql.compatibility_default",
+                        },
+                        ConnectionFieldChoice {
+                            value: "starrocks",
+                            label_key: "form.mysql.compatibility_starrocks",
+                        },
+                    ]),
+                    page: ConnectionPage::Advanced,
+                    visible_when: None,
+                }],
+                ..Default::default()
+            },
             order: 10,
         }
     }
@@ -157,6 +177,18 @@ async fn connect(config: &ConnectionConfig, engine: Engine) -> Result<Box<dyn Co
         .host(&host)
         .port(port)
         .username(&config.username);
+
+    if engine == Engine::MySql
+        && config
+            .options
+            .get("mysql.compatibility")
+            .map(String::as_str)
+            == Some("starrocks")
+    {
+        // StarRocks rejects SQLx's SET sql_mode=(SELECT CONCAT(...)) before after_connect
+        // can run. Disable both additions, leaving the server's existing sql_mode intact.
+        options = options.pipes_as_concat(false).no_engine_substitution(false);
+    }
 
     if let Some(database) = &config.database {
         options = options.database(database);
