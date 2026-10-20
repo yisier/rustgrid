@@ -16,7 +16,7 @@ use sqlx::{AssertSqlSafe, Column, Either, Executor, Row, SqlSafeStr, Statement, 
 use sqlx::{Postgres, pool::PoolConnection};
 
 use crate::helpers::{
-    cell_from_format_type, decode_text_cell, filter_clause, order_clause, qualify,
+    build_fetch_page_sql, cell_from_format_type, decode_text_cell, filter_clause, qualify,
     quote_identifier, split_qualified, split_statements,
 };
 
@@ -404,46 +404,8 @@ impl Connection for PostgresConnection {
             .ok()
             .map(|value| value.max(0) as u64);
 
-        // Project every column to text so the binary protocol path (which is taken because the
-        // filter is bound) yields readable `numeric`/`uuid`/`json`/array values.
-        let projection = if columns.is_empty() {
-            "*".to_string()
-        } else {
-            columns
-                .iter()
-                .map(|column| {
-                    let name = quote_identifier(&column.name);
-                    format!("{name}::text AS {name}")
-                })
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-
-        let order = if !page.order_by.is_empty() {
-            order_clause(&page)
-        } else {
-            let primary: Vec<String> = columns
-                .iter()
-                .filter(|column| column.primary_key)
-                .map(|column| quote_identifier(&column.name))
-                .collect();
-            if !primary.is_empty() {
-                format!(" ORDER BY {}", primary.join(", "))
-            } else {
-                // A stable order without a primary key: base tables, partitioned tables and
-                // materialized views have `ctid`; views and foreign tables do not.
-                match self.relkind(database, &schema, &bare).await? {
-                    Some('r') | Some('p') | Some('m') => " ORDER BY ctid".to_string(),
-                    _ => String::new(),
-                }
-            }
-        };
-
-        let sql = format!(
-            "SELECT {projection} FROM {qualified}{where_clause}{order} LIMIT {} OFFSET {}",
-            page.page_size,
-            page.offset()
-        );
+        let relkind = self.relkind(database, &schema, &bare).await?;
+        let sql = build_fetch_page_sql(&qualified, &columns, &page, &where_clause, relkind);
         let pool = self.pool(Some(database)).await?;
         let mut query = sqlx::query(AssertSqlSafe(sql));
         for bind in &binds {

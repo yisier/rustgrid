@@ -248,8 +248,63 @@ fn has_sql_content(fragment: &str) -> bool {
     false
 }
 
-/// The `ORDER BY` clause for a page, or an empty string when unsorted.
-pub(crate) fn order_clause(page: &PageRequest) -> String {
+/// Build the SQL query for fetching a page of rows.
+///
+/// Every column is projected to `::text` so sqlx's binary protocol path (taken whenever a
+/// filter is bound) can decode arbitrary types. The FROM clause binds the table to the alias
+/// `_rg_t`, and all ORDER BY column expressions are qualified with `_rg_t.` so PostgreSQL
+/// evaluates the sort against the underlying typed table columns instead of matching the
+/// `::text` output aliases.
+pub(crate) fn build_fetch_page_sql(
+    qualified: &str,
+    columns: &[ColumnInfo],
+    page: &PageRequest,
+    where_clause: &str,
+    relkind: Option<char>,
+) -> String {
+    const TABLE_ALIAS: &str = "_rg_t";
+    let projection = if columns.is_empty() {
+        format!("{TABLE_ALIAS}.*")
+    } else {
+        columns
+            .iter()
+            .map(|column| {
+                let name = quote_identifier(&column.name);
+                format!("{TABLE_ALIAS}.{name}::text AS {name}")
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    let order = if !page.order_by.is_empty() {
+        order_clause(page, Some(TABLE_ALIAS))
+    } else {
+        let primary: Vec<String> = columns
+            .iter()
+            .filter(|column| column.primary_key)
+            .map(|column| format!("{TABLE_ALIAS}.{}", quote_identifier(&column.name)))
+            .collect();
+        if !primary.is_empty() {
+            format!(" ORDER BY {}", primary.join(", "))
+        } else {
+            match relkind {
+                Some('r') | Some('p') | Some('m') => format!(" ORDER BY {TABLE_ALIAS}.ctid"),
+                _ => String::new(),
+            }
+        }
+    };
+
+    format!(
+        "SELECT {projection} FROM {qualified} AS {TABLE_ALIAS}{where_clause}{order} LIMIT {} OFFSET {}",
+        page.page_size,
+        page.offset()
+    )
+}
+
+/// The `ORDER BY` clause for a page, or an empty string when unsorted. When `qualifier` is
+/// provided (e.g. a table alias), each column is qualified so PostgreSQL does not resolve the
+/// order term to an output-column alias (such as a `::text` projection).
+pub(crate) fn order_clause(page: &PageRequest, qualifier: Option<&str>) -> String {
     if page.order_by.is_empty() {
         return String::new();
     }
@@ -257,11 +312,12 @@ pub(crate) fn order_clause(page: &PageRequest) -> String {
         .order_by
         .iter()
         .map(|sort| {
-            format!(
-                "{} {}",
-                quote_identifier(&sort.column),
-                if sort.descending { "DESC" } else { "ASC" }
-            )
+            let column = quote_identifier(&sort.column);
+            let target = match qualifier {
+                Some(q) => format!("{q}.{column}"),
+                None => column,
+            };
+            format!("{target} {}", if sort.descending { "DESC" } else { "ASC" })
         })
         .collect::<Vec<_>>()
         .join(", ");
@@ -696,6 +752,142 @@ mod tests {
             " WHERE \"id\" IN (CAST($1 AS integer), CAST($2 AS integer), CAST($3 AS integer))"
         );
         assert_eq!(values, vec!["1", "2", "3"]);
+    }
+
+    #[test]
+    fn order_clause_qualifies_when_requested() {
+        use rustgrid_core::SortColumn;
+
+        let page = PageRequest::new(0, 10).with_order_by(vec![
+            SortColumn {
+                column: "id".to_string(),
+                descending: false,
+            },
+            SortColumn {
+                column: "created_at".to_string(),
+                descending: true,
+            },
+        ]);
+        assert_eq!(
+            order_clause(&page, Some("_rg_t")),
+            " ORDER BY _rg_t.\"id\" ASC, _rg_t.\"created_at\" DESC"
+        );
+        assert_eq!(
+            order_clause(&page, None),
+            " ORDER BY \"id\" ASC, \"created_at\" DESC"
+        );
+        assert_eq!(order_clause(&PageRequest::new(0, 10), Some("_rg_t")), "");
+    }
+
+    #[test]
+    fn build_fetch_page_sql_orders_by_id_and_time_with_table_qualifier() {
+        use rustgrid_core::SortColumn;
+
+        let mut id_col = column("id", "integer");
+        id_col.primary_key = true;
+        let time_col = column("created_at", "timestamp with time zone");
+        let name_col = column("name", "character varying(50)");
+        let columns = vec![id_col, time_col, name_col];
+
+        // 1. Sort by numeric id: verifies table alias _rg_t is attached to "id" so PostgreSQL
+        // does not match the output text projection alias "id"::text AS "id".
+        let page_id_asc = PageRequest::new(0, 50).with_order_by(vec![SortColumn {
+            column: "id".to_string(),
+            descending: false,
+        }]);
+        let sql = build_fetch_page_sql(
+            "\"public\".\"users\"",
+            &columns,
+            &page_id_asc,
+            "",
+            Some('r'),
+        );
+        assert!(
+            sql.contains("ORDER BY _rg_t.\"id\" ASC"),
+            "Expected ORDER BY _rg_t.\"id\" ASC, got: {sql}"
+        );
+        assert!(sql.contains("SELECT _rg_t.\"id\"::text AS \"id\""));
+        assert!(sql.contains("FROM \"public\".\"users\" AS _rg_t"));
+
+        // 2. Sort by time/timestamp column: verifies table alias is attached to "created_at"
+        // so sorting preserves chronological timestamp semantics rather than lexicographical string comparison.
+        let page_time_desc = PageRequest::new(0, 50).with_order_by(vec![SortColumn {
+            column: "created_at".to_string(),
+            descending: true,
+        }]);
+        let sql = build_fetch_page_sql(
+            "\"public\".\"users\"",
+            &columns,
+            &page_time_desc,
+            "",
+            Some('r'),
+        );
+        assert!(
+            sql.contains("ORDER BY _rg_t.\"created_at\" DESC"),
+            "Expected ORDER BY _rg_t.\"created_at\" DESC, got: {sql}"
+        );
+
+        // 3. Multi-column sort: both id and time columns qualified.
+        let page_multi = PageRequest::new(1, 25).with_order_by(vec![
+            SortColumn {
+                column: "id".to_string(),
+                descending: false,
+            },
+            SortColumn {
+                column: "created_at".to_string(),
+                descending: true,
+            },
+        ]);
+        let sql =
+            build_fetch_page_sql("\"public\".\"users\"", &columns, &page_multi, "", Some('r'));
+        assert!(
+            sql.contains("ORDER BY _rg_t.\"id\" ASC, _rg_t.\"created_at\" DESC"),
+            "Expected multi-column qualified order, got: {sql}"
+        );
+        assert!(sql.contains("LIMIT 25 OFFSET 25"));
+
+        // 4. Default sort with primary key: when page.order_by is empty, the primary key column
+        // must also be qualified with _rg_t so default initial page loading doesn't sort by text.
+        let page_default = PageRequest::new(0, 100);
+        let sql = build_fetch_page_sql(
+            "\"public\".\"users\"",
+            &columns,
+            &page_default,
+            "",
+            Some('r'),
+        );
+        assert!(
+            sql.contains("ORDER BY _rg_t.\"id\""),
+            "Expected primary key qualified order, got: {sql}"
+        );
+
+        // 5. Default sort without primary key on a regular table: falls back to _rg_t.ctid.
+        let mut non_pk_cols = columns.clone();
+        non_pk_cols[0].primary_key = false;
+        let sql = build_fetch_page_sql(
+            "\"public\".\"logs\"",
+            &non_pk_cols,
+            &page_default,
+            "",
+            Some('r'),
+        );
+        assert!(
+            sql.contains("ORDER BY _rg_t.ctid"),
+            "Expected ctid order, got: {sql}"
+        );
+
+        // 6. View without primary key has no ctid order.
+        let sql = build_fetch_page_sql(
+            "\"public\".\"v_users\"",
+            &non_pk_cols,
+            &page_default,
+            "",
+            Some('v'),
+        );
+        assert!(
+            !sql.contains("ORDER BY"),
+            "Expected view to have no ORDER BY, got: {sql}"
+        );
     }
 
     #[test]
