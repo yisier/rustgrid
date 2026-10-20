@@ -1096,6 +1096,7 @@ impl AppView {
                     )
                     .child(
                         div()
+                            .min_w_0()
                             .text_size(px(11.5))
                             .text_color(rgb(self.theme.text_muted))
                             .child(t!("options.general.max_statements_hint").to_string()),
