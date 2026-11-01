@@ -10,6 +10,33 @@ UI labels are quoted as the app shows them, so this file quotes the English stri
 [`CHANGELOG_zh.md`](CHANGELOG_zh.md) and [`CHANGELOG_ru.md`](CHANGELOG_ru.md) quote the 简体中文 and
 Russian ones.
 
+## [0.1.4] - 2026-11-01
+
+### Added
+
+- Redis connections (Standalone, Sentinel and Cluster): keys browsed by namespace, each with its
+  type, TTL, memory and value preview and its own page (RAW/JSON for strings, editable tables for
+  collections), plus New Key, Set TTL, Delete and Rename.
+- Sync picks the source and target schema on SQL Server and PostgreSQL.
+
+### Changed
+
+- General turns TLS/SSL and tunnels on with switches, and their pages appear only then.
+- The grid's field-layout button is named Fields (it was Filter).
+- The mouse wheel pans the icon-grid object lists horizontally.
+- The pager fields accept typing, paste and IME, and Up/Down steps the record limit by 100.
+- Import continues past a failed row, and Backups in the tree expands to its files.
+- The changelog in About, the sync log and error dialogs can be selected and copied.
+
+### Fixed
+
+- Right-clicking a saved query or a backup in the tree no longer closes the app.
+- Closing a database closes its tabs, and the object list follows the tree's selection.
+- A cell edit saved on leaving the field confirms it.
+- The filter panel and the connection tree keep in step with the active view.
+- Ctrl+clicking a cell out of Select All keeps the rest of the selection.
+- Long backup names show in full in the icon grid.
+
 ## [0.1.3] - 2026-10-28
 
 ### Added
