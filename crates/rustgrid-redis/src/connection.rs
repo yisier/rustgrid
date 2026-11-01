@@ -48,6 +48,10 @@ const STATUS_CONCURRENCY: usize = 16;
 /// The commands per `SCAN` round.
 const SCAN_COUNT: usize = 1000;
 
+/// How many leading bytes of a string key the object list's 值 preview reads (`GETRANGE`, so a
+/// multi-megabyte value is never transferred just to show a one-line preview).
+const PREVIEW_BYTES: usize = 200;
+
 /// How the client reaches the server.
 enum Mode {
     Standalone,
@@ -649,12 +653,26 @@ impl RedisConnection {
             .await
             .ok()
             .and_then(|value| reply::reply_text(&value));
+        // A string key's content is what the key list's 值 column previews; a collection has no
+        // single value, so it gets none (the list shows its entry count there instead).
+        let preview = match key_type {
+            KeyType::String => {
+                let last = (PREVIEW_BYTES - 1).to_string();
+                self.run(db, &cmd_value("GETRANGE", &[key, "0", &last]))
+                    .await
+                    .ok()
+                    .and_then(|value| reply::reply_text(&value))
+                    .filter(|text| !text.is_empty())
+            }
+            _ => None,
+        };
         Ok(TableStatus {
             engine: Some(key_type.label().to_string()),
             rows,
             data_length: memory,
             comment: encoding.clone(),
             ttl,
+            preview,
             ..Default::default()
         })
     }

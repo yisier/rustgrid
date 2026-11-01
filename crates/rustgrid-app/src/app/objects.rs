@@ -130,7 +130,7 @@ pub(super) fn key_type_badge(kind: &str, theme: Theme) -> AnyElement {
         .into_any_element()
 }
 
-/// The sort value of one key-value key-list cell: 键名 / 类型 / TTL / 内存.
+/// The sort value of one key-value key-list cell: 键名 / 类型 / TTL / 内存 / 值.
 fn key_sort_key(
     table: &rustgrid_core::TableInfo,
     status: Option<&rustgrid_core::TableStatus>,
@@ -140,7 +140,24 @@ fn key_sort_key(
         1 => SortKey::opt_text(status.and_then(|s| s.engine.as_deref())),
         2 => SortKey::number(status.and_then(|s| s.ttl).map(|v| v as f64)),
         3 => SortKey::number(status.and_then(|s| s.data_length).map(|v| v as f64)),
+        4 => SortKey::text(&key_preview(status)),
         _ => SortKey::text(&object_display(&table.name)),
+    }
+}
+
+/// The 值 column's one-line preview of one key: a string key's leading characters, or a
+/// collection's entry count (a collection has no single value to show). The cell truncates what
+/// does not fit and offers the rest on hover.
+fn key_preview(status: Option<&rustgrid_core::TableStatus>) -> String {
+    let Some(status) = status else {
+        return String::new();
+    };
+    if let Some(preview) = status.preview.as_deref() {
+        return single_line(preview);
+    }
+    match status.rows {
+        Some(rows) => format!("{rows} {}", t!("redis.key.entries")),
+        None => String::new(),
     }
 }
 
@@ -1298,7 +1315,7 @@ impl ObjectPane {
         let columns = if self.category == Category::Views {
             2
         } else if self.key_value {
-            4
+            5
         } else {
             7
         };
@@ -1633,7 +1650,7 @@ impl ObjectPane {
         list.render(theme)
     }
 
-    /// The key-value list: 键名 / 类型 / TTL / 内存 (the HTML prototype's key table).
+    /// The key-value list: 键名 / 类型 / TTL / 内存 / 值 (the HTML prototype's key table).
     fn render_key_detail(
         &self,
         tables: &[&rustgrid_core::TableInfo],
@@ -1648,12 +1665,14 @@ impl ObjectPane {
             t!("redis.key.type").to_string(),
             t!("redis.key.ttl").to_string(),
             t!("redis.key.memory").to_string(),
+            t!("redis.key.value").to_string(),
         ];
         let mut longest = [
             ui::approx_text_width(&labels[0]) + 30.0,
             ui::approx_text_width(&labels[1]),
             ui::approx_text_width(&labels[2]),
             ui::approx_text_width(&labels[3]),
+            ui::approx_text_width(&labels[4]),
         ];
         for table in tables {
             let status = statuses.and_then(|list| {
@@ -1679,8 +1698,9 @@ impl ObjectPane {
                     .map(human_size)
                     .unwrap_or_default(),
             ));
+            longest[4] = longest[4].max(ui::approx_text_width(&key_preview(status)));
         }
-        let mins: [f32; 4] = [220.0, 90.0, 80.0, 100.0];
+        let mins: [f32; 5] = [220.0, 90.0, 80.0, 100.0, 160.0];
         let fitted: Vec<f32> = longest
             .iter()
             .zip(mins)
@@ -1744,7 +1764,7 @@ impl ObjectPane {
         list.render(theme)
     }
 
-    /// One key row of the key list, with its type badge, TTL and memory.
+    /// One key row of the key list, with its type badge, TTL, memory and value preview.
     #[allow(clippy::too_many_arguments)]
     fn key_row(
         &self,
@@ -1874,6 +1894,7 @@ impl ObjectPane {
         .child(cell(1, widths[1], kind_text, theme.text_muted))
         .child(cell(2, widths[2], ttl_text, ttl_color))
         .child(cell(3, widths[3], memory, theme.text_muted))
+        .child(cell(4, widths[4], key_preview(status), theme.text_muted))
     }
 
     /// One table/view row of the 详细列表.

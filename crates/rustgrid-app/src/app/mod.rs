@@ -406,7 +406,12 @@ struct NewKeyDialog {
     /// `string` / `hash` / `list` / `set` / `zset` / `stream`.
     kind: String,
     ttl: String,
+    /// The key's content (`string`/`list`/`set`), or the value half of a `hash`/`stream` entry.
     value: String,
+    /// The field name of a `hash`/`stream` entry, or a sorted set's member.
+    field: String,
+    /// A sorted set member's score.
+    score: String,
     error: Option<String>,
     saving: bool,
 }
@@ -2253,7 +2258,10 @@ pub struct AppView {
     new_key_name_input: Option<Entity<TextInput>>,
     new_key_ttl_input: Option<Entity<TextInput>>,
     new_key_type_combo: Option<Entity<ComboBox>>,
-    new_key_value_editor: Option<Entity<ui::SqlEditor>>,
+    /// The modal's value / field / score fields; which of them shows depends on the key type.
+    new_key_value_input: Option<Entity<TextInput>>,
+    new_key_field_input: Option<Entity<TextInput>>,
+    new_key_score_input: Option<Entity<TextInput>>,
     /// The Redis 设置 TTL modal and its TTL field.
     key_ttl_dialog: Option<KeyTtlDialog>,
     key_ttl_input: Option<Entity<TextInput>>,
@@ -3074,7 +3082,9 @@ impl AppView {
             new_key_name_input: None,
             new_key_ttl_input: None,
             new_key_type_combo: None,
-            new_key_value_editor: None,
+            new_key_value_input: None,
+            new_key_field_input: None,
+            new_key_score_input: None,
             key_ttl_dialog: None,
             key_ttl_input: None,
             save_connection_combo: None,

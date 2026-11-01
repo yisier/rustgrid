@@ -750,6 +750,7 @@ impl Connection for MysqlConnection {
             create_options: value("Create_options").and_then(text_value),
             comment: value("Comment").and_then(text_value),
             ttl: None,
+            preview: None,
         })
     }
 

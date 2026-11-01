@@ -91,20 +91,24 @@ writes such as `JSON.SET`, and every grid edit.
 ## Key management and namespaces
 
 The object list is the key list. For key-value engines (`DriverCapability::KeyValue`) its detailed
-layout is 键名 / 类型 / TTL / 内存 and it is the **only** layout for a key list (the 详细列表 /
+layout is 键名 / 类型 / TTL / 内存 / 值 and it is the **only** layout for a key list (the 详细列表 /
 平铺网格 switch is not shown), the tree under a database shows the **namespace folders** (with key
 counts) instead of SQL categories, and the toolbar follows the prototype: a filled **新建键**, an
 outlined **删除**, plain **设置 TTL / 刷新** actions and the active namespace chip. The database row
 itself is the all-keys view and carries the key count (the prototype's `(11)`); there is no
 separate 全部 row and no 查询 category under a Redis database. The key list is loaded in one go up
-to the connection's `redis.key_limit` (so there is no 加载更多 button).
+to the connection's `redis.key_limit` (so there is no 加载更多 button). The 值 column is a one-line
+preview: a string key's first `PREVIEW_BYTES` bytes (read with `GETRANGE`, so a huge value is never
+transferred) shortened in the cell with the rest on hover, and a collection's entry count (a
+collection has no single value).
 
 **新建键** and **设置 TTL** are `Root`-managed modals (`app/dialogs.rs`), not a separate tools
 window:
 
-- **new key**: key name, type (`string`/`hash`/`list`/`set`/`zset`/`stream`), TTL (blank or -1 for
-  no expiry) and an initial value. A hash starts with field `field`, a zset with member = value and
-  score 1, a stream with field `field`.
+- **new key**: key name, type (`string`/`hash`/`list`/`set`/`zset`/`stream`) and TTL (blank or -1 for
+  no expiry), plus the first entry's own fields as plain single-line inputs — one 初始值 for a
+  string/list, 成员 for a set, 字段 + 值 for a hash/stream, and 成员 + 分数 for a zset. A blank field
+  name falls back to `field` (or `item` for a zset member) and a blank score to `1`.
 - **TTL**: `EXPIRE` (or `PERSIST` for 永久), with the key name prefilled by 设置 TTL from the key
   list and quick buttons for 永久 / 1 minute / 1 hour.
 - **namespaces**: `list_namespaces` groups the scanned keys by their first `:` prefix and shows the

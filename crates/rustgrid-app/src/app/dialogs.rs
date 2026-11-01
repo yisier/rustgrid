@@ -902,6 +902,8 @@ impl AppView {
             kind: "string".to_string(),
             ttl: String::new(),
             value: String::new(),
+            field: String::new(),
+            score: String::new(),
             error: None,
             saving: false,
         });
@@ -970,23 +972,69 @@ impl AppView {
         }));
 
         let value_weak = weak.clone();
-        self.new_key_value_editor = Some(cx.new(|cx| {
-            ui::SqlEditor::new(cx)
-                .options(ui::SqlEditorOptions {
-                    language: "text".into(),
-                    font_size: 12.0,
-                    line_number: false,
-                    readonly: false,
-                    ..Default::default()
-                })
-                .on_change(Rc::new(move |text, cx| {
+        let value_submit = weak.clone();
+        let value_cancel = weak.clone();
+        self.new_key_value_input = Some(cx.new(|cx| {
+            TextInput::new(theme, "", TextInputOptions::default(), cx)
+                .on_change(Rc::new(move |text, _window, cx| {
                     let _ = value_weak.update(cx, |app, cx| {
                         if let Some(dialog) = app.new_key_dialog.as_mut() {
                             dialog.value = text.to_string();
+                            dialog.error = None;
                         }
                         cx.notify();
                     });
                 }))
+                .on_submit(Rc::new(move |_window, cx| {
+                    let _ = value_submit.update(cx, |app, cx| app.submit_new_key(cx));
+                }))
+                .on_cancel(Rc::new(move |_window, cx| {
+                    let _ = value_cancel.update(cx, |app, cx| app.cancel_new_key(cx));
+                }))
+        }));
+
+        let field_weak = weak.clone();
+        self.new_key_field_input = Some(cx.new(|cx| {
+            TextInput::new(theme, "", TextInputOptions::default(), cx).on_change(Rc::new(
+                move |text, _window, cx| {
+                    let _ = field_weak.update(cx, |app, cx| {
+                        if let Some(dialog) = app.new_key_dialog.as_mut() {
+                            dialog.field = text.to_string();
+                            dialog.error = None;
+                        }
+                        cx.notify();
+                    });
+                },
+            ))
+        }));
+
+        let score_weak = weak.clone();
+        let score_submit = weak.clone();
+        self.new_key_score_input = Some(cx.new(|cx| {
+            TextInput::new(
+                theme,
+                "",
+                TextInputOptions {
+                    placeholder: "1".into(),
+                    accepts: Some(Rc::new(|ch: char| {
+                        ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.')
+                    })),
+                    ..Default::default()
+                },
+                cx,
+            )
+            .on_change(Rc::new(move |text, _window, cx| {
+                let _ = score_weak.update(cx, |app, cx| {
+                    if let Some(dialog) = app.new_key_dialog.as_mut() {
+                        dialog.score = text.to_string();
+                        dialog.error = None;
+                    }
+                    cx.notify();
+                });
+            }))
+            .on_submit(Rc::new(move |_window, cx| {
+                let _ = score_submit.update(cx, |app, cx| app.submit_new_key(cx));
+            }))
         }));
         cx.notify();
     }
@@ -1046,7 +1094,7 @@ impl AppView {
         let Some(dialog) = self.new_key_dialog.as_ref() else {
             return div().into_any_element();
         };
-        let field = |label: String, control: AnyElement| {
+        let field = |label: String, control: AnyElement| -> AnyElement {
             div()
                 .flex()
                 .flex_col()
@@ -1092,23 +1140,52 @@ impl AppView {
                     )),
                 ),
         );
-        let value = self
-            .new_key_value_editor
-            .clone()
-            .map(|editor| {
+        // Which initial-entry fields a type takes: a hash/stream entry is a field plus a value, a
+        // sorted set's entry is a member plus a score, a set gets one member and every other type
+        // one value. All are plain single-line fields (Redis values are arbitrary text, so nothing
+        // is pre-formatted).
+        let text_input = |input: Option<Entity<TextInput>>| {
+            input
+                .map(|input| div().h(px(26.0)).child(input).into_any_element())
+                .unwrap_or_else(|| div().into_any_element())
+        };
+        let pair =
+            |left_label: String, left: AnyElement, right_label: String, right: AnyElement| {
                 div()
                     .flex()
-                    .flex_col()
-                    .h(px(96.0))
-                    .rounded_md()
-                    .border_1()
-                    .border_color(rgb(theme.border))
-                    .overflow_hidden()
-                    .child(editor)
+                    .flex_row()
+                    .gap_3()
+                    .child(div().flex_1().min_w(px(0.0)).child(field(left_label, left)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .child(field(right_label, right)),
+                    )
                     .into_any_element()
-            })
-            .unwrap_or_else(|| div().into_any_element());
-        body = body.child(field(t!("redis.key.dialog.value").to_string(), value));
+            };
+        body = body.child(match dialog.kind.as_str() {
+            "hash" | "stream" => pair(
+                t!("redis.key.field").to_string(),
+                text_input(self.new_key_field_input.clone()),
+                t!("redis.key.value").to_string(),
+                text_input(self.new_key_value_input.clone()),
+            ),
+            "zset" => pair(
+                t!("redis.key.member").to_string(),
+                text_input(self.new_key_field_input.clone()),
+                t!("redis.key.score").to_string(),
+                text_input(self.new_key_score_input.clone()),
+            ),
+            "set" => field(
+                t!("redis.key.member").to_string(),
+                text_input(self.new_key_value_input.clone()),
+            ),
+            _ => field(
+                t!("redis.key.dialog.value").to_string(),
+                text_input(self.new_key_value_input.clone()),
+            ),
+        });
         if let Some(error) = dialog.error.as_ref() {
             body = body.child(
                 div()
@@ -1148,7 +1225,9 @@ impl AppView {
         self.new_key_name_input = None;
         self.new_key_ttl_input = None;
         self.new_key_type_combo = None;
-        self.new_key_value_editor = None;
+        self.new_key_value_input = None;
+        self.new_key_field_input = None;
+        self.new_key_score_input = None;
         cx.notify();
     }
 
@@ -1183,26 +1262,21 @@ impl AppView {
         };
         let kind = dialog.kind.clone();
         let value = dialog.value.clone();
+        let field = dialog.field.trim().to_string();
+        let score = dialog.score.trim().to_string();
         let values = match kind.as_str() {
             "string" => vec![("value".to_string(), Some(value))],
             "hash" => vec![
-                ("field".to_string(), Some("field".to_string())),
+                ("field".to_string(), Some(non_empty(field, "field"))),
                 ("value".to_string(), Some(value)),
             ],
             "list" | "set" => vec![("value".to_string(), Some(value))],
-            "zset" => {
-                let member = if value.trim().is_empty() {
-                    "item".to_string()
-                } else {
-                    value
-                };
-                vec![
-                    ("member".to_string(), Some(member)),
-                    ("score".to_string(), Some("1".to_string())),
-                ]
-            }
+            "zset" => vec![
+                ("member".to_string(), Some(non_empty(field, "item"))),
+                ("score".to_string(), Some(non_empty(score, "1"))),
+            ],
             "stream" => vec![
-                ("field".to_string(), Some("field".to_string())),
+                ("field".to_string(), Some(non_empty(field, "field"))),
                 ("value".to_string(), Some(value)),
             ],
             _ => Vec::new(),
@@ -1231,7 +1305,9 @@ impl AppView {
                         app.new_key_name_input = None;
                         app.new_key_ttl_input = None;
                         app.new_key_type_combo = None;
-                        app.new_key_value_editor = None;
+                        app.new_key_value_input = None;
+                        app.new_key_field_input = None;
+                        app.new_key_score_input = None;
                         app.reload_tables(connection_index, database_index, cx);
                         app.toast(ToastKind::Success, t!("redis.key.created").to_string(), cx);
                     }
@@ -2055,6 +2131,16 @@ fn parse_redis_ttl(text: &str) -> Result<Option<i64>, String> {
         Ok(ttl) if ttl > 0 => Ok(Some(ttl)),
         Ok(_) => Ok(None),
         Err(_) => Err(t!("redis.key.ttl_invalid").to_string()),
+    }
+}
+
+/// A Redis key's entry field/member, falling back to `fallback` when the field was left blank
+/// (a hash field or stream field cannot be empty, and a sorted set member needs a name).
+fn non_empty(value: String, fallback: &str) -> String {
+    if value.is_empty() {
+        fallback.to_string()
+    } else {
+        value
     }
 }
 

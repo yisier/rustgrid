@@ -702,6 +702,10 @@ pub struct TableStatus {
     /// A key-value object's remaining lifetime in seconds (`-1` = it never expires). `None` for
     /// engines and objects without a TTL concept.
     pub ttl: Option<i64>,
+    /// A short preview of the object's content, for key-value engines whose "tables" are keys
+    /// (Redis): a string key's leading characters. `None` for table-shaped engines and for
+    /// objects whose content the engine does not report cheaply.
+    pub preview: Option<String>,
 }
 
 /// The kind of database object a backup can contain. Mirrors Navicat's object-selection

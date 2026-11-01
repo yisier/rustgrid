@@ -861,8 +861,11 @@ shadcn chrome described above. Implemented today:
     **namespace folders** (key prefixes with counts, from `list_namespaces`) instead of SQL
     categories; the database row itself is the all-keys view (the prototype's key count sits on
     it), so there is no 全部 row and no 查询 category under it. The Tables list is a key table
-    (键名 / 类型 / TTL / 内存) that **always** uses the detailed layout (its 详细列表 / 平铺网格
-    switch is not shown). **Every key opens on its own key page**, never the SQL grid:
+    (键名 / 类型 / TTL / 内存 / 值) that **always** uses the detailed layout (its 详细列表 / 平铺网格
+    switch is not shown). The 值 column is a one-line preview from `TableStatus::preview` — a string
+    key's leading bytes (`GETRANGE`, so a multi-megabyte value never travels) shortened in the cell
+    with the rest on hover, and a collection's entry count (`TableStatus::rows`), since a collection
+    has no single value. **Every key opens on its own key page**, never the SQL grid:
     string/ReJSON keys get the prototype's RAW / JSON switch and a large editor (JSON is a
     read-only pretty print; invalid JSON falls back to RAW, with a warning; Java long literals such
     as `103L` are accepted), while hash, set, list, zset and stream use a Field/Value, Member,
@@ -872,7 +875,10 @@ shadcn chrome described above. Implemented today:
     table pages carry a compact pager instead of the SQL record toolbar, WHERE/sort panels or
     field layout. The key-list toolbar follows the prototype: a filled 新建键, an outlined 删除,
     plain 设置 TTL / 刷新 actions and the active namespace chip; 新建键 and 设置 TTL are
-    `Root`-managed modals (`app/dialogs.rs`), not a separate tools window. `list_objects_page`
+    `Root`-managed modals (`app/dialogs.rs`), not a separate tools window. 新建键 shows the chosen
+    type's own first-entry fields as plain single-line inputs — one 初始值 for a string/list, 成员
+    for a set, 字段 + 值 for a hash/stream and 成员 + 分数 for a zset — never a multi-line editor for
+    all of them. `list_objects_page`
     loads the configured `redis.key_limit` in one go, so there is no 加载更多 button. SQL-only
     designer/import/export items are hidden. The main ribbon keeps only 表 / 查询 for a Redis
     connection. See `docs/redis-driver.md`.
