@@ -2794,7 +2794,7 @@ impl Render for TreePane {
             // and clicking its track jumps there.
             .child(
                 Scrollbar::vertical(&self.scroll)
-                    .mode(ScrollbarMode::Always)
+                    .mode(ScrollbarMode::Scrolling)
                     .id("sidebar-scrollbar"),
             );
         let app = self.app.clone();
