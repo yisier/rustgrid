@@ -288,6 +288,11 @@ impl AppView {
                 _ => None,
             })
             .and_then(|database| database.object_pattern.clone());
+        // A key created while a namespace is active starts inside it (`login_tokens:*` becomes
+        // `login_tokens:` in the name field).
+        let new_key_group = namespace
+            .as_deref()
+            .map(|pattern| pattern.trim_end_matches('*').to_string());
         let pane_for_delete = pane.clone();
 
         let mut left = div()
@@ -300,7 +305,12 @@ impl AppView {
                 t!("redis.key.new").to_string(),
                 true,
                 cx.listener(move |this, _event, _window, cx| {
-                    this.start_new_key_dialog(connection_index, database_index, None, cx);
+                    this.start_new_key_dialog(
+                        connection_index,
+                        database_index,
+                        new_key_group.clone(),
+                        cx,
+                    );
                 }),
             ))
             .child(self.dialog_button(

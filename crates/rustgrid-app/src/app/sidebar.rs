@@ -58,8 +58,6 @@ struct TreeDatabase {
     opened_schemas: BTreeSet<String>,
     /// The key-value namespaces (Redis key prefixes) under this database.
     namespaces: Loadable<Vec<rustgrid_core::ObjectNamespace>>,
-    /// The namespace filter currently applied to the key list.
-    object_pattern: Option<String>,
 }
 
 #[derive(Clone)]
@@ -253,7 +251,6 @@ fn snapshot_connections(app: &AppView) -> Vec<TreeConnection> {
                                         Loadable::Loaded(namespaces.clone())
                                     }
                                 },
-                                object_pattern: database.object_pattern.clone(),
                             }
                         })
                         .collect(),
@@ -1311,9 +1308,7 @@ impl TreePane {
                         "keys-{connection_index}-{database_index}-{}",
                         namespace.name
                     );
-                    let selected = self.selected.as_deref() == Some(id.as_str())
-                        || database.object_pattern.as_deref()
-                            == Some(format!("{}*", namespace.name).as_str());
+                    let selected = self.selected.as_deref() == Some(id.as_str());
                     let name = namespace.name.clone();
                     let label = format!("{name}*");
                     let clicked = namespace.name.clone();

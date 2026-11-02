@@ -136,6 +136,10 @@ impl Render for SidebarHost {
                     .w(px(self.width))
                     .h_full()
                     .flex_none()
+                    // Keep the tree's vertical scrollbar clear of the resize divider: the
+                    // scrollbar is painted at this column's content edge, and without the gutter
+                    // it overlapped the separator.
+                    .pr(px(6.0))
                     .bg(rgb(theme.sidebar_bg))
                     .border_r_1()
                     .border_color(rgb(theme.border))
