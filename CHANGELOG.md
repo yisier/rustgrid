@@ -10,6 +10,32 @@ UI labels are quoted as the app shows them, so this file quotes the English stri
 [`CHANGELOG_zh.md`](CHANGELOG_zh.md) and [`CHANGELOG_ru.md`](CHANGELOG_ru.md) quote the 简体中文 and
 Russian ones.
 
+## [0.1.5] - 2026-11-02
+
+### Added
+
+- The Redis key list has a Group column (the key's prefix through its first colon) and defaults to
+  sorting by it.
+- The query editor highlights and completes Redis commands and keys on a Redis connection.
+- Right-clicking a Redis namespace in the tree offers New Key and Refresh.
+- The JSON view on a key page now has syntax colours.
+
+### Changed
+
+- A Redis database's menu offers New Key instead of Run SQL File and Dump SQL File, and Redis query
+  tabs hide Format SQL.
+- New Key starts with the selected namespace's prefix.
+- Paging, sorting and filtering keep a grid's horizontal scroll position, and sorting keeps its
+  column widths.
+- The connection tree's scrollbar appears only while scrolling and no longer overlaps the divider.
+- Editors without line numbers no longer reserve a blank fold gutter.
+
+### Fixed
+
+- Clicking a Redis namespace in the tree no longer closes the app.
+- Saving a string key reads the editor's current text and confirms with a Saved toast.
+- Only the current Redis namespace stays highlighted, so a previously filtered one is cleared.
+
 ## [0.1.4] - 2026-11-01
 
 ### Added
