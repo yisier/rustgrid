@@ -24,6 +24,8 @@ impl AppView {
         let schema = tab.schema.clone();
         let supports_schemas = connection_index
             .is_some_and(|index| self.driver_supports(index, DriverCapability::Schemas));
+        let key_value = connection_index
+            .is_some_and(|index| self.driver_supports(index, DriverCapability::KeyValue));
         let dialect = connection_index
             .and_then(|index| self.connections.get(index))
             .and_then(|node| self.registry.get(&node.profile.driver))
@@ -42,6 +44,7 @@ impl AppView {
                     schema.clone(),
                     supports_schemas,
                     dialect,
+                    key_value,
                     cx,
                 )
             });
@@ -55,6 +58,7 @@ impl AppView {
                 schema.clone(),
                 supports_schemas,
                 dialect,
+                key_value,
             );
         let loader_app = cx.weak_entity();
         let source = source.with_column_loader(Rc::new(move |cx, connection, database, table| {
@@ -66,7 +70,7 @@ impl AppView {
         let provider: Rc<dyn gpui_kit::component::input::CompletionProvider> =
             Rc::new(sql_completion::SqlCompletionProvider::new(source));
         let options = ui::SqlEditorOptions {
-            language: "sql".into(),
+            language: if key_value { "redis" } else { "sql" }.into(),
             font_family: self.editor_font().into(),
             font_size: self.editor_font_size(),
             line_number: self.editor_line_numbers,
@@ -105,6 +109,7 @@ impl AppView {
         // Warm the completion catalog's columns for every table the statement now references, so
         // `alias.`/`table.` completion has types and comments ready.
         if let Some(connection_index) = connection_index {
+            let key_value = self.driver_supports(connection_index, DriverCapability::KeyValue);
             let scope = sql_completion::CompletionScope {
                 connection_index: Some(connection_index),
                 database,
@@ -116,12 +121,17 @@ impl AppView {
                     .and_then(|node| self.registry.get(&node.profile.driver))
                     .map(|driver| driver.dialect())
                     .unwrap_or_default(),
+                key_value,
             };
-            // Every statement's tables, not only the last one's: the caret may be in any.
-            let referenced = sql::referenced_tables(text);
-            for table in referenced {
-                if let Some((database, table)) = sql_completion::catalog_target(&scope, &table) {
-                    self.ensure_query_columns(cx, connection_index, &database, &table);
+            // Every statement's tables, not only the last one's: the caret may be in any. Redis
+            // commands are not SQL, so there are no tables to warm there.
+            if !key_value {
+                let referenced = sql::referenced_tables(text);
+                for table in referenced {
+                    if let Some((database, table)) = sql_completion::catalog_target(&scope, &table)
+                    {
+                        self.ensure_query_columns(cx, connection_index, &database, &table);
+                    }
                 }
             }
         }

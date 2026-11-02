@@ -130,17 +130,27 @@ pub(super) fn key_type_badge(kind: &str, theme: Theme) -> AnyElement {
         .into_any_element()
 }
 
-/// The sort value of one key-value key-list cell: 键名 / 类型 / TTL / 内存 / 值.
+/// The 分组 of one key: the prefix through its first `:`, the same split the tree's namespace
+/// folders use (`sys_dict:cache` belongs to `sys_dict:`). A key without a colon has no group.
+fn key_group(name: &str) -> String {
+    match name.find(':') {
+        Some(index) => name[..=index].to_string(),
+        None => String::new(),
+    }
+}
+
+/// The sort value of one key-value key-list cell: 分组 / 键名 / 类型 / TTL / 内存 / 值.
 fn key_sort_key(
     table: &rustgrid_core::TableInfo,
     status: Option<&rustgrid_core::TableStatus>,
     column: usize,
 ) -> SortKey {
     match column {
-        1 => SortKey::opt_text(status.and_then(|s| s.engine.as_deref())),
-        2 => SortKey::number(status.and_then(|s| s.ttl).map(|v| v as f64)),
-        3 => SortKey::number(status.and_then(|s| s.data_length).map(|v| v as f64)),
-        4 => SortKey::text(&key_preview(status)),
+        0 => SortKey::text(&key_group(&table.name)),
+        2 => SortKey::opt_text(status.and_then(|s| s.engine.as_deref())),
+        3 => SortKey::number(status.and_then(|s| s.ttl).map(|v| v as f64)),
+        4 => SortKey::number(status.and_then(|s| s.data_length).map(|v| v as f64)),
+        5 => SortKey::text(&key_preview(status)),
         _ => SortKey::text(&object_display(&table.name)),
     }
 }
@@ -1315,7 +1325,7 @@ impl ObjectPane {
         let columns = if self.category == Category::Views {
             2
         } else if self.key_value {
-            5
+            6
         } else {
             7
         };
@@ -1661,6 +1671,7 @@ impl ObjectPane {
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let labels = vec![
+            t!("redis.key.group").to_string(),
             t!("redis.key.name").to_string(),
             t!("redis.key.type").to_string(),
             t!("redis.key.ttl").to_string(),
@@ -1668,11 +1679,12 @@ impl ObjectPane {
             t!("redis.key.value").to_string(),
         ];
         let mut longest = [
-            ui::approx_text_width(&labels[0]) + 30.0,
-            ui::approx_text_width(&labels[1]),
+            ui::approx_text_width(&labels[0]),
+            ui::approx_text_width(&labels[1]) + 30.0,
             ui::approx_text_width(&labels[2]),
             ui::approx_text_width(&labels[3]),
             ui::approx_text_width(&labels[4]),
+            ui::approx_text_width(&labels[5]),
         ];
         for table in tables {
             let status = statuses.and_then(|list| {
@@ -1680,27 +1692,28 @@ impl ObjectPane {
                     .find(|(name, _)| name == &table.name)
                     .map(|(_, status)| status)
             });
-            longest[0] = longest[0].max(ui::approx_text_width(&object_display(&table.name)) + 30.0);
-            longest[1] = longest[1].max(ui::approx_text_width(
+            longest[0] = longest[0].max(ui::approx_text_width(&key_group(&table.name)));
+            longest[1] = longest[1].max(ui::approx_text_width(&object_display(&table.name)) + 30.0);
+            longest[2] = longest[2].max(ui::approx_text_width(
                 status
                     .and_then(|status| status.engine.as_deref())
                     .unwrap_or_default(),
             ));
-            longest[2] = longest[2].max(ui::approx_text_width(
+            longest[3] = longest[3].max(ui::approx_text_width(
                 &status
                     .and_then(|status| status.ttl)
                     .map(|ttl| ttl.to_string())
                     .unwrap_or_default(),
             ));
-            longest[3] = longest[3].max(ui::approx_text_width(
+            longest[4] = longest[4].max(ui::approx_text_width(
                 &status
                     .and_then(|status| status.data_length)
                     .map(human_size)
                     .unwrap_or_default(),
             ));
-            longest[4] = longest[4].max(ui::approx_text_width(&key_preview(status)));
+            longest[5] = longest[5].max(ui::approx_text_width(&key_preview(status)));
         }
-        let mins: [f32; 5] = [220.0, 90.0, 80.0, 100.0, 160.0];
+        let mins: [f32; 6] = [120.0, 220.0, 90.0, 80.0, 100.0, 160.0];
         let fitted: Vec<f32> = longest
             .iter()
             .zip(mins)
@@ -1816,7 +1829,7 @@ impl ObjectPane {
             .flex_row()
             .items_center()
             .gap_2()
-            .w(px(widths[0]))
+            .w(px(widths[1]))
             .flex_none()
             .overflow_hidden()
             .child(badge)
@@ -1890,11 +1903,12 @@ impl ObjectPane {
                 });
             }),
         )
+        .child(cell(0, widths[0], key_group(&name), theme.text_muted))
         .child(name_cell)
-        .child(cell(1, widths[1], kind_text, theme.text_muted))
-        .child(cell(2, widths[2], ttl_text, ttl_color))
-        .child(cell(3, widths[3], memory, theme.text_muted))
-        .child(cell(4, widths[4], key_preview(status), theme.text_muted))
+        .child(cell(2, widths[2], kind_text, theme.text_muted))
+        .child(cell(3, widths[3], ttl_text, ttl_color))
+        .child(cell(4, widths[4], memory, theme.text_muted))
+        .child(cell(5, widths[5], key_preview(status), theme.text_muted))
     }
 
     /// One table/view row of the 详细列表.
@@ -3123,9 +3137,16 @@ impl Render for ObjectPane {
 
 #[cfg(test)]
 mod nav_tests {
-    use super::{ObjectStep, object_display, object_nav_target};
+    use super::{ObjectStep, key_group, object_display, object_nav_target};
 
     const DETAIL: usize = usize::MAX;
+
+    #[test]
+    fn a_key_belongs_to_the_namespace_before_its_first_colon() {
+        assert_eq!(key_group("sys_dict:sys_yes_no"), "sys_dict:");
+        assert_eq!(key_group("login_tokens:abc:def"), "login_tokens:");
+        assert_eq!(key_group("standing_key"), "");
+    }
 
     #[test]
     fn a_rename_edits_the_bare_name_of_a_schema_qualified_object() {

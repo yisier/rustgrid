@@ -1347,13 +1347,20 @@ impl TreePane {
                             window.focus(&this.focus, cx);
                             this.selected = Some(id.clone());
                             let name = clicked.clone();
-                            let _ = row_app.update(cx, |app, cx| {
-                                app.select_key_namespace(
-                                    connection_index,
-                                    database_index,
-                                    Some(name),
-                                    cx,
-                                );
+                            let app = row_app.clone();
+                            // `select_key_namespace` updates the tree pane (to keep the selected
+                            // row in step), so running it from inside this row's listener would
+                            // borrow the tree a second time and abort the app. Defer one cycle,
+                            // exactly like the saved-query and backup leaves do.
+                            cx.defer(move |cx| {
+                                let _ = app.update(cx, |app, cx| {
+                                    app.select_key_namespace(
+                                        connection_index,
+                                        database_index,
+                                        Some(name),
+                                        cx,
+                                    );
+                                });
                             });
                         }))
                         .child(tree_icon("icons/folder.svg", theme.warning))
@@ -1373,13 +1380,19 @@ impl TreePane {
                         );
                     let nav_row =
                         NavRow::new(nav_id, nav_name).opens(Rc::new(move |_this, _window, cx| {
-                            let _ = nav_app.update(cx, |app, cx| {
-                                app.select_key_namespace(
-                                    connection_index,
-                                    database_index,
-                                    Some(nav_pick.clone()),
-                                    cx,
-                                );
+                            let app = nav_app.clone();
+                            let pick = nav_pick.clone();
+                            // Enter on a namespace row goes through the same app path as a
+                            // click; defer it out of the tree's own listener (see above).
+                            cx.defer(move |cx| {
+                                let _ = app.update(cx, |app, cx| {
+                                    app.select_key_namespace(
+                                        connection_index,
+                                        database_index,
+                                        Some(pick.clone()),
+                                        cx,
+                                    );
+                                });
                             });
                         }));
                     sub = sub.child(self.nav_row(row, nav_row));

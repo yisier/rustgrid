@@ -185,6 +185,7 @@ impl SqlEditor {
     }
 
     /// Re-scope the completion provider after the tab's connection/database/schema changes.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn set_scope(
         &mut self,
         connection_index: Option<usize>,
@@ -192,10 +193,16 @@ impl SqlEditor {
         schema: Option<String>,
         supports_schemas: bool,
         dialect: DriverDialect,
+        key_value: bool,
         cx: &mut Context<Self>,
     ) {
         let mysql = dialect == DriverDialect::Mysql;
-        if mysql != self.mysql {
+        let language = if key_value { "redis" } else { "sql" };
+        let language_changed = self.options.language.as_ref() != language;
+        if language_changed {
+            self.options.language = language.into();
+        }
+        if mysql != self.mysql || language_changed {
             self.mysql = mysql;
             self.refresh_highlights(cx);
         }
@@ -207,6 +214,7 @@ impl SqlEditor {
             scope.schema = schema;
             scope.supports_schemas = supports_schemas;
             scope.dialect = dialect;
+            scope.key_value = key_value;
         }
     }
 
@@ -372,10 +380,12 @@ impl SqlEditor {
             let provider = self.provider.clone();
             let word_wrap = self.word_wrap;
             let state = cx.new(|cx| {
-                let language = if options.language.as_ref() == "sql" {
-                    plain_sql_language()
-                } else {
-                    options.language.clone()
+                let language = match options.language.as_ref() {
+                    "sql" => plain_sql_language(),
+                    // Redis has no tree-sitter grammar in the kit; its colours come from the
+                    // app's own scanner below, so keep the parser out of the way.
+                    "redis" => "text".into(),
+                    _ => options.language.clone(),
                 };
                 let mut state = EditorState::new(window, cx)
                     .language(language)
@@ -396,7 +406,7 @@ impl SqlEditor {
                     }
                 },
             ));
-            if options.language.as_ref() == "sql" {
+            if matches!(options.language.as_ref(), "sql" | "redis") {
                 self.highlights = Some(state.update(cx, |state, cx| {
                     state.create_decorations_collection(Vec::new(), cx)
                 }));
@@ -445,6 +455,20 @@ impl SqlEditor {
         let text = state.read(cx).value().to_string();
         let decorations = if text.len() > MAX_HIGHLIGHT_BYTES {
             Vec::new()
+        } else if self.options.language.as_ref() == "redis" {
+            crate::app::redis_lex::tokens(&text)
+                .into_iter()
+                .filter_map(|(range, kind)| {
+                    let style = match kind {
+                        TokenKind::Keyword => keyword,
+                        TokenKind::Function => function,
+                        TokenKind::String => string,
+                        TokenKind::Number => number,
+                        TokenKind::Comment => comment,
+                    }?;
+                    Some(TextDecoration::new(range, style))
+                })
+                .collect()
         } else {
             crate::app::sql_lex::tokens(&text, self.mysql)
                 .into_iter()
@@ -651,6 +675,25 @@ fn find_all_occurrences(haystack: &str, needle: &str) -> Vec<Range<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_json_view_uses_the_compiled_json_grammar() {
+        struct Resolver;
+        impl gpui_kit::base::input::HighlightStyleResolver for Resolver {
+            fn style(&self, _: &str) -> Option<gpui::HighlightStyle> {
+                Some(gpui::HighlightStyle::default())
+            }
+        }
+
+        let mut highlighter = gpui_kit::component::highlighter::SyntaxHighlighter::new("json");
+        assert_eq!(highlighter.language().as_ref(), "json");
+        let text = ropey::Rope::from_str("{\"key\": 1}");
+        highlighter.update(None, &text, Some(std::time::Duration::from_secs(2)));
+        assert!(
+            !highlighter.styles(&(0..text.len()), &Resolver).is_empty(),
+            "the key page's JSON view should have syntax colours"
+        );
+    }
 
     #[test]
     fn find_all_occurrences_is_non_overlapping_and_ordered() {

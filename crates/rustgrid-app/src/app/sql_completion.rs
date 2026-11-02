@@ -50,6 +50,9 @@ pub(crate) struct CompletionScope {
     /// The connection's SQL dialect, used to pick the built-in function list so an engine is not
     /// offered another's functions.
     pub dialect: DriverDialect,
+    /// Whether the target is a key-value engine (Redis): completion offers Redis commands and
+    /// keys instead of SQL keywords, tables and fields.
+    pub key_value: bool,
 }
 
 /// A shared catalog and the scope the active editor targets. The scope is behind an `Arc` so a
@@ -150,6 +153,7 @@ impl CompletionSource {
         schema: Option<String>,
         supports_schemas: bool,
         dialect: DriverDialect,
+        key_value: bool,
     ) -> Self {
         *self.scope.write().expect("completion scope lock") = CompletionScope {
             connection_index,
@@ -157,6 +161,7 @@ impl CompletionSource {
             schema,
             supports_schemas,
             dialect,
+            key_value,
         };
         self
     }
@@ -213,6 +218,15 @@ impl CompletionProvider for SqlCompletionProvider {
         _window: &mut Window,
         cx: &mut App,
     ) -> Task<anyhow::Result<CompletionResponse>> {
+        let key_value = self
+            .source
+            .scope
+            .read()
+            .expect("completion scope lock")
+            .key_value;
+        if key_value {
+            return Task::ready(Ok(redis_completion(&self.source, text, offset)));
+        }
         let sql_text = text.to_string();
         let dialect = self
             .source
@@ -284,10 +298,19 @@ impl CompletionProvider for SqlCompletionProvider {
 
     fn is_completion_trigger(&self, _offset: usize, new_text: &str, _cx: &mut App) -> bool {
         // Open the menu on an identifier character or a `.` qualifier; the provider then filters by
-        // the typed prefix.
-        new_text
-            .chars()
-            .all(|character| character.is_alphanumeric() || character == '_' || character == '.')
+        // the typed prefix. A Redis key may also contain `:`, `-` and `*` (namespace separators and
+        // patterns), so those open it too.
+        let key_value = self
+            .source
+            .scope
+            .read()
+            .expect("completion scope lock")
+            .key_value;
+        new_text.chars().all(|character| {
+            character.is_alphanumeric()
+                || matches!(character, '_' | '.')
+                || (key_value && matches!(character, ':' | '-' | '*'))
+        })
     }
 }
 
@@ -492,7 +515,16 @@ fn build_items(
         }
     }
 
-    let prefix = context.prefix.as_str();
+    rank_items(items, &context.prefix, column_position)
+}
+
+/// Filter `items` by the typed `prefix`, de-duplicate, rank them and keep the popup's 64 closest
+/// candidates. Shared by the SQL and Redis completion paths.
+fn rank_items(
+    items: Vec<(u8, CompletionItem)>,
+    prefix: &str,
+    column_position: bool,
+) -> Vec<CompletionItem> {
     let mut seen = std::collections::HashSet::new();
     let mut filtered: Vec<(Match, u8, CompletionItem)> = items
         .into_iter()
@@ -532,6 +564,110 @@ fn build_items(
     });
     filtered.truncate(64);
     filtered.into_iter().map(|(_, _, item)| item).collect()
+}
+
+/// Build the response for a key-value (Redis) editor: commands plus the current database's keys.
+fn redis_completion(source: &CompletionSource, text: &Rope, offset: usize) -> CompletionResponse {
+    let Some((prefix, prefix_start)) = redis_prefix(&text.to_string(), offset) else {
+        return CompletionResponse::Array(Vec::new());
+    };
+    let range = Range::new(
+        text.offset_to_position(prefix_start),
+        text.offset_to_position(offset),
+    );
+    let mut items = redis_items(source, &prefix);
+    for item in &mut items {
+        item.text_edit = Some(CompletionTextEdit::Edit(TextEdit {
+            range,
+            new_text: item.label.clone(),
+        }));
+    }
+    CompletionResponse::Array(items)
+}
+
+/// The identifier fragment just before `caret` in a Redis command line, or `None` inside a
+/// quoted argument / on a `#` comment line (where a command popup would be noise). Redis keys
+/// commonly contain `:`, `-` and `*`, so those stay part of the fragment.
+fn redis_prefix(text: &str, caret: usize) -> Option<(String, usize)> {
+    let caret = caret.min(text.len());
+    let line_start = text[..caret]
+        .rfind('\n')
+        .map(|offset| offset + 1)
+        .unwrap_or(0);
+    let line = &text[line_start..caret];
+    if line.trim_start().starts_with('#') {
+        return None;
+    }
+    let mut quote = None;
+    let mut escaped = false;
+    for character in line.chars() {
+        match quote {
+            Some(active) => {
+                if escaped {
+                    escaped = false;
+                } else if character == '\\' {
+                    escaped = true;
+                } else if character == active {
+                    quote = None;
+                }
+            }
+            None => {
+                if matches!(character, '"' | '\'') {
+                    quote = Some(character);
+                }
+            }
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    let mut start = caret;
+    for (index, character) in text[..caret].char_indices().rev() {
+        if character.is_alphanumeric() || matches!(character, '_' | '.' | ':' | '-' | '*') {
+            start = index;
+        } else {
+            break;
+        }
+    }
+    Some((text[start..caret].to_lowercase(), start))
+}
+
+/// SQL keywords and tables are replaced by Redis commands and keys when the connection is a
+/// key-value engine.
+fn redis_items(source: &CompletionSource, prefix: &str) -> Vec<CompletionItem> {
+    let catalog = source.catalog.read().expect("completion catalog lock");
+    let scope = source.scope.read().expect("completion scope lock");
+    let mut items: Vec<(u8, CompletionItem)> = Vec::new();
+    for command in crate::app::redis_lex::COMMANDS {
+        items.push((
+            GROUP_COMMON_KEYWORDS,
+            completion_item(command, "command", CompletionItemKind::KEYWORD),
+        ));
+    }
+    if let Some(connection) = scope.connection_index {
+        let mut keys = std::collections::BTreeSet::new();
+        match &scope.database {
+            Some(database) => {
+                if let Some(names) = catalog.tables.get(&(connection, database.clone())) {
+                    keys.extend(names.iter().cloned());
+                }
+            }
+            None => {
+                for ((candidate, _), names) in &catalog.tables {
+                    if *candidate == connection {
+                        keys.extend(names.iter().cloned());
+                    }
+                }
+            }
+        }
+        for key in keys {
+            items.push((
+                GROUP_TABLES,
+                completion_item(&key, "key", CompletionItemKind::CLASS),
+            ));
+        }
+    }
+    rank_items(items, prefix, false)
 }
 
 /// How a candidate's label matched the typed fragment, best first: the popup lists the closest
@@ -661,6 +797,67 @@ mod tests {
         assert_eq!(range.end.character, sql.len() as u32);
     }
 
+    #[test]
+    fn redis_prefix_keeps_namespace_colons_and_skips_strings_and_comments() {
+        let sql = "GET sys_dict:us";
+        assert_eq!(
+            redis_prefix(sql, sql.len()),
+            Some(("sys_dict:us".to_string(), 4))
+        );
+        assert_eq!(redis_prefix("GET \"sys_dict:us\"", 16), None);
+        assert_eq!(redis_prefix("# GET us", 8), None);
+        assert_eq!(
+            redis_prefix("JSON.GET", 8),
+            Some(("json.get".to_string(), 0))
+        );
+    }
+
+    fn redis_source(keys: &[&str]) -> CompletionSource {
+        let mut catalog = CompletionCatalog::default();
+        catalog.tables.insert(
+            (0, "db0".to_string()),
+            keys.iter().map(|key| key.to_string()).collect(),
+        );
+        CompletionSource::new(Arc::new(std::sync::RwLock::new(catalog))).with_scope(
+            Some(0),
+            Some("db0".into()),
+            None,
+            false,
+            DriverDialect::Generic,
+            true,
+        )
+    }
+
+    #[test]
+    fn redis_completion_offers_commands_and_keys() {
+        let source = redis_source(&["user:1", "user:2"]);
+        let response = redis_completion(&source, &Rope::from("GE"), 2);
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected an array response");
+        };
+        assert_eq!(items.first().map(|item| item.label.as_str()), Some("GET"));
+        let edit = match items
+            .iter()
+            .find(|item| item.label == "GET")
+            .and_then(|item| item.text_edit.as_ref())
+        {
+            Some(CompletionTextEdit::Edit(edit)) => edit,
+            other => panic!("expected an explicit text edit, got {other:?}"),
+        };
+        assert_eq!(edit.new_text, "GET");
+        assert_eq!(edit.range.start.line, 0);
+        assert_eq!(edit.range.start.character, 0);
+        assert_eq!(edit.range.end.character, 2);
+
+        let response = redis_completion(&source, &Rope::from("GET us"), 6);
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected an array response");
+        };
+        let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+        assert!(labels.contains(&"user:1"));
+        assert!(labels.contains(&"user:2"));
+    }
+
     fn schema_scope(schema: Option<&str>) -> CompletionScope {
         CompletionScope {
             connection_index: Some(0),
@@ -668,6 +865,7 @@ mod tests {
             schema: schema.map(str::to_string),
             supports_schemas: true,
             dialect: DriverDialect::Generic,
+            key_value: false,
         }
     }
 
@@ -714,6 +912,7 @@ mod tests {
             schema: None,
             supports_schemas: false,
             dialect: DriverDialect::Generic,
+            key_value: false,
         };
         assert_eq!(
             catalog_target(&scope, &table(None, "orders")),
@@ -754,6 +953,7 @@ mod tests {
             None,
             false,
             DriverDialect::Mysql,
+            false,
         )
     }
 
@@ -779,6 +979,7 @@ mod tests {
             None,
             false,
             DriverDialect::Mysql,
+            false,
         )
     }
 

@@ -415,7 +415,10 @@ impl GridView {
             {
                 if self.key_json_editor.is_none() {
                     let options = ui::SqlEditorOptions {
-                        language: "text".into(),
+                        // The JSON grammar is compiled into gpui-kit (tree-sitter-json ships with
+                        // the SQL grammar), so the read-only view gets real syntax colours
+                        // instead of a plain text run.
+                        language: "json".into(),
                         font_size: 13.0,
                         line_number: false,
                         readonly: true,

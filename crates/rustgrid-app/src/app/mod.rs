@@ -2783,6 +2783,7 @@ mod privilege_manager;
 mod query;
 mod query_editor;
 mod query_view;
+pub(crate) mod redis_lex;
 mod routine;
 mod routine_view;
 mod runsql;

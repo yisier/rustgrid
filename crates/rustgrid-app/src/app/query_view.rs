@@ -26,7 +26,13 @@ impl AppView {
             .get(query_index)
             .is_some_and(|query| query.result_grids.iter().any(|grid| grid.is_some()));
 
-        let toolbar = div()
+        let key_value = self
+            .queries
+            .get(query_index)
+            .and_then(|query| query.connection_index)
+            .is_some_and(|index| self.driver_supports(index, DriverCapability::KeyValue));
+
+        let mut toolbar = div()
             .flex()
             .flex_row()
             .items_center()
@@ -45,17 +51,22 @@ impl AppView {
                 theme.text,
                 true,
                 cx.listener(|this, _event, window, cx| this.begin_save_query(window, cx)),
-            ))
-            .child(toolbar_separator(theme))
-            .child(self.query_tool_button(
-                "query-format",
-                "icons/format_sql.svg",
-                t!("query.format").to_string(),
-                theme.text,
-                theme.text,
-                true,
-                cx.listener(|this, _event, window, cx| this.format_query(window, cx)),
-            ))
+            ));
+        // Redis commands are not SQL: there is nothing for 美化SQL to format.
+        if !key_value {
+            toolbar = toolbar
+                .child(toolbar_separator(theme))
+                .child(self.query_tool_button(
+                    "query-format",
+                    "icons/format_sql.svg",
+                    t!("query.format").to_string(),
+                    theme.text,
+                    theme.text,
+                    true,
+                    cx.listener(|this, _event, window, cx| this.format_query(window, cx)),
+                ));
+        }
+        toolbar = toolbar
             .child(toolbar_separator(theme))
             .child(self.query_tool_button(
                 "query-export",
