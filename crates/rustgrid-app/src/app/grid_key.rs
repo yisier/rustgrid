@@ -121,8 +121,16 @@ impl GridView {
         let collection = add_label.is_some();
         let delete_enabled =
             editable && collection && self.state.selection.is_some() && !self.state.rows.is_empty();
+        // The editor is the source of truth for a string key: a keystroke reflected there but not
+        // yet in the mirrored `key_string_dirty` must still enable 保存修改.
+        let string_dirty = self.is_string_key_page()
+            && self.key_string_editor.as_ref().is_some_and(|editor| {
+                let live = editor.read(cx).live_text(cx);
+                self.key_string_loaded.as_deref() != Some(live.as_str())
+            });
         let save_enabled = editable
-            && (self.key_string_dirty
+            && (string_dirty
+                || self.key_string_dirty
                 || self.cell_editor.is_some()
                 || !self.state.edits.is_empty()
                 || !self.inserts.is_empty());
@@ -528,7 +536,14 @@ impl GridView {
         {
             return;
         }
-        let text = self.key_string_text.clone();
+        // Read the editor's live text rather than the mirror: a click on 保存修改 can land before
+        // the last change callback reaches the page, and that made the button look inert.
+        let text = self
+            .key_string_editor
+            .as_ref()
+            .map(|editor| editor.read(cx).live_text(cx))
+            .unwrap_or_else(|| self.key_string_text.clone());
+        self.key_string_text = text.clone();
         let connection = self.state.connection.clone();
         let database = self.state.database.clone();
         let key = self.state.table.clone();
@@ -557,6 +572,7 @@ impl GridView {
                     Ok(Ok(())) => {
                         grid.key_string_dirty = false;
                         grid.key_string_loaded = None;
+                        grid.show_toast(ToastKind::Success, t!("redis.key.saved").to_string(), cx);
                         grid.reload_after_write(cx);
                     }
                     Ok(Err(error)) => grid.key_string_error = Some(error.to_string()),

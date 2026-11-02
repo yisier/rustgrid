@@ -1311,12 +1311,16 @@ impl TreePane {
                         "keys-{connection_index}-{database_index}-{}",
                         namespace.name
                     );
-                    let selected =
-                        database.object_pattern.as_deref() == Some(namespace.name.as_str());
+                    let selected = self.selected.as_deref() == Some(id.as_str())
+                        || database.object_pattern.as_deref()
+                            == Some(format!("{}*", namespace.name).as_str());
                     let name = namespace.name.clone();
                     let label = format!("{name}*");
                     let clicked = namespace.name.clone();
                     let row_app = app.clone();
+                    let menu_app = app.clone();
+                    let menu_id = id.clone();
+                    let menu_namespace = namespace.name.clone();
                     let nav_app = app.clone();
                     let nav_id = id.clone();
                     let nav_name = label.clone();
@@ -1363,6 +1367,26 @@ impl TreePane {
                                 });
                             });
                         }))
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                                cx.stop_propagation();
+                                this.selected_table = None;
+                                this.selected = Some(menu_id.clone());
+                                let _ = menu_app.update(cx, |app, cx| {
+                                    app.context_menu = Some(ContextMenu {
+                                        target: ContextTarget::KeyNamespace {
+                                            connection_index,
+                                            database_index,
+                                            namespace: menu_namespace.clone(),
+                                        },
+                                        position: event.position,
+                                    });
+                                    cx.notify();
+                                });
+                                cx.notify();
+                            }),
+                        )
                         .child(tree_icon("icons/folder.svg", theme.warning))
                         .child(
                             div()

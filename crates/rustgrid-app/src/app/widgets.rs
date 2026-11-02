@@ -386,6 +386,7 @@ impl AppView {
             } => {
                 let ci = *connection_index;
                 let di = *database_index;
+                let key_value = self.driver_supports(ci, DriverCapability::KeyValue);
                 let opened = self
                     .connections
                     .get(ci)
@@ -452,25 +453,46 @@ impl AppView {
                             this.context_menu = None;
                             this.open_new_query_for_database(ci, di, cx);
                         }),
-                    ))
-                    .child(self.context_item(
-                        "db-run-sql",
-                        t!("database.run_sql_file").to_string(),
-                        cx.listener(move |this, _event, _window, cx| {
-                            this.context_menu = None;
-                            this.dump_submenu = None;
-                            this.open_run_sql_file(ci, di, cx);
-                        }),
-                    ))
-                    .child(self.dump_sql_submenu_item(ci, di, cx))
-                    .child(self.context_item(
-                        "db-refresh",
-                        t!("database.refresh").to_string(),
-                        cx.listener(move |this, _event, _window, cx| {
-                            this.context_menu = None;
-                            this.load_databases(ci, cx);
-                        }),
                     ));
+                if key_value {
+                    items = items
+                        .child(self.context_item(
+                            "db-new-key",
+                            t!("redis.key.new").to_string(),
+                            cx.listener(move |this, _event, _window, cx| {
+                                this.context_menu = None;
+                                this.start_new_key_dialog(ci, di, None, cx);
+                            }),
+                        ))
+                        .child(self.context_item(
+                            "db-refresh",
+                            t!("database.refresh").to_string(),
+                            cx.listener(move |this, _event, _window, cx| {
+                                this.context_menu = None;
+                                this.load_databases(ci, cx);
+                            }),
+                        ));
+                } else {
+                    items = items
+                        .child(self.context_item(
+                            "db-run-sql",
+                            t!("database.run_sql_file").to_string(),
+                            cx.listener(move |this, _event, _window, cx| {
+                                this.context_menu = None;
+                                this.dump_submenu = None;
+                                this.open_run_sql_file(ci, di, cx);
+                            }),
+                        ))
+                        .child(self.dump_sql_submenu_item(ci, di, cx))
+                        .child(self.context_item(
+                            "db-refresh",
+                            t!("database.refresh").to_string(),
+                            cx.listener(move |this, _event, _window, cx| {
+                                this.context_menu = None;
+                                this.load_databases(ci, cx);
+                            }),
+                        ));
+                }
                 if self.driver_supports(ci, DriverCapability::Schemas) {
                     items = items
                         .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
@@ -483,6 +505,32 @@ impl AppView {
                             }),
                         ));
                 }
+            }
+            ContextTarget::KeyNamespace {
+                connection_index,
+                database_index,
+                namespace,
+            } => {
+                let ci = *connection_index;
+                let di = *database_index;
+                let namespace = namespace.clone();
+                items = items
+                    .child(self.context_item(
+                        "key-namespace-new-key",
+                        t!("redis.key.new").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.start_new_key_dialog(ci, di, Some(namespace.clone()), cx);
+                        }),
+                    ))
+                    .child(self.context_item(
+                        "key-namespace-refresh",
+                        t!("common.refresh").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.refresh_tree(cx);
+                        }),
+                    ));
             }
             ContextTarget::Schema {
                 connection_index,

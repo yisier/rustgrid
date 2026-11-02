@@ -2,6 +2,7 @@ use super::grid::{make_page_input, make_page_size_input};
 use super::grid_fields::make_field_filter_search_input;
 use super::*;
 use gpui::HitboxBehavior;
+use gpui_kit::component::{Icon, IconName};
 
 impl GridView {
     /// The key-value detail header above the grid: type badge, key name, type, TTL and memory.
@@ -291,10 +292,10 @@ impl Render for GridView {
             // A key page has no sort: field/member order is the server's own, so no sort badge.
             let show_badge =
                 !key_page && self.state.sql.is_none() && (revealed || sort_descending.is_some());
-            let (sort_icon, sort_color) = match sort_descending {
-                Some(true) => ("icons/arrow-down.svg", theme.primary),
-                Some(false) => ("icons/arrow-up.svg", theme.primary),
-                None => ("icons/sort-none.svg", theme.text_muted),
+            let (sort_icon, sort_color, sort_opacity) = match sort_descending {
+                Some(true) => (IconName::SortDescending, theme.primary, 1.0),
+                Some(false) => (IconName::SortAscending, theme.primary, 1.0),
+                None => (IconName::ChevronsUpDown, theme.text_muted, 0.5),
             };
             let mut slot = div()
                 .id(SharedString::from(format!(
@@ -318,12 +319,12 @@ impl Render for GridView {
                         this.toggle_column_sort(sort_column.clone(), cx);
                     }))
                     .child(
-                        svg()
-                            .path(sort_icon)
-                            .w(px(8.0))
-                            .h(px(8.0))
+                        Icon::new(sort_icon)
+                            .w(px(12.0))
+                            .h(px(12.0))
                             .flex_none()
-                            .text_color(rgb(sort_color)),
+                            .text_color(rgb(sort_color))
+                            .opacity(sort_opacity),
                     );
             }
             let cell = div()

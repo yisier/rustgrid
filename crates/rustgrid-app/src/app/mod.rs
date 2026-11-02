@@ -1350,6 +1350,13 @@ enum ContextTarget {
         connection_index: usize,
         database_index: usize,
     },
+    /// A Redis namespace folder under a database (新建键 / 刷新). The key dialog starts with
+    /// the folder's prefix in its name field.
+    KeyNamespace {
+        connection_index: usize,
+        database_index: usize,
+        namespace: String,
+    },
     Table {
         connection_index: usize,
         database_index: usize,

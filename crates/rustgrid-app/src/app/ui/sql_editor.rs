@@ -389,7 +389,10 @@ impl SqlEditor {
                 };
                 let mut state = EditorState::new(window, cx)
                     .language(language)
-                    .line_number(options.line_number);
+                    .line_number(options.line_number)
+                    // The fold gutter is only useful beside line numbers; with them off it just
+                    // leaves a blank strip before the text (the Redis RAW/JSON views).
+                    .folding(options.line_number);
                 // The kit's own default is on; the setting is applied explicitly so a wrap choice
                 // made in the Options window is what the editor actually uses.
                 state.set_soft_wrap(word_wrap, window, cx);
@@ -816,7 +819,7 @@ mod tests {
             let _ = window.draw(cx);
         });
         cx.simulate_mouse_down(
-            point(px(30.), px(24.)),
+            point(px(10.), px(24.)),
             MouseButton::Left,
             Modifiers::default(),
         );

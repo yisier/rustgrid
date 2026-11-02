@@ -886,19 +886,22 @@ impl AppView {
         cx.notify();
     }
 
-    /// Set up the Redis 新建键 modal and build its fields.
+    /// Set up the Redis 新建键 modal and build its fields. `group` pre-fills the name field when
+    /// the dialog was opened from a namespace folder.
     pub(super) fn start_new_key_dialog(
         &mut self,
         connection_index: usize,
         database_index: usize,
+        group: Option<String>,
         cx: &mut Context<'_, Self>,
     ) {
         let theme = self.theme;
         let weak = cx.weak_entity();
+        let name = group.unwrap_or_default();
         self.new_key_dialog = Some(NewKeyDialog {
             connection_index,
             database_index,
-            name: String::new(),
+            name: name.clone(),
             kind: "string".to_string(),
             ttl: String::new(),
             value: String::new(),
@@ -912,7 +915,7 @@ impl AppView {
         let submit_weak = weak.clone();
         let cancel_weak = weak.clone();
         self.new_key_name_input = Some(cx.new(|cx| {
-            TextInput::new(theme, "", TextInputOptions::default(), cx)
+            TextInput::new(theme, name, TextInputOptions::default(), cx)
                 .on_change(Rc::new(move |text, _window, cx| {
                     let _ = name_weak.update(cx, |app, cx| {
                         if let Some(dialog) = app.new_key_dialog.as_mut() {

@@ -300,7 +300,7 @@ impl AppView {
                 t!("redis.key.new").to_string(),
                 true,
                 cx.listener(move |this, _event, _window, cx| {
-                    this.start_new_key_dialog(connection_index, database_index, cx);
+                    this.start_new_key_dialog(connection_index, database_index, None, cx);
                 }),
             ))
             .child(self.dialog_button(

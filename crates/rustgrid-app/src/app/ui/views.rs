@@ -28,6 +28,7 @@ use gpui::{
 
 use super::{hscrollbar_track, scrollbar_fractions, scrollbar_thumb, vscrollbar_track};
 use crate::theme::Theme;
+use gpui_kit::component::{Icon, IconName};
 
 /// The height of one item row of a 平铺网格 column. This is the single shared row metric: every
 /// page's 平铺网格 uses it so the layouts look identical.
@@ -752,10 +753,10 @@ pub(crate) fn detail_header_cell(
     theme: Theme,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    let (icon, color) = match sort {
-        Some(true) => ("icons/arrow-down.svg", theme.primary),
-        Some(false) => ("icons/arrow-up.svg", theme.primary),
-        None => ("icons/sort-none.svg", theme.text_muted),
+    let (icon, color, opacity) = match sort {
+        Some(true) => (IconName::SortDescending, theme.primary, 1.0),
+        Some(false) => (IconName::SortAscending, theme.primary, 1.0),
+        None => (IconName::ChevronsUpDown, theme.text_muted, 0.5),
     };
     div()
         .id(id.into())
@@ -772,12 +773,12 @@ pub(crate) fn detail_header_cell(
         .on_click(on_click)
         .child(label)
         .child(
-            svg()
-                .path(icon)
+            Icon::new(icon)
                 .w(px(11.0))
                 .h(px(11.0))
                 .flex_none()
-                .text_color(rgb(color)),
+                .text_color(rgb(color))
+                .opacity(opacity),
         )
 }
 

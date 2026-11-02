@@ -950,7 +950,9 @@ const SORT_BADGE_ALLOWANCE: f32 = 20.0;
 
 /// The natural-order widths for a freshly fetched page: content-fitted, unless the user has dragged
 /// column edges — then each column keeps the width it had, matched by name so paging/sorting does
-/// not snap the widths back.
+/// not snap the widths back. The same carry-over applies when the page keeps the same column set:
+/// sorting changes the rows, not the schema, so a column must not shrink because the new first page
+/// happens to hold shorter values (its later values then clipped).
 pub fn page_column_widths(
     columns: &[ColumnInfo],
     rows: &[Vec<CellValue>],
@@ -959,7 +961,13 @@ pub fn page_column_widths(
     manual: bool,
 ) -> Vec<f32> {
     let mut widths = compute_column_widths(columns, rows);
-    if manual {
+    let same_columns = previous.len() == columns.len()
+        && columns.iter().all(|column| {
+            previous
+                .iter()
+                .any(|candidate| candidate.name == column.name)
+        });
+    if manual || same_columns {
         for (index, column) in columns.iter().enumerate() {
             let carried = previous
                 .iter()
@@ -1343,6 +1351,18 @@ mod tests {
 
     fn hidden(names: &[&str]) -> BTreeSet<String> {
         names.iter().map(|name| name.to_string()).collect()
+    }
+
+    #[test]
+    fn sorting_keeps_the_widths_of_the_same_column_set() {
+        let previous = columns(&["BatchID", "LineID"]);
+        let previous_widths = vec![130.0, 80.0];
+        let rows = vec![vec![
+            CellValue::Text("x".to_string()),
+            CellValue::Text("0E".to_string()),
+        ]];
+        let widths = page_column_widths(&previous, &rows, &previous, &previous_widths, false);
+        assert_eq!(widths, previous_widths);
     }
 
     #[test]
