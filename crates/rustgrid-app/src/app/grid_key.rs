@@ -206,11 +206,7 @@ impl GridView {
                 save_enabled,
                 theme,
                 cx.listener(|this, _event, _window, cx| {
-                    if this.is_string_key_page() {
-                        this.save_string_key(cx);
-                    } else {
-                        this.save_grid(cx);
-                    }
+                    this.save_current(cx);
                 }),
             ));
         }
@@ -325,7 +321,21 @@ impl GridView {
             .and_then(|value| serde_json::to_string_pretty(&value).ok());
         let json_mode = self.key_string_format == KeyStringFormat::Json && pretty.is_some();
 
-        let mut page = div().flex().flex_col().size_full();
+        let mut page = div()
+            .flex()
+            .flex_col()
+            .size_full()
+            // Ctrl/⌘+S must reach the key page even while the RAW editor owns focus.
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                let keystroke = &event.keystroke;
+                if (keystroke.modifiers.control || keystroke.modifiers.platform)
+                    && keystroke.key.eq_ignore_ascii_case("s")
+                    && this.key_page_kind() == Some("string")
+                {
+                    cx.stop_propagation();
+                    this.save_string_key(cx);
+                }
+            }));
         page = page.child(self.render_key_page_bar(theme, cx));
 
         let format_button = |id: &'static str, label: &'static str, active: bool| {
@@ -527,6 +537,16 @@ impl GridView {
             self.key_string_loaded = Some(raw);
         } else if self.key_string_editor.is_none() {
             let _ = self.ensure_key_string_editor(editable, cx);
+        }
+    }
+
+    /// Save whatever the key page currently shows: the RAW text for a string key, or the
+    /// field/member edits for a collection.
+    pub(super) fn save_current(&mut self, cx: &mut Context<'_, Self>) {
+        if self.is_string_key_page() {
+            self.save_string_key(cx);
+        } else {
+            self.save_grid(cx);
         }
     }
 

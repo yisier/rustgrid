@@ -345,7 +345,7 @@ impl GridView {
         if keystroke.modifiers.control || keystroke.modifiers.platform {
             // Save works while the in-place editor holds focus too (the key bubbles up to here).
             if keystroke.key.eq_ignore_ascii_case("s") {
-                self.save_grid(cx);
+                self.save_current(cx);
                 cx.stop_propagation();
             } else if self.cell_editor.is_none()
                 && self.date_picker.is_none()
