@@ -3296,13 +3296,18 @@ impl AppView {
                     }))
                     // Down / Up moves the focus from the field into the filtered rows — the first
                     // / last table result — so a found table can be picked from the keyboard; the
-                    // tree's own arrows and Enter take over from there.
+                    // tree's own arrows and Enter take over from there. Select the row straight
+                    // through the tree entity: `TreePane::nav_select` writes the app's tree
+                    // selection, so running it inside an `AppView` update would re-enter that
+                    // update and panic.
                     .on_arrow(Rc::new({
                         let weak = weak.clone();
                         move |down, window, cx| {
-                            let _ = weak.update(cx, |app, cx| {
-                                app.focus_tree_search_result(down, window, cx);
-                            });
+                            let Some(app) = weak.upgrade() else {
+                                return;
+                            };
+                            let tree = app.read(cx).tree_pane.clone();
+                            tree.update(cx, |tree, cx| tree.focus_search_result(down, window, cx));
                         }
                     }))
                     // Esc clears the filter and shows the whole tree again. Deferred for the same
