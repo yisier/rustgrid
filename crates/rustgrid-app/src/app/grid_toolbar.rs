@@ -1316,6 +1316,7 @@ impl GridView {
                     true,
                     cx.listener(|this, _event, _window, cx| this.toggle_page_size_menu(cx)),
                 ))
+                .child(self.render_form_toggle(cx))
         });
         // Navicat's grid shows the last fetch's duration next to the pager; the 耗时 label sits
         // just left of it so the eye finds the time and the page controls together.
@@ -1345,6 +1346,31 @@ impl GridView {
             controls = controls.child(right);
         }
         controls
+    }
+
+    /// The footer's 编辑表单 toggle, right of the page-size gear. It only lights up (and is only
+    /// clickable) while a data row is selected, and opens the right-hand pane's row form.
+    fn render_form_toggle(&self, cx: &mut Context<'_, Self>) -> Stateful<Div> {
+        let theme = self.theme;
+        let rows = self.state.rows.len();
+        let has_row = self
+            .state
+            .selection
+            .as_ref()
+            .is_some_and(|selection| selection.row_indices().into_iter().any(|row| row < rows));
+        let open = self.app.upgrade().is_some_and(|app| app.read(cx).form_open);
+        self.grid_icon_button(
+            "grid-form",
+            "icons/form.svg",
+            if open { theme.primary } else { theme.text },
+            has_row,
+            cx.listener(|this, _event, _window, cx| {
+                if let Some(app) = this.app.upgrade() {
+                    app.update(cx, |app, cx| app.toggle_form(cx));
+                }
+            }),
+        )
+        .tooltip(ui::text_tooltip(t!("grid.form_view").to_string()))
     }
 
     pub(super) fn grid_icon_button(

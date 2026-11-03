@@ -2599,6 +2599,9 @@ pub struct AppView {
     sidebar_open: bool,
     /// Whether the right-hand object-info pane is shown (bottom-right toggle).
     info_open: bool,
+    /// Whether the right-hand pane shows the selected row's edit form instead of the object
+    /// details. Opened from the grid footer's 编辑表单 button (the two never show together).
+    form_open: bool,
     /// The remembered list layout per page (详细列表 / 平铺网格), keyed by a stable page id and
     /// persisted in settings so each page keeps its own choice.
     view_modes: BTreeMap<String, String>,
@@ -3299,6 +3302,7 @@ impl AppView {
             // The info pane stays hidden until the user reveals it; the choice is remembered in
             // settings, so it is restored here instead of being forced open on the Users tab.
             info_open: settings.show_info_pane,
+            form_open: false,
             view_modes: settings.view_modes.clone(),
             remembered_db_expansion,
             info_loaded_for: None,
@@ -3521,13 +3525,22 @@ impl AppView {
 
     /// Show or hide the right-hand object-info pane and remember the choice, so the next launch
     /// restores it. This is the only way the pane is revealed from the chrome; it is never shown
-    /// automatically.
+    /// automatically. Opening it closes the row form, which shares the right-hand side.
     pub(super) fn set_info_open(&mut self, open: bool, cx: &mut Context<'_, Self>) {
+        let form_closed = open && std::mem::take(&mut self.form_open);
         if self.info_open == open {
+            if form_closed {
+                // The grid footer's 编辑表单 button follows the form state.
+                self.notify_grids(cx);
+                cx.notify();
+            }
             return;
         }
         self.info_open = open;
         self.persist_settings();
+        if form_closed {
+            self.notify_grids(cx);
+        }
         cx.notify();
     }
 
@@ -4725,7 +4738,7 @@ impl Render for AppView {
             body = body.child(self.sidebar_host.clone());
         }
         body = body.child(self.render_content(window, cx));
-        if self.info_open {
+        if self.info_open || self.form_open {
             body = body.child(self.info_pane.clone());
         }
 

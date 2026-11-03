@@ -296,16 +296,6 @@ impl GridView {
         }
     }
 
-    /// Drop the current cell/row selection. The info pane shows the table's details again
-    /// instead of the selected row's form.
-    pub(super) fn clear_selection(&mut self, cx: &mut Context<'_, Self>) {
-        if self.state.selection.take().is_some() {
-            self.cell_press = None;
-            self.selecting_cells = false;
-            cx.notify();
-        }
-    }
-
     /// Append a blank insert row (the "+" button), select its first cell and reveal it.
     pub(super) fn add_insert_row(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         if !self.state.editable || self.state.loading || self.state.columns.is_empty() {

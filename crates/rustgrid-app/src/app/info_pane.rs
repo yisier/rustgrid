@@ -189,10 +189,9 @@ impl Render for SidebarHost {
 
 // ----- Right info pane ------------------------------------------------------------------------
 
-/// The object-info pane: a drag handle on its left edge and the selected object's details.
-///
-/// While the active grid is a table data page and a row is selected, the pane instead shows that
-/// row as an editable form (the first selected row when several are selected).
+/// The right-hand pane: a drag handle on its left edge, showing either the selected object's
+/// details or — while the grid footer's 编辑表单 button is on — the selected row as an editable
+/// form (the first selected row when several are selected). The two never show together.
 pub(super) struct InfoPane {
     app: WeakEntity<AppView>,
     width: f32,
@@ -251,21 +250,42 @@ impl InfoPane {
         }
     }
 
-    /// The pane's body: the selected table row as an editable form while a table data grid is
-    /// active and a row is selected, the object's details otherwise.
+    /// The pane's body: the selected row's edit form while the grid footer's 编辑表单 button is on,
+    /// the object's details otherwise.
     fn pane_body(
         &mut self,
         app_entity: &Entity<AppView>,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
-        let grid = app_entity.read(cx).form_grid(cx);
-        self.sync_form_grid(grid.as_ref(), cx);
-        if let Some(grid) = grid.as_ref()
-            && let Some(row) = form_row(grid, cx)
-            && let Some(body) = self.form_body(app_entity, grid, row, cx)
-        {
-            return body;
+        let (form_open, grid) = {
+            let app = app_entity.read(cx);
+            (app.form_open, app.form_grid(cx))
+        };
+        if form_open {
+            self.sync_form_grid(grid.as_ref(), cx);
+            if let Some(grid) = grid.as_ref()
+                && let Some(row) = form_row(grid, cx)
+                && let Some(body) = self.form_body(app_entity, grid, row, cx)
+            {
+                return body;
+            }
+            // Nothing left to edit (the selection was cleared, or its tab closed): turn the form
+            // off so the footer button and the pane agree. The details pane keeps the user's own
+            // choice and does not pop open.
+            self.form = None;
+            if let Some(app) = self.app.upgrade() {
+                app.update(cx, |app, cx| {
+                    if app.form_open {
+                        app.form_open = false;
+                        // Keep the grid footer's 编辑表单 button in step.
+                        app.notify_grids(cx);
+                        cx.notify();
+                    }
+                });
+            }
+            return div().into_any_element();
         }
+        self.sync_form_grid(None, cx);
         self.form = None;
         let app = app_entity.read(cx);
         let weak = self.app.clone();
@@ -375,7 +395,7 @@ impl InfoPane {
             show_types,
             show_comments,
         };
-        Some(render_row_form(&style, &fields, form, &grid.entity))
+        Some(render_row_form(&style, &fields, form, app_entity))
     }
 }
 
@@ -759,6 +779,34 @@ impl AppView {
             id: state.id,
             entity: grid.clone(),
         })
+    }
+
+    /// The grid footer's 编辑表单 button: show or hide the selected row's form in the right-hand
+    /// pane. Opening it needs a selected data row and closes the details pane, since both share
+    /// that side; closing it leaves the details pane as the user had it (closed).
+    pub(super) fn toggle_form(&mut self, cx: &mut Context<'_, Self>) {
+        if self.form_open {
+            self.form_open = false;
+            // The grid footer's 编辑表单 button follows the form state and the grid does not
+            // re-render from an `AppView` change by itself.
+            self.notify_grids(cx);
+            cx.notify();
+            return;
+        }
+        if self
+            .form_grid(cx)
+            .and_then(|grid| form_row(&grid, cx))
+            .is_none()
+        {
+            return;
+        }
+        self.form_open = true;
+        if self.info_open {
+            self.info_open = false;
+            self.persist_settings();
+        }
+        self.notify_grids(cx);
+        cx.notify();
     }
 
     /// Build the info pane's contents for the current selection.
@@ -1395,17 +1443,17 @@ struct FormStyle<'a> {
     show_comments: bool,
 }
 
-/// The row form: a compact title (table, 表单 badge and a way back to the table details) over one
+/// The row form: a compact title (table, 表单 badge and a way to the table details) over one
 /// block per field. The right pane is narrow, so each field puts `字段 · 类型 · 注释` on one line
 /// with its editor underneath instead of Navicat's three columns.
 fn render_row_form(
     style: &FormStyle<'_>,
     fields: &[FormField],
     form: &FormState,
-    grid: &Entity<GridView>,
+    app: &Entity<AppView>,
 ) -> AnyElement {
     let theme = style.theme;
-    let back_grid = grid.clone();
+    let back_app = app.clone();
     let title = div()
         .flex()
         .flex_row()
@@ -1456,7 +1504,9 @@ fn render_row_form(
                         .text_color(rgb(theme.text_muted)),
                 )
                 .on_click(move |_event, _window, cx| {
-                    back_grid.update(cx, |grid, cx| grid.clear_selection(cx));
+                    // Switch the right-hand pane to the table's details (this also turns the form
+                    // off, since the two never show together).
+                    back_app.update(cx, |app, cx| app.set_info_open(true, cx));
                 }),
         );
 
