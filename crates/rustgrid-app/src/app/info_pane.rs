@@ -68,11 +68,25 @@ struct FormField {
 struct FormState {
     grid_id: u64,
     row: usize,
+    /// The grid the edits are staged into (the form's inputs and date picker write through it).
+    grid: WeakEntity<GridView>,
     /// Display-column names, in form order.
     columns: Vec<String>,
     inputs: Vec<Entity<TextInput>>,
     /// Whether each editor's field is `NULL`, to update its placeholder only when that changes.
     nulls: Vec<bool>,
+}
+
+/// The inline date/time picker of one form field, for a temporal column. It mirrors the grid's
+/// in-place picker: gpui-kit's calendar is the source of truth for the date, the `TimeField` owns
+/// the time of day, and only the footer is app-drawn.
+struct FormPicker {
+    /// The display column of the field it belongs to.
+    col: usize,
+    /// Whether the column carries a time of day (`datetime`/`timestamp`).
+    has_time: bool,
+    calendar: Entity<CalendarState>,
+    time_field: Option<Entity<TimeFieldState>>,
 }
 
 // ----- Left sidebar ---------------------------------------------------------------------------
@@ -207,6 +221,8 @@ pub(super) struct InfoPane {
     form_grid: Option<(u64, Subscription)>,
     /// The row form's editors while a table row is selected.
     form: Option<FormState>,
+    /// The form field whose inline date/time picker is open, if any.
+    form_picker: Option<FormPicker>,
 }
 
 impl InfoPane {
@@ -226,6 +242,7 @@ impl InfoPane {
             _tree_subscription: tree_subscription,
             form_grid: None,
             form: None,
+            form_picker: None,
         }
     }
 
@@ -273,6 +290,7 @@ impl InfoPane {
             // off so the footer button and the pane agree. The details pane keeps the user's own
             // choice and does not pop open.
             self.form = None;
+            self.form_picker = None;
             if let Some(app) = self.app.upgrade() {
                 // Leave the update for after this frame: the pane is being rendered and the grids
                 // may still be busy drawing.
@@ -291,6 +309,7 @@ impl InfoPane {
         }
         self.sync_form_grid(None, cx);
         self.form = None;
+        self.form_picker = None;
         let app = app_entity.read(cx);
         let weak = self.app.clone();
         app.info_body(&weak, cx)
@@ -305,6 +324,7 @@ impl InfoPane {
             return;
         }
         self.form = None;
+        self.form_picker = None;
         self.form_grid = grid.map(|grid| {
             let subscription = cx.observe(&grid.entity, |_, _, cx| cx.notify());
             (grid.id, subscription)
@@ -364,10 +384,13 @@ impl InfoPane {
             self.form = Some(FormState {
                 grid_id: grid.id,
                 row,
+                grid: grid.entity.downgrade(),
                 columns,
                 inputs,
                 nulls: fields.iter().map(|field| field.null).collect(),
             });
+            // The picker belonged to the previous row/field layout.
+            self.form_picker = None;
         }
         let form = self.form.as_mut()?;
         // Mirror the model into the editors. Typing already staged the same value, so this only
@@ -397,7 +420,129 @@ impl InfoPane {
             show_types,
             show_comments,
         };
-        Some(render_row_form(&style, &fields, form))
+        let weak = cx.weak_entity();
+        Some(render_row_form(
+            &style,
+            &fields,
+            form,
+            self.form_picker.as_ref(),
+            &weak,
+        ))
+    }
+
+    /// Drop an open form date/time picker. Used when the form is closed while the pane is not in
+    /// the element tree and therefore would not render its own cleanup.
+    pub(super) fn clear_form_picker(&mut self, cx: &mut Context<'_, Self>) {
+        if self.form_picker.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Open (or apply-and-close) the inline date/time picker of one form field. Mirrors the grid's
+    /// "…" toggle: the picker starts from the field's current text, or the current moment when
+    /// that is empty or not a date.
+    fn toggle_form_picker(
+        &mut self,
+        col: usize,
+        value: String,
+        has_time: bool,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self
+            .form_picker
+            .as_ref()
+            .is_some_and(|picker| picker.col == col)
+        {
+            self.form_picker_ok(window, cx);
+            return;
+        }
+        let base = parse_datetime(&value).unwrap_or_else(|| chrono::Local::now().naive_local());
+        let date = NaiveDate::from_ymd_opt(base.year(), base.month(), base.day())
+            .unwrap_or_else(|| chrono::Local::now().date_naive());
+        let calendar = cx.new(|cx| {
+            let mut state = CalendarState::new(window, cx);
+            state.set_date(date, window, cx);
+            state
+        });
+        let time_field = has_time.then(|| {
+            let time = NaiveTime::from_hms_opt(base.hour(), base.minute(), base.second())
+                .unwrap_or_default();
+            cx.new(|cx| {
+                let mut state = TimeFieldState::new(window, cx).precision(TimePrecision::Second);
+                state.set_time(time, window, cx);
+                state
+            })
+        });
+        self.form_picker = Some(FormPicker {
+            col,
+            has_time,
+            calendar,
+            time_field,
+        });
+        cx.notify();
+    }
+
+    /// Write the picker's date/time into the field's editor and stage it, then close the picker.
+    /// The editor is focused again so the form behaves like the grid's cell editor.
+    fn form_picker_ok(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let Some(picker) = self.form_picker.take() else {
+            return;
+        };
+        let Some(value) = form_picker_value(&picker, cx) else {
+            return;
+        };
+        let Some(form) = self.form.as_ref() else {
+            return;
+        };
+        let Some(input) = form.inputs.get(picker.col).cloned() else {
+            return;
+        };
+        let (row, col) = (form.row, picker.col);
+        if let Some(grid) = form.grid.upgrade() {
+            let text = value.clone();
+            grid.update(cx, |grid, cx| grid.stage_form_edit(row, col, &text, cx));
+        }
+        input.update(cx, |input, cx| {
+            input.set_text(value, cx);
+            input.focus_state(window, cx);
+        });
+        cx.notify();
+    }
+
+    /// Move the open picker to today (and the current time), leaving it open to confirm.
+    fn form_picker_today(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let now = chrono::Local::now().naive_local();
+        let Some(picker) = self.form_picker.as_ref() else {
+            return;
+        };
+        if let Some(date) = NaiveDate::from_ymd_opt(now.year(), now.month(), now.day()) {
+            picker
+                .calendar
+                .update(cx, |calendar, cx| calendar.set_date(date, window, cx));
+        }
+        if let Some(field) = picker.time_field.as_ref()
+            && let Some(time) = NaiveTime::from_hms_opt(now.hour(), now.minute(), now.second())
+        {
+            field.update(cx, |field, cx| field.set_time(time, window, cx));
+        }
+        cx.notify();
+    }
+
+    /// Close the picker without touching the field's text and focus the editor again.
+    fn form_picker_cancel(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let Some(picker) = self.form_picker.take() else {
+            return;
+        };
+        if let Some(input) = self
+            .form
+            .as_ref()
+            .and_then(|form| form.inputs.get(picker.col))
+            .cloned()
+        {
+            input.update(cx, |input, cx| input.focus_state(window, cx));
+        }
+        cx.notify();
     }
 }
 
@@ -791,6 +936,10 @@ impl AppView {
     pub(super) fn toggle_form(&mut self, cx: &mut Context<'_, Self>) {
         if self.form_open {
             self.form_open = false;
+            // The pane may leave the element tree without rendering again, so drop its picker here
+            // rather than letting it reappear the next time the form opens.
+            let pane = self.info_pane.clone();
+            pane.update(cx, |pane, cx| pane.clear_form_picker(cx));
         } else {
             self.form_open = true;
             if self.info_open {
@@ -1437,7 +1586,13 @@ struct FormStyle<'a> {
 /// The row form: a compact title (table and 表单 badge) over one block per field. The right pane is
 /// narrow, so each field puts `字段 · 类型 · 注释` on one line with its editor underneath instead of
 /// Navicat's three columns.
-fn render_row_form(style: &FormStyle<'_>, fields: &[FormField], form: &FormState) -> AnyElement {
+fn render_row_form(
+    style: &FormStyle<'_>,
+    fields: &[FormField],
+    form: &FormState,
+    picker: Option<&FormPicker>,
+    pane: &WeakEntity<InfoPane>,
+) -> AnyElement {
     let theme = style.theme;
     let title = div()
         .flex()
@@ -1476,6 +1631,8 @@ fn render_row_form(style: &FormStyle<'_>, fields: &[FormField], form: &FormState
             index,
             field,
             form.inputs.get(index).cloned(),
+            picker.filter(|picker| picker.col == index),
+            pane,
         ));
     }
 
@@ -1507,6 +1664,8 @@ fn render_form_field(
     index: usize,
     field: &FormField,
     input: Option<Entity<TextInput>>,
+    picker: Option<&FormPicker>,
+    pane: &WeakEntity<InfoPane>,
 ) -> AnyElement {
     let theme = style.theme;
     // The pane's own padding (p_3 on both the header and the list) and the divider.
@@ -1600,17 +1759,204 @@ fn render_form_field(
         .border_b_1()
         .border_color(rgb(theme.grid_line))
         .child(header);
-    block = match input {
-        Some(input) => block.child(div().w_full().h(px(24.0)).child(input)),
-        None => block.child(
-            div()
+    match input {
+        Some(input) => {
+            let temporal = is_temporal_type(&field.data_type);
+            let has_time = {
+                let data_type = field.data_type.to_ascii_lowercase();
+                data_type.contains("datetime") || data_type.contains("timestamp")
+            };
+            let mut value_row = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
                 .w_full()
-                .text_size(px(12.0))
-                .text_color(rgb(theme.text_muted))
-                .child(field.value.clone()),
-        ),
-    };
+                .child(div().flex_1().min_w(px(0.0)).h(px(24.0)).child(input));
+            if temporal {
+                value_row = value_row.child(form_picker_toggle(
+                    theme,
+                    index,
+                    field.value.clone(),
+                    has_time,
+                    picker.is_some(),
+                    pane,
+                ));
+            }
+            block = block.child(value_row);
+            if let Some(picker) = picker {
+                block = block.child(render_form_picker(theme, picker, pane));
+            }
+        }
+        None => {
+            block = block.child(
+                div()
+                    .w_full()
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(field.value.clone()),
+            );
+        }
+    }
     block.into_any_element()
+}
+
+/// The "…" button a temporal form field shows next to its editor: it opens the field's inline
+/// date/time picker (or applies and closes it when already open), like the grid's cell button.
+fn form_picker_toggle(
+    theme: Theme,
+    col: usize,
+    value: String,
+    has_time: bool,
+    open: bool,
+    pane: &WeakEntity<InfoPane>,
+) -> Stateful<Div> {
+    let weak = pane.clone();
+    div()
+        .id(SharedString::from(format!("info-form-date-{col}")))
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .w(px(24.0))
+        .h(px(24.0))
+        .rounded_sm()
+        .cursor_pointer()
+        .border_1()
+        .border_color(rgb(theme.button_border))
+        .bg(rgb(if open {
+            theme.button_hover_bg
+        } else {
+            theme.button_bg
+        }))
+        .text_size(px(11.0))
+        .text_color(rgb(if open { theme.primary } else { theme.text }))
+        .hover(move |style| style.bg(rgb(theme.button_hover_bg)))
+        .child("…")
+        .on_click(move |_event, window, cx| {
+            let text = value.clone();
+            let _ = weak.update(cx, |pane, cx| {
+                pane.toggle_form_picker(col, text, has_time, window, cx);
+            });
+        })
+}
+
+/// The inline calendar of a form field's date/time picker: gpui-kit's compact calendar, the
+/// optional time-of-day row, and the app-drawn 今天 / 取消 / 确定 footer.
+fn render_form_picker(
+    theme: Theme,
+    picker: &FormPicker,
+    pane: &WeakEntity<InfoPane>,
+) -> AnyElement {
+    let now = chrono::Local::now().naive_local();
+    // The mouse-down capture keeps focus where it is (the editor or the time field) when a
+    // calendar cell is pressed, exactly like the grid's picker.
+    let calendar = div()
+        .capture_any_mouse_down(|_event, window, _cx| window.prevent_default())
+        .child(ui::compact_calendar(&picker.calendar));
+    let time_row: Option<AnyElement> = picker.time_field.as_ref().map(|field| {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_center()
+            .pb_1()
+            .child(TimeField::new(field).small())
+            .into_any_element()
+    });
+
+    let today = pane.clone();
+    let cancel = pane.clone();
+    let ok = pane.clone();
+    let footer = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .child(
+            div()
+                .id("info-form-date-today")
+                .px_1()
+                .rounded_sm()
+                .text_size(px(11.0))
+                .text_color(rgb(theme.text))
+                .cursor_pointer()
+                .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                .on_click(move |_event, window, cx| {
+                    let _ = today.update(cx, |pane, cx| pane.form_picker_today(window, cx));
+                })
+                .child(format!(
+                    "{}: {}/{}/{}",
+                    t!("grid.today"),
+                    now.year(),
+                    now.month(),
+                    now.day()
+                )),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(ui::popup_button(
+                    "info-form-date-cancel",
+                    t!("form.cancel").to_string(),
+                    false,
+                    theme,
+                    move |_event, window, cx| {
+                        let _ = cancel.update(cx, |pane, cx| pane.form_picker_cancel(window, cx));
+                    },
+                ))
+                .child(ui::popup_button(
+                    "info-form-date-ok",
+                    t!("form.ok").to_string(),
+                    true,
+                    theme,
+                    move |_event, window, cx| {
+                        let _ = ok.update(cx, |pane, cx| pane.form_picker_ok(window, cx));
+                    },
+                )),
+        );
+
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .mt_1()
+        .p_1()
+        .rounded_md()
+        .bg(rgb(theme.dialog_bg))
+        .border_1()
+        .border_color(rgb(theme.border))
+        .child(calendar)
+        .children(time_row)
+        .child(footer)
+        .into_any_element()
+}
+
+/// The picker's accepted value: `YYYY-MM-DD` for a date column, `YYYY-MM-DD HH:MM:SS` when the
+/// column carries a time of day (the same formats the grid's picker writes).
+fn form_picker_value(picker: &FormPicker, cx: &App) -> Option<String> {
+    let date = picker.calendar.read(cx).date().start()?;
+    Some(if picker.has_time {
+        let time = picker
+            .time_field
+            .as_ref()
+            .map(|field| field.read(cx).time())
+            .unwrap_or_default();
+        format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+            date.year(),
+            date.month(),
+            date.day(),
+            time.hour(),
+            time.minute(),
+            time.second()
+        )
+    } else {
+        format!("{:04}-{:02}-{:02}", date.year(), date.month(), date.day())
+    })
 }
 
 /// The selectable body of the info pane: a big icon, a title and the label/value fields, all

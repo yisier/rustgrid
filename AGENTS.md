@@ -897,7 +897,11 @@ shadcn chrome described above. Implemented today:
     on hover when it does not fit. Typing stages straight into the grid's `edits` (the grid cell
     shows the pending value too, and one Ctrl+Z restores the value the run started from), Enter
     saves through the grid's normal commit path, Escape drops that field's staged value. A `NULL`
-    cell shows an empty field with a `NULL` placeholder.
+    cell shows an empty field with a `NULL` placeholder. A temporal field (`date` / `datetime` /
+    `timestamp`, the same types the grid's cell picker accepts) carries the grid picker's "…"
+    button; it opens an inline `compact_calendar` + `TimeField` panel under the editor with the
+    app-drawn 今天 / 取消 / 确定 footer, and 确定 writes the formatted value into the editor and
+    stages it exactly like typing it.
 
 Still out of scope: engines other than MySQL, MariaDB, SQLite, SQL Server, PostgreSQL, Oracle and
 Redis, and the disabled placeholder UI
