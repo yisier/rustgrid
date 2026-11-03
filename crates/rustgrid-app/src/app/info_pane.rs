@@ -1517,16 +1517,20 @@ fn combine_server_info(
 }
 
 /// The first selected row of a table grid that actually holds data (a pending insert row has no
-/// page values to show).
+/// page values to show), as the page row index.
 fn form_row(grid: &FormGrid, cx: &App) -> Option<usize> {
-    let state = &grid.entity.read(cx).state;
+    let view = grid.entity.read(cx);
+    let state = &view.state;
     let rows = state.rows.len();
     state
         .selection
         .as_ref()?
         .row_indices()
         .into_iter()
-        .find(|row| *row < rows)
+        .find_map(|row| match view.row_at(row) {
+            Some(GridRow::Data(data)) if data < rows => Some(data),
+            _ => None,
+        })
 }
 
 /// Build one [`TextInput`] per form field. Every edit is staged straight into the grid, so the

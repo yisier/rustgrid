@@ -75,13 +75,12 @@ impl GridView {
             .staged_value(row, col)
             .cloned()
             .flatten()
-            .unwrap_or_else(|| {
-                self.state
-                    .rows
-                    .get(row)
-                    .and_then(|cells| cells.get(self.state.source_col(col)))
+            .unwrap_or_else(|| match self.row_at(row) {
+                Some(GridRow::Data(data)) => self.state.rows[data]
+                    .get(self.state.source_col(col))
                     .map(|cell| cell.as_edit_string())
-                    .unwrap_or_default()
+                    .unwrap_or_default(),
+                _ => String::new(),
             });
         let column = self
             .state

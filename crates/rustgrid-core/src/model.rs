@@ -146,6 +146,14 @@ pub struct ColumnInfo {
     pub data_type: String,
     pub nullable: bool,
     pub primary_key: bool,
+    /// Whether the engine generates the value itself (identity/auto-increment/rowid alias), so an
+    /// insert must leave the column out instead of copying a value into it.
+    #[serde(default)]
+    pub auto_increment: bool,
+    /// Whether the column is computed by the engine (`GENERATED ALWAYS AS ...`, a SQL Server
+    /// computed column, an Oracle virtual column). It can never be written.
+    #[serde(default)]
+    pub generated: bool,
     /// The column's comment, when the engine exposes one (e.g. MySQL's `column_comment`).
     #[serde(default)]
     pub comment: String,

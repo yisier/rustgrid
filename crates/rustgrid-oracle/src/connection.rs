@@ -363,7 +363,8 @@ impl Connection for OracleConnection {
             let primary = primary_key_columns(connection, &schema, &bare)?;
             let cursor = connection
                 .query(
-                    "SELECT c.column_name, c.data_type, c.nullable, cc.comments \
+                    "SELECT c.column_name, c.data_type, c.nullable, cc.comments, \
+                            c.identity_column, c.virtual_column \
                      FROM all_tab_columns c \
                      LEFT JOIN all_col_comments cc \
                        ON cc.owner = c.owner AND cc.table_name = c.table_name \
@@ -397,11 +398,23 @@ impl Connection for OracleConnection {
                     .ok()
                     .flatten()
                     .unwrap_or_default();
+                let auto_increment = row
+                    .get::<Option<String>>(4)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|value| value.eq_ignore_ascii_case("YES"));
+                let generated = row
+                    .get::<Option<String>>(5)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|value| value.eq_ignore_ascii_case("YES"));
                 columns.push(ColumnInfo {
                     primary_key: primary.iter().any(|column| column == &name),
                     name,
                     data_type: crate::helpers::display_type(&data_type),
                     nullable,
+                    auto_increment,
+                    generated,
                     comment,
                 });
             }

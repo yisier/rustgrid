@@ -1344,6 +1344,8 @@ mod tests {
                 data_type: "int".to_string(),
                 nullable: true,
                 primary_key: false,
+                auto_increment: false,
+                generated: false,
                 comment: String::new(),
             })
             .collect()

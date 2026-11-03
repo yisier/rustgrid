@@ -355,26 +355,48 @@ impl Connection for PostgresConnection {
     async fn columns(&self, database: &str, table: &str) -> Result<Vec<ColumnInfo>> {
         let (schema, table) = self.resolve_object(database, table).await?;
         let pool = self.pool(Some(database)).await?;
-        let rows = sqlx::query(
-            "SELECT a.attname, \
-                    format_type(a.atttypid, a.atttypmod) AS data_type, \
-                    NOT a.attnotnull AS nullable, \
-                    col_description(a.attrelid, a.attnum) AS comment, \
-                    EXISTS (SELECT 1 FROM pg_index i \
-                            WHERE i.indrelid = a.attrelid AND i.indisprimary \
-                              AND a.attnum = ANY(i.indkey)) AS primary_key \
-             FROM pg_attribute a \
-             JOIN pg_class c ON c.oid = a.attrelid \
-             JOIN pg_namespace n ON n.oid = c.relnamespace \
-             WHERE n.nspname = $1 AND c.relname = $2 \
-               AND a.attnum > 0 AND NOT a.attisdropped \
-             ORDER BY a.attnum",
-        )
-        .bind(&schema)
-        .bind(&table)
-        .fetch_all(&pool)
-        .await
-        .map_err(map_query_error)?;
+        let mut with_generated = true;
+        let rows = loop {
+            let generated = if with_generated {
+                "a.attgenerated <> '' AS generated"
+            } else {
+                // PostgreSQL before 12 has no `attgenerated` column (and no generated columns
+                // either), so the flag is a constant there.
+                "false AS generated"
+            };
+            let sql = format!(
+                "SELECT a.attname, \
+                        format_type(a.atttypid, a.atttypmod) AS data_type, \
+                        NOT a.attnotnull AS nullable, \
+                        col_description(a.attrelid, a.attnum) AS comment, \
+                        EXISTS (SELECT 1 FROM pg_index i \
+                                WHERE i.indrelid = a.attrelid AND i.indisprimary \
+                                  AND a.attnum = ANY(i.indkey)) AS primary_key, \
+                        (a.attidentity <> '' \
+                         OR COALESCE(pg_get_expr(d.adbin, d.adrelid) LIKE 'nextval(%', false)) \
+                            AS auto_increment, \
+                        {generated} \
+                 FROM pg_attribute a \
+                 JOIN pg_class c ON c.oid = a.attrelid \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
+                 WHERE n.nspname = $1 AND c.relname = $2 \
+                   AND a.attnum > 0 AND NOT a.attisdropped \
+                 ORDER BY a.attnum"
+            );
+            match sqlx::query(AssertSqlSafe(sql))
+                .bind(&schema)
+                .bind(&table)
+                .fetch_all(&pool)
+                .await
+            {
+                Ok(rows) => break rows,
+                Err(error) if with_generated && is_undefined_column(&error) => {
+                    with_generated = false;
+                }
+                Err(error) => return Err(map_query_error(error)),
+            }
+        };
 
         let mut columns = Vec::with_capacity(rows.len());
         for row in &rows {
@@ -383,6 +405,8 @@ impl Connection for PostgresConnection {
                 data_type: row.try_get(1).map_err(map_query_error)?,
                 nullable: row.try_get(2).unwrap_or(true),
                 primary_key: row.try_get(4).unwrap_or(false),
+                auto_increment: row.try_get(5).unwrap_or(false),
+                generated: row.try_get(6).unwrap_or(false),
                 comment: row.try_get(3).unwrap_or(None).unwrap_or_default(),
             });
         }
@@ -1205,6 +1229,9 @@ fn column_info(column: &sqlx::postgres::PgColumn) -> ColumnInfo {
         data_type: column.type_info().name().to_string(),
         nullable: true,
         primary_key: false,
+        // Result-set metadata only; an editable query grid re-attaches the catalog's flags.
+        auto_increment: false,
+        generated: false,
         comment: String::new(),
     }
 }
@@ -1289,6 +1316,15 @@ pub(crate) fn map_query_error(error: sqlx::Error) -> Error {
         return Error::Query(format!("{} - {}", pg_error.code(), pg_error.message()));
     }
     Error::Query(error.to_string())
+}
+
+/// Whether the server rejected a statement because it names a column that does not exist
+/// (`42703 undefined_column`), which is how a pre-12 server answers `attgenerated`.
+fn is_undefined_column(error: &sqlx::Error) -> bool {
+    matches!(
+        error,
+        sqlx::Error::Database(database_error) if database_error.code().as_deref() == Some("42703")
+    )
 }
 
 /// The PostgreSQL types offered by the table designer's type list.

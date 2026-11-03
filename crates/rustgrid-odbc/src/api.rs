@@ -598,6 +598,10 @@ impl OdbcApi {
                 data_type: type_name(data_type).to_string(),
                 nullable: nullable != 0,
                 primary_key: false,
+                // ODBC's SQLDescribeCol carries no identity/computed information; the generic
+                // driver leaves both flags unset.
+                auto_increment: false,
+                generated: false,
                 comment: String::new(),
             });
         }

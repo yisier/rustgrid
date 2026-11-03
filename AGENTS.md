@@ -950,6 +950,17 @@ make more engines cheap later — do not build those features early.
   — never from the filler's own height, which would feed back and grow. The filler carries no
   hitboxes, so nothing in it is selectable; a click just focuses the grid.
 
+- **A pending insert row is not always at the bottom, so never index a displayed row into
+  `state.rows`.** `GridView::inserts` holds `PendingInsert { values, after }`: the `+` button appends
+  (`after: None`, the old behaviour), while 复制行 (`duplicate_row`) copies the selected record into a
+  row **anchored under it** (`after: Some(page row)`) and opens the in-place editor on its first
+  column. Map a displayed row through `GridView::row_at` / `grid::row_origin` (and
+  `grid::display_of_insert` for the reverse) everywhere a row index is turned into data, and keep
+  `state.edits` keyed by the **page** row index, not the displayed one: the clone shifts every row
+  below it. The clone leaves `ColumnInfo::auto_increment` / `generated` columns unset so the engine
+  assigns them, skips `CellValue::Bytes` (the insert path carries text, so a BLOB's hex preview must
+  not be written back), and copies hidden columns too.
+
 - **A running fetch is a spinner inside a bar the grid already draws, never a bar of its own.** The
   old `加载中...` strip was a `flex_none` child of the grid root, so every page load pushed the rows
   down and back up. `GridView::render_loading_spinner` is now appended to the grid toolbar's far end

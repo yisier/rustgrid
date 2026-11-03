@@ -206,6 +206,23 @@ impl Connection for SqliteConnection {
             .await
             .map_err(map_query_error)?;
 
+        // A single `INTEGER PRIMARY KEY` is the rowid alias: SQLite assigns it when the insert
+        // omits it. A `WITHOUT ROWID` table has no such alias, so the key must come from the user.
+        let without_rowid: Option<String> =
+            sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE name = ?")
+                .bind(table)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(map_query_error)?
+                .flatten();
+        let without_rowid = without_rowid
+            .map(|sql| sql.to_ascii_lowercase().contains("without rowid"))
+            .unwrap_or(false);
+        let primary_key_count = rows
+            .iter()
+            .filter(|row| row.try_get::<i64, _>("pk").unwrap_or(0) > 0)
+            .count();
+
         let mut columns = Vec::with_capacity(rows.len());
         for row in &rows {
             let name: String = row.try_get("name").map_err(map_query_error)?;
@@ -217,11 +234,19 @@ impl Connection for SqliteConnection {
             let primary_key: i64 = row.try_get("pk").unwrap_or(0);
             columns.push(ColumnInfo {
                 name,
+                auto_increment: primary_key > 0
+                    && primary_key_count == 1
+                    && !without_rowid
+                    // The rowid alias needs exactly `INTEGER`, not `INT`/`BIGINT`.
+                    && data_type.trim().eq_ignore_ascii_case("integer"),
                 data_type,
                 // SQLite reports `notnull = 0` even for a primary-key column, so treat key columns
                 // as not-null explicitly.
                 nullable: not_null == 0 && primary_key == 0,
                 primary_key: primary_key > 0,
+                // `PRAGMA table_info` omits generated and hidden columns entirely, so nothing
+                // listed here is computed.
+                generated: false,
                 comment: String::new(),
             });
         }
@@ -1071,6 +1096,9 @@ fn column_info(column: &SqliteColumn) -> ColumnInfo {
         data_type: column.type_info().to_string(),
         nullable: true,
         primary_key: false,
+        // Result-set metadata only; an editable query grid re-attaches the catalog's flags.
+        auto_increment: false,
+        generated: false,
         comment: String::new(),
     }
 }

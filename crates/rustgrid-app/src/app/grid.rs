@@ -285,14 +285,17 @@ impl GridView {
         self.state.rows.len() + self.inserts.len()
     }
 
+    /// The displayed row at `row`: a page row or a pending insert.
+    pub(super) fn row_at(&self, row: usize) -> Option<GridRow> {
+        row_origin(&self.inserts, self.state.rows.len(), row)
+    }
+
     /// The staged value of a cell, whether it is an existing row's pending edit or a pending
     /// insert row's value. `Some(None)` means an explicit `NULL`; `None` means no staged value.
     pub(super) fn staged_value(&self, row: usize, col: usize) -> Option<&Option<String>> {
-        let data_rows = self.state.rows.len();
-        if row < data_rows {
-            self.state.edits.get(&(row, col))
-        } else {
-            self.inserts.get(row - data_rows)?.get(&col)
+        match self.row_at(row)? {
+            GridRow::Data(data) => self.state.edits.get(&(data, col)),
+            GridRow::Insert(index) => self.inserts.get(index)?.values.get(&col),
         }
     }
 
@@ -302,8 +305,16 @@ impl GridView {
             return;
         }
         // Repeatedly pressing "+" right after an untouched row should just refocus it.
-        if !self.inserts.last().is_some_and(|row| row.is_empty()) {
-            self.inserts.push(BTreeMap::new());
+        let last = self.display_row_count().saturating_sub(1);
+        let blank = self.display_row_count() > 0
+            && matches!(
+                self.row_at(last),
+                Some(GridRow::Insert(index))
+                    if self.inserts[index].after.is_none()
+                        && self.inserts[index].values.is_empty()
+            );
+        if !blank {
+            self.inserts.push(PendingInsert::appended());
         }
         if self.cell_editor.is_some() {
             self.finish_cell_editor(cx);
@@ -313,6 +324,85 @@ impl GridView {
         self.list_scroll.scroll_to_item(row, ScrollStrategy::Bottom);
         window.focus(&self.focus, cx);
         cx.notify();
+    }
+
+    /// 复制行: insert a copy of the selected record right below it (the DBX clone-row behaviour),
+    /// leaving every auto-increment / generated column unset so the engine assigns it, then open
+    /// the in-place editor on the new row's first column.
+    pub(super) fn duplicate_row(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        if !self.state.editable
+            || self.state.loading
+            || self.state.visible_columns == 0
+            || self.state.key_status.is_some()
+            || self.state.rows.is_empty()
+        {
+            return;
+        }
+        // Stage the live editor first (without flushing it to the database), so the copy sees the
+        // value the user just typed.
+        if self.cell_editor.is_some() {
+            self.commit_editor(cx);
+        }
+        let Some(source) = self.selected_row() else {
+            return;
+        };
+        let Some(origin) = self.row_at(source) else {
+            return;
+        };
+        let (values, after) = match origin {
+            GridRow::Data(data) => (
+                duplicate_values(
+                    &self.state.columns,
+                    &self.state.column_order,
+                    &self.state.rows,
+                    data,
+                    &self.state.edits,
+                ),
+                Some(data),
+            ),
+            GridRow::Insert(index) => {
+                let source = &self.inserts[index];
+                let values = source
+                    .values
+                    .iter()
+                    .filter(|(col, _)| {
+                        self.state
+                            .columns
+                            .get(**col)
+                            .is_none_or(|column| !column.auto_increment && !column.generated)
+                    })
+                    .map(|(col, value)| (*col, value.clone()))
+                    .collect();
+                (values, source.after)
+            }
+        };
+        self.inserts.push(PendingInsert { values, after });
+        let row = display_of_insert(&self.inserts, self.state.rows.len(), self.inserts.len() - 1)
+            .unwrap_or_else(|| self.display_row_count() - 1);
+        self.state.selection = Some(CellSelection::new(row, 0));
+        self.list_scroll
+            .scroll_to_item(row, ScrollStrategy::Nearest);
+        // The clone opens on its first column, so bring the pane back to it even if the user had
+        // scrolled right.
+        self.hscroll
+            .set_offset(Point::new(px(0.0), self.hscroll.offset().y));
+        // The clone lands in edit mode on its first column, ready to type.
+        window.focus(&self.focus, cx);
+        self.begin_edit((row, 0), None, window, cx);
+        cx.notify();
+    }
+
+    /// The row the grid asks about: the selection's active cursor, or its first row.
+    fn selected_row(&self) -> Option<usize> {
+        let selection = self.state.selection.as_ref()?;
+        let cursor = selection.active_cursor().0;
+        if cursor < self.display_row_count() {
+            return Some(cursor);
+        }
+        selection
+            .row_indices()
+            .into_iter()
+            .find(|row| *row < self.display_row_count())
     }
 
     /// Load the current page, resetting the scroll position (page navigation, sort, filter).
@@ -425,7 +515,7 @@ impl GridView {
                             && grid.state.filters.is_empty()
                             && grid.inserts.is_empty()
                         {
-                            grid.inserts.push(BTreeMap::new());
+                            grid.inserts.push(PendingInsert::appended());
                             grid.state.selection = Some(CellSelection::new(0, 0));
                         }
                         if reset_scroll {
@@ -541,6 +631,8 @@ impl GridView {
                                     .find(|candidate| candidate.name == column.name)
                                 {
                                     column.primary_key = found.primary_key;
+                                    column.auto_increment = found.auto_increment;
+                                    column.generated = found.generated;
                                     column.data_type = found.data_type.clone();
                                 }
                             }
@@ -1494,5 +1586,254 @@ impl GridView {
             GridNav::Refresh => self.refresh_now(cx),
             GridNav::PageSize => self.page_size_apply_now(cx),
         }
+    }
+}
+
+/// How many pending inserts are anchored inline (cloned under a data row).
+fn inline_inserts(inserts: &[PendingInsert]) -> usize {
+    inserts
+        .iter()
+        .filter(|insert| insert.after.is_some())
+        .count()
+}
+
+/// How many inline inserts render before data row `data`.
+fn inserts_before(inserts: &[PendingInsert], data: usize) -> usize {
+    inserts
+        .iter()
+        .filter(|insert| insert.after.is_some_and(|after| after < data))
+        .count()
+}
+
+/// Map a displayed row position to its owner. Data rows and their cloned rows interleave; the
+/// "+" rows (`after: None`) follow the whole page.
+pub(super) fn row_origin(
+    inserts: &[PendingInsert],
+    data_rows: usize,
+    display: usize,
+) -> Option<GridRow> {
+    let inline = inline_inserts(inserts);
+    let appended_start = data_rows + inline;
+    if display >= appended_start {
+        // Appended inserts keep their push order after every data row and clone.
+        let mut remaining = display - appended_start;
+        for (index, insert) in inserts.iter().enumerate() {
+            if insert.after.is_none() {
+                if remaining == 0 {
+                    return Some(GridRow::Insert(index));
+                }
+                remaining -= 1;
+            }
+        }
+        return None;
+    }
+    if data_rows == 0 {
+        return None;
+    }
+    // The first display position of data row d is `d + inserts_before(d)`; it grows strictly, so a
+    // binary search finds the row holding `display`. The insert list is tiny, so counting inline
+    // rows per probe stays cheap even for a million-row page.
+    let mut low = 0usize;
+    let mut high = data_rows;
+    let mut found = 0usize;
+    while low < high {
+        let mid = (low + high) / 2;
+        if mid + inserts_before(inserts, mid) <= display {
+            found = mid;
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    let start = found + inserts_before(inserts, found);
+    if display == start {
+        return Some(GridRow::Data(found));
+    }
+    let mut remaining = display - start - 1;
+    for (index, insert) in inserts.iter().enumerate() {
+        if insert.after == Some(found) {
+            if remaining == 0 {
+                return Some(GridRow::Insert(index));
+            }
+            remaining -= 1;
+        }
+    }
+    None
+}
+
+/// The display position of a pending insert, or `None` for a stale anchor.
+fn display_of_insert(inserts: &[PendingInsert], data_rows: usize, index: usize) -> Option<usize> {
+    let insert = inserts.get(index)?;
+    match insert.after {
+        None => {
+            let start = data_rows + inline_inserts(inserts);
+            let mut rank = 0;
+            for (other, candidate) in inserts.iter().enumerate() {
+                if candidate.after.is_none() {
+                    if other == index {
+                        return Some(start + rank);
+                    }
+                    rank += 1;
+                }
+            }
+            None
+        }
+        Some(data) if data < data_rows => {
+            let start = data + inserts_before(inserts, data) + 1;
+            let mut rank = 0;
+            for (other, candidate) in inserts.iter().enumerate() {
+                if candidate.after == Some(data) {
+                    if other == index {
+                        return Some(start + rank);
+                    }
+                    rank += 1;
+                }
+            }
+            None
+        }
+        Some(_) => None,
+    }
+}
+
+/// Build the pending insert row for a clone of `row`: every column's value, except the ones the
+/// engine owns (auto-increment and generated columns stay unset, so the engine fills them) and
+/// binary cells. The pending insert path carries text only, so writing a BLOB back as its hex
+/// preview would corrupt it; leaving it out keeps that failure loud instead of silent. A staged
+/// edit wins over the loaded value.
+fn duplicate_values(
+    columns: &[ColumnInfo],
+    column_order: &[usize],
+    rows: &[Vec<CellValue>],
+    row: usize,
+    edits: &BTreeMap<(usize, usize), Option<String>>,
+) -> BTreeMap<usize, Option<String>> {
+    let mut values = BTreeMap::new();
+    let Some(cells) = rows.get(row) else {
+        return values;
+    };
+    for (col, column) in columns.iter().enumerate() {
+        if column.auto_increment || column.generated {
+            continue;
+        }
+        if let Some(staged) = edits.get(&(row, col)) {
+            values.insert(col, staged.clone());
+            continue;
+        }
+        let Some(cell) = cells.get(column_order.get(col).copied().unwrap_or(col)) else {
+            continue;
+        };
+        if matches!(cell, CellValue::Bytes(_)) {
+            continue;
+        }
+        values.insert(col, cell.as_edit_value());
+    }
+    values
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn column(name: &str, auto_increment: bool, generated: bool) -> ColumnInfo {
+        ColumnInfo {
+            name: name.to_string(),
+            data_type: "int".to_string(),
+            nullable: false,
+            primary_key: false,
+            auto_increment,
+            generated,
+            comment: String::new(),
+        }
+    }
+
+    fn insert(after: Option<usize>) -> PendingInsert {
+        PendingInsert {
+            values: BTreeMap::new(),
+            after,
+        }
+    }
+
+    #[test]
+    fn a_clone_renders_directly_under_its_source_row() {
+        let inserts = vec![insert(Some(1))];
+        assert_eq!(row_origin(&inserts, 3, 0), Some(GridRow::Data(0)));
+        assert_eq!(row_origin(&inserts, 3, 1), Some(GridRow::Data(1)));
+        assert_eq!(row_origin(&inserts, 3, 2), Some(GridRow::Insert(0)));
+        assert_eq!(row_origin(&inserts, 3, 3), Some(GridRow::Data(2)));
+        assert_eq!(row_origin(&inserts, 3, 4), None);
+        assert_eq!(display_of_insert(&inserts, 3, 0), Some(2));
+    }
+
+    #[test]
+    fn clones_of_the_same_row_stack_in_order() {
+        let inserts = vec![insert(Some(1)), insert(Some(1)), insert(None)];
+        assert_eq!(row_origin(&inserts, 3, 2), Some(GridRow::Insert(0)));
+        assert_eq!(row_origin(&inserts, 3, 3), Some(GridRow::Insert(1)));
+        assert_eq!(row_origin(&inserts, 3, 4), Some(GridRow::Data(2)));
+        assert_eq!(row_origin(&inserts, 3, 5), Some(GridRow::Insert(2)));
+        assert_eq!(display_of_insert(&inserts, 3, 1), Some(3));
+        assert_eq!(display_of_insert(&inserts, 3, 2), Some(5));
+    }
+
+    #[test]
+    fn plus_rows_stay_after_the_whole_page() {
+        let inserts = vec![insert(None)];
+        assert_eq!(row_origin(&inserts, 2, 0), Some(GridRow::Data(0)));
+        assert_eq!(row_origin(&inserts, 2, 1), Some(GridRow::Data(1)));
+        assert_eq!(row_origin(&inserts, 2, 2), Some(GridRow::Insert(0)));
+        assert_eq!(row_origin(&inserts, 2, 3), None);
+    }
+
+    #[test]
+    fn a_clone_skips_engine_owned_columns_and_binary_values() {
+        let columns = vec![
+            column("id", true, false),
+            column("name", false, false),
+            column("total", false, true),
+            column("blob", false, false),
+            column("note", false, false),
+        ];
+        let rows = vec![vec![
+            CellValue::Int(7),
+            CellValue::Text("alice".to_string()),
+            CellValue::Int(3),
+            CellValue::Bytes(vec![0, 1, 2]),
+            CellValue::Null,
+        ]];
+        let values = duplicate_values(&columns, &[0, 1, 2, 3, 4], &rows, 0, &BTreeMap::new());
+        assert_eq!(values.get(&0), None, "auto-increment must stay unset");
+        assert_eq!(values.get(&1), Some(&Some("alice".to_string())));
+        assert_eq!(values.get(&2), None, "generated columns cannot be written");
+        assert_eq!(values.get(&3), None, "binary cells cannot round-trip");
+        assert_eq!(values.get(&4), Some(&None), "NULL is copied as NULL");
+    }
+
+    #[test]
+    fn a_clone_follows_the_field_layout_and_hidden_columns() {
+        // Display order: "name" (engine 1), "id" (engine 0), "note" (engine 2).
+        let columns = vec![
+            column("name", false, false),
+            column("id", true, false),
+            column("note", false, false),
+        ];
+        let rows = vec![vec![
+            CellValue::Int(7),
+            CellValue::Text("alice".to_string()),
+            CellValue::Text("hello".to_string()),
+        ]];
+        let values = duplicate_values(&columns, &[1, 0, 2], &rows, 0, &BTreeMap::new());
+        assert_eq!(values.get(&0), Some(&Some("alice".to_string())));
+        assert_eq!(values.get(&1), None);
+        assert_eq!(values.get(&2), Some(&Some("hello".to_string())));
+    }
+
+    #[test]
+    fn a_staged_edit_wins_over_the_loaded_value() {
+        let columns = vec![column("name", false, false)];
+        let rows = vec![vec![CellValue::Text("old".to_string())]];
+        let mut edits = BTreeMap::new();
+        edits.insert((0, 0), Some("new".to_string()));
+        let values = duplicate_values(&columns, &[0], &rows, 0, &edits);
+        assert_eq!(values.get(&0), Some(&Some("new".to_string())));
     }
 }

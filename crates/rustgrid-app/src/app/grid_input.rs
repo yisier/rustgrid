@@ -1,3 +1,4 @@
+use super::grid::row_origin;
 use super::*;
 
 impl GridView {
@@ -524,15 +525,19 @@ impl GridView {
             if col >= self.state.visible_columns {
                 continue;
             }
-            if row >= data_rows {
+            let origin = row_origin(&self.inserts, data_rows, row);
+            if let Some(GridRow::Insert(index)) = origin {
                 // Pending insert rows have no undo stack: clearing just stages an explicit NULL.
-                if let Some(insert) = self.inserts.get_mut(row - data_rows)
-                    && insert.get(&col) != Some(&None)
+                if let Some(insert) = self.inserts.get_mut(index)
+                    && insert.values.get(&col) != Some(&None)
                 {
-                    insert.insert(col, None);
+                    insert.values.insert(col, None);
                 }
                 continue;
             }
+            let Some(GridRow::Data(row)) = origin else {
+                continue;
+            };
             if !self.state.edits.contains_key(&(row, col))
                 && self
                     .state
@@ -578,15 +583,12 @@ impl GridView {
             .staged_value(row, col)
             .cloned()
             .flatten()
-            .unwrap_or_else(|| {
-                if row < self.state.rows.len() {
-                    self.state.rows[row]
-                        .get(self.state.source_col(col))
-                        .map(|cell| cell.as_edit_string())
-                        .unwrap_or_default()
-                } else {
-                    String::new()
-                }
+            .unwrap_or_else(|| match self.row_at(row) {
+                Some(GridRow::Data(data)) => self.state.rows[data]
+                    .get(self.state.source_col(col))
+                    .map(|cell| cell.as_edit_string())
+                    .unwrap_or_default(),
+                _ => String::new(),
             });
         let cells = self
             .state
@@ -768,14 +770,16 @@ impl GridView {
     /// Stage the current cell edit, then auto-commit single-cell edits to the database.
     /// Batch edits stay pending until the user presses the commit button.
     pub(super) fn finish_cell_editor(&mut self, cx: &mut Context<'_, Self>) {
-        let data_rows = self.state.rows.len();
         let Some(editor) = self.cell_editor.as_ref() else {
             return;
         };
         let multi = editor.cells.len() > 1;
         // A single-cell edit on an existing row auto-commits; a pending insert row waits for Save
         // (the checkmark or Ctrl+S) so a whole new row is inserted in one statement.
-        let only_data_rows = editor.row < data_rows;
+        let only_data_rows = matches!(
+            row_origin(&self.inserts, self.state.rows.len(), editor.row),
+            Some(GridRow::Data(_))
+        );
         self.commit_editor(cx);
         // Auto-commit only when this single-cell edit is the *only* pending change. If other
         // edits/inserts are staged, committing here would flush (and reload away) the batch the
@@ -799,55 +803,59 @@ impl GridView {
             if col >= self.state.visible_columns {
                 continue;
             }
-            if row >= data_rows {
-                // Stage into the pending insert row instead of the existing-row edit map.
-                let Some(insert) = self.inserts.get_mut(row - data_rows) else {
-                    continue;
-                };
-                let previous = insert.get(&col).cloned();
-                let staged = if editor.value.is_empty() && previous.is_none() {
-                    None
-                } else if editor.value.is_empty() {
-                    Some(None)
-                } else {
-                    Some(Some(editor.value.clone()))
-                };
-                if previous == staged {
-                    continue;
-                }
-                match staged {
-                    Some(value) => {
-                        insert.insert(col, value);
+            match row_origin(&self.inserts, data_rows, row) {
+                Some(GridRow::Insert(index)) => {
+                    // Stage into the pending insert row instead of the existing-row edit map.
+                    let Some(insert) = self.inserts.get_mut(index) else {
+                        continue;
+                    };
+                    let previous = insert.values.get(&col).cloned();
+                    let staged = if editor.value.is_empty() && previous.is_none() {
+                        None
+                    } else if editor.value.is_empty() {
+                        Some(None)
+                    } else {
+                        Some(Some(editor.value.clone()))
+                    };
+                    if previous == staged {
+                        continue;
                     }
-                    None => {
-                        insert.remove(&col);
+                    match staged {
+                        Some(value) => {
+                            insert.values.insert(col, value);
+                        }
+                        None => {
+                            insert.values.remove(&col);
+                        }
                     }
                 }
-                continue;
+                Some(GridRow::Data(row)) => {
+                    let previous = self.state.edits.get(&(row, col)).cloned();
+                    let original = match &previous {
+                        Some(value) => value.clone(),
+                        None => match self
+                            .state
+                            .rows
+                            .get(row)
+                            .and_then(|values| values.get(self.state.source_col(col)))
+                        {
+                            Some(CellValue::Null) | None => None,
+                            Some(cell) => Some(cell.as_edit_string()),
+                        },
+                    };
+                    let desired = if editor.value.is_empty() && original.is_none() {
+                        None
+                    } else {
+                        Some(editor.value.clone())
+                    };
+                    if original == desired {
+                        continue;
+                    }
+                    action.push(((row, col), previous));
+                    self.state.edits.insert((row, col), desired);
+                }
+                None => continue,
             }
-            let previous = self.state.edits.get(&(row, col)).cloned();
-            let original = match &previous {
-                Some(value) => value.clone(),
-                None => match self
-                    .state
-                    .rows
-                    .get(row)
-                    .and_then(|values| values.get(self.state.source_col(col)))
-                {
-                    Some(CellValue::Null) | None => None,
-                    Some(cell) => Some(cell.as_edit_string()),
-                },
-            };
-            let desired = if editor.value.is_empty() && original.is_none() {
-                None
-            } else {
-                Some(editor.value.clone())
-            };
-            if original == desired {
-                continue;
-            }
-            action.push(((row, col), previous));
-            self.state.edits.insert((row, col), desired);
         }
         if !action.is_empty() {
             self.state.redo.clear();

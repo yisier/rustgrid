@@ -75,6 +75,8 @@ fn column(name: &str) -> ColumnInfo {
         data_type: "text".to_string(),
         nullable: true,
         primary_key: false,
+        auto_increment: false,
+        generated: false,
         comment: String::new(),
     }
 }

@@ -641,6 +641,8 @@ mod tests {
             data_type: data_type.to_string(),
             nullable: true,
             primary_key: false,
+            auto_increment: false,
+            generated: false,
             comment: String::new(),
         }
     }

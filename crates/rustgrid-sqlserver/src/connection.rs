@@ -414,7 +414,9 @@ impl Connection for SqlServerConnection {
             "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE, \
                     c.CHARACTER_MAXIMUM_LENGTH, c.NUMERIC_PRECISION, c.NUMERIC_SCALE, \
                     c.DATETIME_PRECISION, \
-                    CASE WHEN pk.COLUMN_NAME IS NULL THEN 0 ELSE 1 END AS is_pk \
+                    CASE WHEN pk.COLUMN_NAME IS NULL THEN 0 ELSE 1 END AS is_pk, \
+                    CASE WHEN sc.is_identity IS NULL THEN 0 ELSE sc.is_identity END AS is_identity, \
+                    CASE WHEN sc.is_computed IS NULL THEN 0 ELSE sc.is_computed END AS is_computed \
              FROM {db}.INFORMATION_SCHEMA.COLUMNS c \
              LEFT JOIN ( \
                  SELECT ku.TABLE_SCHEMA, ku.TABLE_NAME, ku.COLUMN_NAME \
@@ -425,6 +427,14 @@ impl Connection for SqlServerConnection {
                  WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY' \
              ) pk ON pk.TABLE_SCHEMA = c.TABLE_SCHEMA \
                  AND pk.TABLE_NAME = c.TABLE_NAME AND pk.COLUMN_NAME = c.COLUMN_NAME \
+             LEFT JOIN ( \
+                 SELECT s.name AS schema_name, o.name AS table_name, col.name AS column_name, \
+                        col.is_identity, col.is_computed \
+                 FROM {db}.sys.objects o \
+                 JOIN {db}.sys.schemas s ON s.schema_id = o.schema_id \
+                 JOIN {db}.sys.columns col ON col.object_id = o.object_id \
+             ) sc ON sc.schema_name = c.TABLE_SCHEMA \
+                 AND sc.table_name = c.TABLE_NAME AND sc.column_name = c.COLUMN_NAME \
              WHERE c.TABLE_SCHEMA = @P1 AND c.TABLE_NAME = @P2 \
              ORDER BY c.ORDINAL_POSITION",
             db = quote_identifier(database)
@@ -448,6 +458,8 @@ impl Connection for SqlServerConnection {
                 ),
                 nullable: text_cell(row, 2).eq_ignore_ascii_case("YES"),
                 primary_key: text_cell(row, 7) == "1",
+                auto_increment: text_cell(row, 8) == "1",
+                generated: text_cell(row, 9) == "1",
                 comment: String::new(),
             });
         }
@@ -2186,6 +2198,9 @@ fn column_info(column: &tiberius::Column) -> ColumnInfo {
         data_type: column_type_name(column.column_type()),
         nullable: true,
         primary_key: false,
+        // Result-set metadata only; an editable query grid re-attaches the catalog's flags.
+        auto_increment: false,
+        generated: false,
         comment: String::new(),
     }
 }

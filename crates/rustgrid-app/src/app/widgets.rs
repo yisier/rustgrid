@@ -1335,6 +1335,7 @@ impl AppView {
                         )
                     };
                     let for_delete = grid.clone();
+                    let for_duplicate = grid.clone();
                     let for_copy = grid.clone();
                     let for_insert = grid.clone();
                     let for_paste = grid.clone();
@@ -1369,6 +1370,27 @@ impl AppView {
                         self.context_item_disabled("grid-ctx-delete", delete_label)
                             .into_any_element()
                     });
+                    if !key_value {
+                        items = items.child(if deletable {
+                            self.context_item(
+                                "grid-ctx-duplicate",
+                                t!("grid.duplicate_row").to_string(),
+                                cx.listener(move |this, _event, window, cx| {
+                                    this.context_menu = None;
+                                    for_duplicate
+                                        .update(cx, |grid, cx| grid.duplicate_row(window, cx));
+                                    cx.notify();
+                                }),
+                            )
+                            .into_any_element()
+                        } else {
+                            self.context_item_disabled(
+                                "grid-ctx-duplicate",
+                                t!("grid.duplicate_row").to_string(),
+                            )
+                            .into_any_element()
+                        });
+                    }
                     items = items.child(if has_selection {
                         self.context_item(
                             "grid-ctx-copy",

@@ -149,6 +149,7 @@ gpui::actions!(
     gridnav,
     [
         GridRefresh,
+        GridDuplicateRow,
         GridEditValue,
         GridPageUp,
         GridPageDown,
@@ -1660,6 +1661,35 @@ struct GridClipboard {
     text: Option<String>,
 }
 
+/// Which displayed grid row a position holds: one of the loaded page's rows, or one of the
+/// pending insert rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GridRow {
+    Data(usize),
+    Insert(usize),
+}
+
+/// A pending insert row and where it sits in the display order.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct PendingInsert {
+    /// Column index -> staged value. `None` is an explicit SQL `NULL`; an absent entry leaves the
+    /// column to its default.
+    values: BTreeMap<usize, Option<String>>,
+    /// The data row this row was cloned under (`复制行`); `None` appends after the whole page,
+    /// which is where the "+" button's blank row goes.
+    after: Option<usize>,
+}
+
+impl PendingInsert {
+    /// A blank row appended after the page (the "+" button).
+    fn appended() -> Self {
+        Self {
+            values: BTreeMap::new(),
+            after: None,
+        }
+    }
+}
+
 /// A single open grid (a table page or a SQL result) as an isolated child view. Owns the grid
 /// data (`GridState`) and every piece of interaction state (scroll handles, cell editor, date
 /// picker, sort popup, page inputs), so grid-local interactions re-render only this view.
@@ -1703,11 +1733,12 @@ struct GridView {
     key_string_saving: bool,
     key_string_error: Option<String>,
 
-    /// Pending rows added with the "+" button that have not been written to the database yet.
-    /// They render after `state.rows` (gutter `*`) and are flushed by Save. Each row maps a
-    /// column index to its staged value: `None` is an explicit SQL `NULL`, an absent entry means
-    /// the column is left to its default.
-    inserts: Vec<BTreeMap<usize, Option<String>>>,
+    /// Pending rows that have not been written to the database yet. A row added with the "+"
+    /// button appends after the page; 复制行 (duplicate) anchors its row under the record it was
+    /// cloned from. They carry the gutter's `*` and are flushed by Save. Each row maps a column
+    /// index to its staged value: `None` is an explicit SQL `NULL`, an absent entry leaves the
+    /// column to its default (how an auto-increment column stays empty).
+    inserts: Vec<PendingInsert>,
 
     /// The column edge being dragged, with the pointer x and width captured on mouse-down.
     column_resize: Option<ColumnResize>,

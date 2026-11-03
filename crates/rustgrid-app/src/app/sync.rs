@@ -6500,6 +6500,8 @@ mod tests {
             data_type: "bigint".to_string(),
             nullable: false,
             primary_key: true,
+            auto_increment: false,
+            generated: false,
             comment: String::new(),
         }];
         assert!(streamable_keys(&numeric, &["id".to_string()]));
@@ -6509,6 +6511,8 @@ mod tests {
             data_type: "varchar(32)".to_string(),
             nullable: false,
             primary_key: true,
+            auto_increment: false,
+            generated: false,
             comment: String::new(),
         }];
         assert!(!streamable_keys(&text, &["code".to_string()]));

@@ -5,6 +5,7 @@
 //! (and an app-wide clipboard that remembers NULLs), building `INSERT` statements, and pasting a
 //! copied block into the selected records.
 
+use super::grid::row_origin;
 use super::*;
 
 use crate::session::EditAction;
@@ -37,22 +38,23 @@ impl GridView {
         if col >= self.state.visible_columns {
             return None;
         }
+        let origin = self.row_at(row)?;
         if let Some(staged) = self.staged_value(row, col) {
             return staged.clone();
         }
-        let data_rows = self.state.rows.len();
-        if row < data_rows {
-            match self
-                .state
-                .rows
-                .get(row)
-                .and_then(|values| values.get(self.state.source_col(col)))
-            {
-                Some(CellValue::Null) | None => None,
-                Some(cell) => Some(cell.as_edit_string()),
+        match origin {
+            GridRow::Data(data) => {
+                match self
+                    .state
+                    .rows
+                    .get(data)
+                    .and_then(|values| values.get(self.state.source_col(col)))
+                {
+                    Some(CellValue::Null) | None => None,
+                    Some(cell) => Some(cell.as_edit_string()),
+                }
             }
-        } else {
-            None
+            GridRow::Insert(_) => None,
         }
     }
 
@@ -238,7 +240,6 @@ impl GridView {
             .map(|selection| selection.row_indices())
             .unwrap_or_default();
         let map_rows = !selected_rows.is_empty() && selected_rows.len() == block.len();
-        let data_rows = self.state.rows.len();
         let mut action = Vec::new();
         for (index, values) in block.iter().enumerate() {
             let target_row = if map_rows {
@@ -246,19 +247,17 @@ impl GridView {
             } else {
                 start_row + index
             };
-            if target_row >= data_rows {
+            if map_rows {
                 // A one-to-one paste onto selected records never creates rows; it only fills the
-                // selected ones, which may include pending insert rows the user added. A free
-                // paste that runs past the page grows pending insert rows to hold the overflow.
-                if map_rows {
-                    if self.inserts.get(target_row - data_rows).is_none() {
-                        break;
-                    }
-                } else {
-                    let needed = target_row - data_rows + 1;
-                    while self.inserts.len() < needed {
-                        self.inserts.push(BTreeMap::new());
-                    }
+                // selected ones, which may include pending insert rows the user added.
+                if target_row >= self.display_row_count() {
+                    break;
+                }
+            } else {
+                // A free paste that runs past the grid grows appended pending rows to hold the
+                // overflow.
+                while target_row >= self.display_row_count() {
+                    self.inserts.push(PendingInsert::appended());
                 }
             }
             for (offset, value) in values.iter().enumerate() {
@@ -299,15 +298,21 @@ impl GridView {
             value
         };
         let data_rows = self.state.rows.len();
-        if row < data_rows {
-            let previous = self.state.edits.get(&(row, col)).cloned();
-            if previous.as_ref() == Some(value) {
-                return;
+        match row_origin(&self.inserts, data_rows, row) {
+            Some(GridRow::Data(row)) => {
+                let previous = self.state.edits.get(&(row, col)).cloned();
+                if previous.as_ref() == Some(value) {
+                    return;
+                }
+                action.push(((row, col), previous));
+                self.state.edits.insert((row, col), value.clone());
             }
-            action.push(((row, col), previous));
-            self.state.edits.insert((row, col), value.clone());
-        } else if let Some(insert) = self.inserts.get_mut(row - data_rows) {
-            insert.insert(col, value.clone());
+            Some(GridRow::Insert(index)) => {
+                if let Some(insert) = self.inserts.get_mut(index) {
+                    insert.values.insert(col, value.clone());
+                }
+            }
+            None => {}
         }
     }
 }

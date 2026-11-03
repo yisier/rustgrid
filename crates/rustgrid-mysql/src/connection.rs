@@ -252,17 +252,26 @@ impl Connection for MysqlConnection {
     }
 
     async fn columns(&self, database: &str, table: &str) -> Result<Vec<ColumnInfo>> {
-        let rows = sqlx::query(
+        // `EXTRA` is a MySQL/MariaDB column. StarRocks' information_schema is only a subset, so it
+        // keeps the plain catalog query (it has no auto-increment/generated columns to report).
+        let starrocks = self.engine == Engine::StarRocks;
+        let sql = if starrocks {
             "SELECT column_name, column_type, is_nullable, column_key, column_comment \
              FROM information_schema.columns \
              WHERE table_schema = ? AND table_name = ? \
-             ORDER BY ordinal_position",
-        )
-        .bind(database)
-        .bind(table)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(map_query_error)?;
+             ORDER BY ordinal_position"
+        } else {
+            "SELECT column_name, column_type, is_nullable, column_key, column_comment, extra \
+             FROM information_schema.columns \
+             WHERE table_schema = ? AND table_name = ? \
+             ORDER BY ordinal_position"
+        };
+        let rows = sqlx::query(sql)
+            .bind(database)
+            .bind(table)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_query_error)?;
 
         let mut columns = Vec::with_capacity(rows.len());
         for row in rows {
@@ -271,11 +280,26 @@ impl Connection for MysqlConnection {
             let nullable: String = row.try_get(2).map_err(map_query_error)?;
             let key: String = row.try_get(3).map_err(map_query_error)?;
             let comment: String = row.try_get(4).unwrap_or_default();
+            let extra = if starrocks {
+                String::new()
+            } else {
+                row.try_get(5).unwrap_or_default()
+            };
+            let extra = extra.to_ascii_lowercase();
+            let tokens: Vec<&str> = extra.split_whitespace().collect();
             columns.push(ColumnInfo {
                 name,
                 data_type,
                 nullable: nullable.eq_ignore_ascii_case("YES"),
                 primary_key: key.eq_ignore_ascii_case("PRI"),
+                // `AUTO_INCREMENT`; MariaDB reports it in the same `EXTRA` column.
+                auto_increment: tokens.contains(&"auto_increment"),
+                // Generated columns read `VIRTUAL GENERATED` / `STORED GENERATED` (MariaDB up to
+                // 10.1: `VIRTUAL` / `PERSISTENT`). A default expression is `DEFAULT_GENERATED`,
+                // one underscore-separated token, so it never matches.
+                generated: tokens
+                    .iter()
+                    .any(|token| matches!(*token, "virtual" | "stored" | "persistent")),
                 comment,
             });
         }
@@ -2751,6 +2775,10 @@ fn column_info(column: &MySqlColumn) -> ColumnInfo {
         data_type: column.type_info().to_string(),
         nullable: true,
         primary_key: false,
+        // Result-set metadata carries no catalog knowledge; an editable query grid re-attaches the
+        // table's flags (`run_query` / the reload path).
+        auto_increment: false,
+        generated: false,
         comment: String::new(),
     }
 }

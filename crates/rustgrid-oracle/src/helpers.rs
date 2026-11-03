@@ -693,6 +693,9 @@ pub(crate) fn metadata_column(metadata: &Metadata) -> ColumnInfo {
         data_type: display_type(&metadata.data_type()),
         nullable: metadata.nullable(),
         primary_key: false,
+        // Result-set metadata only; the catalog query supplies the real flags.
+        auto_increment: false,
+        generated: false,
         comment: String::new(),
     }
 }
@@ -880,6 +883,8 @@ mod tests {
             data_type: data_type.to_string(),
             nullable: true,
             primary_key: false,
+            auto_increment: false,
+            generated: false,
             comment: String::new(),
         }
     }

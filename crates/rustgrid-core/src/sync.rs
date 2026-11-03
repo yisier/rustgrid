@@ -803,6 +803,8 @@ mod tests {
             data_type: data_type.to_string(),
             nullable: !primary_key,
             primary_key,
+            auto_increment: false,
+            generated: false,
             comment: String::new(),
         }
     }

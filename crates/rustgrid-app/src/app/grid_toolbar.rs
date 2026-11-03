@@ -1233,6 +1233,21 @@ impl GridView {
                             && self.state.visible_columns > 0,
                         cx.listener(|this, _event, window, cx| this.add_insert_row(window, cx)),
                     ))
+                    .child(
+                        self.grid_icon_button(
+                            "grid-duplicate",
+                            "icons/copy.svg",
+                            theme.icon_connection,
+                            self.state.editable
+                                && !scalar_key
+                                && !self.state.loading
+                                && self.state.visible_columns > 0
+                                && self.state.selection.is_some()
+                                && !self.state.rows.is_empty(),
+                            cx.listener(|this, _event, window, cx| this.duplicate_row(window, cx)),
+                        )
+                        .tooltip(ui::text_tooltip(t!("grid.duplicate_row").to_string())),
+                    )
                     .child(self.grid_icon_button(
                         "grid-delete",
                         "icons/minus.svg",
@@ -1352,12 +1367,12 @@ impl GridView {
     /// clickable) while a data row is selected, and opens the right-hand pane's row form.
     fn render_form_toggle(&self, cx: &mut Context<'_, Self>) -> Stateful<Div> {
         let theme = self.theme;
-        let rows = self.state.rows.len();
-        let has_row = self
-            .state
-            .selection
-            .as_ref()
-            .is_some_and(|selection| selection.row_indices().into_iter().any(|row| row < rows));
+        let has_row = self.state.selection.as_ref().is_some_and(|selection| {
+            selection
+                .row_indices()
+                .into_iter()
+                .any(|row| matches!(self.row_at(row), Some(GridRow::Data(_))))
+        });
         let open = self.app.upgrade().is_some_and(|app| app.read(cx).form_open);
         let button = self
             .grid_icon_button(
@@ -1512,7 +1527,10 @@ impl GridView {
         if let Some(staged) = self.staged_value(row, col) {
             return staged.as_deref().and_then(parse_numeric_text);
         }
-        match self.state.rows.get(row)?.get(self.state.source_col(col))? {
+        let GridRow::Data(data) = self.row_at(row)? else {
+            return None;
+        };
+        match self.state.rows.get(data)?.get(self.state.source_col(col))? {
             CellValue::Int(value) => Some(NumericCell::Int(i128::from(*value))),
             CellValue::Uint(value) => Some(NumericCell::Int(i128::from(*value))),
             CellValue::Float(value) if value.is_finite() => Some(NumericCell::Float(*value)),

@@ -1,4 +1,4 @@
-use super::grid::{make_page_input, make_page_size_input};
+use super::grid::{make_page_input, make_page_size_input, row_origin};
 use super::grid_fields::make_field_filter_search_input;
 use super::*;
 use gpui::HitboxBehavior;
@@ -347,7 +347,7 @@ impl Render for GridView {
                             this.set_sort_hover(index, *hovered, cx);
                         }))
                         .on_click(cx.listener(move |this, _event, _window, cx| {
-                            let rows = this.state.rows.len();
+                            let rows = this.display_row_count();
                             if rows > 0 && index < this.state.visible_columns {
                                 this.state.selection =
                                     Some(CellSelection::single((rows - 1, index), (0, index)));
@@ -454,9 +454,20 @@ impl Render for GridView {
             move |range, _window, _cx| {
                 range
                     .map(|row_index| {
-                        // Rows past the loaded page are pending inserts (gutter `*`, unset cells).
-                        let insert =
-                            (row_index >= data_rows).then(|| &inserts[row_index - data_rows]);
+                        // A row is either one of the page's rows or a pending insert, which may
+                        // sit inline (a 复制行 clone, under the record it copied) or at the end
+                        // (the "+" button).
+                        let origin = row_origin(&inserts, data_rows, row_index);
+                        let data_row = match origin {
+                            Some(GridRow::Data(data)) => Some(data),
+                            _ => None,
+                        };
+                        let insert = match origin {
+                            Some(GridRow::Insert(index)) => {
+                                inserts.get(index).map(|insert| &insert.values)
+                            }
+                            _ => None,
+                        };
                         let base_background = if row_index % 2 == 1 {
                             theme.row_alt_bg
                         } else {
@@ -530,11 +541,7 @@ impl Render for GridView {
                                 .is_some_and(|selection| selection.contains(row_index, index));
                             // A pending insert row's staged value (`None` = explicit NULL).
                             let staged = insert.and_then(|row| row.get(&index));
-                            let edited = if insert.is_some() {
-                                None
-                            } else {
-                                edits.get(&(row_index, index))
-                            };
+                            let edited = data_row.and_then(|data| edits.get(&(data, index)));
                             let previewed = preview
                                 .as_ref()
                                 .filter(|(cells, _)| cells.contains(&(row_index, index)))
@@ -558,7 +565,9 @@ impl Render for GridView {
                             let is_null = if insert.is_some() {
                                 !matches!(staged, Some(Some(_)))
                             } else {
-                                let cell = source_cell(&rows, &column_order, row_index, index);
+                                let cell = data_row.and_then(|data| {
+                                    source_cell(&rows, &column_order, data, index)
+                                });
                                 match (edited, &previewed) {
                                     (Some(Some(_)), _) | (_, Some(_)) => false,
                                     (Some(None), _) => true,
@@ -580,7 +589,10 @@ impl Render for GridView {
                                         if is_null {
                                             "(Null)".to_string()
                                         } else {
-                                            source_cell(&rows, &column_order, row_index, index)
+                                            data_row
+                                                .and_then(|data| {
+                                                    source_cell(&rows, &column_order, data, index)
+                                                })
                                                 .map(|cell| cell.as_display())
                                                 .unwrap_or_default()
                                         }
@@ -732,6 +744,9 @@ impl Render for GridView {
         // Keyboard commands (keymap): F5 refresh and the spreadsheet jumps.
         .key_context(GRID_CONTEXT)
         .on_action(cx.listener(|this, _: &GridRefresh, _window, cx| this.refresh(cx)))
+        .on_action(
+            cx.listener(|this, _: &GridDuplicateRow, window, cx| this.duplicate_row(window, cx)),
+        )
         .on_action(
             cx.listener(|this, _: &GridEditValue, window, cx| this.open_value_editor(window, cx)),
         )

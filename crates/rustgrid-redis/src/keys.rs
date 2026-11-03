@@ -56,6 +56,8 @@ impl KeyType {
             data_type: data_type.to_string(),
             nullable: true,
             primary_key,
+            auto_increment: false,
+            generated: false,
             comment: String::new(),
         };
         let columns = match self {

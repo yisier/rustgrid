@@ -1,3 +1,4 @@
+use super::grid::row_origin;
 use super::*;
 
 impl GridView {
@@ -65,6 +66,7 @@ impl GridView {
             .iter()
             .map(|row| RowInsert {
                 values: row
+                    .values
                     .iter()
                     .map(|(&col, value)| (self.state.columns[col].name.clone(), value.clone()))
                     .collect(),
@@ -216,23 +218,27 @@ impl GridView {
             return None;
         }
         let selected_rows = self.state.selection.as_ref()?.row_indices();
-        // Pending insert rows are not in the database yet: discard the selected ones outright
-        // (highest index first so the remaining indices stay valid).
         let data_rows = self.state.rows.len();
-        let mut removed = false;
-        for row in selected_rows.iter().rev() {
-            if *row >= data_rows {
-                let index = row - data_rows;
-                if index < self.inserts.len() {
-                    self.inserts.remove(index);
-                    removed = true;
-                }
+        let mut rows = Vec::new();
+        let mut inserts = Vec::new();
+        for row in selected_rows {
+            match row_origin(&self.inserts, data_rows, row) {
+                // Pending insert rows are not in the database yet: discard them outright.
+                Some(GridRow::Insert(index)) => inserts.push(index),
+                Some(GridRow::Data(row)) => rows.push(row),
+                None => {}
             }
         }
-        let rows: Vec<usize> = selected_rows
-            .into_iter()
-            .filter(|row| *row < data_rows)
-            .collect();
+        // Highest insert index first, so the remaining indices stay valid.
+        inserts.sort_unstable();
+        inserts.dedup();
+        let mut removed = false;
+        for index in inserts.into_iter().rev() {
+            if index < self.inserts.len() {
+                self.inserts.remove(index);
+                removed = true;
+            }
+        }
         if rows.is_empty() {
             if removed {
                 cx.notify();

@@ -20,17 +20,17 @@ use gpui_kit::component::input::ShowCompletions;
 use super::{
     BACKUP_LIST_CONTEXT, CloseActiveTab, CloseAllTabs, CloseOtherTabs, CopyBackupFile,
     CopyQueryFile, CopyStatusSql, DESIGNER_CONTEXT, DeleteTransferConfig, DesignerCopy,
-    DesignerSelectAll, DuplicateLines, GRID_CONTEXT, GRID_STATUS_CONTEXT, GridEditValue,
-    GridFirstCell, GridLastCell, GridNextCell, GridPageDown, GridPageUp, GridPrevCell, GridRefresh,
-    GridRowEnd, GridRowStart, GridSelectPageDown, GridSelectPageUp, MoveLinesDown, MoveLinesUp,
-    NewQueryTab, NextTab, OBJECT_LIST_CONTEXT, ObjectDown, ObjectEnd, ObjectHome, ObjectLeft,
-    ObjectOpen, ObjectPageDown, ObjectPageUp, ObjectRename, ObjectRight, ObjectSelectAll, ObjectUp,
-    OpenTransferConfig, PasteBackupFile, PasteQueryFile, PrevTab, QUERY_EDITOR_CONTEXT,
-    QUERY_LIST_CONTEXT, RenameBackupFile, RenameQueryFile, RunQuery, RunSelectedQuery, SaveDesign,
-    SaveQuery, SelectAllBackups, SelectAllOccurrences, SelectAllQueries, SelectAllStatusSql,
-    SelectAllTransfers, SwapLineUp, TRANSFER_LIST_CONTEXT, TREE_CONTEXT, ToggleComment,
-    TreeCollapse, TreeDown, TreeEnd, TreeExpand, TreeHome, TreeOpen, TreePageDown, TreePageUp,
-    TreeRename, TreeSelectAll, TreeUp, WORKSPACE_CONTEXT,
+    DesignerSelectAll, DuplicateLines, GRID_CONTEXT, GRID_STATUS_CONTEXT, GridDuplicateRow,
+    GridEditValue, GridFirstCell, GridLastCell, GridNextCell, GridPageDown, GridPageUp,
+    GridPrevCell, GridRefresh, GridRowEnd, GridRowStart, GridSelectPageDown, GridSelectPageUp,
+    MoveLinesDown, MoveLinesUp, NewQueryTab, NextTab, OBJECT_LIST_CONTEXT, ObjectDown, ObjectEnd,
+    ObjectHome, ObjectLeft, ObjectOpen, ObjectPageDown, ObjectPageUp, ObjectRename, ObjectRight,
+    ObjectSelectAll, ObjectUp, OpenTransferConfig, PasteBackupFile, PasteQueryFile, PrevTab,
+    QUERY_EDITOR_CONTEXT, QUERY_LIST_CONTEXT, RenameBackupFile, RenameQueryFile, RunQuery,
+    RunSelectedQuery, SaveDesign, SaveQuery, SelectAllBackups, SelectAllOccurrences,
+    SelectAllQueries, SelectAllStatusSql, SelectAllTransfers, SwapLineUp, TRANSFER_LIST_CONTEXT,
+    TREE_CONTEXT, ToggleComment, TreeCollapse, TreeDown, TreeEnd, TreeExpand, TreeHome, TreeOpen,
+    TreePageDown, TreePageUp, TreeRename, TreeSelectAll, TreeUp, WORKSPACE_CONTEXT,
 };
 
 /// Where a command lives, for grouping the 快捷键 page.
@@ -324,6 +324,12 @@ pub(super) const COMMANDS: &[Command] = &[
         GridEditValue
     ),
     grid_command!("grid.refresh", "keymap.grid.refresh", &["f5"], GridRefresh),
+    grid_command!(
+        "grid.duplicate_row",
+        "keymap.grid.duplicate_row",
+        &["secondary-d"],
+        GridDuplicateRow
+    ),
     grid_command!(
         "grid.page_up",
         "keymap.grid.page_up",

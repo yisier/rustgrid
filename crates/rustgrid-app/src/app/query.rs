@@ -975,6 +975,8 @@ impl AppView {
                                         .find(|candidate| candidate.name == column.name)
                                     {
                                         column.primary_key = found.primary_key;
+                                        column.auto_increment = found.auto_increment;
+                                        column.generated = found.generated;
                                         column.data_type = found.data_type.clone();
                                     }
                                 }
