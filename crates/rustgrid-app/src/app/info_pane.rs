@@ -274,13 +274,17 @@ impl InfoPane {
             // choice and does not pop open.
             self.form = None;
             if let Some(app) = self.app.upgrade() {
-                app.update(cx, |app, cx| {
-                    if app.form_open {
-                        app.form_open = false;
-                        // Keep the grid footer's 编辑表单 button in step.
-                        app.notify_grids(cx);
-                        cx.notify();
-                    }
+                // Leave the update for after this frame: the pane is being rendered and the grids
+                // may still be busy drawing.
+                cx.defer(move |cx| {
+                    app.update(cx, |app, cx| {
+                        if app.form_open {
+                            app.form_open = false;
+                            // Keep the grid footer's 编辑表单 button in step.
+                            app.notify_grids(cx);
+                            cx.notify();
+                        }
+                    });
                 });
             }
             return div().into_any_element();
@@ -782,30 +786,20 @@ impl AppView {
     }
 
     /// The grid footer's 编辑表单 button: show or hide the selected row's form in the right-hand
-    /// pane. Opening it needs a selected data row and closes the details pane, since both share
-    /// that side; closing it leaves the details pane as the user had it (closed).
+    /// pane. The button is only enabled while a data row is selected, so no grid is read here:
+    /// this runs inside that grid's own update, and reading or notifying it re-entrantly aborts.
+    /// The pane itself closes the form again if its row disappears. Opening the form closes the
+    /// details pane, since both share the right-hand side; closing leaves it as the user had it.
     pub(super) fn toggle_form(&mut self, cx: &mut Context<'_, Self>) {
         if self.form_open {
             self.form_open = false;
-            // The grid footer's 编辑表单 button follows the form state and the grid does not
-            // re-render from an `AppView` change by itself.
-            self.notify_grids(cx);
-            cx.notify();
-            return;
+        } else {
+            self.form_open = true;
+            if self.info_open {
+                self.info_open = false;
+                self.persist_settings();
+            }
         }
-        if self
-            .form_grid(cx)
-            .and_then(|grid| form_row(&grid, cx))
-            .is_none()
-        {
-            return;
-        }
-        self.form_open = true;
-        if self.info_open {
-            self.info_open = false;
-            self.persist_settings();
-        }
-        self.notify_grids(cx);
         cx.notify();
     }
 

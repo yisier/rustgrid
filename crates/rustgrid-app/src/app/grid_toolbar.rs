@@ -1368,6 +1368,10 @@ impl GridView {
                 if let Some(app) = this.app.upgrade() {
                     app.update(cx, |app, cx| app.toggle_form(cx));
                 }
+                // The button's lit state reads `AppView::form_open`; repaint this grid. Do it here
+                // rather than through `AppView::notify_grids`, which would update this very grid
+                // re-entrantly and abort.
+                cx.notify();
             }),
         )
         .tooltip(ui::text_tooltip(t!("grid.form_view").to_string()))
