@@ -40,6 +40,19 @@ impl AppView {
         cx.notify();
     }
 
+    /// Down / Up in the tree's search box hands the keyboard to the filtered rows: Down selects the
+    /// first table/view result and Up the last (a filter that only matched a branch selects that
+    /// row). The tree keeps the focus, so its own arrows, Page Up/Down and Enter work from there.
+    pub(super) fn focus_tree_search_result(
+        &mut self,
+        down: bool,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.tree_pane
+            .update(cx, |tree, cx| tree.focus_search_result(down, window, cx));
+    }
+
     /// The connection the active tab belongs to, falling back to the tree's current selection.
     /// The main ribbon's key-value gating uses this so a restored key tab (whose tree row may not
     /// be selected yet) still hides the SQL-only tabs.

@@ -925,8 +925,11 @@ shadcn chrome described above. Implemented today:
     name only and the search never issues a catalog query of its own. A matching branch keeps its
     immediate children (a matched connection shows its databases, a matched database its schemas),
     the branches on the way to a match open, only 表/视图 are drawn while filtering (with just the
-    matching objects), and a group without a surviving connection is skipped. Esc or the field's ✕
-    clears the filter and restores the saved tree; 无匹配项 is shown when nothing matches.
+    matching objects), and a group without a surviving connection is skipped. Down / Up in the
+    search box hands the keyboard to the filtered rows — Down selects the first table/view result,
+    Up the last (falling back to the first/last row when only a branch matched) — and the tree keeps
+    the focus, so its arrows, Page Up/Down and Enter work from there. Esc or the field's ✕ clears
+    the filter and restores the saved tree; 无匹配项 is shown when nothing matches.
 
 Still out of scope: engines other than MySQL, MariaDB, SQLite, SQL Server, PostgreSQL, Oracle and
 Redis, and the disabled placeholder UI

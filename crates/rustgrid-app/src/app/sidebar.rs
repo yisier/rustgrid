@@ -598,6 +598,22 @@ pub(super) fn typeahead_target(
         .find(|&index| labels[index].to_lowercase().starts_with(&prefix))
 }
 
+/// The row the tree's search box hands the keyboard to on Down / Up: the first / last table or view
+/// result, so a found table is selected in one keystroke. When the filter only matched a branch
+/// (no table row is drawn), it falls back to the first / last drawn row. `None` with no rows.
+fn search_result_target(rows: &[NavRow], down: bool) -> Option<usize> {
+    if rows.is_empty() {
+        return None;
+    }
+    let mut tables = (0..rows.len()).filter(|&index| rows[index].table.is_some());
+    let target = if down {
+        tables.next()
+    } else {
+        tables.next_back()
+    };
+    target.or(Some(if down { 0 } else { rows.len() - 1 }))
+}
+
 impl TreePane {
     pub(super) fn new(app: WeakEntity<AppView>, cx: &mut Context<'_, Self>) -> Self {
         Self {
@@ -704,6 +720,25 @@ impl TreePane {
             None => 0,
         };
         self.nav_select(next, cx);
+    }
+
+    /// Take the keyboard from the search box into the filtered rows: Down selects the first
+    /// table/view result and Up the last, then the tree is focused so its arrows, Page Up/Down and
+    /// Enter keep working. Rows come from the last frame, and only a filtered tree is entered.
+    pub(super) fn focus_search_result(
+        &mut self,
+        down: bool,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if !self.searching {
+            return;
+        }
+        let Some(index) = search_result_target(&self.nav_rows, down) else {
+            return;
+        };
+        self.nav_select(index, cx);
+        window.focus(&self.focus, cx);
     }
 
     /// How many rows one Page Up / Page Down moves: a screenful, less one row of context.
@@ -3129,8 +3164,9 @@ pub(super) fn tree_marquee_element(
 #[cfg(test)]
 mod nav_tests {
     use super::{
-        BTreeSet, Category, CategoryExpansion, DatabaseNode, Loadable, TreeTable, nav_parent,
-        snapshot_database, table_search_matches, tree_search_query, typeahead_target,
+        BTreeSet, Category, CategoryExpansion, DatabaseNode, Loadable, NavRow, TreeTable,
+        nav_parent, search_result_target, snapshot_database, table_search_matches,
+        tree_search_query, typeahead_target,
     };
 
     fn table(name: &str, kind: rustgrid_core::ObjectKind) -> rustgrid_core::TableInfo {
@@ -3163,6 +3199,32 @@ mod nav_tests {
             object_pattern: None,
             namespaces: Loadable::Idle,
         }
+    }
+
+    #[test]
+    fn the_search_box_enters_the_first_or_last_table_result() {
+        fn row(id: &str, table: Option<&str>) -> NavRow {
+            let mut row = NavRow::new(id.to_string(), id);
+            row.table = table.map(|name| (0, 0, name.to_string(), false));
+            row
+        }
+        let rows = vec![
+            row("group-1", None),
+            row("conn-0", None),
+            row("db-0-0", None),
+            row("cat-0-0-tables", None),
+            row("tbl-0-0-a", Some("a")),
+            row("tbl-0-0-b", Some("b")),
+        ];
+        // Down enters at the first table, Up at the last: one keystroke selects a result.
+        assert_eq!(search_result_target(&rows, true), Some(4));
+        assert_eq!(search_result_target(&rows, false), Some(5));
+
+        // A filter that only matched branches falls back to the first / last drawn row.
+        assert_eq!(search_result_target(&rows[..4], true), Some(0));
+        assert_eq!(search_result_target(&rows[..4], false), Some(3));
+        assert_eq!(search_result_target(&[], true), None);
+        assert_eq!(search_result_target(&[], false), None);
     }
 
     #[test]

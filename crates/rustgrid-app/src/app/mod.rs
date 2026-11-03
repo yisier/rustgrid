@@ -3294,6 +3294,17 @@ impl AppView {
                             });
                         }
                     }))
+                    // Down / Up moves the focus from the field into the filtered rows — the first
+                    // / last table result — so a found table can be picked from the keyboard; the
+                    // tree's own arrows and Enter take over from there.
+                    .on_arrow(Rc::new({
+                        let weak = weak.clone();
+                        move |down, window, cx| {
+                            let _ = weak.update(cx, |app, cx| {
+                                app.focus_tree_search_result(down, window, cx);
+                            });
+                        }
+                    }))
                     // Esc clears the filter and shows the whole tree again. Deferred for the same
                     // reason as the object search: clearing writes back to the field, which must
                     // not happen while it is handling the key.
