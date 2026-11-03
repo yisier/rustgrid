@@ -10,6 +10,19 @@ UI labels are quoted as the app shows them, so this file quotes the English stri
 [`CHANGELOG_zh.md`](CHANGELOG_zh.md) and [`CHANGELOG_ru.md`](CHANGELOG_ru.md) quote the 简体中文 and
 Russian ones.
 
+## [0.1.6] - 2026-11-03
+
+### Added
+
+- The connection tree can be searched by name fragment, `schema.table` and `database.schema.table`.
+- A form editing mode: select a row in the table and switch to the form view.
+- Duplicate Row (Ctrl+D) copies the selected record, leaving auto-increment and generated columns
+  unset.
+
+### Changed
+
+- A table page selects its first row when it opens.
+
 ## [0.1.5] - 2026-11-02
 
 ### Added
