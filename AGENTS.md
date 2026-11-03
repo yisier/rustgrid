@@ -889,16 +889,15 @@ shadcn chrome described above. Implemented today:
     (and is clickable) while a data row is selected; query result grids, Redis key pages and the
     designer's preview grids have their own layouts and no such button. The form and the
     object-details pane share the right side, so opening the form closes the details pane (and
-    opening the details pane from the status bar closes the form); the form's 返回表信息 button
-    switches straight to the details. The form turns itself off when the selection disappears (page
-    turn, refresh, tab close), so it never sits over an empty selection. Because the pane is narrow,
-    each field is one `字段 · 类型 · 注释` line with its editor below instead of Navicat's three
-    columns; the type and comment follow the 数据 options (`grid_show_types` /
-    `grid_show_comments`) and every segment is ellipsized with the full text on hover when it does
-    not fit. Typing stages straight into the grid's `edits` (the grid cell shows the pending value
-    too, and one Ctrl+Z restores the value the run started from), Enter saves through the grid's
-    normal commit path, Escape drops that field's staged value. A `NULL` cell shows an empty field
-    with a `NULL` placeholder.
+    opening the details pane from the status bar closes the form). The form turns itself off when
+    the selection disappears (page turn, refresh, tab close), so it never sits over an empty
+    selection. Because the pane is narrow, each field is one `字段 · 类型 · 注释` line with its
+    editor below instead of Navicat's three columns; the type and comment follow the 数据 options
+    (`grid_show_types` / `grid_show_comments`) and every segment is ellipsized with the full text
+    on hover when it does not fit. Typing stages straight into the grid's `edits` (the grid cell
+    shows the pending value too, and one Ctrl+Z restores the value the run started from), Enter
+    saves through the grid's normal commit path, Escape drops that field's staged value. A `NULL`
+    cell shows an empty field with a `NULL` placeholder.
 
 Still out of scope: engines other than MySQL, MariaDB, SQLite, SQL Server, PostgreSQL, Oracle and
 Redis, and the disabled placeholder UI

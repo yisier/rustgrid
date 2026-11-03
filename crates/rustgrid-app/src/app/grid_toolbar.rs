@@ -1359,22 +1359,26 @@ impl GridView {
             .as_ref()
             .is_some_and(|selection| selection.row_indices().into_iter().any(|row| row < rows));
         let open = self.app.upgrade().is_some_and(|app| app.read(cx).form_open);
-        self.grid_icon_button(
-            "grid-form",
-            "icons/form.svg",
-            if open { theme.primary } else { theme.text },
-            has_row,
-            cx.listener(|this, _event, _window, cx| {
-                if let Some(app) = this.app.upgrade() {
-                    app.update(cx, |app, cx| app.toggle_form(cx));
-                }
-                // The button's lit state reads `AppView::form_open`; repaint this grid. Do it here
-                // rather than through `AppView::notify_grids`, which would update this very grid
-                // re-entrantly and abort.
-                cx.notify();
-            }),
-        )
-        .tooltip(ui::text_tooltip(t!("grid.form_view").to_string()))
+        let button = self
+            .grid_icon_button(
+                "grid-form",
+                "icons/form.svg",
+                if open { theme.primary } else { theme.text },
+                has_row,
+                cx.listener(|this, _event, _window, cx| {
+                    if let Some(app) = this.app.upgrade() {
+                        app.update(cx, |app, cx| app.toggle_form(cx));
+                    }
+                    // The button's lit state reads `AppView::form_open`; repaint this grid. Do it here
+                    // rather than through `AppView::notify_grids`, which would update this very grid
+                    // re-entrantly and abort.
+                    cx.notify();
+                }),
+            )
+            .tooltip(ui::text_tooltip(t!("grid.form_view").to_string()));
+        // With no record selected the icon is disabled; fade it well below the page-size gear's
+        // muted tint so "not available yet" is obvious at a glance.
+        if has_row { button } else { button.opacity(0.4) }
     }
 
     pub(super) fn grid_icon_button(

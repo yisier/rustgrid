@@ -329,7 +329,6 @@ impl InfoPane {
             return None;
         }
         let table = state.table.clone();
-        let record = state.page_index * state.page_size + row as u64 + 1;
         let values = &state.rows[row];
         let fields: Vec<FormField> = (0..state.visible_columns)
             .filter_map(|col| {
@@ -394,12 +393,11 @@ impl InfoPane {
         let style = FormStyle {
             theme,
             table: &table,
-            record,
             width: self.width,
             show_types,
             show_comments,
         };
-        Some(render_row_form(&style, &fields, form, app_entity))
+        Some(render_row_form(&style, &fields, form))
     }
 }
 
@@ -1426,28 +1424,21 @@ fn build_form_inputs(
         .collect()
 }
 
-/// The row form's shared layout inputs: the palette, the table it edits, the record number and
-/// the width the header lines have to fit into.
+/// The row form's shared layout inputs: the palette, the table it edits and the width the header
+/// lines have to fit into.
 struct FormStyle<'a> {
     theme: Theme,
     table: &'a str,
-    record: u64,
     width: f32,
     show_types: bool,
     show_comments: bool,
 }
 
-/// The row form: a compact title (table, 表单 badge and a way to the table details) over one
-/// block per field. The right pane is narrow, so each field puts `字段 · 类型 · 注释` on one line
-/// with its editor underneath instead of Navicat's three columns.
-fn render_row_form(
-    style: &FormStyle<'_>,
-    fields: &[FormField],
-    form: &FormState,
-    app: &Entity<AppView>,
-) -> AnyElement {
+/// The row form: a compact title (table and 表单 badge) over one block per field. The right pane is
+/// narrow, so each field puts `字段 · 类型 · 注释` on one line with its editor underneath instead of
+/// Navicat's three columns.
+fn render_row_form(style: &FormStyle<'_>, fields: &[FormField], form: &FormState) -> AnyElement {
     let theme = style.theme;
-    let back_app = app.clone();
     let title = div()
         .flex()
         .flex_row()
@@ -1476,32 +1467,6 @@ fn render_row_form(
                 .text_size(px(10.0))
                 .text_color(rgb(theme.text_muted))
                 .child(t!("info.form").to_string()),
-        )
-        .child(
-            div()
-                .id("info-form-details")
-                .flex()
-                .flex_none()
-                .items_center()
-                .justify_center()
-                .w(px(22.0))
-                .h(px(22.0))
-                .rounded_sm()
-                .cursor_pointer()
-                .tooltip(ui::text_tooltip(t!("info.form_details").to_string()))
-                .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-                .child(
-                    svg()
-                        .path("icons/database.svg")
-                        .w(px(14.0))
-                        .h(px(14.0))
-                        .text_color(rgb(theme.text_muted)),
-                )
-                .on_click(move |_event, _window, cx| {
-                    // Switch the right-hand pane to the table's details (this also turns the form
-                    // off, since the two never show together).
-                    back_app.update(cx, |app, cx| app.set_info_open(true, cx));
-                }),
         );
 
     let mut list = div().flex().flex_col().w_full();
@@ -1528,13 +1493,7 @@ fn render_row_form(
                 .pb_2()
                 .border_b_1()
                 .border_color(rgb(theme.border))
-                .child(title)
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(rgb(theme.text_muted))
-                        .child(t!("info.form_record", row = style.record).to_string()),
-                ),
+                .child(title),
         )
         .child(div().flex().flex_col().w_full().px_3().child(list))
         .into_any_element()
