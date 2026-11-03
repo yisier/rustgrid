@@ -156,6 +156,10 @@ impl TextInput {
     /// Replaces the field's text. Applied on the next render, where a `Window` is available.
     pub(crate) fn set_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
         self.pending.push(Pending::SetText(text.into(), true));
+        // A programmatic rewrite supersedes an edit the host has not been told about yet (the row
+        // form's Escape sets the page value back before the last keystroke's change callback has
+        // run); dispatching that stale change afterwards would re-stage the value we just dropped.
+        self.pending_change = None;
         cx.notify();
     }
 
@@ -461,6 +465,60 @@ mod tests {
         ) -> impl IntoElement {
             div().size_full().p_2().child(self.field.clone())
         }
+    }
+
+    /// The kit input's own Ctrl+Z (bound in its `Input` key context) must reach the field, so a
+    /// focused form cell undoes typing like the grid's in-place cell editor does.
+    #[gpui_kit::test]
+    fn ctrl_z_undoes_typing(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (handle, view) = cx.update(|cx| {
+            let field = cx
+                .new(|cx| TextInput::new(Theme::light(), "hello", TextInputOptions::default(), cx));
+            let view = cx.new(|_cx| ArrowHarness {
+                field: field.clone(),
+            });
+            let (handle, _window) = gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: Point::default(),
+                        size: size(px(400.), px(200.)),
+                    })),
+                    ..Default::default()
+                },
+                cx,
+                |_, _| view.clone(),
+            )
+            .expect("open test window");
+            (handle, view)
+        });
+        let mut cx = VisualTestContext::from_window(handle, cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.update(|window, cx| {
+            let field = view.read(cx).field.clone();
+            field.update(cx, |field, cx| field.focus_state(window, cx));
+            let _ = window.draw(cx);
+        });
+        cx.simulate_keystrokes("x");
+        let after_typing = cx.update(|_window, cx| {
+            view.read(cx)
+                .field
+                .read(cx)
+                .current_text(cx)
+                .unwrap_or_default()
+        });
+        cx.simulate_keystrokes("ctrl-z");
+        let after_undo = cx.update(|_window, cx| {
+            view.read(cx)
+                .field
+                .read(cx)
+                .current_text(cx)
+                .unwrap_or_default()
+        });
+        assert_eq!(after_typing, "xhello");
+        assert_eq!(after_undo, "hello");
     }
 
     /// Up/Down must reach the wrapper's `on_arrow`: the kit's single-line input handles the arrows

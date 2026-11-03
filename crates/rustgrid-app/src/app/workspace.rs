@@ -281,7 +281,13 @@ impl AppView {
             {
                 database.opened = true;
                 database.expanded = true;
-                load = matches!(database.tables, Loadable::Idle | Loadable::Failed(_));
+                // The tree search may have loaded this database's object names without the
+                // overview pass (`table_statuses`); the restored open list needs both.
+                load = matches!(database.tables, Loadable::Idle | Loadable::Failed(_))
+                    || matches!(
+                        database.table_statuses,
+                        Loadable::Idle | Loadable::Failed(_)
+                    );
             }
             if load {
                 self.load_tables(

@@ -26,11 +26,12 @@ use super::{
     MoveLinesDown, MoveLinesUp, NewQueryTab, NextTab, OBJECT_LIST_CONTEXT, ObjectDown, ObjectEnd,
     ObjectHome, ObjectLeft, ObjectOpen, ObjectPageDown, ObjectPageUp, ObjectRename, ObjectRight,
     ObjectSelectAll, ObjectUp, OpenTransferConfig, PasteBackupFile, PasteQueryFile, PrevTab,
-    QUERY_EDITOR_CONTEXT, QUERY_LIST_CONTEXT, RenameBackupFile, RenameQueryFile, RunQuery,
-    RunSelectedQuery, SaveDesign, SaveQuery, SelectAllBackups, SelectAllOccurrences,
-    SelectAllQueries, SelectAllStatusSql, SelectAllTransfers, SwapLineUp, TRANSFER_LIST_CONTEXT,
-    TREE_CONTEXT, ToggleComment, TreeCollapse, TreeDown, TreeEnd, TreeExpand, TreeHome, TreeOpen,
-    TreePageDown, TreePageUp, TreeRename, TreeSelectAll, TreeUp, WORKSPACE_CONTEXT,
+    QUERY_EDITOR_CONTEXT, QUERY_LIST_CONTEXT, ROW_FORM_CONTEXT, RenameBackupFile, RenameQueryFile,
+    RunQuery, RunSelectedQuery, SaveDesign, SaveQuery, SaveRowForm, SelectAllBackups,
+    SelectAllOccurrences, SelectAllQueries, SelectAllStatusSql, SelectAllTransfers, SwapLineUp,
+    TRANSFER_LIST_CONTEXT, TREE_CONTEXT, ToggleComment, TreeCollapse, TreeDown, TreeEnd,
+    TreeExpand, TreeHome, TreeOpen, TreePageDown, TreePageUp, TreeRename, TreeSelectAll, TreeUp,
+    WORKSPACE_CONTEXT,
 };
 
 /// Where a command lives, for grouping the 快捷键 page.
@@ -385,6 +386,15 @@ pub(super) const COMMANDS: &[Command] = &[
         &["shift-tab"],
         GridPrevCell
     ),
+    Command {
+        id: "form.save",
+        label_key: "keymap.form.save",
+        group: CommandGroup::TableGrid,
+        context: ROW_FORM_CONTEXT,
+        defaults: &["secondary-s"],
+        mac_defaults: None,
+        bind: bind!(SaveRowForm),
+    },
     editor_command!(
         "query.toggle_comment",
         "keymap.query.toggle_comment",

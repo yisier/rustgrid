@@ -895,13 +895,35 @@ shadcn chrome described above. Implemented today:
     editor below instead of Navicat's three columns; the type and comment follow the 数据 options
     (`grid_show_types` / `grid_show_comments`) and every segment is ellipsized with the full text
     on hover when it does not fit. Typing stages straight into the grid's `edits` (the grid cell
-    shows the pending value too, and one Ctrl+Z restores the value the run started from), Enter
-    saves through the grid's normal commit path, Escape drops that field's staged value. A `NULL`
-    cell shows an empty field with a `NULL` placeholder. A temporal field (`date` / `datetime` /
-    `timestamp`, the same types the grid's cell picker accepts) carries the grid picker's "…"
-    button; it opens an inline `compact_calendar` + `TimeField` panel under the editor with the
-    app-drawn 今天 / 取消 / 确定 footer, and 确定 writes the formatted value into the editor and
-    stages it exactly like typing it.
+    shows the pending value after the field is left; undo/redo is the focused input's own,
+    Ctrl+Z / Ctrl+Y — Cmd+Z / Cmd+Shift+Z on macOS — exactly like the grid's in-place cell editor),
+    Enter saves through the grid's normal commit path, Ctrl+S (`keymap.form.save`, bound in the
+    form's `RowForm` context) saves too, and Escape restores the page's value for that field. The
+    header's ✓ / ✕ do the same 保存 / 回滚 as the grid footer. A `NULL` cell shows an empty field
+    with a `NULL` placeholder. A temporal field (`date` / `datetime` / `timestamp`, the same types
+    the grid's cell picker accepts) carries the grid picker's "…" button; it opens an inline
+    `compact_calendar` + `TimeField` panel under the
+    editor with the app-drawn 今天 / 取消 / 确定 footer, and 确定 writes the formatted value into the
+    editor and stages it exactly like typing it. The per-keystroke staging path must not notify the
+    grid: the grid clones its whole page when it repaints, and the pane re-renders every field, so
+    notifying per character made typing (and IME composition) lag. Only the first/last staged
+    change of a run and the field's blur repaint, and the pane must never `set_text` a field that
+    holds focus — its change callback is dispatched on the wrapper's next render, so the model can
+    lag one keystroke and rewriting it would drop that keystroke and clear the input's undo
+    history.
+
+21. Connection-tree search (`app/sidebar.rs` + `app/tree.rs`): a search box at the top of the
+    connection tree filters it to the connections, databases, schemas and tables whose name
+    contains the query. A table also matches its schema-qualified `schema.table` — and
+    `database.table` on engines whose tree has no schema level — so `ORDER.ORDER_INFO` finds the
+    table without expanding the ORDER schema first. A matching branch keeps its immediate children
+    (a matched connection shows its databases, a matched database its schemas), the branches on the
+    way to a match open, only 表/视图 are drawn while filtering (with just the matching objects),
+    and a group without a surviving connection is skipped. Esc or the field's ✕ clears the filter
+    and restores the saved tree. The search lazily loads the databases and object lists it has to
+    see — debounced, and without the overview `table_statuses` pass — so objects under a database the
+    user never opened are searchable; an empty filtered tree shows 加载中 while that crawl runs and
+    无匹配项 once it is done.
 
 Still out of scope: engines other than MySQL, MariaDB, SQLite, SQL Server, PostgreSQL, Oracle and
 Redis, and the disabled placeholder UI

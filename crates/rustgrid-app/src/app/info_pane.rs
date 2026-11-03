@@ -58,6 +58,8 @@ struct FormField {
     data_type: String,
     comment: String,
     value: String,
+    /// The page's own value, ignoring a staged edit. Escape restores this.
+    original: String,
     /// Whether the value is SQL `NULL` (shown as an empty field with a `NULL` placeholder).
     null: bool,
 }
@@ -139,10 +141,14 @@ impl SidebarHost {
 
 impl Render for SidebarHost {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let (theme, tree) = match self.app.upgrade() {
+        let (theme, tree, search) = match self.app.upgrade() {
             Some(app) => {
                 let app = app.read(cx);
-                (app.theme, app.tree_pane.clone())
+                (
+                    app.theme,
+                    app.tree_pane.clone(),
+                    app.tree_search_input.clone(),
+                )
             }
             None => return div().into_any_element(),
         };
@@ -189,6 +195,24 @@ impl Render for SidebarHost {
                     .border_r_1()
                     .border_color(rgb(theme.border))
                     .on_mouse_down(MouseButton::Right, menu)
+                    // The connection tree's search box sits at the top of the sidebar (Navicat's
+                    // layout): it filters 连接 → 数据库 → 模式 → 表 (see `sidebar`), and belongs
+                    // here rather than inside the scroll area so it stays put while the tree
+                    // scrolls.
+                    .child(
+                        div()
+                            .flex_none()
+                            .w_full()
+                            .px_1()
+                            .pt_1()
+                            // The tree's blank-area right-click menu belongs to the tree below, not
+                            // to the search field above it.
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                            )
+                            .child(div().w_full().h(px(24.0)).child(search)),
+                    )
                     .child(tree.cached(cached_style(|d| {
                         d.flex().flex_col().flex_1().min_h(px(0.0)).w_full()
                     }))),
@@ -272,6 +296,7 @@ impl InfoPane {
     fn pane_body(
         &mut self,
         app_entity: &Entity<AppView>,
+        window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let (form_open, grid) = {
@@ -282,7 +307,7 @@ impl InfoPane {
             self.sync_form_grid(grid.as_ref(), cx);
             if let Some(grid) = grid.as_ref()
                 && let Some(row) = form_row(grid, cx)
-                && let Some(body) = self.form_body(app_entity, grid, row, cx)
+                && let Some(body) = self.form_body(app_entity, grid, row, window, cx)
             {
                 return body;
             }
@@ -338,6 +363,7 @@ impl InfoPane {
         app_entity: &Entity<AppView>,
         grid: &FormGrid,
         row: usize,
+        window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> Option<AnyElement> {
         let (theme, show_types, show_comments) = {
@@ -353,20 +379,23 @@ impl InfoPane {
         let fields: Vec<FormField> = (0..state.visible_columns)
             .filter_map(|col| {
                 let column = state.columns.get(col)?;
-                // A staged edit wins over the page's value, exactly like the grid's own cells.
+                // The page's own value is what Escape restores; a staged edit wins over it for
+                // display, exactly like the grid's own cells.
+                let (original, page_null) = match values.get(state.source_col(col)) {
+                    Some(CellValue::Null) | None => (String::new(), true),
+                    Some(cell) => (cell.as_edit_string(), false),
+                };
                 let (value, null) = match state.edits.get(&(row, col)) {
                     Some(Some(value)) => (value.clone(), false),
                     Some(None) => (String::new(), true),
-                    None => match values.get(state.source_col(col)) {
-                        Some(CellValue::Null) | None => (String::new(), true),
-                        Some(cell) => (cell.as_edit_string(), false),
-                    },
+                    None => (original.clone(), page_null),
                 };
                 Some(FormField {
                     name: column.name.clone(),
                     data_type: column.data_type.clone(),
                     comment: column.comment.clone(),
                     value,
+                    original,
                     null,
                 })
             })
@@ -395,11 +424,17 @@ impl InfoPane {
         let form = self.form.as_mut()?;
         // Mirror the model into the editors. Typing already staged the same value, so this only
         // touches a field whose value changed elsewhere (a reload, undo, the grid's editor).
+        // Never programmatically rewrite the field that holds focus: its edit callback is
+        // dispatched on the wrapper's next render, so the model can legitimately lag one
+        // keystroke behind — setting the text then would drop that keystroke and, because the kit
+        // input clears its history on `set_value`, the field's undo stack with it.
         for (index, field) in fields.iter().enumerate() {
             let Some(input) = form.inputs.get(index).cloned() else {
                 continue;
             };
-            if input.read(cx).current_text(cx).as_deref() != Some(field.value.as_str()) {
+            let focused = input.read(cx).is_focused(window, cx);
+            if !focused && input.read(cx).current_text(cx).as_deref() != Some(field.value.as_str())
+            {
                 let value = field.value.clone();
                 input.update(cx, |input, cx| input.set_text(value, cx));
             }
@@ -436,6 +471,47 @@ impl InfoPane {
         if self.form_picker.take().is_some() {
             cx.notify();
         }
+    }
+
+    /// Ctrl+S / the form header's 保存: stage every field's live text first (the focused field's
+    /// change callback is dispatched on the wrapper's next render, so the grid may not have seen
+    /// the last keystroke yet), then save through the grid's normal commit path.
+    fn save_form(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(form) = self.form.as_ref() else {
+            return;
+        };
+        let Some(grid) = form.grid.upgrade() else {
+            return;
+        };
+        let row = form.row;
+        let values: Vec<(usize, String)> = form
+            .inputs
+            .iter()
+            .enumerate()
+            .filter_map(|(col, input)| input.read(cx).current_text(cx).map(|text| (col, text)))
+            .collect();
+        grid.update(cx, |grid, cx| {
+            for (col, text) in &values {
+                grid.stage_form_edit(row, *col, text, false, cx);
+            }
+            grid.save_grid(cx);
+        });
+        cx.notify();
+    }
+
+    /// The form header's 回滚: discard every pending edit (the form and the grid share one staged
+    /// edit set) and close the form with the grid's own rollback.
+    fn cancel_form(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(form) = self.form.as_ref() else {
+            return;
+        };
+        let Some(grid) = form.grid.upgrade() else {
+            return;
+        };
+        grid.update(cx, |grid, cx| grid.cancel_edits(cx));
+        self.form = None;
+        self.form_picker = None;
+        cx.notify();
     }
 
     /// Open (or apply-and-close) the inline date/time picker of one form field. Mirrors the grid's
@@ -501,7 +577,9 @@ impl InfoPane {
         let (row, col) = (form.row, picker.col);
         if let Some(grid) = form.grid.upgrade() {
             let text = value.clone();
-            grid.update(cx, |grid, cx| grid.stage_form_edit(row, col, &text, cx));
+            grid.update(cx, |grid, cx| {
+                grid.stage_form_edit(row, col, &text, true, cx)
+            });
         }
         input.update(cx, |input, cx| {
             input.set_text(value, cx);
@@ -547,12 +625,12 @@ impl InfoPane {
 }
 
 impl Render for InfoPane {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let Some(app_entity) = self.app.upgrade() else {
             return div().into_any_element();
         };
         let theme = app_entity.read(cx).theme;
-        let body = self.pane_body(&app_entity, cx);
+        let body = self.pane_body(&app_entity, window, cx);
 
         let start = cx.listener(|this, event: &MouseDownEvent, _window, cx| {
             this.drag = Some((f32::from(event.position.x), this.width));
@@ -1535,7 +1613,12 @@ fn form_row(grid: &FormGrid, cx: &App) -> Option<usize> {
 
 /// Build one [`TextInput`] per form field. Every edit is staged straight into the grid, so the
 /// form and the grid's own cells always agree on the pending value; Enter saves the staged edits
-/// and Escape drops this field's staged value.
+/// and Escape restores the page's value for this field.
+///
+/// Typing stages **without notifying** the grid: a per-keystroke repaint of the grid (which clones
+/// its whole page) and of the pane (which rebuilds every field) made typing, and IME composition
+/// in particular, lag badly. The grid still repaints once when the edit first appears or is
+/// dropped, and again when the field loses focus.
 fn build_form_inputs(
     theme: Theme,
     fields: &[FormField],
@@ -1548,11 +1631,18 @@ fn build_form_inputs(
         .enumerate()
         .map(|(col, field)| {
             let value = field.value.clone();
+            let original = field.original.clone();
             let null = field.null;
             let changed = grid.downgrade();
             let submitted = changed.clone();
+            let committed = changed.clone();
             let cancelled = changed.clone();
-            cx.new(|cx| {
+            // The field's own entity, so Escape can put its text back before dropping the staged
+            // edit (the pane skips a focused field when it mirrors the model).
+            let input_slot: Rc<std::cell::RefCell<Option<WeakEntity<TextInput>>>> =
+                Rc::new(std::cell::RefCell::new(None));
+            let cancel_slot = input_slot.clone();
+            let input = cx.new(|cx| {
                 TextInput::new(
                     theme,
                     value.clone(),
@@ -1564,15 +1654,37 @@ fn build_form_inputs(
                     cx,
                 )
                 .on_change(Rc::new(move |text, _window, cx| {
-                    let _ = changed.update(cx, |grid, cx| grid.stage_form_edit(row, col, text, cx));
+                    let _ = changed.update(cx, |grid, cx| {
+                        grid.stage_form_edit(row, col, text, false, cx)
+                    });
                 }))
                 .on_submit(Rc::new(move |_window, cx| {
                     let _ = submitted.update(cx, |grid, cx| grid.submit_form(cx));
                 }))
-                .on_cancel(Rc::new(move |_window, cx| {
-                    let _ = cancelled.update(cx, |grid, cx| grid.cancel_form_edit(row, col, cx));
+                .on_blur(Rc::new(move |_window, cx| {
+                    let _ = committed.update(cx, |grid, cx| grid.form_field_committed(cx));
                 }))
-            })
+                .on_cancel(Rc::new(move |_window, cx| {
+                    let Some(input) = cancel_slot.borrow().as_ref().cloned() else {
+                        return;
+                    };
+                    let grid = cancelled.clone();
+                    let fallback = original.clone();
+                    // Escape arrives through this field's own `handle_key_down`, so rewriting the
+                    // field must wait until that update has ended; doing it inline would
+                    // re-enter the entity. The deferred rewrite also clears the change callback
+                    // still queued for the keystroke being undone.
+                    cx.defer(move |cx| {
+                        let value = grid
+                            .update(cx, |grid, _cx| grid.form_original_text(row, col))
+                            .unwrap_or(fallback);
+                        let _ = input.update(cx, |input, cx| input.set_text(value, cx));
+                        let _ = grid.update(cx, |grid, cx| grid.cancel_form_edit(row, col, cx));
+                    });
+                }))
+            });
+            *input_slot.borrow_mut() = Some(input.downgrade());
+            input
         })
         .collect()
 }
@@ -1598,6 +1710,12 @@ fn render_row_form(
     pane: &WeakEntity<InfoPane>,
 ) -> AnyElement {
     let theme = style.theme;
+    // The form's own actions, inside its `RowForm` context so they work while one of its fields
+    // holds focus: Ctrl+S saves through the grid's normal commit path, and Escape is the field's
+    // own cancel (see `build_form_inputs`).
+    let save_pane = pane.clone();
+    let cancel_pane = pane.clone();
+    let save_weak = pane.clone();
     let title = div()
         .flex()
         .flex_row()
@@ -1615,6 +1733,36 @@ fn render_row_form(
                 .text_color(rgb(theme.text))
                 .tooltip(ui::text_tooltip(style.table.to_string()))
                 .child(style.table.to_string()),
+        )
+        .child(
+            ui::icon_button(
+                "info-form-save",
+                "icons/check.svg",
+                theme.icon_connection,
+                22.0,
+                20.0,
+                false,
+                theme,
+                move |_event, _window, cx| {
+                    let _ = save_pane.update(cx, |pane, cx| pane.save_form(cx));
+                },
+            )
+            .tooltip(ui::text_tooltip(t!("info.form.save").to_string())),
+        )
+        .child(
+            ui::icon_button(
+                "info-form-rollback",
+                "icons/cross.svg",
+                theme.danger,
+                22.0,
+                20.0,
+                false,
+                theme,
+                move |_event, _window, cx| {
+                    let _ = cancel_pane.update(cx, |pane, cx| pane.cancel_form(cx));
+                },
+            )
+            .tooltip(ui::text_tooltip(t!("info.form.rollback").to_string())),
         )
         .child(
             div()
@@ -1641,6 +1789,10 @@ fn render_row_form(
     }
 
     div()
+        .key_context(ROW_FORM_CONTEXT)
+        .on_action(move |_: &SaveRowForm, _window, cx| {
+            let _ = save_weak.update(cx, |pane, cx| pane.save_form(cx));
+        })
         .flex()
         .flex_col()
         .w_full()

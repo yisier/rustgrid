@@ -69,6 +69,11 @@ use ui::{
 // handlers consume those keys for a single-line field without propagating.
 gpui::actions!(grid, [NextCell, PrevCell, MoveCellUp, MoveCellDown]);
 
+// The row form's own commands. Ctrl+S is bound in the form's `RowForm` context (an ancestor of
+// the field inputs), so it saves through the grid while a form field holds focus — the grid's own
+// `on_key_down` never sees that keystroke.
+gpui::actions!(rowform, [SaveRowForm]);
+
 // Backup-list actions. `Root` binds `ctrl-c` to a copy action in the `"Root"` context, which
 // would swallow the keystroke before `on_key_down`; binding our own actions in a deeper context
 // (the backup list) takes precedence, like the grid's Tab binding above. `SelectAllBackups` lets
@@ -167,6 +172,10 @@ gpui::actions!(
 /// Key context on the table grid (the in-place cell editor sits deeper, in `GridCell`, so its
 /// own Tab / Home / End keep working while a cell is being edited).
 const GRID_CONTEXT: &str = "TableGrid";
+
+/// Key context on the info pane's row form, so its commands (Ctrl+S saves) fire while one of its
+/// text fields holds focus.
+const ROW_FORM_CONTEXT: &str = "RowForm";
 
 // The grid status bar's selectable SQL line. `Root` binds `ctrl-c` (copy) and `ctrl-a`
 // (select-all), which would otherwise consume the keystroke before the line sees it; binding our
@@ -1647,6 +1656,9 @@ struct TreePane {
     /// The name typed so far to jump to a row, and when its last key arrived.
     typeahead: String,
     typeahead_at: Option<std::time::Instant>,
+    /// Whether the tree is currently filtered by the search box, so groups open and empty
+    /// categories are skipped instead of the saved expansion being replayed.
+    searching: bool,
     /// Bumped by every keyboard move; the deferred app-wide refresh runs only for the latest.
     nav_generation: u64,
 }
@@ -2364,6 +2376,12 @@ pub struct AppView {
     object_pane: Option<Entity<ObjectPane>>,
     tab_bar: Entity<TabBar>,
     tree_pane: Entity<TreePane>,
+    /// The connection tree's search text and its field. Typing filters the tree to matching
+    /// connections, databases, schemas and tables (see `sidebar::snapshot_connections`).
+    tree_search: String,
+    tree_search_input: Entity<TextInput>,
+    /// Bumped on every search edit; the debounced crawl only loads for the latest one.
+    tree_search_generation: u64,
     main_tab: MainTab,
     db_dialog: Option<DbDialog>,
     db_charset_combo: Option<Entity<ComboBox>>,
@@ -3255,6 +3273,41 @@ impl AppView {
                     }))
                 })
             },
+            tree_search: String::new(),
+            tree_search_generation: 0,
+            tree_search_input: {
+                let weak = app.clone();
+                cx.new(move |cx| {
+                    TextInput::new(
+                        Theme::dark(),
+                        "",
+                        TextInputOptions {
+                            placeholder: t!("sidebar.search").to_string().into(),
+                            icon: Some("icons/search.svg"),
+                            clearable: true,
+                            ..Default::default()
+                        },
+                        cx,
+                    )
+                    .on_change(Rc::new({
+                        let weak = weak.clone();
+                        move |text, _window, cx| {
+                            let _ = weak.update(cx, |app, cx| {
+                                app.set_tree_search(text.to_string(), cx);
+                            });
+                        }
+                    }))
+                    // Esc clears the filter and shows the whole tree again. Deferred for the same
+                    // reason as the object search: clearing writes back to the field, which must
+                    // not happen while it is handling the key.
+                    .on_cancel(Rc::new(move |_window, cx| {
+                        let weak = weak.clone();
+                        cx.defer(move |cx| {
+                            let _ = weak.update(cx, |app, cx| app.clear_tree_search(cx));
+                        });
+                    }))
+                })
+            },
             delete_confirm: None,
             error_dialog: None,
             grid_clipboard: Rc::new(RefCell::new(GridClipboard::default())),
@@ -3527,6 +3580,9 @@ impl AppView {
         });
         self.backup_search_input.update(cx, |input, cx| {
             input.set_placeholder(t!("backup.search").to_string(), cx);
+        });
+        self.tree_search_input.update(cx, |input, cx| {
+            input.set_placeholder(t!("sidebar.search").to_string(), cx);
         });
         self.routine_find_input.update(cx, |input, cx| {
             input.set_placeholder(t!("routine.find").to_string(), cx);
@@ -4020,6 +4076,10 @@ impl AppView {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         self.theme.is_dark().hash(&mut hasher);
         self.tree_layout.hash(&mut hasher);
+        // The tree's search box filters every row, and while it is active the leaves under a
+        // collapsed database are read too, so its text is part of what the tree shows.
+        self.tree_search.hash(&mut hasher);
+        let searching = !self.tree_search.trim().is_empty();
         // Environment colours change the tree node/subtree backgrounds, so a colour edit must
         // invalidate the cached tree even when nothing else about the connection changed.
         self.connection_colors.hash(&mut hasher);
@@ -4057,7 +4117,7 @@ impl AppView {
                         for category in Category::ALL {
                             database.categories.get(category).hash(&mut hasher);
                         }
-                        if database.expanded {
+                        if database.expanded || searching {
                             match &database.tables {
                                 Loadable::Idle => 0u8.hash(&mut hasher),
                                 Loadable::Loading => 1u8.hash(&mut hasher),
@@ -4073,6 +4133,8 @@ impl AppView {
                                     }
                                 }
                             }
+                        }
+                        if database.expanded {
                             match &database.routines {
                                 Loadable::Idle => 0u8.hash(&mut hasher),
                                 Loadable::Loading => 1u8.hash(&mut hasher),
@@ -4192,6 +4254,8 @@ impl AppView {
             }
         }
         self.object_search_input
+            .update(cx, |input, cx| input.set_theme(theme, cx));
+        self.tree_search_input
             .update(cx, |input, cx| input.set_theme(theme, cx));
         self.user_search_input
             .update(cx, |input, cx| input.set_theme(theme, cx));

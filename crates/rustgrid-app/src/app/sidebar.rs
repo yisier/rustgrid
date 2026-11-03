@@ -58,6 +58,33 @@ struct TreeDatabase {
     opened_schemas: BTreeSet<String>,
     /// The key-value namespaces (Redis key prefixes) under this database.
     namespaces: Loadable<Vec<rustgrid_core::ObjectNamespace>>,
+    /// Whether this snapshot was filtered by the tree's search box. While it is, only 表/视图
+    /// categories are drawn, and only when they hold a matching object.
+    searching: bool,
+}
+
+impl TreeDatabase {
+    /// Whether `category` has a row to draw in this snapshot. Outside a search every category is
+    /// shown; while searching, the tree only carries 表/视图 (the search covers connections,
+    /// databases, schemas and tables, not routines/queries/backups) and only when `schema` holds a
+    /// matching object of that kind.
+    fn shows_category(&self, category: Category, schema: Option<&str>) -> bool {
+        if !self.searching {
+            return true;
+        }
+        let want_view = match category {
+            Category::Tables => false,
+            Category::Views => true,
+            _ => return false,
+        };
+        match &self.tables {
+            Loadable::Loaded(tables) => tables.iter().any(|table| {
+                table.is_view == want_view
+                    && schema.is_none_or(|scope| table.schema.as_deref() == Some(scope))
+            }),
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -78,28 +105,84 @@ fn split_schema(name: &str) -> Option<(String, &str)> {
         .map(|(schema, object)| (schema.to_string(), object))
 }
 
-/// The distinct schema prefixes among the loaded tables/routines. Empty when no object is
-/// schema-qualified, so schema-less engines keep the flat database → category tree.
-fn build_schema_nodes(
-    tables: &Loadable<Vec<TreeTable>>,
-    routines: &Loadable<Vec<RoutineInfo>>,
-) -> Vec<String> {
+/// The distinct schema prefixes among a database's loaded tables/routines, merged with the schema
+/// list loaded when the database was opened (so a freshly created empty schema still appears).
+/// Read from the live node, not from a snapshot, so a search can see every object without cloning
+/// the ones it will not show. Empty when no object is schema-qualified, which keeps schema-less
+/// engines (MySQL/SQLite) on the flat database → category tree.
+fn database_schemas(database: &DatabaseNode) -> Vec<String> {
     let mut names: BTreeSet<String> = BTreeSet::new();
-    if let Loadable::Loaded(items) = tables {
-        for table in items {
-            if let Some(schema) = &table.schema {
-                names.insert(schema.clone());
+    if let Loadable::Loaded(tables) = &database.tables {
+        for table in tables {
+            if let Some((schema, _)) = split_schema(&table.name) {
+                names.insert(schema);
             }
         }
     }
-    if let Loadable::Loaded(items) = routines {
-        for routine in items {
+    if let Loadable::Loaded(routines) = &database.routines {
+        for routine in routines {
             if let Some((schema, _)) = split_schema(&routine.name) {
                 names.insert(schema);
             }
         }
     }
-    names.into_iter().collect()
+    let mut schemas: Vec<String> = names.into_iter().collect();
+    if let Some(Loadable::Loaded(loaded)) = &database.schemas {
+        for name in loaded {
+            if !schemas.contains(name) {
+                schemas.push(name.clone());
+            }
+        }
+        schemas.sort();
+    }
+    schemas
+}
+
+/// One table/view of a snapshot database. `name` is the engine's object name (schema-qualified for
+/// SQL Server/PostgreSQL/Oracle), `display` the bare leaf label drawn under the schema node.
+fn tree_table(table: &rustgrid_core::TableInfo) -> TreeTable {
+    let (schema, object) = match split_schema(&table.name) {
+        Some((schema, object)) => (Some(schema), object.to_string()),
+        None => (None, table.name.clone()),
+    };
+    TreeTable {
+        name: table.name.clone(),
+        display: object,
+        is_view: matches!(table.kind, rustgrid_core::ObjectKind::View),
+        schema,
+    }
+}
+
+/// The tree search box as a filter query: trimmed, lower-cased and with both path separators
+/// folded to the `.` qualified object names use, so a pasted `schema/table` finds `schema.table`.
+/// `None` while the box is empty (the tree is shown as saved).
+fn tree_search_query(text: &str) -> Option<String> {
+    let query = text.trim().to_lowercase().replace(['/', '\\'], ".");
+    (!query.is_empty()).then_some(query)
+}
+
+/// Whether a name contains the search query. `query` is already lower-cased by
+/// [`tree_search_query`]; the name is folded here.
+fn tree_search_matches(query: &str, name: &str) -> bool {
+    name.to_lowercase().contains(query)
+}
+
+/// Whether a table row matches the search: its bare name, its schema-qualified catalog name
+/// (`ORDER.ORDER_INFO`), or — for an engine whose tree has no schema level — `database.table`.
+fn table_search_matches(query: &str, table: &TreeTable, database: &str) -> bool {
+    tree_search_matches(query, &table.display)
+        || tree_search_matches(query, &table.name)
+        || (table.schema.is_none()
+            && tree_search_matches(query, &format!("{database}.{}", table.display)))
+}
+
+/// Whether `group` still holds a connection in the filtered tree, so a group without a match is
+/// not drawn as an empty row while searching.
+fn group_has_visible_connection(group: &ConnectionGroup, connections: &[TreeConnection]) -> bool {
+    group.children.iter().any(|child| match child {
+        GroupEntry::Connection(id) => connections.iter().any(|conn| &conn.id == id),
+        GroupEntry::Group(nested) => group_has_visible_connection(nested, connections),
+    })
 }
 
 /// One saved-query leaf shown under a database's Queries category in the connection tree.
@@ -150,11 +233,15 @@ fn backup_tree_id(connection_index: usize, database_index: usize, backup: &TreeB
     )
 }
 
-fn snapshot_connections(app: &AppView) -> Vec<TreeConnection> {
+/// The tree's rendering snapshot. With `search` set, only the connections, databases, schemas and
+/// tables that match are kept (a name match on a branch keeps its immediate children too, so the
+/// located node is not an empty row); `None` snapshots the tree exactly as it is saved.
+fn snapshot_connections(app: &AppView, search: Option<&str>) -> Vec<TreeConnection> {
+    let searching = search.is_some();
     app.connections
         .iter()
         .enumerate()
-        .map(|(index, node)| {
+        .filter_map(|(index, node)| {
             let status = match &node.status {
                 ConnectionStatus::Connected(_) => TreeStatus::Connected,
                 ConnectionStatus::Connecting => TreeStatus::Connecting,
@@ -165,6 +252,10 @@ fn snapshot_connections(app: &AppView) -> Vec<TreeConnection> {
                 ConnectionStatus::Failed(message) => Some(message.clone()),
                 _ => None,
             };
+            let key_value = app.driver_supports(index, DriverCapability::KeyValue);
+            let name = node.profile.name.clone();
+            let connection_matches =
+                search.is_some_and(|query| tree_search_matches(query, &name));
             let databases = match &node.databases {
                 Loadable::Idle => Loadable::Idle,
                 Loadable::Loading => Loadable::Loading,
@@ -173,97 +264,34 @@ fn snapshot_connections(app: &AppView) -> Vec<TreeConnection> {
                     databases
                         .iter()
                         .enumerate()
-                        .map(|(index, database)| {
-                            // Leaf tables are only read when the database is expanded.
-                            let tables = if database.expanded {
-                                match &database.tables {
-                                    Loadable::Idle => Loadable::Idle,
-                                    Loadable::Loading => Loadable::Loading,
-                                    Loadable::Failed(error) => Loadable::Failed(error.clone()),
-                                    Loadable::Loaded(tables) => Loadable::Loaded(
-                                        tables
-                                            .iter()
-                                            .map(|table| {
-                                                let (schema, object) =
-                                                    match split_schema(&table.name) {
-                                                        Some((schema, object)) => {
-                                                            (Some(schema), object.to_string())
-                                                        }
-                                                        None => (None, table.name.clone()),
-                                                    };
-                                                TreeTable {
-                                                    name: table.name.clone(),
-                                                    display: object,
-                                                    is_view: matches!(
-                                                        table.kind,
-                                                        rustgrid_core::ObjectKind::View
-                                                    ),
-                                                    schema,
-                                                }
-                                            })
-                                            .collect(),
-                                    ),
-                                }
-                            } else {
-                                Loadable::Idle
-                            };
-                            // Routine leaves are only read when the Functions category is expanded.
-                            let routines = if database.expanded {
-                                match &database.routines {
-                                    Loadable::Idle => Loadable::Idle,
-                                    Loadable::Loading => Loadable::Loading,
-                                    Loadable::Failed(error) => Loadable::Failed(error.clone()),
-                                    Loadable::Loaded(routines) => {
-                                        Loadable::Loaded(routines.clone())
-                                    }
-                                }
-                            } else {
-                                Loadable::Idle
-                            };
-                            // Merge the schemas derived from object names with the database's own
-                            // schema list (loaded on open), so an empty/newly created schema
-                            // still appears in the tree.
-                            let mut schemas = build_schema_nodes(&tables, &routines);
-                            if let Some(Loadable::Loaded(loaded)) = &database.schemas {
-                                for name in loaded {
-                                    if !schemas.contains(name) {
-                                        schemas.push(name.clone());
-                                    }
-                                }
-                                schemas.sort();
-                            }
-                            TreeDatabase {
-                                index,
-                                name: database.name.clone(),
-                                opened: database.opened,
-                                expanded: database.expanded,
-                                categories: database.categories,
-                                tables,
-                                routines,
-                                schemas,
-                                expanded_schemas: database.expanded_schemas.clone(),
-                                opened_schemas: database.opened_schemas.clone(),
-                                namespaces: match &database.namespaces {
-                                    Loadable::Idle => Loadable::Idle,
-                                    Loadable::Loading => Loadable::Loading,
-                                    Loadable::Failed(error) => Loadable::Failed(error.clone()),
-                                    Loadable::Loaded(namespaces) => {
-                                        Loadable::Loaded(namespaces.clone())
-                                    }
-                                },
-                            }
+                        .filter_map(|(database_index, database)| {
+                            snapshot_database(
+                                database,
+                                database_index,
+                                search,
+                                key_value,
+                                connection_matches,
+                            )
                         })
-                        .collect(),
+                        .collect::<Vec<TreeDatabase>>(),
                 ),
             };
+            // A connection with no database left under it is not part of the filtered tree — unless
+            // its own name matched, which keeps it as the located node.
+            if searching
+                && !connection_matches
+                && !matches!(&databases, Loadable::Loaded(databases) if !databases.is_empty())
+            {
+                return None;
+            }
             let descriptor = app
                 .registry
                 .get(&node.profile.driver)
                 .map(|driver| driver.descriptor());
-            TreeConnection {
+            Some(TreeConnection {
                 index,
                 id: node.profile.id.clone(),
-                name: node.profile.name.clone(),
+                name,
                 icon: descriptor
                     .as_ref()
                     .map_or("icons/connection.svg", |descriptor| descriptor.icon),
@@ -273,10 +301,15 @@ fn snapshot_connections(app: &AppView) -> Vec<TreeConnection> {
                 supports_routines: app.driver_supports(index, DriverCapability::Routines),
                 supports_schemas: app.driver_supports(index, DriverCapability::Schemas),
                 supports_backups: app.driver_supports_backup(index),
-                supports_key_value: app.driver_supports(index, DriverCapability::KeyValue),
+                supports_key_value: key_value,
                 status,
                 failed_error,
-                expanded: node.expanded,
+                expanded: if searching {
+                    connection_matches
+                        || matches!(&databases, Loadable::Loaded(databases) if !databases.is_empty())
+                } else {
+                    node.expanded
+                },
                 color: app.connection_color(index),
                 databases,
                 saved_queries: app
@@ -318,9 +351,154 @@ fn snapshot_connections(app: &AppView) -> Vec<TreeConnection> {
                             }),
                     )
                     .collect(),
-            }
+            })
         })
         .collect()
+}
+
+/// One database of the snapshot. While the tree is filtered this returns `None` when neither the
+/// database, one of its schemas/namespaces nor one of its tables matches; a kept node only carries
+/// what survived and is expanded down to the match. `parent_matched` is a matching connection,
+/// whose immediate children stay visible so the located connection is not an empty row.
+fn snapshot_database(
+    database: &DatabaseNode,
+    index: usize,
+    search: Option<&str>,
+    key_value: bool,
+    parent_matched: bool,
+) -> Option<TreeDatabase> {
+    let searching = search.is_some();
+    let query = search.unwrap_or_default();
+    let database_matches = searching && tree_search_matches(query, &database.name);
+
+    // Leaf tables are only read when the database is expanded — and always while searching, which
+    // has to see objects under databases the user never opened.
+    let tables: Loadable<Vec<TreeTable>> = if searching && !key_value {
+        match &database.tables {
+            Loadable::Idle => Loadable::Idle,
+            Loadable::Loading => Loadable::Loading,
+            Loadable::Failed(error) => Loadable::Failed(error.clone()),
+            Loadable::Loaded(tables) => Loadable::Loaded(
+                tables
+                    .iter()
+                    .map(tree_table)
+                    .filter(|table| {
+                        table_search_matches(query, table, &database.name)
+                            // A schema-less engine's database is its schema, so a database match
+                            // brings that schema's tables into the result.
+                            || (database_matches && table.schema.is_none())
+                    })
+                    .collect(),
+            ),
+        }
+    } else if database.expanded {
+        match &database.tables {
+            Loadable::Idle => Loadable::Idle,
+            Loadable::Loading => Loadable::Loading,
+            Loadable::Failed(error) => Loadable::Failed(error.clone()),
+            Loadable::Loaded(tables) => Loadable::Loaded(tables.iter().map(tree_table).collect()),
+        }
+    } else {
+        Loadable::Idle
+    };
+    // Routine leaves are only read when the Functions category is expanded (the tree search covers
+    // tables, not routines).
+    let routines = if database.expanded {
+        match &database.routines {
+            Loadable::Idle => Loadable::Idle,
+            Loadable::Loading => Loadable::Loading,
+            Loadable::Failed(error) => Loadable::Failed(error.clone()),
+            Loadable::Loaded(routines) => Loadable::Loaded(routines.clone()),
+        }
+    } else {
+        Loadable::Idle
+    };
+    let mut schemas = database_schemas(database);
+    // A schema with no matching table is only kept while its own name matches (or its database's
+    // name did, which keeps the database's direct children).
+    if searching && !database_matches {
+        schemas.retain(|schema| {
+            tree_search_matches(query, schema)
+                || matches!(&tables, Loadable::Loaded(tables)
+                    if tables.iter().any(|table| table.schema.as_deref() == Some(schema.as_str())))
+        });
+    }
+    let namespaces: Loadable<Vec<rustgrid_core::ObjectNamespace>> = match &database.namespaces {
+        Loadable::Idle => Loadable::Idle,
+        Loadable::Loading => Loadable::Loading,
+        Loadable::Failed(error) => Loadable::Failed(error.clone()),
+        Loadable::Loaded(namespaces) => Loadable::Loaded(
+            namespaces
+                .iter()
+                .filter(|namespace| !searching || tree_search_matches(query, &namespace.name))
+                .cloned()
+                .collect(),
+        ),
+    };
+
+    // A key-value database's tables are its keys; they are not tree rows, so a key match does not
+    // keep a database (the key list narrows by namespace instead).
+    let tables_match =
+        !key_value && matches!(&tables, Loadable::Loaded(tables) if !tables.is_empty());
+    let schemas_match = !schemas.is_empty();
+    let namespaces_match =
+        matches!(&namespaces, Loadable::Loaded(namespaces) if !namespaces.is_empty());
+    if searching
+        && !parent_matched
+        && !database_matches
+        && !tables_match
+        && !schemas_match
+        && !namespaces_match
+    {
+        return None;
+    }
+
+    let expanded = if searching {
+        database_matches || tables_match || schemas_match || namespaces_match
+    } else {
+        database.expanded
+    };
+    let expanded_schemas = if searching {
+        schemas
+            .iter()
+            .filter(|schema| {
+                tree_search_matches(query, schema)
+                    || matches!(&tables, Loadable::Loaded(tables)
+                    if tables.iter().any(|table| {
+                        table.schema.as_deref() == Some(schema.as_str())
+                    }))
+            })
+            .cloned()
+            .collect()
+    } else {
+        database.expanded_schemas.clone()
+    };
+    // Only 表/视图 are drawn while searching (see `shows_category`), and those open straight onto
+    // their matches.
+    let categories = if searching {
+        CategoryExpansion {
+            tables: true,
+            views: true,
+            ..database.categories
+        }
+    } else {
+        database.categories
+    };
+
+    Some(TreeDatabase {
+        index,
+        name: database.name.clone(),
+        opened: database.opened,
+        expanded,
+        categories,
+        tables,
+        routines,
+        schemas,
+        expanded_schemas,
+        opened_schemas: database.opened_schemas.clone(),
+        namespaces,
+        searching,
+    })
 }
 
 /// What a tree row does when the keyboard expands, collapses or opens it.
@@ -425,6 +603,7 @@ impl TreePane {
             row_bounds: Rc::new(std::cell::RefCell::new(std::collections::HashMap::new())),
             typeahead: String::new(),
             typeahead_at: None,
+            searching: false,
             nav_generation: 0,
         }
     }
@@ -1239,6 +1418,9 @@ impl TreePane {
                             // Schema-less engines (MySQL/SQLite), or a schema engine whose database
                             // has no user schemas yet, keep the flat category list.
                             for category in Category::ALL {
+                                if !database.shows_category(category, None) {
+                                    continue;
+                                }
                                 if category == Category::Functions && !supports_routines {
                                     continue;
                                 }
@@ -1550,6 +1732,9 @@ impl TreePane {
             sub = self.nested(|| {
                 let mut sub = sub;
                 for category in Category::ALL {
+                    if !database.shows_category(category, Some(schema)) {
+                        continue;
+                    }
                     if category == Category::Functions && !supports_routines {
                         continue;
                     }
@@ -2438,6 +2623,12 @@ impl TreePane {
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let theme = self.theme;
+        // A group with no surviving connection is not part of the filtered tree; with a match it
+        // opens so the match is visible.
+        if self.searching && !group_has_visible_connection(group, connections) {
+            return div().into_any_element();
+        }
+        let expanded = group.expanded || self.searching;
         let id = group.id;
         let row_id = format!("group-{id}");
         let click_id = row_id.clone();
@@ -2581,7 +2772,7 @@ impl TreePane {
                     .on_click(cx.listener(move |_this, _event, _window, cx| {
                         let _ = toggle_app.update(cx, |app, cx| app.toggle_group(id, cx));
                     }))
-                    .child(tree_chevron(group.expanded, theme.chevron)),
+                    .child(tree_chevron(expanded, theme.chevron)),
             )
             .child(tree_icon("icons/folder.svg", theme.icon_group))
             .child(label);
@@ -2590,13 +2781,13 @@ impl TreePane {
         let row = self.nav_row(
             row,
             NavRow::new(row_id, group.name.clone()).branch(
-                group.expanded,
+                expanded,
                 Rc::new(move |this, _window, cx| this.activate_tree_id(&toggle_id, cx)),
             ),
         );
 
         let mut body = div().flex().flex_col().w_full().child(row);
-        if group.expanded {
+        if expanded {
             let children = self.nested(|| {
                 let mut children = div().flex().flex_col().w_full().pl(px(12.0));
                 for child in &group.children {
@@ -2617,14 +2808,25 @@ impl TreePane {
 
 impl Render for TreePane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let (theme, connections, layout, rename, group_rename, group_renaming, tree_selection) = {
+        let (
+            theme,
+            connections,
+            layout,
+            rename,
+            group_rename,
+            group_renaming,
+            tree_selection,
+            search_query,
+            search_pending,
+        ) = {
             let Some(app) = self.app.upgrade() else {
                 return div().into_any_element();
             };
             let app = app.read(cx);
+            let search_query = tree_search_query(&app.tree_search);
             (
                 app.theme,
-                snapshot_connections(app),
+                snapshot_connections(app, search_query.as_deref()),
                 app.tree_layout.clone(),
                 app.rename_row(RowPane::Tree),
                 app.group_rename
@@ -2632,9 +2834,12 @@ impl Render for TreePane {
                     .map(|edit| (edit.id, edit.input.clone())),
                 app.group_rename.is_some(),
                 app.tree_selection.items(),
+                search_query,
+                app.tree_search_pending(),
             )
         };
         self.theme = theme;
+        self.searching = search_query.is_some();
         self.rename_row = rename;
         self.group_renaming = group_renaming;
         // A database/schema/object click moves the single selection off the connections: the
@@ -2655,7 +2860,7 @@ impl Render for TreePane {
         self.nav_depth.set(0);
 
         let mut list = div().flex().flex_col().w_full();
-        if layout.is_empty() {
+        if layout.is_empty() && !self.searching {
             list = list.child(
                 div()
                     .w_full()
@@ -2669,6 +2874,21 @@ impl Render for TreePane {
                 list.child(self.render_tree_entry(entry, &connections, group_rename.as_ref(), cx));
         }
         self.nav_rows = std::mem::take(&mut *self.nav_build.borrow_mut());
+        // A filtered tree with no rows says why: either the crawl behind the search is still
+        // loading the databases/table lists, or nothing matches the query.
+        if self.searching && self.nav_rows.is_empty() {
+            list = div().flex().flex_col().w_full().child(
+                div()
+                    .w_full()
+                    .p_2()
+                    .text_color(rgb(theme.text_muted))
+                    .child(if search_pending {
+                        t!("common.loading").to_string()
+                    } else {
+                        t!("sidebar.no_match").to_string()
+                    }),
+            );
+        }
         self.visible_ids = self.nav_rows.iter().map(|row| row.id.clone()).collect();
         // Rows that are no longer drawn must not keep stale bounds.
         let drawn: BTreeSet<&str> = self.nav_rows.iter().map(|row| row.id.as_str()).collect();
@@ -2790,8 +3010,8 @@ impl Render for TreePane {
                     )
                     .child(list),
             )
-            // gpui does not paint a scrollbar for an overflow container; this one can be dragged,
-            // and clicking its track jumps there.
+            // gpui does not paint a scrollbar for an overflow container; this one can be
+            // dragged, and clicking its track jumps there.
             .child(
                 Scrollbar::vertical(&self.scroll)
                     .mode(ScrollbarMode::Scrolling)
@@ -2901,7 +3121,42 @@ pub(super) fn tree_marquee_element(
 
 #[cfg(test)]
 mod nav_tests {
-    use super::{nav_parent, typeahead_target};
+    use super::{
+        BTreeSet, Category, CategoryExpansion, DatabaseNode, Loadable, TreeTable, nav_parent,
+        snapshot_database, table_search_matches, tree_search_query, typeahead_target,
+    };
+
+    fn table(name: &str, kind: rustgrid_core::ObjectKind) -> rustgrid_core::TableInfo {
+        rustgrid_core::TableInfo {
+            name: name.into(),
+            kind,
+            updatable: false,
+        }
+    }
+
+    fn database(
+        name: &str,
+        tables: Vec<rustgrid_core::TableInfo>,
+        schemas: &[&str],
+    ) -> DatabaseNode {
+        DatabaseNode {
+            name: name.into(),
+            tables: Loadable::Loaded(tables),
+            table_statuses: Loadable::Idle,
+            routines: Loadable::Idle,
+            opened: true,
+            expanded: false,
+            categories: CategoryExpansion::default(),
+            expanded_schemas: BTreeSet::new(),
+            opened_schemas: BTreeSet::new(),
+            schemas: Some(Loadable::Loaded(
+                schemas.iter().map(|schema| schema.to_string()).collect(),
+            )),
+            object_cursor: None,
+            object_pattern: None,
+            namespaces: Loadable::Idle,
+        }
+    }
 
     #[test]
     fn a_rows_parent_is_the_nearest_shallower_row_above_it() {
@@ -2925,5 +3180,156 @@ mod nav_tests {
         assert_eq!(typeahead_target(&labels, Some(1), "customer_"), Some(3));
         assert_eq!(typeahead_target(&labels, Some(0), "zz"), None);
         assert_eq!(typeahead_target(&[], None, "a"), None);
+    }
+
+    #[test]
+    fn the_search_query_is_trimmed_lower_cased_and_path_separator_aware() {
+        assert_eq!(
+            tree_search_query("  ORDER.ORDER_INFO ").as_deref(),
+            Some("order.order_info")
+        );
+        assert_eq!(
+            tree_search_query("ORDER/ORDER_INFO").as_deref(),
+            Some("order.order_info")
+        );
+        assert_eq!(tree_search_query("   "), None);
+        assert_eq!(tree_search_query(""), None);
+    }
+
+    #[test]
+    fn a_table_matches_its_bare_schema_qualified_or_database_qualified_name() {
+        let table = TreeTable {
+            name: "ORDER.ORDER_INFO".into(),
+            display: "ORDER_INFO".into(),
+            is_view: false,
+            schema: Some("ORDER".into()),
+        };
+        let query = tree_search_query("ORDER.ORDER_INFO").unwrap();
+        assert!(table_search_matches(&query, &table, "shop"));
+        let query = tree_search_query("order_info").unwrap();
+        assert!(table_search_matches(&query, &table, "shop"));
+        let query = tree_search_query("sales").unwrap();
+        assert!(!table_search_matches(&query, &table, "shop"));
+
+        // A schema-less engine's database is the qualifier the tree does not show.
+        let table = TreeTable {
+            name: "users".into(),
+            display: "users".into(),
+            is_view: false,
+            schema: None,
+        };
+        let query = tree_search_query("shop.users").unwrap();
+        assert!(table_search_matches(&query, &table, "shop"));
+        let query = tree_search_query("archive.users").unwrap();
+        assert!(!table_search_matches(&query, &table, "shop"));
+    }
+
+    #[test]
+    fn a_schema_qualified_search_keeps_the_table_and_its_branch() {
+        let database = database(
+            "shop",
+            vec![
+                table("public.users", rustgrid_core::ObjectKind::Table),
+                table("sales.orders", rustgrid_core::ObjectKind::Table),
+                table("ORDER.ORDER_INFO", rustgrid_core::ObjectKind::Table),
+                table("ORDER.v_order", rustgrid_core::ObjectKind::View),
+            ],
+            &["public", "sales", "ORDER", "empty"],
+        );
+        let query = tree_search_query("ORDER.ORDER_INFO").unwrap();
+        let snapshot =
+            snapshot_database(&database, 2, Some(&query), false, false).expect("a match");
+        assert!(snapshot.searching);
+        assert!(snapshot.expanded);
+        assert_eq!(snapshot.index, 2);
+        assert_eq!(snapshot.schemas, vec!["ORDER".to_string()]);
+        let Loadable::Loaded(tables) = &snapshot.tables else {
+            panic!("tables should be loaded");
+        };
+        assert_eq!(
+            tables
+                .iter()
+                .map(|table| table.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ORDER.ORDER_INFO"]
+        );
+        assert!(snapshot.expanded_schemas.contains("ORDER"));
+        // 表 opens straight onto its match; 视图 has none and is not drawn at all.
+        assert!(snapshot.shows_category(Category::Tables, Some("ORDER")));
+        assert!(!snapshot.shows_category(Category::Views, Some("ORDER")));
+        assert!(!snapshot.shows_category(Category::Functions, Some("ORDER")));
+    }
+
+    #[test]
+    fn searching_a_schema_name_lists_its_tables_and_keeps_an_empty_schema() {
+        let database = database(
+            "shop",
+            vec![
+                table("public.users", rustgrid_core::ObjectKind::Table),
+                table("sales.orders", rustgrid_core::ObjectKind::Table),
+            ],
+            &["public", "sales", "empty"],
+        );
+        let query = tree_search_query("sales").unwrap();
+        let snapshot =
+            snapshot_database(&database, 0, Some(&query), false, false).expect("a match");
+        let Loadable::Loaded(tables) = &snapshot.tables else {
+            panic!("tables should be loaded");
+        };
+        assert_eq!(
+            tables
+                .iter()
+                .map(|table| table.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sales.orders"]
+        );
+        assert_eq!(snapshot.schemas, vec!["sales".to_string()]);
+        assert!(snapshot.expanded_schemas.contains("sales"));
+
+        // A schema with no objects still matches by its own name.
+        let query = tree_search_query("empty").unwrap();
+        let snapshot =
+            snapshot_database(&database, 0, Some(&query), false, false).expect("a match");
+        assert_eq!(snapshot.schemas, vec!["empty".to_string()]);
+        assert!(snapshot.expanded);
+    }
+
+    #[test]
+    fn a_schema_less_database_match_lists_its_tables() {
+        let database = database(
+            "shop",
+            vec![
+                table("users", rustgrid_core::ObjectKind::Table),
+                table("orders", rustgrid_core::ObjectKind::Table),
+            ],
+            &[],
+        );
+        let query = tree_search_query("shop").unwrap();
+        let snapshot =
+            snapshot_database(&database, 0, Some(&query), false, false).expect("a match");
+        let Loadable::Loaded(tables) = &snapshot.tables else {
+            panic!("tables should be loaded");
+        };
+        assert_eq!(tables.len(), 2);
+        assert!(snapshot.expanded);
+    }
+
+    #[test]
+    fn a_matched_connection_keeps_its_databases_but_does_not_expand_them() {
+        let database = database(
+            "shop",
+            vec![table("public.users", rustgrid_core::ObjectKind::Table)],
+            &["public"],
+        );
+        let query = tree_search_query("nothing").unwrap();
+        assert!(snapshot_database(&database, 0, Some(&query), false, false).is_none());
+        let snapshot = snapshot_database(&database, 0, Some(&query), false, true)
+            .expect("a child of a matched connection");
+        assert!(!snapshot.expanded);
+        let Loadable::Loaded(tables) = &snapshot.tables else {
+            panic!("tables should be filtered, not idle");
+        };
+        assert!(tables.is_empty());
+        assert!(snapshot.schemas.is_empty());
     }
 }

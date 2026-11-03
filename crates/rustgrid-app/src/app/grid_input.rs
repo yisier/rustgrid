@@ -950,11 +950,17 @@ impl GridView {
     /// editor: an empty field on a `NULL` cell stages nothing, otherwise it becomes an empty
     /// string; a value that matches the page's own value drops the staged edit instead of keeping
     /// a no-op. The edit is keyed by display column, so it shows up in the grid cell too.
+    ///
+    /// `notify` is `false` for a plain keystroke: repainting the grid (which clones its page) and
+    /// the form pane on every character is what made form typing lag. The first/last change of a
+    /// run still repaints (an edit appears or disappears), and leaving the field repaints again
+    /// through [`Self::form_field_committed`].
     pub(super) fn stage_form_edit(
         &mut self,
         row: usize,
         col: usize,
         text: &str,
+        notify: bool,
         cx: &mut Context<'_, Self>,
     ) {
         if !self.state.editable || row >= self.state.rows.len() || col >= self.state.visible_columns
@@ -986,10 +992,30 @@ impl GridView {
         if previous == Some(desired.clone()) {
             return;
         }
+        let structural = previous.is_none();
         self.push_form_undo(row, col, previous);
         self.state.edits.insert((row, col), desired);
         self.state.redo.clear();
+        if notify || structural {
+            cx.notify();
+        }
+    }
+
+    /// A row-form field lost focus: repaint once so the grid cell behind it shows the final staged
+    /// value (the keystrokes themselves stage without notifying).
+    pub(super) fn form_field_committed(&mut self, cx: &mut Context<'_, Self>) {
         cx.notify();
+    }
+
+    /// The page's own text for a row-form field, ignoring any staged edit. Escape puts this back
+    /// into the field after dropping the edit.
+    pub(super) fn form_original_text(&self, row: usize, col: usize) -> String {
+        self.state
+            .rows
+            .get(row)
+            .and_then(|values| values.get(self.state.source_col(col)))
+            .map(|cell| cell.as_edit_string())
+            .unwrap_or_default()
     }
 
     /// Record the first edit of a continuous run on one cell, so one Ctrl+Z restores the value
