@@ -1,9 +1,5 @@
 use super::*;
 
-/// How long the connection-tree search waits after the last keystroke before it loads the
-/// databases and table lists it has to filter (a crawl of every connection is not free).
-const TREE_SEARCH_LOAD_DELAY: Duration = Duration::from_millis(300);
-
 impl AppView {
     pub(super) fn connection_arc(&self, index: usize) -> Option<Arc<dyn Connection>> {
         match &self.connections.get(index)?.status {
@@ -21,19 +17,15 @@ impl AppView {
         })
     }
 
-    /// Set the connection tree's search text. The tree filters to matching connections, databases,
-    /// schemas and tables (a table also matches `schema.table`), and the first keystroke schedules
-    /// the debounced crawl that loads the databases/table lists the filter needs.
+    /// Set the connection tree's search text. The tree filters what is already loaded — its
+    /// connections, databases, schemas and tables (a table matches its bare name,
+    /// `schema.table` and `database.schema.table`) — and never issues a catalog query of its own:
+    /// a database has to be opened (which loads its objects) before its tables are searchable.
     pub(super) fn set_tree_search(&mut self, text: String, cx: &mut Context<'_, Self>) {
         if self.tree_search == text {
             return;
         }
         self.tree_search = text;
-        // A newer keystroke supersedes the pending crawl; only the latest generation runs.
-        self.tree_search_generation = self.tree_search_generation.wrapping_add(1);
-        if !self.tree_search.trim().is_empty() {
-            self.schedule_tree_search_load(cx);
-        }
         self.tree_pane.update(cx, |_, cx| cx.notify());
         cx.notify();
     }
@@ -41,154 +33,11 @@ impl AppView {
     /// Clear the tree search (Esc, or the field's clear button once it has reported `""`), showing
     /// the whole tree again.
     pub(super) fn clear_tree_search(&mut self, cx: &mut Context<'_, Self>) {
-        self.tree_search_generation = self.tree_search_generation.wrapping_add(1);
         self.tree_search.clear();
         self.tree_search_input
             .update(cx, |input, cx| input.set_text(String::new(), cx));
         self.tree_pane.update(cx, |_, cx| cx.notify());
         cx.notify();
-    }
-
-    /// Wait for the user to stop typing, then load whatever the search still needs. Typing a name
-    /// must not crawl every connection on its first letter, hence the debounce.
-    fn schedule_tree_search_load(&mut self, cx: &mut Context<'_, Self>) {
-        let generation = self.tree_search_generation;
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(TREE_SEARCH_LOAD_DELAY).await;
-            let _ = this.update(cx, |this, cx| {
-                if this.tree_search_generation == generation && !this.tree_search.trim().is_empty()
-                {
-                    this.load_tree_search_objects(cx);
-                }
-            });
-        })
-        .detach();
-    }
-
-    /// Load the databases and table lists a search has to see. Search filters every connected
-    /// connection, so a database whose list was never opened is loaded here; key-value engines are
-    /// left alone (their keys are not tree rows). Both loads are no-ops when already in flight or
-    /// loaded, so this can be called again whenever data lands.
-    pub(super) fn load_tree_search_objects(&mut self, cx: &mut Context<'_, Self>) {
-        if self.tree_search.trim().is_empty() {
-            return;
-        }
-        let mut databases_to_load = Vec::new();
-        let mut tables_to_load = Vec::new();
-        for (index, node) in self.connections.iter().enumerate() {
-            if !matches!(node.status, ConnectionStatus::Connected(_))
-                || self.driver_supports(index, DriverCapability::KeyValue)
-            {
-                continue;
-            }
-            match &node.databases {
-                // Only never-loaded databases are fetched here: a failed listing is retried by
-                // 刷新, not by this crawl, whose completion calls back into it (a `Failed` entry
-                // would otherwise retry forever).
-                Loadable::Idle => databases_to_load.push(index),
-                Loadable::Loaded(databases) => {
-                    for (database_index, database) in databases.iter().enumerate() {
-                        if matches!(database.tables, Loadable::Idle | Loadable::Failed(_)) {
-                            tables_to_load.push((index, database_index));
-                        }
-                    }
-                }
-                Loadable::Loading | Loadable::Failed(_) => {}
-            }
-        }
-        for index in databases_to_load {
-            self.load_databases(index, cx);
-        }
-        for (connection_index, database_index) in tables_to_load {
-            self.load_tables_for_search(connection_index, database_index, cx);
-        }
-    }
-
-    /// Whether the search's crawl still has work in flight, so an empty filtered tree can show
-    /// 加载中 instead of 无匹配项.
-    pub(super) fn tree_search_pending(&self) -> bool {
-        self.connections.iter().enumerate().any(|(index, node)| {
-            if !matches!(node.status, ConnectionStatus::Connected(_))
-                || self.driver_supports(index, DriverCapability::KeyValue)
-            {
-                return false;
-            }
-            match &node.databases {
-                Loadable::Idle | Loadable::Loading => true,
-                Loadable::Loaded(databases) => databases
-                    .iter()
-                    .any(|database| matches!(database.tables, Loadable::Idle | Loadable::Loading)),
-                Loadable::Failed(_) => false,
-            }
-        })
-    }
-
-    /// Load one database's object list for the tree search. Unlike [`Self::load_tables`] it skips
-    /// the overview pass (`table_statuses` runs a `COUNT(*)` per table on MySQL), because the
-    /// search only needs the names.
-    fn load_tables_for_search(
-        &mut self,
-        connection_index: usize,
-        database_index: usize,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let Some(connection) = self.connection_arc(connection_index) else {
-            return;
-        };
-        let Some(database_name) =
-            self.connections
-                .get(connection_index)
-                .and_then(|node| match &node.databases {
-                    Loadable::Loaded(databases) => databases
-                        .get(database_index)
-                        .map(|database| database.name.clone()),
-                    _ => None,
-                })
-        else {
-            return;
-        };
-        if let Some(node) = self.connections.get_mut(connection_index)
-            && let Loadable::Loaded(databases) = &mut node.databases
-            && let Some(database) = databases.get_mut(database_index)
-        {
-            database.tables = Loadable::Loading;
-        } else {
-            return;
-        }
-
-        let runtime = self.runtime.clone();
-        cx.spawn(async move |this, cx| {
-            let tables = match runtime
-                .spawn(async move {
-                    connection
-                        .list_objects_page(&database_name, None, None)
-                        .await
-                })
-                .await
-            {
-                Ok(inner) => inner,
-                Err(error) => Err(Error::other(error)),
-            };
-            let _ = this.update(cx, |view, cx| {
-                if let Some(node) = view.connections.get_mut(connection_index)
-                    && let Loadable::Loaded(databases) = &mut node.databases
-                    && let Some(database) = databases.get_mut(database_index)
-                {
-                    match tables {
-                        Ok((tables, cursor)) => {
-                            database.tables = Loadable::Loaded(tables);
-                            database.object_cursor = cursor;
-                        }
-                        Err(error) => database.tables = Loadable::Failed(error.to_string()),
-                    }
-                }
-                view.completion_generation = view.completion_generation.wrapping_add(1);
-                view.refresh_completion_catalog();
-                view.notify_object_pane(cx);
-                cx.notify();
-            });
-        })
-        .detach();
     }
 
     /// The connection the active tab belongs to, falling back to the tree's current selection.
@@ -905,9 +754,6 @@ impl AppView {
                         );
                     }
                 }
-                // A search that was waiting for this connection's database list (or for a
-                // connection that just finished connecting) can now load its table lists.
-                view.load_tree_search_objects(cx);
             });
         })
         .detach();
@@ -946,14 +792,7 @@ impl AppView {
                 database.opened = true;
                 database.expanded = true;
                 just_opened = true;
-                if matches!(database.tables, Loadable::Idle | Loadable::Failed(_))
-                    // The tree search loads a database's object names without the overview pass
-                    // (`table_statuses`). Opening it afterwards must fetch those columns too.
-                    || matches!(
-                        database.table_statuses,
-                        Loadable::Idle | Loadable::Failed(_)
-                    )
-                {
+                if matches!(database.tables, Loadable::Idle | Loadable::Failed(_)) {
                     should_load = true;
                 }
                 if supports_key_value

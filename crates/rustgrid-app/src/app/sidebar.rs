@@ -168,12 +168,25 @@ fn tree_search_matches(query: &str, name: &str) -> bool {
 }
 
 /// Whether a table row matches the search: its bare name, its schema-qualified catalog name
-/// (`ORDER.ORDER_INFO`), or — for an engine whose tree has no schema level — `database.table`.
+/// (`ORDER.ORDER_INFO`), its fully-qualified `database.schema.table` (`shop.ORDER.ORDER_INFO`), or
+/// — for an engine whose tree has no schema level — `database.table`.
 fn table_search_matches(query: &str, table: &TreeTable, database: &str) -> bool {
-    tree_search_matches(query, &table.display)
-        || tree_search_matches(query, &table.name)
-        || (table.schema.is_none()
-            && tree_search_matches(query, &format!("{database}.{}", table.display)))
+    if tree_search_matches(query, &table.display) || tree_search_matches(query, &table.name) {
+        return true;
+    }
+    match &table.schema {
+        Some(schema) => {
+            tree_search_matches(query, &format!("{database}.{schema}.{}", table.display))
+        }
+        None => tree_search_matches(query, &format!("{database}.{}", table.display)),
+    }
+}
+
+/// Whether a schema row matches the search: its own name or `database.schema`. Tables under a
+/// matched schema also match through their qualified names, so a schema hit lists its objects.
+fn schema_search_matches(query: &str, database: &str, schema: &str) -> bool {
+    tree_search_matches(query, schema)
+        || tree_search_matches(query, &format!("{database}.{schema}"))
 }
 
 /// Whether `group` still holds a connection in the filtered tree, so a group without a match is
@@ -371,9 +384,14 @@ fn snapshot_database(
     let query = search.unwrap_or_default();
     let database_matches = searching && tree_search_matches(query, &database.name);
 
-    // Leaf tables are only read when the database is expanded — and always while searching, which
-    // has to see objects under databases the user never opened.
-    let tables: Loadable<Vec<TreeTable>> = if searching && !key_value {
+    // Leaf tables are read when the database is expanded, and while searching for an opened
+    // database even if it is collapsed: opening it already loaded the objects, and a hit expands
+    // the branch again. A database that was never opened keeps its tables `Idle` — the search
+    // never issues a catalog query of its own.
+    let read_tables = database.expanded || (searching && !key_value && database.opened);
+    let tables: Loadable<Vec<TreeTable>> = if !read_tables {
+        Loadable::Idle
+    } else {
         match &database.tables {
             Loadable::Idle => Loadable::Idle,
             Loadable::Loading => Loadable::Loading,
@@ -383,7 +401,8 @@ fn snapshot_database(
                     .iter()
                     .map(tree_table)
                     .filter(|table| {
-                        table_search_matches(query, table, &database.name)
+                        !(searching && !key_value)
+                            || table_search_matches(query, table, &database.name)
                             // A schema-less engine's database is its schema, so a database match
                             // brings that schema's tables into the result.
                             || (database_matches && table.schema.is_none())
@@ -391,15 +410,6 @@ fn snapshot_database(
                     .collect(),
             ),
         }
-    } else if database.expanded {
-        match &database.tables {
-            Loadable::Idle => Loadable::Idle,
-            Loadable::Loading => Loadable::Loading,
-            Loadable::Failed(error) => Loadable::Failed(error.clone()),
-            Loadable::Loaded(tables) => Loadable::Loaded(tables.iter().map(tree_table).collect()),
-        }
-    } else {
-        Loadable::Idle
     };
     // Routine leaves are only read when the Functions category is expanded (the tree search covers
     // tables, not routines).
@@ -413,12 +423,16 @@ fn snapshot_database(
     } else {
         Loadable::Idle
     };
-    let mut schemas = database_schemas(database);
-    // A schema with no matching table is only kept while its own name matches (or its database's
-    // name did, which keeps the database's direct children).
+    let mut schemas = if database.opened || database.expanded {
+        database_schemas(database)
+    } else {
+        Vec::new()
+    };
+    // A schema with no matching table is only kept while its own name (or `database.schema`)
+    // matches, or its database's name did, which keeps the database's direct children.
     if searching && !database_matches {
         schemas.retain(|schema| {
-            tree_search_matches(query, schema)
+            schema_search_matches(query, &database.name, schema)
                 || matches!(&tables, Loadable::Loaded(tables)
                     if tables.iter().any(|table| table.schema.as_deref() == Some(schema.as_str())))
         });
@@ -462,7 +476,7 @@ fn snapshot_database(
         schemas
             .iter()
             .filter(|schema| {
-                tree_search_matches(query, schema)
+                schema_search_matches(query, &database.name, schema)
                     || matches!(&tables, Loadable::Loaded(tables)
                     if tables.iter().any(|table| {
                         table.schema.as_deref() == Some(schema.as_str())
@@ -2817,7 +2831,6 @@ impl Render for TreePane {
             group_renaming,
             tree_selection,
             search_query,
-            search_pending,
         ) = {
             let Some(app) = self.app.upgrade() else {
                 return div().into_any_element();
@@ -2835,7 +2848,6 @@ impl Render for TreePane {
                 app.group_rename.is_some(),
                 app.tree_selection.items(),
                 search_query,
-                app.tree_search_pending(),
             )
         };
         self.theme = theme;
@@ -2874,19 +2886,14 @@ impl Render for TreePane {
                 list.child(self.render_tree_entry(entry, &connections, group_rename.as_ref(), cx));
         }
         self.nav_rows = std::mem::take(&mut *self.nav_build.borrow_mut());
-        // A filtered tree with no rows says why: either the crawl behind the search is still
-        // loading the databases/table lists, or nothing matches the query.
+        // A filtered tree with no rows says so instead of looking like an empty connection.
         if self.searching && self.nav_rows.is_empty() {
             list = div().flex().flex_col().w_full().child(
                 div()
                     .w_full()
                     .p_2()
                     .text_color(rgb(theme.text_muted))
-                    .child(if search_pending {
-                        t!("common.loading").to_string()
-                    } else {
-                        t!("sidebar.no_match").to_string()
-                    }),
+                    .child(t!("sidebar.no_match").to_string()),
             );
         }
         self.visible_ids = self.nav_rows.iter().map(|row| row.id.clone()).collect();
@@ -3197,7 +3204,7 @@ mod nav_tests {
     }
 
     #[test]
-    fn a_table_matches_its_bare_schema_qualified_or_database_qualified_name() {
+    fn a_table_matches_its_bare_schema_or_fully_qualified_name() {
         let table = TreeTable {
             name: "ORDER.ORDER_INFO".into(),
             display: "ORDER_INFO".into(),
@@ -3206,9 +3213,17 @@ mod nav_tests {
         };
         let query = tree_search_query("ORDER.ORDER_INFO").unwrap();
         assert!(table_search_matches(&query, &table, "shop"));
+        // `database.schema.table` reaches the same table.
+        let query = tree_search_query("shop.ORDER.ORDER_INFO").unwrap();
+        assert!(table_search_matches(&query, &table, "shop"));
         let query = tree_search_query("order_info").unwrap();
         assert!(table_search_matches(&query, &table, "shop"));
         let query = tree_search_query("sales").unwrap();
+        assert!(!table_search_matches(&query, &table, "shop"));
+        // The schema alone qualifies (`schema.table` and `database.schema.table` both contain it).
+        let query = tree_search_query("shop.ORDER").unwrap();
+        assert!(table_search_matches(&query, &table, "shop"));
+        let query = tree_search_query("archive.ORDER.ORDER_INFO").unwrap();
         assert!(!table_search_matches(&query, &table, "shop"));
 
         // A schema-less engine's database is the qualifier the tree does not show.
@@ -3236,7 +3251,7 @@ mod nav_tests {
             ],
             &["public", "sales", "ORDER", "empty"],
         );
-        let query = tree_search_query("ORDER.ORDER_INFO").unwrap();
+        let query = tree_search_query("shop.ORDER.ORDER_INFO").unwrap();
         let snapshot =
             snapshot_database(&database, 2, Some(&query), false, false).expect("a match");
         assert!(snapshot.searching);
@@ -3312,6 +3327,28 @@ mod nav_tests {
         };
         assert_eq!(tables.len(), 2);
         assert!(snapshot.expanded);
+    }
+
+    #[test]
+    fn a_database_that_was_never_opened_is_not_searched_for_tables() {
+        let mut database = database(
+            "shop",
+            vec![table("users", rustgrid_core::ObjectKind::Table)],
+            &[],
+        );
+        database.opened = false;
+        database.expanded = false;
+        // The objects are not read (the search issues no catalog query of its own), so the table
+        // does not match even if a stale cache were present.
+        let query = tree_search_query("users").unwrap();
+        assert!(snapshot_database(&database, 0, Some(&query), false, false).is_none());
+
+        // The database name is known from the database list, so it still locates its row.
+        let query = tree_search_query("shop").unwrap();
+        let snapshot =
+            snapshot_database(&database, 0, Some(&query), false, false).expect("a match");
+        assert!(matches!(snapshot.tables, Loadable::Idle));
+        assert!(snapshot.schemas.is_empty());
     }
 
     #[test]

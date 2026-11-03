@@ -1007,6 +1007,12 @@ impl GridView {
         cx.notify();
     }
 
+    /// Whether the grid has staged edits or pending inserts that Save would write. The row form's
+    /// header uses it to colour ✓ / ✕ only while there is something to save or discard.
+    pub(super) fn has_pending_changes(&self) -> bool {
+        !self.state.edits.is_empty() || !self.inserts.is_empty()
+    }
+
     /// The page's own text for a row-form field, ignoring any staged edit. Escape puts this back
     /// into the field after dropping the edit.
     pub(super) fn form_original_text(&self, row: usize, col: usize) -> String {

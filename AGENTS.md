@@ -899,7 +899,9 @@ shadcn chrome described above. Implemented today:
     Ctrl+Z / Ctrl+Y — Cmd+Z / Cmd+Shift+Z on macOS — exactly like the grid's in-place cell editor),
     Enter saves through the grid's normal commit path, Ctrl+S (`keymap.form.save`, bound in the
     form's `RowForm` context) saves too, and Escape restores the page's value for that field. The
-    header's ✓ / ✕ do the same 保存 / 回滚 as the grid footer. A `NULL` cell shows an empty field
+    header (table name + ✓ / ✕) stays fixed above the field list, which is the only part that
+    scrolls; the buttons are muted grey while the grid has nothing staged and take their save /
+    rollback colours once it does. A `NULL` cell shows an empty field
     with a `NULL` placeholder. A temporal field (`date` / `datetime` / `timestamp`, the same types
     the grid's cell picker accepts) carries the grid picker's "…" button; it opens an inline
     `compact_calendar` + `TimeField` panel under the
@@ -913,17 +915,18 @@ shadcn chrome described above. Implemented today:
     history.
 
 21. Connection-tree search (`app/sidebar.rs` + `app/tree.rs`): a search box at the top of the
-    connection tree filters it to the connections, databases, schemas and tables whose name
-    contains the query. A table also matches its schema-qualified `schema.table` — and
-    `database.table` on engines whose tree has no schema level — so `ORDER.ORDER_INFO` finds the
-    table without expanding the ORDER schema first. A matching branch keeps its immediate children
-    (a matched connection shows its databases, a matched database its schemas), the branches on the
-    way to a match open, only 表/视图 are drawn while filtering (with just the matching objects),
-    and a group without a surviving connection is skipped. Esc or the field's ✕ clears the filter
-    and restores the saved tree. The search lazily loads the databases and object lists it has to
-    see — debounced, and without the overview `table_statuses` pass — so objects under a database the
-    user never opened are searchable; an empty filtered tree shows 加载中 while that crawl runs and
-    无匹配项 once it is done.
+    connection tree filters what the tree already holds — connections, databases, schemas and
+    tables. A table matches its bare name, its schema-qualified `schema.table` and its
+    fully-qualified `database.schema.table` (`database.table` on engines whose tree has no schema
+    level), so `ORDER.ORDER_INFO` (or `sales.ORDER.ORDER_INFO`) finds the table without expanding
+    the ORDER schema first. A schema matches its name or `database.schema`. The filter only sees
+    objects that are already loaded: opening a database loads all its schemas' tables, which is
+    what makes the qualified search work, while a database that was never opened is matched by its
+    name only and the search never issues a catalog query of its own. A matching branch keeps its
+    immediate children (a matched connection shows its databases, a matched database its schemas),
+    the branches on the way to a match open, only 表/视图 are drawn while filtering (with just the
+    matching objects), and a group without a surviving connection is skipped. Esc or the field's ✕
+    clears the filter and restores the saved tree; 无匹配项 is shown when nothing matches.
 
 Still out of scope: engines other than MySQL, MariaDB, SQLite, SQL Server, PostgreSQL, Oracle and
 Redis, and the disabled placeholder UI

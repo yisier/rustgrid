@@ -298,7 +298,7 @@ impl InfoPane {
         app_entity: &Entity<AppView>,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
-    ) -> AnyElement {
+    ) -> (AnyElement, bool) {
         let (form_open, grid) = {
             let app = app_entity.read(cx);
             (app.form_open, app.form_grid(cx))
@@ -309,7 +309,8 @@ impl InfoPane {
                 && let Some(row) = form_row(grid, cx)
                 && let Some(body) = self.form_body(app_entity, grid, row, window, cx)
             {
-                return body;
+                // The form keeps its header fixed and scrolls only its field list.
+                return (body, true);
             }
             // Nothing left to edit (the selection was cleared, or its tab closed): turn the form
             // off so the footer button and the pane agree. The details pane keeps the user's own
@@ -330,14 +331,14 @@ impl InfoPane {
                     });
                 });
             }
-            return div().into_any_element();
+            return (div().into_any_element(), true);
         }
         self.sync_form_grid(None, cx);
         self.form = None;
         self.form_picker = None;
         let app = app_entity.read(cx);
         let weak = self.app.clone();
-        app.info_body(&weak, cx)
+        (app.info_body(&weak, cx), false)
     }
 
     /// Keep an observation on the active table grid so a row selection (which happens inside
@@ -370,10 +371,12 @@ impl InfoPane {
             let app = app_entity.read(cx);
             (app.theme, app.grid_show_types, app.grid_show_comments)
         };
-        let state = &grid.entity.read(cx).state;
+        let view = grid.entity.read(cx);
+        let state = &view.state;
         if row >= state.rows.len() || state.visible_columns == 0 {
             return None;
         }
+        let dirty = view.has_pending_changes();
         let table = state.table.clone();
         let values = &state.rows[row];
         let fields: Vec<FormField> = (0..state.visible_columns)
@@ -454,6 +457,7 @@ impl InfoPane {
             width: self.width,
             show_types,
             show_comments,
+            dirty,
         };
         let weak = cx.weak_entity();
         Some(render_row_form(
@@ -630,12 +634,36 @@ impl Render for InfoPane {
             return div().into_any_element();
         };
         let theme = app_entity.read(cx).theme;
-        let body = self.pane_body(&app_entity, window, cx);
+        let (body, self_scrolling) = self.pane_body(&app_entity, window, cx);
 
         let start = cx.listener(|this, event: &MouseDownEvent, _window, cx| {
             this.drag = Some((f32::from(event.position.x), this.width));
             cx.notify();
         });
+
+        // The row form scrolls only its field list, under a fixed header. The details pane keeps
+        // scrolling as a whole.
+        let pane_body: AnyElement = if self_scrolling {
+            div()
+                .w(px(self.width))
+                .h_full()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .bg(rgb(theme.editor_bg))
+                .child(body)
+                .into_any_element()
+        } else {
+            div()
+                .id("info-scroll")
+                .w(px(self.width))
+                .h_full()
+                .flex_none()
+                .overflow_y_scroll()
+                .bg(rgb(theme.editor_bg))
+                .child(body)
+                .into_any_element()
+        };
 
         div()
             .flex()
@@ -646,16 +674,7 @@ impl Render for InfoPane {
                 ui::pane_resize_divider("pane-divider-info", theme)
                     .on_mouse_down(MouseButton::Left, start),
             )
-            .child(
-                div()
-                    .id("info-scroll")
-                    .w(px(self.width))
-                    .h_full()
-                    .flex_none()
-                    .overflow_y_scroll()
-                    .bg(rgb(theme.editor_bg))
-                    .child(body),
-            )
+            .child(pane_body)
             .into_any_element()
     }
 }
@@ -1697,6 +1716,9 @@ struct FormStyle<'a> {
     width: f32,
     show_types: bool,
     show_comments: bool,
+    /// Whether the grid has something to save or discard; the header's buttons colour up while
+    /// it does.
+    dirty: bool,
 }
 
 /// The row form: a compact title (table and 表单 badge) over one block per field. The right pane is
@@ -1716,6 +1738,18 @@ fn render_row_form(
     let save_pane = pane.clone();
     let cancel_pane = pane.clone();
     let save_weak = pane.clone();
+    // Both buttons stay grey until the grid holds a staged edit (or a pending insert) and pick up
+    // their action colour only while there is something to save or discard.
+    let save_color = if style.dirty {
+        theme.icon_connection
+    } else {
+        theme.text_muted
+    };
+    let rollback_color = if style.dirty {
+        theme.danger
+    } else {
+        theme.text_muted
+    };
     let title = div()
         .flex()
         .flex_row()
@@ -1738,9 +1772,9 @@ fn render_row_form(
             ui::icon_button(
                 "info-form-save",
                 "icons/check.svg",
-                theme.icon_connection,
-                22.0,
-                20.0,
+                save_color,
+                28.0,
+                26.0,
                 false,
                 theme,
                 move |_event, _window, cx| {
@@ -1753,9 +1787,9 @@ fn render_row_form(
             ui::icon_button(
                 "info-form-rollback",
                 "icons/cross.svg",
-                theme.danger,
-                22.0,
-                20.0,
+                rollback_color,
+                28.0,
+                26.0,
                 false,
                 theme,
                 move |_event, _window, cx| {
@@ -1796,19 +1830,33 @@ fn render_row_form(
         .flex()
         .flex_col()
         .w_full()
+        .h_full()
+        // The table name and the ✓ / ✕ stay put; only the field list below scrolls.
         .child(
             div()
                 .flex()
                 .flex_col()
+                .flex_none()
                 .gap_1()
                 .px_3()
                 .pt_3()
                 .pb_2()
                 .border_b_1()
                 .border_color(rgb(theme.border))
+                .bg(rgb(theme.editor_bg))
                 .child(title),
         )
-        .child(div().flex().flex_col().w_full().px_3().child(list))
+        .child(
+            div()
+                .id("info-form-fields")
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h(px(0.0))
+                .w_full()
+                .overflow_y_scroll()
+                .child(div().flex().flex_col().w_full().px_3().child(list)),
+        )
         .into_any_element()
 }
 

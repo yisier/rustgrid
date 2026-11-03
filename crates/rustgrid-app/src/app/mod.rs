@@ -2380,8 +2380,6 @@ pub struct AppView {
     /// connections, databases, schemas and tables (see `sidebar::snapshot_connections`).
     tree_search: String,
     tree_search_input: Entity<TextInput>,
-    /// Bumped on every search edit; the debounced crawl only loads for the latest one.
-    tree_search_generation: u64,
     main_tab: MainTab,
     db_dialog: Option<DbDialog>,
     db_charset_combo: Option<Entity<ComboBox>>,
@@ -3274,7 +3272,6 @@ impl AppView {
                 })
             },
             tree_search: String::new(),
-            tree_search_generation: 0,
             tree_search_input: {
                 let weak = app.clone();
                 cx.new(move |cx| {
@@ -4076,8 +4073,9 @@ impl AppView {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         self.theme.is_dark().hash(&mut hasher);
         self.tree_layout.hash(&mut hasher);
-        // The tree's search box filters every row, and while it is active the leaves under a
-        // collapsed database are read too, so its text is part of what the tree shows.
+        // The tree's search box filters every row, so its text is part of what the tree shows;
+        // while it is active an opened database's tables are read even when that database is
+        // collapsed (a hit expands it), so those are hashed then too.
         self.tree_search.hash(&mut hasher);
         let searching = !self.tree_search.trim().is_empty();
         // Environment colours change the tree node/subtree backgrounds, so a colour edit must
@@ -4117,7 +4115,7 @@ impl AppView {
                         for category in Category::ALL {
                             database.categories.get(category).hash(&mut hasher);
                         }
-                        if database.expanded || searching {
+                        if database.expanded || (searching && database.opened) {
                             match &database.tables {
                                 Loadable::Idle => 0u8.hash(&mut hasher),
                                 Loadable::Loading => 1u8.hash(&mut hasher),
