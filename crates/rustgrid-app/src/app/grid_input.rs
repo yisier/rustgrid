@@ -937,6 +937,83 @@ impl GridView {
         self.date_picker = None;
         cx.notify();
     }
+
+    /// Stage a value typed into the info pane's row form. The rules match the in-place cell
+    /// editor: an empty field on a `NULL` cell stages nothing, otherwise it becomes an empty
+    /// string; a value that matches the page's own value drops the staged edit instead of keeping
+    /// a no-op. The edit is keyed by display column, so it shows up in the grid cell too.
+    pub(super) fn stage_form_edit(
+        &mut self,
+        row: usize,
+        col: usize,
+        text: &str,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if !self.state.editable || row >= self.state.rows.len() || col >= self.state.visible_columns
+        {
+            return;
+        }
+        let previous = self.state.edits.get(&(row, col)).cloned();
+        let original = match self
+            .state
+            .rows
+            .get(row)
+            .and_then(|values| values.get(self.state.source_col(col)))
+        {
+            Some(CellValue::Null) | None => None,
+            Some(cell) => Some(cell.as_edit_string()),
+        };
+        let desired = if text.is_empty() && original.is_none() {
+            None
+        } else {
+            Some(text.to_string())
+        };
+        if original == desired {
+            if previous.is_some() {
+                self.state.edits.remove(&(row, col));
+                cx.notify();
+            }
+            return;
+        }
+        if previous == Some(desired.clone()) {
+            return;
+        }
+        self.push_form_undo(row, col, previous);
+        self.state.edits.insert((row, col), desired);
+        self.state.redo.clear();
+        cx.notify();
+    }
+
+    /// Record the first edit of a continuous run on one cell, so one Ctrl+Z restores the value
+    /// the run started from instead of stepping through every keystroke.
+    fn push_form_undo(&mut self, row: usize, col: usize, previous: Option<Option<String>>) {
+        if let Some(last) = self.state.undo.last()
+            && last.len() == 1
+            && last[0].0 == (row, col)
+        {
+            return;
+        }
+        self.state.undo.push(vec![((row, col), previous)]);
+        if self.state.undo.len() > 256 {
+            self.state.undo.remove(0);
+        }
+    }
+
+    /// Drop one field's staged value (Escape in the row form), leaving every other pending edit
+    /// alone.
+    pub(super) fn cancel_form_edit(&mut self, row: usize, col: usize, cx: &mut Context<'_, Self>) {
+        if self.state.edits.remove(&(row, col)).is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Enter in the row form: write the pending edits. Nothing pending (the user just opened a
+    /// form and pressed Enter) saves nothing and shows no toast.
+    pub(super) fn submit_form(&mut self, cx: &mut Context<'_, Self>) {
+        if !self.state.edits.is_empty() || !self.inserts.is_empty() {
+            self.save_grid(cx);
+        }
+    }
 }
 
 /// A table-grid keyboard jump (keymap commands; the arrow keys stay on `grid_key`).

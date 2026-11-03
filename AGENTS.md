@@ -883,6 +883,21 @@ shadcn chrome described above. Implemented today:
     designer/import/export items are hidden. The main ribbon keeps only 表 / 查询 for a Redis
     connection. See `docs/redis-driver.md`.
 
+20. Row form in the info pane (`app/info_pane.rs`): while a table data page is active and a row is
+    selected, the right-hand info pane shows that row as an editable form instead of the object
+    details — the first selected row when several are selected. Query result grids, Redis key
+    pages and the designer's preview grids keep their own layouts and never show it; with no row
+    selected the pane keeps showing the connection/database/table details. The pane observes the
+    active grid (a selection changes inside `GridView` without re-rendering `AppView`, so the
+    observation is what brings it to the pane). Because the pane is narrow, each field is one
+    `字段 · 类型 · 注释` line with its editor below instead of Navicat's three columns; the type and
+    comment follow the 数据 options (`grid_show_types` / `grid_show_comments`) and every segment is
+    ellipsized with the full text on hover when it does not fit. Typing stages straight into the
+    grid's `edits` (the grid cell shows the pending value too, and one Ctrl+Z restores the value the
+    run started from), Enter saves through the grid's normal commit path, Escape drops that field's
+    staged value, and a 返回表信息 button clears the selection to show the details again. A `NULL`
+    cell shows an empty field with a `NULL` placeholder.
+
 Still out of scope: engines other than MySQL, MariaDB, SQLite, SQL Server, PostgreSQL, Oracle and
 Redis, and the disabled placeholder UI
 (the `Design/New/Delete Table` toolbar buttons and the query editor's `Query Builder`/`Snippets`

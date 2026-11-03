@@ -44,6 +44,37 @@ impl InfoTarget {
     }
 }
 
+/// The active table grid the info pane's row form reads its fields from.
+struct FormGrid {
+    /// The grid's own id, used to notice a switch to another tab's grid.
+    id: u64,
+    entity: Entity<GridView>,
+}
+
+/// One field of the row form: its display column's metadata plus the value to show, with any
+/// pending edit already applied.
+struct FormField {
+    name: String,
+    data_type: String,
+    comment: String,
+    value: String,
+    /// Whether the value is SQL `NULL` (shown as an empty field with a `NULL` placeholder).
+    null: bool,
+}
+
+/// The row form's field editors, rebuilt when the form moves to another row or grid or the field
+/// layout changes. The values themselves are re-read from the grid on every render, so a staged
+/// edit or a page reload never leaves the editors out of date.
+struct FormState {
+    grid_id: u64,
+    row: usize,
+    /// Display-column names, in form order.
+    columns: Vec<String>,
+    inputs: Vec<Entity<TextInput>>,
+    /// Whether each editor's field is `NULL`, to update its placeholder only when that changes.
+    nulls: Vec<bool>,
+}
+
 // ----- Left sidebar ---------------------------------------------------------------------------
 
 /// The connection-tree pane: the cached tree plus a drag handle on its right edge.
@@ -159,6 +190,9 @@ impl Render for SidebarHost {
 // ----- Right info pane ------------------------------------------------------------------------
 
 /// The object-info pane: a drag handle on its left edge and the selected object's details.
+///
+/// While the active grid is a table data page and a row is selected, the pane instead shows that
+/// row as an editable form (the first selected row when several are selected).
 pub(super) struct InfoPane {
     app: WeakEntity<AppView>,
     width: f32,
@@ -168,6 +202,12 @@ pub(super) struct InfoPane {
     /// refresh it.
     _subscription: Subscription,
     _tree_subscription: Subscription,
+    /// The table grid observed for the row form. Kept while no row is selected too: a selection
+    /// happens inside `GridView` and does not re-render `AppView`, so the observation is what
+    /// brings the newly selected row to the pane.
+    form_grid: Option<(u64, Subscription)>,
+    /// The row form's editors while a table row is selected.
+    form: Option<FormState>,
 }
 
 impl InfoPane {
@@ -185,6 +225,8 @@ impl InfoPane {
             drag: None,
             _subscription: subscription,
             _tree_subscription: tree_subscription,
+            form_grid: None,
+            form: None,
         }
     }
 
@@ -208,18 +250,142 @@ impl InfoPane {
             cx.notify();
         }
     }
+
+    /// The pane's body: the selected table row as an editable form while a table data grid is
+    /// active and a row is selected, the object's details otherwise.
+    fn pane_body(
+        &mut self,
+        app_entity: &Entity<AppView>,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let grid = app_entity.read(cx).form_grid(cx);
+        self.sync_form_grid(grid.as_ref(), cx);
+        if let Some(grid) = grid.as_ref()
+            && let Some(row) = form_row(grid, cx)
+            && let Some(body) = self.form_body(app_entity, grid, row, cx)
+        {
+            return body;
+        }
+        self.form = None;
+        let app = app_entity.read(cx);
+        let weak = self.app.clone();
+        app.info_body(&weak, cx)
+    }
+
+    /// Keep an observation on the active table grid so a row selection (which happens inside
+    /// `GridView`, without re-rendering `AppView`) reaches this pane. The observation stays even
+    /// while no row is selected, so selecting one later shows the form.
+    fn sync_form_grid(&mut self, grid: Option<&FormGrid>, cx: &mut Context<'_, Self>) {
+        let id = grid.map(|grid| grid.id);
+        if self.form_grid.as_ref().map(|(current, _)| *current) == id {
+            return;
+        }
+        self.form = None;
+        self.form_grid = grid.map(|grid| {
+            let subscription = cx.observe(&grid.entity, |_, _, cx| cx.notify());
+            (grid.id, subscription)
+        });
+    }
+
+    /// Build the editable form for the selected row, or `None` when there is nothing to show yet
+    /// (the page is still loading its columns).
+    fn form_body(
+        &mut self,
+        app_entity: &Entity<AppView>,
+        grid: &FormGrid,
+        row: usize,
+        cx: &mut Context<'_, Self>,
+    ) -> Option<AnyElement> {
+        let (theme, show_types, show_comments) = {
+            let app = app_entity.read(cx);
+            (app.theme, app.grid_show_types, app.grid_show_comments)
+        };
+        let state = &grid.entity.read(cx).state;
+        if row >= state.rows.len() || state.visible_columns == 0 {
+            return None;
+        }
+        let table = state.table.clone();
+        let record = state.page_index * state.page_size + row as u64 + 1;
+        let values = &state.rows[row];
+        let fields: Vec<FormField> = (0..state.visible_columns)
+            .filter_map(|col| {
+                let column = state.columns.get(col)?;
+                // A staged edit wins over the page's value, exactly like the grid's own cells.
+                let (value, null) = match state.edits.get(&(row, col)) {
+                    Some(Some(value)) => (value.clone(), false),
+                    Some(None) => (String::new(), true),
+                    None => match values.get(state.source_col(col)) {
+                        Some(CellValue::Null) | None => (String::new(), true),
+                        Some(cell) => (cell.as_edit_string(), false),
+                    },
+                };
+                Some(FormField {
+                    name: column.name.clone(),
+                    data_type: column.data_type.clone(),
+                    comment: column.comment.clone(),
+                    value,
+                    null,
+                })
+            })
+            .collect();
+        if fields.is_empty() {
+            return None;
+        }
+
+        let columns: Vec<String> = fields.iter().map(|field| field.name.clone()).collect();
+        let rebuild = self.form.as_ref().is_none_or(|form| {
+            form.grid_id != grid.id || form.row != row || form.columns != columns
+        });
+        if rebuild {
+            let inputs = build_form_inputs(theme, &fields, &grid.entity, row, cx);
+            self.form = Some(FormState {
+                grid_id: grid.id,
+                row,
+                columns,
+                inputs,
+                nulls: fields.iter().map(|field| field.null).collect(),
+            });
+        }
+        let form = self.form.as_mut()?;
+        // Mirror the model into the editors. Typing already staged the same value, so this only
+        // touches a field whose value changed elsewhere (a reload, undo, the grid's editor).
+        for (index, field) in fields.iter().enumerate() {
+            let Some(input) = form.inputs.get(index).cloned() else {
+                continue;
+            };
+            if input.read(cx).current_text(cx).as_deref() != Some(field.value.as_str()) {
+                let value = field.value.clone();
+                input.update(cx, |input, cx| input.set_text(value, cx));
+            }
+            if form.nulls.get(index).copied() != Some(field.null) {
+                if let Some(null) = form.nulls.get_mut(index) {
+                    *null = field.null;
+                }
+                let placeholder: SharedString = if field.null { "NULL".into() } else { "".into() };
+                input.update(cx, |input, cx| input.set_placeholder(placeholder, cx));
+            }
+            input.update(cx, |input, cx| input.set_theme(theme, cx));
+        }
+
+        let style = FormStyle {
+            theme,
+            table: &table,
+            record,
+            width: self.width,
+            show_types,
+            show_comments,
+        };
+        Some(render_row_form(&style, &fields, form, &grid.entity))
+    }
 }
 
 impl Render for InfoPane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let (theme, body) = match self.app.upgrade() {
-            Some(app) => {
-                let weak = self.app.clone();
-                let app = app.read(cx);
-                (app.theme, app.info_body(&weak, cx))
-            }
-            None => return div().into_any_element(),
+        let Some(app_entity) = self.app.upgrade() else {
+            return div().into_any_element();
         };
+        let theme = app_entity.read(cx).theme;
+        let body = self.pane_body(&app_entity, cx);
 
         let start = cx.listener(|this, event: &MouseDownEvent, _window, cx| {
             this.drag = Some((f32::from(event.position.x), this.width));
@@ -577,6 +743,22 @@ impl AppView {
             }
             _ => {}
         }
+    }
+
+    /// The active grid, when it is a table data page whose selected row the info pane can show as
+    /// a form. Query results, Redis key pages and the designer's preview grids have their own
+    /// layouts and never get one.
+    fn form_grid(&self, cx: &App) -> Option<FormGrid> {
+        if self.active_query.is_some() || self.active_design.is_some() {
+            return None;
+        }
+        let grid = self.active_grid.and_then(|index| self.grids.get(index))?;
+        let state = &grid.read(cx).state;
+        let table_page = state.sql.is_none() && state.key_status.is_none() && state.show_toolbar;
+        table_page.then(|| FormGrid {
+            id: state.id,
+            entity: grid.clone(),
+        })
     }
 
     /// Build the info pane's contents for the current selection.
@@ -1143,6 +1325,289 @@ fn combine_server_info(
         Err(error) => return Loadable::Failed(error.to_string()),
     };
     Loadable::Loaded((version, sessions))
+}
+
+/// The first selected row of a table grid that actually holds data (a pending insert row has no
+/// page values to show).
+fn form_row(grid: &FormGrid, cx: &App) -> Option<usize> {
+    let state = &grid.entity.read(cx).state;
+    let rows = state.rows.len();
+    state
+        .selection
+        .as_ref()?
+        .row_indices()
+        .into_iter()
+        .find(|row| *row < rows)
+}
+
+/// Build one [`TextInput`] per form field. Every edit is staged straight into the grid, so the
+/// form and the grid's own cells always agree on the pending value; Enter saves the staged edits
+/// and Escape drops this field's staged value.
+fn build_form_inputs(
+    theme: Theme,
+    fields: &[FormField],
+    grid: &Entity<GridView>,
+    row: usize,
+    cx: &mut Context<'_, InfoPane>,
+) -> Vec<Entity<TextInput>> {
+    fields
+        .iter()
+        .enumerate()
+        .map(|(col, field)| {
+            let value = field.value.clone();
+            let null = field.null;
+            let changed = grid.downgrade();
+            let submitted = changed.clone();
+            let cancelled = changed.clone();
+            cx.new(|cx| {
+                TextInput::new(
+                    theme,
+                    value.clone(),
+                    TextInputOptions {
+                        text_size: Some(12.0),
+                        placeholder: if null { "NULL".into() } else { "".into() },
+                        ..Default::default()
+                    },
+                    cx,
+                )
+                .on_change(Rc::new(move |text, _window, cx| {
+                    let _ = changed.update(cx, |grid, cx| grid.stage_form_edit(row, col, text, cx));
+                }))
+                .on_submit(Rc::new(move |_window, cx| {
+                    let _ = submitted.update(cx, |grid, cx| grid.submit_form(cx));
+                }))
+                .on_cancel(Rc::new(move |_window, cx| {
+                    let _ = cancelled.update(cx, |grid, cx| grid.cancel_form_edit(row, col, cx));
+                }))
+            })
+        })
+        .collect()
+}
+
+/// The row form's shared layout inputs: the palette, the table it edits, the record number and
+/// the width the header lines have to fit into.
+struct FormStyle<'a> {
+    theme: Theme,
+    table: &'a str,
+    record: u64,
+    width: f32,
+    show_types: bool,
+    show_comments: bool,
+}
+
+/// The row form: a compact title (table, 表单 badge and a way back to the table details) over one
+/// block per field. The right pane is narrow, so each field puts `字段 · 类型 · 注释` on one line
+/// with its editor underneath instead of Navicat's three columns.
+fn render_row_form(
+    style: &FormStyle<'_>,
+    fields: &[FormField],
+    form: &FormState,
+    grid: &Entity<GridView>,
+) -> AnyElement {
+    let theme = style.theme;
+    let back_grid = grid.clone();
+    let title = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .w_full()
+        .child(
+            div()
+                .id("info-form-table")
+                .flex_1()
+                .min_w(px(0.0))
+                .truncate()
+                .text_size(px(13.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(theme.text))
+                .tooltip(ui::text_tooltip(style.table.to_string()))
+                .child(style.table.to_string()),
+        )
+        .child(
+            div()
+                .flex_none()
+                .px_2()
+                .py_0p5()
+                .rounded_sm()
+                .bg(rgb(theme.button_bg))
+                .text_size(px(10.0))
+                .text_color(rgb(theme.text_muted))
+                .child(t!("info.form").to_string()),
+        )
+        .child(
+            div()
+                .id("info-form-details")
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .w(px(22.0))
+                .h(px(22.0))
+                .rounded_sm()
+                .cursor_pointer()
+                .tooltip(ui::text_tooltip(t!("info.form_details").to_string()))
+                .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                .child(
+                    svg()
+                        .path("icons/database.svg")
+                        .w(px(14.0))
+                        .h(px(14.0))
+                        .text_color(rgb(theme.text_muted)),
+                )
+                .on_click(move |_event, _window, cx| {
+                    back_grid.update(cx, |grid, cx| grid.clear_selection(cx));
+                }),
+        );
+
+    let mut list = div().flex().flex_col().w_full();
+    for (index, field) in fields.iter().enumerate() {
+        list = list.child(render_form_field(
+            style,
+            index,
+            field,
+            form.inputs.get(index).cloned(),
+        ));
+    }
+
+    div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .px_3()
+                .pt_3()
+                .pb_2()
+                .border_b_1()
+                .border_color(rgb(theme.border))
+                .child(title)
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(rgb(theme.text_muted))
+                        .child(t!("info.form_record", row = style.record).to_string()),
+                ),
+        )
+        .child(div().flex().flex_col().w_full().px_3().child(list))
+        .into_any_element()
+}
+
+/// One field of the row form: the `字段 · 类型 · 注释` line above its value editor. Each segment is
+/// clipped with an ellipsis when the pane is too narrow, and shows its full text in a hover
+/// tooltip in that case. Type and comment only appear while the 数据 options are on.
+fn render_form_field(
+    style: &FormStyle<'_>,
+    index: usize,
+    field: &FormField,
+    input: Option<Entity<TextInput>>,
+) -> AnyElement {
+    let theme = style.theme;
+    // The pane's own padding (p_3 on both the header and the list) and the divider.
+    let content_width = (style.width - 24.0).max(80.0);
+    let name_max = content_width * 0.55;
+    let type_shown = style.show_types && !field.data_type.is_empty();
+    let comment_shown = style.show_comments && !field.comment.is_empty();
+    let type_max = content_width * 0.35;
+
+    let name_cut = ui::approx_text_width(&field.name) > name_max;
+    let mut name = div()
+        .id(SharedString::from(format!("info-form-name-{index}")))
+        .flex_none()
+        .max_w(px(name_max))
+        .truncate()
+        .text_size(px(12.0))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgb(theme.text));
+    if name_cut {
+        name = name.tooltip(ui::text_tooltip(field.name.clone()));
+    }
+    let mut header = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .w_full()
+        .min_w(px(0.0))
+        .overflow_hidden()
+        .child(name.child(field.name.clone()));
+
+    let separator = || {
+        div()
+            .flex_none()
+            .text_size(px(10.0))
+            .text_color(rgb(theme.text_muted))
+            .child("·")
+    };
+
+    let mut used = ui::approx_text_width(&field.name).min(name_max);
+    if type_shown {
+        let type_cut = ui::approx_text_width(&field.data_type) > type_max;
+        let mut data_type = div()
+            .id(SharedString::from(format!("info-form-type-{index}")))
+            .flex_none()
+            .max_w(px(type_max))
+            .truncate()
+            .text_size(px(11.0))
+            .text_color(rgb(theme.brand));
+        if type_cut {
+            data_type = data_type.tooltip(ui::text_tooltip(field.data_type.clone()));
+        }
+        header = header
+            .child(separator())
+            .child(data_type.child(field.data_type.clone()));
+        used += ui::approx_text_width(&field.data_type).min(type_max) + 10.0;
+    }
+    if comment_shown {
+        // The comment takes the room that is left; narrower than its text means it is cut.
+        let comment_max = (content_width - used - 10.0).max(20.0);
+        let comment_cut = ui::approx_text_width(&field.comment) > comment_max;
+        let mut comment = div()
+            .id(SharedString::from(format!("info-form-comment-{index}")))
+            .flex_1()
+            .min_w(px(0.0))
+            .truncate()
+            .text_size(px(11.0))
+            .text_color(rgb(theme.text_muted));
+        if comment_cut {
+            comment = comment.tooltip(ui::text_tooltip(field.comment.clone()));
+        }
+        header = header
+            .child(separator())
+            .child(comment.child(field.comment.clone()));
+    }
+
+    if let Some(input) = input.as_ref() {
+        // Clicking the label line focuses the value editor, like a form field label.
+        let focus_input = input.clone();
+        header = header.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+            focus_input.update(cx, |input, cx| input.focus_state(window, cx));
+        });
+    }
+
+    let mut block = div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .w_full()
+        .py_2()
+        .border_b_1()
+        .border_color(rgb(theme.grid_line))
+        .child(header);
+    block = match input {
+        Some(input) => block.child(div().w_full().h(px(24.0)).child(input)),
+        None => block.child(
+            div()
+                .w_full()
+                .text_size(px(12.0))
+                .text_color(rgb(theme.text_muted))
+                .child(field.value.clone()),
+        ),
+    };
+    block.into_any_element()
 }
 
 /// The selectable body of the info pane: a big icon, a title and the label/value fields, all
