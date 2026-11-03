@@ -498,6 +498,15 @@ impl GridView {
                         }) {
                             grid.state.selection = None;
                         }
+                        // A freshly loaded page opens with its first record selected, so the
+                        // status bar and keyboard navigation start on real data instead of an
+                        // empty grid. A kept selection (refresh / reload after a write) wins.
+                        if grid.state.selection.is_none()
+                            && !grid.state.rows.is_empty()
+                            && grid.state.visible_columns > 0
+                        {
+                            grid.state.selection = Some(CellSelection::new(0, 0));
+                        }
                         if grid.field_filter_open {
                             // Keep the in-progress draft, but fold in any field the table has
                             // gained since the popup opened so it is still listable.
