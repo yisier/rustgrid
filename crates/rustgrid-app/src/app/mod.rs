@@ -1707,6 +1707,9 @@ impl PendingInsert {
     }
 }
 
+/// The window-space bounds of every temporal filter value field, keyed by `(node path, slot)`.
+type FilterDateAnchors = Rc<RefCell<BTreeMap<(Vec<usize>, u8), Bounds<Pixels>>>>;
+
 /// A single open grid (a table page or a SQL result) as an isolated child view. Owns the grid
 /// data (`GridState`) and every piece of interaction state (scroll handles, cell editor, date
 /// picker, sort popup, page inputs), so grid-local interactions re-render only this view.
@@ -1793,6 +1796,13 @@ struct GridView {
     filter_rendered_width: f32,
     /// `(pointer x, width)` captured when the filter-width drag started.
     filter_resize: Option<(f32, f32)>,
+    /// The filter builder's date/time picker: at most one is open, from a temporal value field's
+    /// "…" button.
+    filter_date_picker: Option<FilterDatePicker>,
+    /// The window-space bounds of every temporal value field, keyed by `(node path, slot)` and
+    /// recorded each frame so the picker opens under its field (and follows the filter panel when
+    /// it scrolls) instead of appearing at the pane's corner on its first frame.
+    filter_date_anchors: FilterDateAnchors,
 
     /// The pager's fields: the model text each one commits on Enter, and the shared
     /// [`TextInput`]s that own caret, selection, clipboard and IME.
@@ -1884,6 +1894,20 @@ struct DatePicker {
     /// selected date all live here (the calendar is the source of truth for the date).
     calendar: Entity<CalendarState>,
     /// The time half, owned by gpui-kit's `TimeField`. `None` for a `date`-only column.
+    time_field: Option<Entity<TimeFieldState>>,
+}
+
+/// The open date/time picker of one filter-builder value field. It mirrors the grid's cell
+/// picker (gpui-kit's calendar + optional `TimeField`), but only fills the value text: 确定
+/// writes the formatted date/time into the field and the WHERE still runs on 应用.
+struct FilterDatePicker {
+    /// The condition node path and value slot (`0` first value, `1` the `BETWEEN` upper bound)
+    /// the picker writes to.
+    path: Vec<usize>,
+    slot: u8,
+    /// Whether the column carries a time of day (`datetime`/`timestamp`).
+    has_time: bool,
+    calendar: Entity<CalendarState>,
     time_field: Option<Entity<TimeFieldState>>,
 }
 
@@ -2140,8 +2164,11 @@ const FILTER_CONTROL_RADIUS: f32 = 6.0;
 const FILTER_RAIL_WIDTH: f32 = 66.0;
 const FILTER_FIELD_WIDTH: f32 = 112.0;
 const FILTER_OPERATOR_WIDTH: f32 = 84.0;
-/// Minimum width of the value field (it stretches to fill the rest of the row).
+/// Minimum and maximum width of the value field. It grows with the row but stops at a compact
+/// width, so a wide filter panel leaves the row actions beside the value instead of flinging them
+/// to the far edge (a `datetime` string plus the "…" picker button still fits).
 const FILTER_VALUE_WIDTH: f32 = 110.0;
+const FILTER_VALUE_MAX_WIDTH: f32 = 200.0;
 const FILTER_ROW_ACTION_SIZE: f32 = 22.0;
 const FILTER_ROW_ACTION_RADIUS: f32 = 6.0;
 const FILTER_BOUNDARY_BAR_HEIGHT: f32 = 24.0;
@@ -2190,6 +2217,10 @@ const GRID_TOOLBAR_HEIGHT: f32 = 28.0;
 /// above the grid body; the panel sits above its backdrop.
 const FIELD_FILTER_BACKDROP_PRIORITY: usize = 98;
 const FIELD_FILTER_POPUP_PRIORITY: usize = 99;
+/// The deferred paint priority of the filter builder's date/time picker and its click-away
+/// backdrop (below the 字段筛选 popup, which owns the topmost layer when open).
+const FILTER_DATE_BACKDROP_PRIORITY: usize = 96;
+const FILTER_DATE_POPUP_PRIORITY: usize = 97;
 /// The width of the 字段筛选 popup panel.
 const FIELD_FILTER_POPUP_WIDTH: f32 = 252.0;
 /// The height of one row of the 字段筛选 popup's field list.

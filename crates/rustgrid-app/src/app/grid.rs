@@ -1036,6 +1036,7 @@ impl GridView {
             self.filter_value_inputs.clear();
             self.filter_field_combos.clear();
             self.filter_operator_combos.clear();
+            self.filter_date_picker = None;
         } else {
             if self.state.sql.is_some() {
                 return;
@@ -1044,6 +1045,7 @@ impl GridView {
             self.filter_value_inputs.clear();
             self.filter_field_combos.clear();
             self.filter_operator_combos.clear();
+            self.filter_date_picker = None;
             self.state.filter_draft = self.state.filters.clone();
             if self.state.filter_draft.is_empty() {
                 self.filter_draft_start();
@@ -1184,6 +1186,7 @@ impl GridView {
         self.filter_value_inputs.clear();
         self.filter_field_combos.clear();
         self.filter_operator_combos.clear();
+        self.filter_date_picker = None;
         cx.notify();
     }
 
@@ -1415,6 +1418,161 @@ impl GridView {
         cx.notify();
     }
 
+    /// Open the date/time picker of one temporal filter value field, or apply-and-close it when
+    /// that field's picker is already open (the value field's "…" toggle).
+    pub(super) fn filter_toggle_date_picker(
+        &mut self,
+        path: Vec<usize>,
+        slot: u8,
+        value: String,
+        has_time: bool,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self
+            .filter_date_picker
+            .as_ref()
+            .is_some_and(|picker| picker.path == path && picker.slot == slot)
+        {
+            self.filter_date_picker_ok(window, cx);
+            return;
+        }
+        let base = parse_datetime(&value).unwrap_or_else(|| chrono::Local::now().naive_local());
+        let date = NaiveDate::from_ymd_opt(base.year(), base.month(), base.day())
+            .unwrap_or_else(|| chrono::Local::now().date_naive());
+        let calendar = cx.new(|cx| {
+            let mut state = CalendarState::new(window, cx);
+            state.set_date(date, window, cx);
+            state
+        });
+        // `TimePrecision::Second` matches the grid's cell picker and MySQL's rendered
+        // `datetime`/`timestamp`; a `date` column gets no time row.
+        let time_field = if has_time {
+            let time = NaiveTime::from_hms_opt(base.hour(), base.minute(), base.second())
+                .unwrap_or_default();
+            Some(cx.new(|cx| {
+                let mut state = TimeFieldState::new(window, cx).precision(TimePrecision::Second);
+                state.set_time(time, window, cx);
+                state
+            }))
+        } else {
+            None
+        };
+        self.filter_date_picker = Some(FilterDatePicker {
+            path,
+            slot,
+            has_time,
+            calendar,
+            time_field,
+        });
+        cx.notify();
+    }
+
+    /// Write the picker's date/time into the filter value field and close it. Unlike the grid's
+    /// cell picker nothing is committed here: the WHERE still runs when 应用 is pressed.
+    pub(super) fn filter_date_picker_ok(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(picker) = self.filter_date_picker.take() else {
+            return;
+        };
+        let Some(date) = picker.calendar.read(cx).date().start() else {
+            cx.notify();
+            return;
+        };
+        let value = if picker.has_time {
+            let time = picker
+                .time_field
+                .as_ref()
+                .map(|field| field.read(cx).time())
+                .unwrap_or_default();
+            format!(
+                "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                date.year(),
+                date.month(),
+                date.day(),
+                time.hour(),
+                time.minute(),
+                time.second()
+            )
+        } else {
+            format!("{:04}-{:02}-{:02}", date.year(), date.month(), date.day())
+        };
+        if let Some(input) = self
+            .filter_value_inputs
+            .get(&(picker.path.clone(), picker.slot))
+            .cloned()
+        {
+            let text = value.clone();
+            input.update(cx, |input, cx| {
+                input.set_text(text, cx);
+                input.focus_state(window, cx);
+            });
+        }
+        if let Some(FilterNode::Condition(condition)) =
+            filter_node_mut(&mut self.state.filter_draft, &picker.path)
+        {
+            if picker.slot == 0 {
+                condition.value = value;
+            } else {
+                condition.value2 = value;
+            }
+        }
+        cx.notify();
+    }
+
+    /// Move the open picker to today (and the current time), leaving it open to confirm.
+    pub(super) fn filter_date_picker_today(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let now = chrono::Local::now().naive_local();
+        let Some(picker) = self.filter_date_picker.as_ref() else {
+            return;
+        };
+        if let Some(today) = NaiveDate::from_ymd_opt(now.year(), now.month(), now.day()) {
+            picker
+                .calendar
+                .update(cx, |calendar, cx| calendar.set_date(today, window, cx));
+        }
+        if let Some(field) = picker.time_field.as_ref()
+            && let Some(time) = NaiveTime::from_hms_opt(now.hour(), now.minute(), now.second())
+        {
+            field.update(cx, |field, cx| field.set_time(time, window, cx));
+        }
+        cx.notify();
+    }
+
+    /// Close the picker without touching the value, and return focus to its field.
+    pub(super) fn filter_date_picker_cancel(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(picker) = self.filter_date_picker.take() else {
+            return;
+        };
+        if let Some(input) = self
+            .filter_value_inputs
+            .get(&(picker.path, picker.slot))
+            .cloned()
+        {
+            input.update(cx, |input, cx| input.focus_state(window, cx));
+        }
+        cx.notify();
+    }
+
+    /// Dismiss the picker from a click outside it, without moving focus back to the field (the
+    /// press was aimed at another control).
+    pub(super) fn filter_date_picker_dismiss(&mut self, cx: &mut Context<'_, Self>) {
+        if self.filter_date_picker.take().is_some() {
+            cx.notify();
+        }
+    }
+
     pub(super) fn filter_apply(&mut self, cx: &mut Context<'_, Self>) {
         if self.guard_pending(GridNav::Filter, cx) {
             return;
@@ -1424,6 +1582,7 @@ impl GridView {
 
     pub(super) fn filter_apply_now(&mut self, cx: &mut Context<'_, Self>) {
         self.sync_filter_controls(cx);
+        self.filter_date_picker = None;
         self.state.filters = self.state.filter_draft.clone();
         self.state.page_index = 0;
         self.sync_page_input(cx);

@@ -116,6 +116,8 @@ impl GridView {
             filter_available_width: 0.0,
             filter_rendered_width: FILTER_CONTENT_WIDTH_DEFAULT,
             filter_resize: None,
+            filter_date_picker: None,
+            filter_date_anchors: Rc::new(RefCell::new(BTreeMap::new())),
             page_input,
             page_input_view,
             page_size_menu_open: false,
@@ -967,6 +969,12 @@ impl Render for GridView {
         if !key_page && self.state.show_toolbar && self.field_filter_open {
             root = root.child(self.render_field_filter_backdrop(cx));
             root = root.child(self.render_field_filter_popup(cx));
+        }
+        // The filter builder's temporal value picker is a deferred popup too, so the calendar is
+        // never clipped by the filter panel's scroll container.
+        if !key_page && self.state.filter_open && self.filter_date_picker.is_some() {
+            root = root.child(self.render_filter_date_backdrop(cx));
+            root = root.child(self.render_filter_date_picker(cx));
         }
         // The pane's own window-space bounds, so the popup can be positioned inside it. The root's
         // children are the toolbar plus the body/controls, so the pane rectangle is their *union* —

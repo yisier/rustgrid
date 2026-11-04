@@ -1062,7 +1062,9 @@ impl GridView {
 
     /// One value field of a condition row. An enabled slot hosts a real [`TextInput`] (caret,
     /// mouse selection, clipboard and IME come from gpui-kit); a slot the operator does not use
-    /// shows an inert placeholder instead.
+    /// shows an inert placeholder instead. A value on a temporal column (`date`/`datetime`/
+    /// `timestamp`) also carries a "…" button that opens the date/time picker, like the grid's
+    /// in-place cell editor.
     fn render_filter_value(
         &mut self,
         path: &[usize],
@@ -1093,13 +1095,33 @@ impl GridView {
             }
             _ => String::new(),
         };
+        let column_type = match condition {
+            Some(FilterNode::Condition(condition)) => self
+                .state
+                .columns
+                .iter()
+                .find(|column| column.name == condition.column)
+                .map(|column| column.data_type.clone())
+                .unwrap_or_default(),
+            _ => String::new(),
+        };
+        let temporal = enabled && is_temporal_type(&column_type);
+        let has_time = {
+            let column_type = column_type.to_ascii_lowercase();
+            column_type.contains("datetime") || column_type.contains("timestamp")
+        };
+        let picker_open = self
+            .filter_date_picker
+            .as_ref()
+            .is_some_and(|picker| picker.path == path && picker.slot == slot);
 
-        let field = ui::text_field(theme)
+        let mut field = ui::text_field(theme)
             .flex()
             .flex_row()
             .items_center()
             .flex_1()
             .min_w(px(FILTER_VALUE_WIDTH))
+            .max_w(px(FILTER_VALUE_MAX_WIDTH))
             .h(px(FILTER_CONTROL_HEIGHT))
             .px_2()
             .rounded(px(FILTER_CONTROL_RADIUS))
@@ -1115,9 +1137,195 @@ impl GridView {
                 )
                 .into_any_element();
         }
+        if temporal {
+            // Record the field's inner rectangle every frame — well before the "…" button can be
+            // pressed — so the popup is anchored under it on the very frame it opens, and follows
+            // the field when the filter panel scrolls.
+            let anchors = self.filter_date_anchors.clone();
+            let anchor_key = (path.clone(), slot);
+            field = field.on_children_prepainted(move |bounds, _window, _cx| {
+                if let Some(rect) = bounds.first() {
+                    anchors.borrow_mut().insert(anchor_key.clone(), *rect);
+                }
+            });
+        }
+        let picker_value = value.clone();
         let input = self.filter_value_input(&path, slot, value, cx);
-        field
-            .child(div().flex_1().min_w(px(0.0)).h_full().child(input))
+        field = field.child(div().flex_1().min_w(px(0.0)).h_full().child(input));
+        if temporal {
+            let button_path = path.clone();
+            field = field.child(
+                div()
+                    .id(SharedString::from(format!(
+                        "filter-date-{}-{slot}",
+                        filter_path_key(&path)
+                    )))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .w(px(18.0))
+                    .h_full()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .text_size(px(11.0))
+                    .text_color(rgb(if picker_open {
+                        theme.primary
+                    } else {
+                        theme.text_muted
+                    }))
+                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                    .on_click(cx.listener(move |this, _event, window, cx| {
+                        this.filter_toggle_date_picker(
+                            button_path.clone(),
+                            slot,
+                            picker_value.clone(),
+                            has_time,
+                            window,
+                            cx,
+                        );
+                    }))
+                    .child("…"),
+            );
+        }
+        field.into_any_element()
+    }
+
+    /// The click-away backdrop under the filter builder's date/time picker. A press outside the
+    /// calendar dismisses the popup (and is not forwarded to the control underneath, so a second
+    /// click reaches it).
+    pub(super) fn render_filter_date_backdrop(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        deferred(
+            div()
+                .id("filter-date-backdrop")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _event, _window, cx| {
+                        this.filter_date_picker_dismiss(cx);
+                    }),
+                ),
+        )
+        .with_priority(FILTER_DATE_BACKDROP_PRIORITY)
+        .into_any_element()
+    }
+
+    /// The filter builder's date/time picker, a small popup under the value field that opened it.
+    /// The calendar and time row come from gpui-kit (through `ui::compact_calendar`); the footer
+    /// is app-drawn, exactly like the grid's in-place picker.
+    pub(super) fn render_filter_date_picker(&mut self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let Some(picker) = self.filter_date_picker.as_ref() else {
+            return div().into_any_element();
+        };
+        let pane = *self.grid_pane_bounds.borrow();
+        let anchor = self
+            .filter_date_anchors
+            .borrow()
+            .get(&(picker.path.clone(), picker.slot))
+            .copied()
+            .unwrap_or_default();
+        let width = 192.0f32;
+        let popup_h = if picker.has_time { 248.0 } else { 210.0 };
+        // The anchor is the field's inner content box; subtract its 1px border and 8px padding so
+        // the popup lines up with the field's outer edge.
+        let left = (f32::from(anchor.left()) - 9.0 - f32::from(pane.left()))
+            .clamp(0.0, (f32::from(pane.size.width) - width - 8.0).max(0.0));
+        let anchor_top = f32::from(anchor.top()) - f32::from(pane.top());
+        let below = anchor_top + f32::from(anchor.size.height) + 2.0;
+        let top = if below + popup_h > f32::from(pane.size.height) {
+            (anchor_top - popup_h - 2.0).max(0.0)
+        } else {
+            below
+        };
+
+        // A mouse-down on a calendar cell must not steal focus from the value field (or the time
+        // field); the time segments stay focusable so they can be keyboard-edited.
+        let calendar = div()
+            .capture_any_mouse_down(|_event, window, _cx| window.prevent_default())
+            .child(ui::compact_calendar(&picker.calendar));
+        let time_row: Option<AnyElement> = picker.time_field.as_ref().map(|field| {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_center()
+                .pb_1()
+                .child(TimeField::new(field).small())
+                .into_any_element()
+        });
+        let now = chrono::Local::now().naive_local();
+
+        let footer = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .id("filter-date-today")
+                    .text_size(px(11.0))
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                    .on_click(cx.listener(|this, _event, window, cx| {
+                        this.filter_date_picker_today(window, cx);
+                    }))
+                    .child(format!(
+                        "{}: {}/{}/{}",
+                        t!("grid.today"),
+                        now.year(),
+                        now.month(),
+                        now.day()
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(ui::popup_button(
+                        "filter-date-cancel",
+                        t!("form.cancel").to_string(),
+                        false,
+                        theme,
+                        cx.listener(|this, _event, window, cx| {
+                            this.filter_date_picker_cancel(window, cx);
+                        }),
+                    ))
+                    .child(ui::popup_button(
+                        "filter-date-ok",
+                        t!("form.ok").to_string(),
+                        true,
+                        theme,
+                        cx.listener(|this, _event, window, cx| {
+                            this.filter_date_picker_ok(window, cx);
+                        }),
+                    )),
+            );
+
+        let panel = ui::popup_panel(theme)
+            .id("filter-date-picker")
+            .left(px(left))
+            .top(px(top))
+            .w(px(width))
+            .p_2()
+            .gap_1()
+            .border_color(rgb(theme.text_muted))
+            // The `TimeField`'s keys never reach the grid, so Escape is handled on the panel.
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" {
+                    this.filter_date_picker_cancel(window, cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .child(calendar)
+            .children(time_row)
+            .child(footer);
+        deferred(panel)
+            .with_priority(FILTER_DATE_POPUP_PRIORITY)
             .into_any_element()
     }
 
