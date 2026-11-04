@@ -18,7 +18,7 @@ use gpui::{
 };
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::input::{
-    Copy, Cut, Editor, EditorState, Enter, InputEvent, Paste, Redo, SelectAll, TextDecoration,
+    Copy, Cut, Editor, EditorState, Enter, InputEvent, Paste, SelectAll, TextDecoration,
     TextDecorationCollection, Undo,
 };
 use gpui_kit::component::native_menu::NativeMenu;
@@ -612,24 +612,24 @@ fn highlight_palette(cx: &App) -> [Option<gpui::HighlightStyle>; 5] {
 }
 
 /// The SQL editor's right-click menu: the app's 运行已选择的 first, then the standard edit items.
+/// 运行 and 重做 are deliberately left out — the full run is the toolbar's/`Ctrl+Enter`'s job and
+/// redo is available from the keyboard (its menu entry only cluttered the short menu).
 ///
 /// `Editor::context_menu` replaces the built-in menu, so the standard items are rebuilt here from
 /// the same input actions the built-in menu uses.
 fn sql_editor_context_menu(menu: NativeMenu) -> NativeMenu {
-    menu.menu(t!("query.run").to_string(), Box::new(crate::app::RunQuery))
-        .menu(
-            t!("query.run_selected").to_string(),
-            Box::new(crate::app::RunSelectedQuery),
-        )
-        .separator()
-        .menu(t!("query.undo").to_string(), Box::new(Undo))
-        .menu(t!("query.redo").to_string(), Box::new(Redo))
-        .separator()
-        .menu(t!("query.cut").to_string(), Box::new(Cut))
-        .menu(t!("query.copy").to_string(), Box::new(Copy))
-        .menu(t!("query.paste").to_string(), Box::new(Paste))
-        .separator()
-        .menu(t!("query.select_all").to_string(), Box::new(SelectAll))
+    menu.menu(
+        t!("query.run_selected").to_string(),
+        Box::new(crate::app::RunSelectedQuery),
+    )
+    .separator()
+    .menu(t!("query.undo").to_string(), Box::new(Undo))
+    .separator()
+    .menu(t!("query.cut").to_string(), Box::new(Cut))
+    .menu(t!("query.copy").to_string(), Box::new(Copy))
+    .menu(t!("query.paste").to_string(), Box::new(Paste))
+    .separator()
+    .menu(t!("query.select_all").to_string(), Box::new(SelectAll))
 }
 
 /// The ASCII identifier-ish run around `cursor` (letters, digits and `_`), as a byte range, or

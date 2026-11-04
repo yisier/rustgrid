@@ -1481,6 +1481,103 @@ impl AppView {
                         ));
                 }
             }
+            ContextTarget::GridHeader { grid_id, column } => {
+                let grid_id = *grid_id;
+                let column = *column;
+                let grid = self
+                    .grids
+                    .iter()
+                    .find(|grid| grid.read(cx).state.id == grid_id)
+                    .cloned();
+                if let Some(grid) = grid {
+                    let (valid, frozen, can_hide) = {
+                        let g = grid.read(cx);
+                        (
+                            column < g.state.visible_columns,
+                            g.state.frozen_column_index().is_some(),
+                            g.state.sql.is_none() && g.state.visible_columns > 1,
+                        )
+                    };
+                    let for_freeze = grid.clone();
+                    let for_unfreeze = grid.clone();
+                    let for_hide = grid.clone();
+                    let for_refresh = grid.clone();
+                    items = items.child(if valid {
+                        self.context_item(
+                            "grid-head-freeze",
+                            t!("grid.freeze_column").to_string(),
+                            cx.listener(move |this, _event, _window, cx| {
+                                this.context_menu = None;
+                                for_freeze.update(cx, |grid, cx| grid.freeze_column(column, cx));
+                                cx.notify();
+                            }),
+                        )
+                        .into_any_element()
+                    } else {
+                        self.context_item_disabled(
+                            "grid-head-freeze",
+                            t!("grid.freeze_column").to_string(),
+                        )
+                        .into_any_element()
+                    });
+                    items = items.child(if frozen {
+                        self.context_item(
+                            "grid-head-unfreeze",
+                            t!("grid.unfreeze_column").to_string(),
+                            cx.listener(move |this, _event, _window, cx| {
+                                this.context_menu = None;
+                                for_unfreeze.update(cx, |grid, cx| grid.unfreeze_columns(cx));
+                                cx.notify();
+                            }),
+                        )
+                        .into_any_element()
+                    } else {
+                        self.context_item_disabled(
+                            "grid-head-unfreeze",
+                            t!("grid.unfreeze_column").to_string(),
+                        )
+                        .into_any_element()
+                    });
+                    items = items.child(if valid && can_hide {
+                        self.context_item(
+                            "grid-head-hide",
+                            t!("grid.hide_column").to_string(),
+                            cx.listener(move |this, _event, window, cx| {
+                                this.context_menu = None;
+                                // Deferred: `hide_column` persists the field layout through
+                                // `AppView::set_field_layout`, and this listener already runs
+                                // inside an `AppView::update`.
+                                let grid = for_hide.clone();
+                                cx.defer_in(window, move |_this, _window, cx| {
+                                    grid.update(cx, |grid, cx| grid.hide_column(column, cx));
+                                });
+                                cx.notify();
+                            }),
+                        )
+                        .into_any_element()
+                    } else {
+                        self.context_item_disabled(
+                            "grid-head-hide",
+                            t!("grid.hide_column").to_string(),
+                        )
+                        .into_any_element()
+                    });
+                    items = items
+                        .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                        .child(self.context_item(
+                            "grid-head-refresh",
+                            t!("grid.refresh").to_string(),
+                            cx.listener(move |this, _event, window, cx| {
+                                this.context_menu = None;
+                                let grid = for_refresh.clone();
+                                cx.defer_in(window, move |_this, _window, cx| {
+                                    grid.update(cx, |grid, cx| grid.refresh(cx));
+                                });
+                                cx.notify();
+                            }),
+                        ));
+                }
+            }
         }
 
         // The panel places itself from the pointer through `anchored`, which measures the menu

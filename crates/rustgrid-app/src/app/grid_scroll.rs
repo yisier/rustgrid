@@ -1,6 +1,70 @@
 use super::*;
 
 impl GridView {
+    /// How many leading visible columns are frozen. Zero when no field is frozen (or the frozen
+    /// field was hidden since).
+    pub(super) fn frozen_split(&self) -> usize {
+        self.state
+            .frozen_column_index()
+            .map(|index| index + 1)
+            .unwrap_or(0)
+    }
+
+    /// The total width of the frozen columns (the columns up to and including the frozen one).
+    pub(super) fn frozen_width(&self) -> f32 {
+        let split = self.frozen_split();
+        self.state
+            .column_widths
+            .iter()
+            .take(split)
+            .sum::<f32>()
+            .max(0.0)
+    }
+
+    /// The width the non-frozen columns pan inside: the table viewport minus the frozen columns
+    /// and the row gutter. Without a frozen field this is the old whole-table viewport minus the
+    /// gutter, which keeps the existing horizontal scroll maths unchanged.
+    pub(super) fn grid_scroll_viewport(&self) -> f32 {
+        let table = f32::from(self.hscroll.bounds().size.width);
+        (table - self.gutter_width() - self.frozen_width()).max(0.0)
+    }
+
+    /// How far the non-frozen columns can pan; zero when they already fit.
+    pub(super) fn grid_scroll_max(&self) -> f32 {
+        let split = self.frozen_split();
+        let total: f32 = self
+            .state
+            .column_widths
+            .iter()
+            .take(self.state.visible_columns)
+            .skip(split)
+            .sum();
+        (total - self.grid_scroll_viewport()).max(0.0)
+    }
+
+    /// The current pan of the non-frozen columns, clamped to the current maximum.
+    pub(super) fn grid_column_scroll(&self) -> f32 {
+        let scroll = if self.frozen_split() > 0 {
+            self.column_scroll
+        } else {
+            -f32::from(self.hscroll.offset().x)
+        };
+        scroll.clamp(0.0, self.grid_scroll_max())
+    }
+
+    /// Move the non-frozen columns to `scroll`. A frozen grid keeps the offset in its own field
+    /// (the tracked handle must not translate the frozen subtree); otherwise it drives `hscroll`
+    /// exactly as before.
+    pub(super) fn set_grid_column_scroll(&mut self, scroll: f32) {
+        let scroll = scroll.clamp(0.0, self.grid_scroll_max());
+        if self.frozen_split() > 0 {
+            self.column_scroll = scroll;
+        } else {
+            let y = self.hscroll.offset().y;
+            self.hscroll.set_offset(Point::new(px(-scroll), y));
+        }
+    }
+
     pub(super) fn render_grid_vscrollbar(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
         let header_height = self.header_height(cx);
@@ -31,8 +95,8 @@ impl GridView {
 
     pub(super) fn render_grid_hscrollbar(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
-        let viewport = f32::from(self.hscroll.bounds().size.width);
-        let max = f32::from(self.hscroll.max_offset().x);
+        let viewport = self.grid_scroll_viewport();
+        let max = self.grid_scroll_max();
         if max <= 0.0 {
             // Reserve the same height as a real scrollbar so the vertical track's viewport stays
             // constant whether or not the grid can scroll horizontally.
@@ -41,7 +105,7 @@ impl GridView {
                 .h(px(GRID_SCROLLBAR_THICKNESS))
                 .into_any_element();
         }
-        let scroll = -f32::from(self.hscroll.offset().x);
+        let scroll = self.grid_column_scroll();
         let (thumb_left, thumb_len) = scrollbar_fractions(viewport, max, scroll);
 
         ui::hscrollbar_track("grid-hscrollbar", theme, thumb_left, thumb_len)
@@ -56,13 +120,13 @@ impl GridView {
 
     pub(super) fn grid_hscroll_begin(&mut self, mouse_x: Pixels, cx: &mut Context<'_, Self>) {
         let bounds = self.hscroll.bounds();
-        let viewport = f32::from(bounds.size.width);
-        let max = f32::from(self.hscroll.max_offset().x);
+        let viewport = self.grid_scroll_viewport();
+        let max = self.grid_scroll_max();
         let (thumb_w, travel) = scrollbar_thumb(viewport, max);
         if travel <= 0.0 {
             return;
         }
-        let scroll = -f32::from(self.hscroll.offset().x);
+        let scroll = self.grid_column_scroll();
         let thumb_x = (scroll / max) * travel;
         let relative = f32::from(mouse_x) - f32::from(bounds.left());
         let grab = if relative >= thumb_x && relative <= thumb_x + thumb_w {
@@ -87,17 +151,21 @@ impl GridView {
         self.grid_hscroll_set(relative, grab, cx);
     }
 
-    pub(super) fn grid_hscroll_set(&self, relative: f32, grab: f32, cx: &mut Context<'_, Self>) {
-        let viewport = f32::from(self.hscroll.bounds().size.width);
-        let max = f32::from(self.hscroll.max_offset().x);
+    pub(super) fn grid_hscroll_set(
+        &mut self,
+        relative: f32,
+        grab: f32,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let viewport = self.grid_scroll_viewport();
+        let max = self.grid_scroll_max();
         let (_, travel) = scrollbar_thumb(viewport, max);
         if travel <= 0.0 {
             return;
         }
         let thumb_x = (relative - grab).clamp(0.0, travel);
         let scroll = thumb_x / travel * max;
-        let y = self.hscroll.offset().y;
-        self.hscroll.set_offset(Point::new(px(-scroll), y));
+        self.set_grid_column_scroll(scroll);
         cx.notify();
     }
 

@@ -804,7 +804,12 @@ shadcn chrome described above. Implemented today:
     hidden or re-ordered — and the popup's counter reads `visible/total`. The 数据 page of the Options window
     (`OptionsSection::Data`, between 编辑器 and 关于) holds the two grid display switches, 展示备注
     (`AppSettings::grid_show_comments`) and 展示类型 (`grid_show_types`), both off by default, which
-    paint each column's comment / data type under its name in the grid header.
+    paint each column's comment / data type under its name in the grid header. Right-clicking a
+    grid column header opens its own menu — 冻结列 / 取消冻结 / 隐藏列 / 刷新. Freezing pins every
+    column up to and including the clicked one (stored by field name in `GridState::frozen_column`)
+    while the columns after it pan inside their own clipped strip; 隐藏列 writes the same
+    `GridFieldLayout.hidden` set the 字段 popup edits (and persists it), so the field is listed
+    unchecked there.
 
 17. 详细列表 density and sorting (`ui/views.rs` + every list page): all detail lists share one
     compact row metric — `DETAIL_ROW_HEIGHT` (28px), `DETAIL_BADGE_SIZE` (18px) and a 32px header —

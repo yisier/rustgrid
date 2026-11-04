@@ -881,6 +881,10 @@ pub struct GridState {
     pub column_order: Vec<usize>,
     /// How many leading entries of [`Self::columns`] are visible; the rest are hidden fields.
     pub visible_columns: usize,
+    /// The field the user froze from the header's context menu. The columns up to and including it
+    /// stay put while the ones after it pan horizontally; a grid freezes at most one field. Kept by
+    /// name so a field-layout change (hide/reorder) never points it at the wrong column.
+    pub frozen_column: Option<String>,
     pub rows: Arc<Vec<Vec<CellValue>>>,
     pub column_widths: Vec<f32>,
     /// Set once the user drags a column edge. Keeps the widths for the rest of this grid's life
@@ -1284,6 +1288,16 @@ impl GridState {
         self.column_order.get(col).copied().unwrap_or(col)
     }
 
+    /// The visible display position of the frozen field, when it is still shown. A hidden or
+    /// renamed frozen field reports `None`, so the grid simply stops freezing it.
+    pub fn frozen_column_index(&self) -> Option<usize> {
+        let name = self.frozen_column.as_deref()?;
+        self.columns
+            .iter()
+            .take(self.visible_columns)
+            .position(|column| column.name == name)
+    }
+
     /// Whether the 字段筛选 popup holds a layout that differs from the table's natural columns.
     pub fn field_layout_configured(&self) -> bool {
         !self.field_layout.is_default(&self.all_columns)
@@ -1329,6 +1343,11 @@ impl GridState {
         self.column_order = permutation;
         self.visible_columns = visible;
         self.field_layout.order = self.field_layout.resolved_order(&self.all_columns);
+        // A frozen field that the new layout hides (or the table no longer has) must not come back
+        // frozen when it is shown again.
+        if self.frozen_column_index().is_none() {
+            self.frozen_column = None;
+        }
     }
 }
 

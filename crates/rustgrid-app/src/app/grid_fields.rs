@@ -220,7 +220,7 @@ impl GridView {
     }
 
     /// Write the applied layout to settings so the next open of this table restores it.
-    fn persist_field_layout(&mut self, cx: &mut Context<'_, Self>) {
+    pub(super) fn persist_field_layout(&mut self, cx: &mut Context<'_, Self>) {
         let connection_id = self.state.connection_id.clone();
         if connection_id.is_empty() {
             return;

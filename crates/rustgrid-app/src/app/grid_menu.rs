@@ -32,6 +32,83 @@ impl GridView {
         }
     }
 
+    /// Right-click on a column header: select that column (Navicat-style) and open the header menu
+    /// (冻结列 / 取消冻结 / 隐藏列 / 刷新) at the pointer.
+    pub(super) fn grid_header_right_mouse_down(
+        &mut self,
+        column: usize,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.cell_editor.is_some() {
+            self.finish_cell_editor(cx);
+        }
+        let rows = self.display_row_count();
+        if rows > 0 && column < self.state.visible_columns {
+            self.state.selection = Some(CellSelection::single((rows - 1, column), (0, column)));
+        }
+        self.selecting_cells = false;
+        window.focus(&self.focus, cx);
+        let grid_id = self.state.id;
+        if let Some(app) = self.app.upgrade() {
+            app.update(cx, |app, cx| {
+                app.context_menu = Some(ContextMenu {
+                    target: ContextTarget::GridHeader { grid_id, column },
+                    position,
+                });
+                cx.notify();
+            });
+        }
+        cx.notify();
+    }
+
+    /// Freeze the columns up to and including `column`: they stay put while the columns after it
+    /// pan. A grid has at most one frozen field, so choosing another column moves the freeze.
+    pub(super) fn freeze_column(&mut self, column: usize, cx: &mut Context<'_, Self>) {
+        if column >= self.state.visible_columns {
+            return;
+        }
+        let scroll = self.grid_column_scroll();
+        let name = self.state.columns[column].name.clone();
+        self.state.frozen_column = Some(name);
+        self.column_scroll = scroll;
+        cx.notify();
+    }
+
+    /// 取消冻结: let the whole table pan again.
+    pub(super) fn unfreeze_columns(&mut self, cx: &mut Context<'_, Self>) {
+        if self.state.frozen_column.take().is_none() {
+            return;
+        }
+        let scroll = self.column_scroll;
+        self.column_scroll = 0.0;
+        let y = self.hscroll.offset().y;
+        self.hscroll.set_offset(Point::new(px(-scroll), y));
+        cx.notify();
+    }
+
+    /// 隐藏列: hide the field through the same layout the 字段筛选 popup edits, so the popup lists
+    /// it unchecked the next time it opens. The applied layout is remembered per table.
+    pub(super) fn hide_column(&mut self, column: usize, cx: &mut Context<'_, Self>) {
+        if self.state.sql.is_some()
+            || column >= self.state.visible_columns
+            || self.state.visible_columns <= 1
+        {
+            return;
+        }
+        let name = self.state.columns[column].name.clone();
+        if self.state.frozen_column.as_deref() == Some(name.as_str()) {
+            self.state.frozen_column = None;
+            self.column_scroll = 0.0;
+        }
+        self.state.field_layout.set_hidden(&name, true);
+        self.state.reproject_fields();
+        self.column_scroll = self.column_scroll.min(self.grid_scroll_max());
+        self.persist_field_layout(cx);
+        cx.notify();
+    }
+
     /// The edit value of a cell: a staged edit/insert value if present, otherwise the loaded
     /// `CellValue`. `None` is SQL `NULL`.
     fn cell_edit_value(&self, row: usize, col: usize) -> Option<String> {

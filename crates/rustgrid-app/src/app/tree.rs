@@ -1724,6 +1724,7 @@ impl AppView {
             },
             column_order: Vec::new(),
             visible_columns: 0,
+            frozen_column: None,
             rows: Arc::new(Vec::new()),
             column_widths: Vec::new(),
             manual_column_widths: false,

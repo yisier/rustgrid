@@ -236,17 +236,16 @@ impl GridView {
     /// trackpad's horizontal swipe) is the way to reach off-screen columns.
     pub(super) fn scroll_grid_columns(&mut self, delta: f32, cx: &mut Context<'_, Self>) -> bool {
         self.end_transient_editing(cx);
-        let max = f32::from(self.hscroll.max_offset().x);
+        let max = self.grid_scroll_max();
         if max <= 0.0 {
             return false;
         }
-        let scroll = -f32::from(self.hscroll.offset().x);
+        let scroll = self.grid_column_scroll();
         let new_scroll = (scroll - delta).clamp(0.0, max);
         if (new_scroll - scroll).abs() < 0.5 {
             return false;
         }
-        let y = self.hscroll.offset().y;
-        self.hscroll.set_offset(Point::new(px(-new_scroll), y));
+        self.set_grid_column_scroll(new_scroll);
         cx.notify();
         true
     }
@@ -302,8 +301,9 @@ impl GridView {
         // horizontal offset must be applied against the scroll viewport instead — subtracting both
         // would double-count it and land the hit a few columns to the right when scrolled.
         let viewport = self.hscroll.bounds();
+        let frozen_split = self.frozen_split();
         let local_x = if viewport.size.width > px(0.0) {
-            f32::from(position.x) - f32::from(viewport.left()) - f32::from(self.hscroll.offset().x)
+            f32::from(position.x) - f32::from(viewport.left())
         } else {
             f32::from(position.x) - f32::from(bounds.left())
         };
@@ -317,19 +317,53 @@ impl GridView {
         if row >= self.display_row_count() {
             return None;
         }
+        if frozen_split == 0 {
+            // Without a frozen field the gutter scrolls with the whole content, exactly as the
+            // tracked `hscroll` translates it.
+            let local_x = local_x + self.grid_column_scroll();
+            if local_x < gutter {
+                return Some(GridHit::Gutter(row));
+            }
+            let mut accumulated = gutter;
+            for (col, width) in self
+                .state
+                .column_widths
+                .iter()
+                .take(self.state.visible_columns)
+                .enumerate()
+            {
+                if local_x < accumulated + width {
+                    return Some(GridHit::Cell(row, col));
+                }
+                accumulated += width;
+            }
+            return None;
+        }
+        // A frozen grid pins its gutter and leading columns: map a hit inside the frozen block
+        // without the horizontal pan, and only the columns after it through the scroll offset.
         if local_x < gutter {
             return Some(GridHit::Gutter(row));
         }
-        let mut accumulated = gutter;
+        let frozen_width = self.frozen_width();
+        let (start, local_x) = if local_x < gutter + frozen_width {
+            (0, local_x - gutter)
+        } else {
+            (
+                frozen_split,
+                local_x - gutter - frozen_width + self.grid_column_scroll(),
+            )
+        };
+        let mut accumulated = 0.0;
         for (col, width) in self
             .state
             .column_widths
             .iter()
             .take(self.state.visible_columns)
+            .skip(start)
             .enumerate()
         {
             if local_x < accumulated + width {
-                return Some(GridHit::Cell(row, col));
+                return Some(GridHit::Cell(row, start + col));
             }
             accumulated += width;
         }
@@ -1141,27 +1175,30 @@ impl GridView {
     }
 
     /// Scroll horizontally so column `col` is fully visible.
-    fn reveal_column(&self, col: usize) {
+    fn reveal_column(&mut self, col: usize) {
+        let split = self.frozen_split();
+        if col < split {
+            // The frozen block never pans away.
+            return;
+        }
         let widths = &self.state.column_widths;
-        let gutter = self.gutter_width();
-        let left = gutter + widths.iter().take(col).sum::<f32>();
+        let frozen_width = self.frozen_width();
+        let left = widths.iter().take(col).sum::<f32>() - frozen_width;
         let right = left + widths.get(col).copied().unwrap_or(0.0);
-        let viewport = f32::from(self.hscroll.bounds().size.width);
+        let viewport = self.grid_scroll_viewport();
         if viewport <= 0.0 {
             return;
         }
-        let shown = -f32::from(self.hscroll.offset().x);
-        let start = if left - gutter < shown {
-            left - gutter
+        let shown = self.grid_column_scroll();
+        let start = if left < shown {
+            left
         } else if right > shown + viewport {
             right - viewport
         } else {
             return;
         };
-        let max = f32::from(self.hscroll.max_offset().x);
-        let mut offset = self.hscroll.offset();
-        offset.x = px(-start.clamp(0.0, max.max(0.0)));
-        self.hscroll.set_offset(offset);
+        let max = self.grid_scroll_max();
+        self.set_grid_column_scroll(start.clamp(0.0, max.max(0.0)));
     }
 }
 

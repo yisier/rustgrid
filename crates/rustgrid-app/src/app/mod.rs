@@ -1431,6 +1431,11 @@ enum ContextTarget {
     Grid {
         grid_id: u64,
     },
+    /// A grid column header (right-click → 冻结列 / 取消冻结 / 隐藏列 / 刷新).
+    GridHeader {
+        grid_id: u64,
+        column: usize,
+    },
 }
 
 struct ContextMenu {
@@ -1716,6 +1721,10 @@ struct GridView {
 
     hscroll: ScrollHandle,
     hscroll_grab: Option<f32>,
+    /// The horizontal pan of the columns after the frozen one. `hscroll` is not used for that
+    /// translation while a field is frozen, because GPUI moves the whole tracked subtree and the
+    /// frozen columns must stay put; this offset drives the clipped scrollable column group.
+    column_scroll: f32,
     list_scroll: UniformListScrollHandle,
     vscroll_grab: Option<f32>,
     focus: FocusHandle,

@@ -82,6 +82,7 @@ impl GridView {
             theme,
             hscroll: ScrollHandle::new(),
             hscroll_grab: None,
+            column_scroll: 0.0,
             list_scroll: UniformListScrollHandle::new(),
             vscroll_grab: None,
             focus: cx.focus_handle(),
@@ -251,6 +252,11 @@ impl Render for GridView {
         let widths: Vec<f32> = all_widths[..visible_count].to_vec();
         let gutter_width = self.gutter_width();
         let content_width: f32 = (gutter_width + widths.iter().sum::<f32>()).max(1.0);
+        // With a frozen field the trailing columns live in their own clipped, horizontally panned
+        // group (the tracked `hscroll` would move the frozen block along with them). Without one
+        // the whole table keeps the original single content strip.
+        let frozen_split = self.frozen_split();
+        let column_scroll = self.grid_column_scroll();
 
         let mut header = div()
             .flex()
@@ -274,6 +280,11 @@ impl Render for GridView {
                     .border_color(rgb(theme.grid_line)),
             );
         }
+        if frozen_split > 0 {
+            header = header.w_full();
+        }
+        let mut fixed_cells: Vec<AnyElement> = Vec::new();
+        let mut scrolling_cells: Vec<AnyElement> = Vec::new();
         for (index, column) in self.state.columns.iter().enumerate().take(visible_count) {
             let width = widths.get(index).copied().unwrap_or(GRID_COLUMN_WIDTH);
             let sort_descending = self
@@ -355,6 +366,17 @@ impl Render for GridView {
                             this.selecting_cells = false;
                             cx.notify();
                         }))
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                this.grid_header_right_mouse_down(
+                                    index,
+                                    event.position,
+                                    window,
+                                    cx,
+                                );
+                            }),
+                        )
                 })
                 .border_r_1()
                 .border_color(rgb(theme.grid_line))
@@ -401,8 +423,23 @@ impl Render for GridView {
                                 }),
                             ),
                     )
-                });
-            header = header.child(cell);
+                })
+                .into_any_element();
+            if index < frozen_split {
+                fixed_cells.push(cell);
+            } else {
+                scrolling_cells.push(cell);
+            }
+        }
+        header = header.children(fixed_cells);
+        if frozen_split > 0 {
+            header = header.child(scrolling_column_group(
+                scrolling_cells,
+                column_scroll,
+                header_height,
+            ));
+        } else {
+            header = header.children(scrolling_cells);
         }
 
         let selection = self.state.selection.clone();
@@ -489,6 +526,7 @@ impl Render for GridView {
                             .flex_row()
                             .bg(rgb(base_background))
                             .h(px(GRID_ROW_HEIGHT))
+                            .when(frozen_split > 0, |row| row.w_full())
                             .when(!key_page, |row| {
                                 row.child(
                                     div()
@@ -534,6 +572,8 @@ impl Render for GridView {
                                         }),
                                 )
                             });
+                        let mut fixed_row_cells: Vec<AnyElement> = Vec::new();
+                        let mut scrolling_row_cells: Vec<AnyElement> = Vec::new();
                         for index in 0..column_count {
                             let width = widths.get(index).copied().unwrap_or(GRID_COLUMN_WIDTH);
                             let selected = selection
@@ -714,7 +754,21 @@ impl Render for GridView {
                                     );
                                 }
                             }
-                            row_element = row_element.child(cell_element);
+                            if frozen_split > 0 && index >= frozen_split {
+                                scrolling_row_cells.push(cell_element.into_any_element());
+                            } else {
+                                fixed_row_cells.push(cell_element.into_any_element());
+                            }
+                        }
+                        row_element = row_element.children(fixed_row_cells);
+                        if frozen_split > 0 {
+                            row_element = row_element.child(scrolling_column_group(
+                                scrolling_row_cells,
+                                column_scroll,
+                                GRID_ROW_HEIGHT,
+                            ));
+                        } else {
+                            row_element = row_element.children(scrolling_row_cells);
                         }
                         row_element
                     })
@@ -827,6 +881,8 @@ impl Render for GridView {
                                 &filler_widths,
                                 rows_to_fill,
                                 gutter_width,
+                                frozen_split,
+                                column_scroll,
                                 theme,
                             )),
                     )
@@ -848,7 +904,8 @@ impl Render for GridView {
                     .flex()
                     .flex_col()
                     .h_full()
-                    .w(px(content_width))
+                    .when(frozen_split == 0, |strip| strip.w(px(content_width)))
+                    .when(frozen_split > 0, |strip| strip.w_full())
                     .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
                         this.grid_mouse_move(event, cx);
                     }))
@@ -1076,6 +1133,29 @@ impl Render for GridView {
     }
 }
 
+/// The clipped, horizontally panned group holding the columns after a frozen field. The group is
+/// `flex_1` so it takes the rest of its row; the absolutely positioned inner strip is moved by the
+/// grid's own column offset, which keeps the frozen group before it fixed.
+fn scrolling_column_group(cells: Vec<AnyElement>, scroll: f32, height: f32) -> AnyElement {
+    div()
+        .relative()
+        .flex_1()
+        .min_w(px(0.0))
+        .h(px(height))
+        .overflow_hidden()
+        .child(
+            div()
+                .absolute()
+                .left(px(-scroll))
+                .top(px(0.0))
+                .h(px(height))
+                .flex()
+                .flex_row()
+                .children(cells),
+        )
+        .into_any_element()
+}
+
 /// The cell a display column reads from. The rows keep the engine's column order (so a field-layout
 /// change never has to touch them), so the display column index is mapped back through the layout.
 fn source_cell<'a>(
@@ -1183,6 +1263,8 @@ fn empty_grid_rows(
     widths: &[f32],
     rows: usize,
     gutter_width: f32,
+    frozen_split: usize,
+    column_scroll: f32,
     theme: Theme,
 ) -> impl IntoElement {
     let mut column = div().flex().flex_col().w_full();
@@ -1197,6 +1279,7 @@ fn empty_grid_rows(
             .flex_row()
             .flex_none()
             .h(px(GRID_ROW_HEIGHT))
+            .when(frozen_split > 0, |row| row.w_full())
             .bg(rgb(background));
         if gutter_width > 0.0 {
             row_element = row_element.child(
@@ -1208,18 +1291,38 @@ fn empty_grid_rows(
                     .border_color(rgb(theme.grid_line)),
             );
         }
-        for width in widths {
-            row_element = row_element.child(
-                div()
-                    .w(px(*width))
-                    .h(px(GRID_ROW_HEIGHT))
-                    .flex_none()
-                    .border_r_1()
-                    .border_b_1()
-                    .border_color(rgb(theme.grid_line)),
-            );
+        let fixed = if frozen_split > 0 {
+            &widths[..frozen_split.min(widths.len())]
+        } else {
+            widths
+        };
+        for width in fixed {
+            row_element = row_element.child(empty_grid_cell(*width, theme));
+        }
+        if frozen_split > 0 {
+            let cells = widths[frozen_split.min(widths.len())..]
+                .iter()
+                .map(|width| empty_grid_cell(*width, theme))
+                .collect();
+            row_element = row_element.child(scrolling_column_group(
+                cells,
+                column_scroll,
+                GRID_ROW_HEIGHT,
+            ));
         }
         column = column.child(row_element);
     }
     column
+}
+
+/// One decorative cell of the empty-table filler.
+fn empty_grid_cell(width: f32, theme: Theme) -> AnyElement {
+    div()
+        .w(px(width))
+        .h(px(GRID_ROW_HEIGHT))
+        .flex_none()
+        .border_r_1()
+        .border_b_1()
+        .border_color(rgb(theme.grid_line))
+        .into_any_element()
 }
