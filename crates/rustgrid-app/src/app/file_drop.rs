@@ -28,10 +28,24 @@ enum DroppedFile {
     SqliteDatabase(PathBuf),
 }
 
+/// Whether `path` carries one of SQLite's conventional extensions. The header is authoritative for
+/// a normal database, but an encrypted SQLite file (SQLCipher) or a database still being copied has
+/// no readable header at drop time; the extension still says what the user meant to open, and the
+/// connection attempt reports a useful error instead of "unsupported".
+fn has_sqlite_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            SQLITE_EXTENSIONS
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(extension))
+        })
+}
+
 /// Decide what a dropped file is. Unrecognised formats return `None`; the drop handler then shows
 /// the generic "unsupported file type" message.
 fn classify_dropped_file(path: &Path) -> Option<DroppedFile> {
-    if is_sqlite_file(path) {
+    if is_sqlite_file(path) || has_sqlite_extension(path) {
         return Some(DroppedFile::SqliteDatabase(path.to_path_buf()));
     }
     None
@@ -55,16 +69,7 @@ fn is_sqlite_file(path: &Path) -> bool {
         })
         .is_ok()
         && &header == SQLITE_HEADER;
-    header_ok
-        || (meta.len() == 0
-            && path
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .is_some_and(|extension| {
-                    SQLITE_EXTENSIONS
-                        .iter()
-                        .any(|known| known.eq_ignore_ascii_case(extension))
-                }))
+    header_ok || (meta.len() == 0 && has_sqlite_extension(path))
 }
 
 /// The dropped files this build can open, in the order they were dropped.
@@ -142,12 +147,14 @@ impl AppView {
     /// Open one classified dropped file. A new format adds its arm here and its classifier above.
     fn open_dropped_file(&mut self, file: DroppedFile, cx: &mut Context<'_, Self>) {
         match file {
-            DroppedFile::SqliteDatabase(path) => self.open_sqlite_path(path, cx),
+            DroppedFile::SqliteDatabase(path) => self.open_sqlite_file(path, cx),
         }
     }
 
     /// Open a dropped (or command-line) SQLite file: reuse its connection when the file is already
-    /// configured, otherwise add and connect a new one named after the file.
+    /// configured, otherwise add and connect a new one named after the file. Command-line paths
+    /// have not been classified, so they are checked here; a dropped file already passed
+    /// [`classify_dropped_file`] and must not be rejected again by the header check.
     pub(crate) fn open_sqlite_path(&mut self, path: PathBuf, cx: &mut Context<'_, Self>) {
         if !is_sqlite_file(&path) {
             self.toast(
@@ -157,6 +164,11 @@ impl AppView {
             );
             return;
         }
+        self.open_sqlite_file(path, cx);
+    }
+
+    /// Open a file already known to be a SQLite database.
+    fn open_sqlite_file(&mut self, path: PathBuf, cx: &mut Context<'_, Self>) {
         if let Some(index) = self.sqlite_connection_index(&path) {
             self.focus_sqlite_connection(index, cx);
             return;
@@ -452,6 +464,26 @@ mod tests {
         let file = dir.join("sample.data");
         std::fs::write(&file, SQLITE_HEADER).unwrap();
         assert!(is_sqlite_file(&file));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_non_empty_file_with_a_sqlite_extension_is_still_offered_to_sqlite() {
+        // An encrypted (SQLCipher) database or a file still being copied has no readable header;
+        // its extension still says the user meant a SQLite database, so the connect attempt must
+        // report the real error instead of "unsupported file type".
+        let dir =
+            std::env::temp_dir().join(format!("rustgrid-sqlite-drop-{}", crate::form::now_nanos()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("encrypted.sqlite");
+        std::fs::write(&file, b"not a plain sqlite header").unwrap();
+        assert!(matches!(
+            classify_dropped_file(&file),
+            Some(DroppedFile::SqliteDatabase(path)) if path == file
+        ));
+        let other = dir.join("notes.txt");
+        std::fs::write(&other, b"not a database").unwrap();
+        assert!(classify_dropped_file(&other).is_none());
         std::fs::remove_dir_all(&dir).ok();
     }
 
