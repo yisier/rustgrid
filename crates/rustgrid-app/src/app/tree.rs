@@ -40,6 +40,15 @@ impl AppView {
         cx.notify();
     }
 
+    /// Ctrl/Cmd+F while the tree holds focus moves the caret into the sidebar's search box, so
+    /// filtering the tree never needs the mouse. The box sits above the tree's key context, so
+    /// taking focus also leaves that context — like clicking it does.
+    pub(super) fn focus_tree_search(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.tree_search_input
+            .update(cx, |input, cx| input.focus_state(window, cx));
+        cx.notify();
+    }
+
     /// The connection the active tab belongs to, falling back to the tree's current selection.
     /// The main ribbon's key-value gating uses this so a restored key tab (whose tree row may not
     /// be selected yet) still hides the SQL-only tabs.

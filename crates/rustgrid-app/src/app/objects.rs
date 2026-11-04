@@ -1115,6 +1115,15 @@ impl AppView {
         cx.notify();
     }
 
+    /// Ctrl/Cmd+F while the object list holds focus moves the caret into the toolbar's search box,
+    /// so filtering the list never needs the mouse. The box sits in the toolbar (outside the
+    /// list's key context), so taking focus also leaves that context — like clicking it does.
+    pub(super) fn focus_object_search(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.object_search_input
+            .update(cx, |input, cx| input.focus_state(window, cx));
+        cx.notify();
+    }
+
     /// Clear every list's search unless 保留对象搜索 is on: the searches are then kept while the
     /// shown tab, database, schema or connection changes. With the setting off a switch forgets
     /// them all, so coming back shows every object again.
@@ -3050,6 +3059,11 @@ impl Render for ObjectPane {
             .on_action(
                 cx.listener(|this, _: &ObjectSelectAll, _window, cx| this.object_select_all(cx)),
             )
+            .on_action(cx.listener(|this, _: &ObjectFocusSearch, window, cx| {
+                if let Some(app) = this.app.upgrade() {
+                    app.update(cx, |app, cx| app.focus_object_search(window, cx));
+                }
+            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.object_key(event, window, cx);
             }))

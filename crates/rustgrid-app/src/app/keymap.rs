@@ -24,14 +24,14 @@ use super::{
     GridEditValue, GridFirstCell, GridLastCell, GridNextCell, GridPageDown, GridPageUp,
     GridPrevCell, GridRefresh, GridRowEnd, GridRowStart, GridSelectPageDown, GridSelectPageUp,
     MoveLinesDown, MoveLinesUp, NewQueryTab, NextTab, OBJECT_LIST_CONTEXT, ObjectDown, ObjectEnd,
-    ObjectHome, ObjectLeft, ObjectOpen, ObjectPageDown, ObjectPageUp, ObjectRename, ObjectRight,
-    ObjectSelectAll, ObjectUp, OpenTransferConfig, PasteBackupFile, PasteQueryFile, PrevTab,
-    QUERY_EDITOR_CONTEXT, QUERY_LIST_CONTEXT, ROW_FORM_CONTEXT, RenameBackupFile, RenameQueryFile,
-    RunQuery, RunSelectedQuery, SaveDesign, SaveQuery, SaveRowForm, SelectAllBackups,
-    SelectAllOccurrences, SelectAllQueries, SelectAllStatusSql, SelectAllTransfers, SwapLineUp,
-    TRANSFER_LIST_CONTEXT, TREE_CONTEXT, ToggleComment, TreeCollapse, TreeDown, TreeEnd,
-    TreeExpand, TreeHome, TreeOpen, TreePageDown, TreePageUp, TreeRename, TreeSelectAll, TreeUp,
-    WORKSPACE_CONTEXT,
+    ObjectFocusSearch, ObjectHome, ObjectLeft, ObjectOpen, ObjectPageDown, ObjectPageUp,
+    ObjectRename, ObjectRight, ObjectSelectAll, ObjectUp, OpenTransferConfig, PasteBackupFile,
+    PasteQueryFile, PrevTab, QUERY_EDITOR_CONTEXT, QUERY_LIST_CONTEXT, ROW_FORM_CONTEXT,
+    RenameBackupFile, RenameQueryFile, RunQuery, RunSelectedQuery, SaveDesign, SaveQuery,
+    SaveRowForm, SelectAllBackups, SelectAllOccurrences, SelectAllQueries, SelectAllStatusSql,
+    SelectAllTransfers, SwapLineUp, TRANSFER_LIST_CONTEXT, TREE_CONTEXT, ToggleComment,
+    TreeCollapse, TreeDown, TreeEnd, TreeExpand, TreeFocusSearch, TreeHome, TreeOpen, TreePageDown,
+    TreePageUp, TreeRename, TreeSelectAll, TreeUp, WORKSPACE_CONTEXT,
 };
 
 /// Where a command lives, for grouping the 快捷键 page.
@@ -226,6 +226,12 @@ pub(super) const COMMANDS: &[Command] = &[
         &["secondary-a"],
         TreeSelectAll
     ),
+    tree_command!(
+        "tree.focus_search",
+        "keymap.tree.focus_search",
+        &["secondary-f"],
+        TreeFocusSearch
+    ),
     object_command!("objects.up", "keymap.objects.up", &["up"], ObjectUp),
     object_command!("objects.down", "keymap.objects.down", &["down"], ObjectDown),
     object_command!("objects.left", "keymap.objects.left", &["left"], ObjectLeft),
@@ -266,6 +272,12 @@ pub(super) const COMMANDS: &[Command] = &[
         "keymap.objects.select_all",
         &["secondary-a"],
         ObjectSelectAll
+    ),
+    object_command!(
+        "objects.focus_search",
+        "keymap.objects.focus_search",
+        &["secondary-f"],
+        ObjectFocusSearch
     ),
     Command {
         id: "general.new_query",
