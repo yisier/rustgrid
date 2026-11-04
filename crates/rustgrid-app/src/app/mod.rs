@@ -7,14 +7,14 @@ use std::time::Duration;
 use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 
 use gpui::{
-    Anchor, AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle,
-    DispatchPhase, Div, Entity, FocusHandle, FontWeight, HighlightStyle, ImageSource, KeyBinding,
-    KeyDownEvent, Keystroke, ListHorizontalSizingBehavior, Modifiers, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, OperatingSystem, Pixels, Point, Render, Resource, ScrollDelta,
-    ScrollEvent, ScrollHandle, ScrollStrategy, SharedString, Stateful, StyledText, Subscription,
-    Svg, TextLayout, UniformListScrollHandle, WeakEntity, Window, WindowBounds, WindowHandle,
-    WindowId, WindowOptions, anchored, canvas, deferred, div, img, prelude::*, px, relative, rgb,
-    rgba, size, svg, uniform_list,
+    Anchor, Animation, AnimationExt, AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context,
+    CursorStyle, DispatchPhase, Div, DragMoveEvent, Entity, ExternalPaths, FocusHandle, FontWeight,
+    HighlightStyle, ImageSource, KeyBinding, KeyDownEvent, Keystroke, ListHorizontalSizingBehavior,
+    Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, OperatingSystem, Pixels,
+    Point, Render, Resource, ScrollDelta, ScrollEvent, ScrollHandle, ScrollStrategy, SharedString,
+    Stateful, StyledText, Subscription, Svg, TextLayout, UniformListScrollHandle, WeakEntity,
+    Window, WindowBounds, WindowHandle, WindowId, WindowOptions, anchored, canvas, deferred, div,
+    img, prelude::*, px, relative, rgb, rgba, size, svg, uniform_list,
 };
 use rustgrid_config::{
     AppSettings, ConfigStore, ConnectionGroup, DEFAULT_EDITOR_FONT_SIZE, FieldLayout, GroupEntry,
@@ -2646,6 +2646,17 @@ pub struct AppView {
     /// The connection tree's window-space bounds (published by the tree pane), so the rubber band
     /// is clamped to it.
     tree_bounds: Option<Bounds<Pixels>>,
+    /// Whether a SQLite database file is being dragged over the window, so the drop scrim is up.
+    sqlite_drop_active: bool,
+    /// Whether the current drag's paths have already been inspected. A drag move fires constantly,
+    /// and reading every dragged file's header on each move would be pointless disk I/O.
+    sqlite_drop_checked: bool,
+    /// Raise the main window on the next frame. A second launch that forwards a SQLite file (the
+    /// executable was the drop target) should bring the running app forward.
+    pending_activate: bool,
+    /// The profiles whose first database opens once their database list loads: a SQLite file
+    /// dropped onto the window (or passed on the command line) opens its `main` database with it.
+    pending_open_databases: BTreeSet<String>,
     /// The connection-tree host, which owns its own (drag-resizable) width so resizing only
     /// re-renders it, not the whole app.
     sidebar_host: Entity<SidebarHost>,
@@ -2856,6 +2867,7 @@ mod runsql;
 mod sidebar;
 mod sql_completion;
 pub(crate) mod sql_lex;
+mod sqlite_drop;
 mod sync;
 mod tabs;
 mod toolbar;
@@ -3004,6 +3016,32 @@ impl AppView {
             })
             .detach();
         }
+        // A later launch that was handed a SQLite file (dragging it onto RustGrid.exe) cannot open
+        // a window of its own — the single-instance guard stops it — so it drops the path into a
+        // small temp file for this instance to pick up (see `single_instance`). The file usually
+        // does not exist, so the poll costs one failed `exists` check every 300 ms.
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(300))
+                    .await;
+                let paths = crate::single_instance::take_forwarded_paths();
+                if paths.is_empty() {
+                    continue;
+                }
+                let opened = this.update(cx, |view, cx| {
+                    view.pending_activate = true;
+                    for path in paths {
+                        view.open_sqlite_path(path, cx);
+                    }
+                    cx.notify();
+                });
+                if opened.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         cx.on_app_quit(|view, cx| {
             view.save_session_now(cx);
             async {}
@@ -3400,6 +3438,10 @@ impl AppView {
             tree_drag: None,
             tree_row_rects: std::collections::HashMap::new(),
             tree_selection: ListSelection::default(),
+            sqlite_drop_active: false,
+            sqlite_drop_checked: false,
+            pending_activate: false,
+            pending_open_databases: BTreeSet::new(),
             tree_marquee: None,
             tree_bounds: None,
             sidebar_host,
@@ -4654,6 +4696,10 @@ impl Render for AppView {
             self.main_tab = MainTab::Tables;
         }
         self.theme = Theme::resolve(self.theme_setting, window.appearance());
+        if self.pending_activate {
+            self.pending_activate = false;
+            window.activate_window();
+        }
         // Keep gpui-kit's own theme in lockstep with the app palette so its components (and the
         // shadcn tokens they read) follow the user's Light/Dark/System setting.
         let want_dark = self.theme.is_dark();
@@ -4868,6 +4914,25 @@ impl Render for AppView {
             .bg(rgb(theme.window_bg))
             .text_color(rgb(theme.text))
             .text_size(px(12.5))
+            // A SQLite database dragged onto the window opens as a connection. The move handler
+            // only flips the scrim when the dragged files actually qualify, and only on a change,
+            // so a drag over the window costs no repaints beyond the one it needs; `on_drop`
+            // receives the platform paths through gpui's `ExternalPaths` payload.
+            .on_drag_move::<ExternalPaths>(cx.listener(
+                |this, event: &DragMoveEvent<ExternalPaths>, _window, cx| {
+                    if let Some(paths) = event.dragged_item().downcast_ref::<ExternalPaths>() {
+                        this.sqlite_drop_entered(paths, cx);
+                    }
+                },
+            ))
+            .on_file_drop_exit(
+                cx.listener(|this, _event: &gpui::FileDropEvent, _window, cx| {
+                    this.sqlite_drop_exited(cx);
+                }),
+            )
+            .on_drop::<ExternalPaths>(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
+                this.sqlite_drop_submitted(paths, cx);
+            }))
             // A side-pane divider sits on its pane's edge, so the pointer leaves the pane while
             // dragging. These root-level handlers keep the drag alive anywhere in the window and
             // update only the pane entities, so the whole app does not re-render per mouse move.
@@ -4924,6 +4989,11 @@ impl Render for AppView {
 
         if let Some(menu) = self.tab_menu.as_ref() {
             root = root.child(self.render_tab_menu(menu, cx));
+        }
+
+        // The SQLite file-drag scrim sits above every pane (but under `Root`'s dialogs).
+        if self.sqlite_drop_active {
+            root = root.child(self.render_sqlite_drop_overlay(theme));
         }
 
         // Dialogs are hosted by `Root` (opened imperatively); AppView state remains the source

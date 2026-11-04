@@ -1490,18 +1490,41 @@ impl AppView {
                     .find(|grid| grid.read(cx).state.id == grid_id)
                     .cloned();
                 if let Some(grid) = grid {
-                    let (valid, on_frozen_column, can_hide) = {
+                    let (valid, on_frozen_column, can_hide, can_filter) = {
                         let g = grid.read(cx);
                         (
                             column < g.state.visible_columns,
                             g.state.frozen_column_index() == Some(column),
                             g.state.sql.is_none() && g.state.visible_columns > 1,
+                            g.state.sql.is_none(),
                         )
                     };
+                    let for_filter = grid.clone();
                     let for_freeze = grid.clone();
                     let for_unfreeze = grid.clone();
                     let for_hide = grid.clone();
                     let for_refresh = grid.clone();
+                    // 筛选 opens the WHERE panel with this field already added, the way Navicat's
+                    // header menu does, so a filter can be started from the column itself.
+                    items = items.child(if valid && can_filter {
+                        self.context_item(
+                            "grid-head-filter",
+                            t!("grid.filter").to_string(),
+                            cx.listener(move |this, _event, _window, cx| {
+                                this.context_menu = None;
+                                for_filter.update(cx, |grid, cx| grid.filter_column(column, cx));
+                                cx.notify();
+                            }),
+                        )
+                        .into_any_element()
+                    } else {
+                        self.context_item_disabled(
+                            "grid-head-filter",
+                            t!("grid.filter").to_string(),
+                        )
+                        .into_any_element()
+                    });
+                    items = items.child(div().h(px(1.0)).my_1().bg(rgb(theme.border)));
                     // 冻结列 / 取消冻结 are one item: the frozen column itself offers 取消冻结,
                     // every other column offers 冻结列.
                     items = items.child(if on_frozen_column {

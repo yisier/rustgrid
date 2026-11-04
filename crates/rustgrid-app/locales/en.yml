@@ -1632,3 +1632,8 @@ redis.key.created: "Key created"
 redis.key.ttl_updated: "TTL updated"
 redis.key.name_required: "Enter a key name."
 redis.key.ttl_invalid: "TTL must be an integer."
+
+sqlite_drop.title: "Open SQLite Database"
+sqlite_drop.hint: "Drop the SQLite file to open it as a connection"
+sqlite_drop.unsupported: "Only SQLite database files can be opened by dropping them here."
+sqlite_drop.opened: "Opened %{name}"

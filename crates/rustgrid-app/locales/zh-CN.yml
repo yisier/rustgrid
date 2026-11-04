@@ -1632,3 +1632,8 @@ redis.key.created: "键已创建"
 redis.key.ttl_updated: "TTL 已更新"
 redis.key.name_required: "请输入键名。"
 redis.key.ttl_invalid: "TTL 必须是整数。"
+
+sqlite_drop.title: "打开 SQLite 数据库"
+sqlite_drop.hint: "松开即可把该 SQLite 文件添加为连接并打开"
+sqlite_drop.unsupported: "只能通过拖拽打开 SQLite 数据库文件。"
+sqlite_drop.opened: "已打开 %{name}"

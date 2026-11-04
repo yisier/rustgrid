@@ -1,0 +1,425 @@
+//! Opening SQLite database files by dragging them onto the window (or launching RustGrid with one
+//! as its argument).
+//!
+//! A dropped file becomes an ordinary SQLite connection named after the file, added to the tree and
+//! opened. A file that already has a connection is not added twice: its connection is selected and
+//! opened again. While a file is dragged over the window, a scrim shows where it will land; the
+//! overlay is one element with a short opacity animation, so the indicator costs nothing per mouse
+//! move.
+
+use std::path::{Path, PathBuf};
+
+use gpui::ExternalPaths;
+use rustgrid_core::{ConnectionOptions, ConnectionProfile, DriverId};
+
+use super::*;
+
+/// The extensions a database file may carry. SQLite accepts any name, so these are only a hint for
+/// an empty file whose header has not been written yet; the header check below is authoritative.
+const SQLITE_EXTENSIONS: &[&str] = &["db", "db3", "s3db", "sl3", "sqlite", "sqlite3"];
+
+/// The 16-byte header every SQLite database file starts with.
+const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
+
+/// Whether `path` is a SQLite database file: either its header proves it, or it is an empty file
+/// with one of the conventional extensions (SQLite writes the header when the first page is
+/// committed).
+fn is_sqlite_file(path: &Path) -> bool {
+    let Some(meta) = std::fs::metadata(path).ok() else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    let mut header = [0u8; SQLITE_HEADER.len()];
+    let header_ok = std::fs::File::open(path)
+        .and_then(|mut file| {
+            use std::io::Read as _;
+            file.read_exact(&mut header)
+        })
+        .is_ok()
+        && &header == SQLITE_HEADER;
+    header_ok
+        || (meta.len() == 0
+            && path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| {
+                    SQLITE_EXTENSIONS
+                        .iter()
+                        .any(|known| known.eq_ignore_ascii_case(extension))
+                }))
+}
+
+/// The dropped files that can be opened as SQLite databases.
+fn sqlite_drop_paths(paths: &ExternalPaths) -> Vec<PathBuf> {
+    paths
+        .paths()
+        .iter()
+        .filter(|path| is_sqlite_file(path))
+        .cloned()
+        .collect()
+}
+
+/// Paths compare case-insensitively on Windows, which is where dragging a file onto the executable
+/// is most likely.
+fn same_file(left: &str, right: &Path) -> bool {
+    let right = right.to_string_lossy();
+    if cfg!(windows) {
+        left.eq_ignore_ascii_case(&right)
+    } else {
+        left == right
+    }
+}
+
+impl AppView {
+    /// The index of an existing connection that already points at `path`.
+    fn sqlite_connection_index(&self, path: &Path) -> Option<usize> {
+        let canonical = std::fs::canonicalize(path).ok();
+        self.connections.iter().position(|node| {
+            if node.profile.driver.as_str() != "sqlite" {
+                return false;
+            }
+            let Some(database) = node.profile.database.as_deref() else {
+                return false;
+            };
+            if same_file(database, path) {
+                return true;
+            }
+            canonical.as_ref().is_some_and(|canonical| {
+                std::fs::canonicalize(database)
+                    .ok()
+                    .is_some_and(|existing| existing == *canonical)
+            })
+        })
+    }
+
+    /// A connection name unique among the configured ones: the file stem, then `name (2)`.
+    fn unique_sqlite_name(&self, path: &Path) -> String {
+        let base = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .filter(|stem| !stem.trim().is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| "SQLite".to_string());
+        let used: std::collections::HashSet<&str> = self
+            .connections
+            .iter()
+            .map(|node| node.profile.name.as_str())
+            .collect();
+        if !used.contains(base.as_str()) {
+            return base;
+        }
+        let mut suffix = 2;
+        loop {
+            let candidate = format!("{base} ({suffix})");
+            if !used.contains(candidate.as_str()) {
+                return candidate;
+            }
+            suffix += 1;
+        }
+    }
+
+    /// Open a dropped (or command-line) SQLite file: reuse its connection when the file is already
+    /// configured, otherwise add and connect a new one named after the file.
+    pub(crate) fn open_sqlite_path(&mut self, path: PathBuf, cx: &mut Context<'_, Self>) {
+        if !is_sqlite_file(&path) {
+            self.toast(
+                ToastKind::Error,
+                t!("sqlite_drop.unsupported").to_string(),
+                cx,
+            );
+            return;
+        }
+        if let Some(index) = self.sqlite_connection_index(&path) {
+            self.focus_sqlite_connection(index, cx);
+            return;
+        }
+
+        let profile = ConnectionProfile {
+            id: format!("conn-{}", crate::form::now_nanos()),
+            name: self.unique_sqlite_name(&path),
+            driver: DriverId::new("sqlite"),
+            host: String::new(),
+            port: 0,
+            username: String::new(),
+            database: Some(path.to_string_lossy().into_owned()),
+            options: BTreeMap::new(),
+            settings: ConnectionOptions::default(),
+        };
+        self.connect_sqlite_profile(profile, cx);
+    }
+
+    /// Select a connection and make sure it is open, then show its first database's objects.
+    fn focus_sqlite_connection(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        self.tree_selection.select_one(format!("conn-{index}"));
+        let Some((profile_id, connected, connecting, loaded)) =
+            self.connections.get_mut(index).map(|node| {
+                node.expanded = true;
+                (
+                    node.profile.id.clone(),
+                    matches!(&node.status, ConnectionStatus::Connected(_)),
+                    matches!(&node.status, ConnectionStatus::Connecting),
+                    matches!(&node.databases, Loadable::Loaded(_)),
+                )
+            })
+        else {
+            return;
+        };
+        if connected {
+            if loaded {
+                self.open_first_database(index, cx);
+            } else {
+                self.pending_open_databases.insert(profile_id);
+                self.load_databases(index, cx);
+            }
+        } else {
+            self.pending_open_databases.insert(profile_id);
+            if !connecting {
+                self.connect(index, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Show the first database of `index` (SQLite has exactly one, `main`), opening it when it is
+    /// still closed and merely re-selecting it when a restored session already opened it.
+    pub(super) fn open_first_database(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        if let Some(profile_id) = self
+            .connections
+            .get(index)
+            .map(|node| node.profile.id.clone())
+        {
+            self.pending_open_databases.remove(&profile_id);
+        }
+        let Some(has_database) =
+            self.connections
+                .get(index)
+                .and_then(|node| match &node.databases {
+                    Loadable::Loaded(databases) => Some(!databases.is_empty()),
+                    _ => None,
+                })
+        else {
+            return;
+        };
+        if !has_database {
+            return;
+        }
+        let opened = matches!(
+            self.connections
+                .get(index)
+                .and_then(|node| match &node.databases {
+                    Loadable::Loaded(databases) => databases.first(),
+                    _ => None,
+                }),
+            Some(database) if database.opened
+        );
+        if opened {
+            self.show_database_objects(index, 0, cx);
+        } else {
+            self.open_database(index, 0, cx);
+        }
+    }
+
+    /// Connect a freshly built SQLite profile, add it to the tree and open its database once the
+    /// connection is up.
+    fn connect_sqlite_profile(&mut self, profile: ConnectionProfile, cx: &mut Context<'_, Self>) {
+        let Some(driver) = self.registry.get(&profile.driver) else {
+            self.error_dialog = Some(t!("error.driver_missing").to_string());
+            cx.notify();
+            return;
+        };
+        let config = ConnectionConfig {
+            driver: profile.driver.clone(),
+            host: profile.host.clone(),
+            port: profile.port,
+            username: profile.username.clone(),
+            password: None,
+            database: profile.database.clone(),
+            options: profile.options.clone(),
+            settings: profile.settings.clone(),
+        };
+        let runtime = self.runtime.clone();
+        let profile_id = profile.id.clone();
+        cx.spawn(async move |this, cx| {
+            let result = match runtime
+                .spawn(async move { driver.connect(&config).await })
+                .await
+            {
+                Ok(inner) => inner,
+                Err(error) => Err(Error::other(error)),
+            };
+            let _ = this.update(cx, |view, cx| match result {
+                Ok(connection) => {
+                    view.connections.push(ConnectionNode {
+                        profile,
+                        password: None,
+                        password_saved: false,
+                        status: ConnectionStatus::Connected(Arc::from(connection)),
+                        databases: Loadable::Idle,
+                        expanded: true,
+                    });
+                    let index = view.connections.len() - 1;
+                    view.add_connection_to_tree(profile_id.clone(), None);
+                    view.persist_profiles(cx);
+                    view.persist_settings();
+                    view.tree_selection.select_one(format!("conn-{index}"));
+                    view.pending_open_databases.insert(profile_id);
+                    view.load_databases(index, cx);
+                    view.toast(
+                        ToastKind::Info,
+                        t!(
+                            "sqlite_drop.opened",
+                            name = view.connections[index].profile.name
+                        )
+                        .to_string(),
+                        cx,
+                    );
+                }
+                Err(error) => {
+                    view.error_dialog = Some(error.to_string());
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The file drag crossed onto the window: show the drop scrim only when the drag carries a
+    /// SQLite database, and only when the state actually changes (a drag move fires constantly).
+    pub(super) fn sqlite_drop_entered(
+        &mut self,
+        paths: &ExternalPaths,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.sqlite_drop_checked {
+            return;
+        }
+        self.sqlite_drop_checked = true;
+        let active = !sqlite_drop_paths(paths).is_empty();
+        if self.sqlite_drop_active != active {
+            self.sqlite_drop_active = active;
+            cx.notify();
+        }
+    }
+
+    /// The drag left the window (or the platform cancelled it): take the scrim down.
+    pub(super) fn sqlite_drop_exited(&mut self, cx: &mut Context<'_, Self>) {
+        self.sqlite_drop_checked = false;
+        if self.sqlite_drop_active {
+            self.sqlite_drop_active = false;
+            cx.notify();
+        }
+    }
+
+    /// The files were dropped: open every SQLite database among them.
+    pub(super) fn sqlite_drop_submitted(
+        &mut self,
+        paths: &ExternalPaths,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.sqlite_drop_exited(cx);
+        let files = sqlite_drop_paths(paths);
+        if files.is_empty() {
+            self.toast(
+                ToastKind::Error,
+                t!("sqlite_drop.unsupported").to_string(),
+                cx,
+            );
+            return;
+        }
+        for path in files {
+            self.open_sqlite_path(path, cx);
+        }
+    }
+
+    /// The drag indicator: the window dims and a dashed drop target names the action.
+    pub(super) fn render_sqlite_drop_overlay(&self, theme: Theme) -> AnyElement {
+        div()
+            .id("sqlite-drop-overlay")
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            // A plain alpha scrim rather than a backdrop filter: it reads as the interface
+            // receding, costs one quad, and works on every platform GPUI supports. It is
+            // deliberately not `.occlude()`: the root still needs to stay hovered so its drop
+            // listener receives the release.
+            .bg(rgba((theme.window_bg << 8) | 0xC8))
+            .with_animation(
+                "sqlite-drop-overlay-fade",
+                Animation::new(Duration::from_millis(120)),
+                |overlay, delta| overlay.opacity(delta),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_3()
+                    .w(px(420.0))
+                    .px_8()
+                    .py_10()
+                    .rounded(px(14.0))
+                    .border_2()
+                    .border_color(rgb(theme.brand))
+                    .bg(rgb(theme.dialog_bg))
+                    .child(
+                        svg()
+                            .path("icons/database.svg")
+                            .w(px(40.0))
+                            .h(px(40.0))
+                            .flex_none()
+                            .text_color(rgb(theme.brand)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(14.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(theme.text))
+                            .child(t!("sqlite_drop.title").to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(theme.text_muted))
+                            .child(t!("sqlite_drop.hint").to_string()),
+                    ),
+            )
+            .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_sqlite_header_is_recognised() {
+        let dir =
+            std::env::temp_dir().join(format!("rustgrid-sqlite-drop-{}", crate::form::now_nanos()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("sample.data");
+        std::fs::write(&file, SQLITE_HEADER).unwrap();
+        assert!(is_sqlite_file(&file));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_empty_database_file_keeps_its_conventional_extension() {
+        let dir =
+            std::env::temp_dir().join(format!("rustgrid-sqlite-drop-{}", crate::form::now_nanos()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("sample.db");
+        std::fs::write(&file, b"").unwrap();
+        assert!(is_sqlite_file(&file));
+        let other = dir.join("notes.txt");
+        std::fs::write(&other, b"not a database").unwrap();
+        assert!(!is_sqlite_file(&other));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

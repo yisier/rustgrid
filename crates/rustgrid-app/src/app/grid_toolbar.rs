@@ -391,19 +391,36 @@ impl GridView {
                         t!("grid.sort_asc").to_string()
                     }),
             )
-            .child(ui::icon_button(
-                SharedString::from(format!("sort-remove-{index}")),
-                "icons/cross.svg",
-                theme.danger,
-                18.0,
-                18.0,
-                false,
-                theme,
-                cx.listener(move |this, _event, _window, cx| {
-                    cx.stop_propagation();
-                    this.sort_remove_rule(index, cx)
-                }),
-            ))
+            // The same flat outlined `−` as the filter builder's remove action: the two panels sit
+            // side by side, so a bare `✕` here read as a different control.
+            .child(
+                div()
+                    .id(SharedString::from(format!("sort-remove-{index}")))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(FILTER_ROW_ACTION_SIZE))
+                    .h(px(FILTER_ROW_ACTION_SIZE))
+                    .flex_none()
+                    .rounded(px(FILTER_ROW_ACTION_RADIUS))
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .bg(rgb(theme.dialog_bg))
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        cx.stop_propagation();
+                        this.sort_remove_rule(index, cx)
+                    }))
+                    .child(
+                        svg()
+                            .path("icons/minus.svg")
+                            .w(px(FILTER_ROW_ACTION_SIZE * 0.5))
+                            .h(px(FILTER_ROW_ACTION_SIZE * 0.5))
+                            .flex_none()
+                            .text_color(rgb(theme.text_null)),
+                    ),
+            )
             .into_any_element()
     }
 

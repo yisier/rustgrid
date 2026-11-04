@@ -732,6 +732,11 @@ impl AppView {
                 view.remember_databases(index);
                 // Reopen the last session's databases on this connection.
                 view.restore_session_databases(index, cx);
+                // A SQLite file dropped onto the window (or passed on launch) opens its `main`
+                // database as soon as the list arrives.
+                if view.pending_open_databases.remove(&profile_id) {
+                    view.open_first_database(index, cx);
+                }
                 view.notify_object_pane(cx);
                 cx.notify();
                 for (database_index, database_name, tables, routines) in reload {

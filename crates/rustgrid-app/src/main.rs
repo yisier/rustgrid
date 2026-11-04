@@ -31,12 +31,22 @@ use crate::assets::Assets;
 use crate::runtime::Runtime;
 
 fn main() {
+    // Dropping a SQLite database onto RustGrid.exe launches the executable with the file as its
+    // argument; the running copy opens it when one exists, so a second process never starts.
+    let startup_paths: Vec<std::path::PathBuf> = std::env::args_os()
+        .skip(1)
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_file())
+        .collect();
     // Double-clicking the executable must not open a second copy: the first instance owns the
     // single-instance lock and every later launch exits immediately. The guard is held for the
     // whole of `main`, so the lock lives as long as the app runs.
     let _instance = match single_instance::acquire() {
         Some(guard) => guard,
-        None => return,
+        None => {
+            single_instance::forward_to_running(&startup_paths);
+            return;
+        }
     };
 
     tracing_subscriber::fmt()
@@ -79,6 +89,7 @@ fn main() {
         let registry = registry.clone();
         let config = config.clone();
         let runtime = runtime.clone();
+        let startup_paths = startup_paths.clone();
 
         // `open_window` wraps the content in gpui-kit's `Root`, which now hosts dialogs,
         // sheets, notifications and tooltips automatically.
@@ -98,6 +109,15 @@ fn main() {
                 win_resize::install(window);
                 let view = cx
                     .new(|cx| AppView::new(registry.clone(), config.clone(), runtime.clone(), cx));
+                // A database file the app was launched with (dragged onto the executable, or
+                // opened through the shell's "Open with") becomes a connection like a dropped one.
+                if !startup_paths.is_empty() {
+                    view.update(cx, |app, cx| {
+                        for path in startup_paths {
+                            app.open_sqlite_path(path, cx);
+                        }
+                    });
+                }
                 let weak = view.downgrade();
                 // The kit title bar's close button posts `WM_CLOSE` (and macOS' native close goes
                 // through the same hook), so the unsaved-work confirmation has to live here rather

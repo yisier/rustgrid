@@ -24,9 +24,9 @@ use std::time::{Duration, Instant};
 
 use rustgrid_core::{
     CellValue, ColumnInfo, DataDiff, ObjectKind, PageRequest, RowChange, RowChangeKind,
-    SchemaChange, SchemaChangeKind, SortColumn, TableSchema, TransferMode, delete_row_change,
-    diff_rows, diff_schema, insert_row_change, map_schema, map_table_name, render_change_sql,
-    update_row_change, usable_key_columns,
+    SchemaChange, SortColumn, TableSchema, TransferMode, delete_row_change, diff_rows, diff_schema,
+    insert_row_change, map_schema, map_table_name, render_change_sql, update_row_change,
+    usable_key_columns,
 };
 
 use super::backup::{format_hms, now_timestamp};
@@ -408,8 +408,6 @@ pub(super) struct SyncState {
     /// The table list's vertical scrollbar/drag state.
     pub list_detail: DetailScroll,
     pub inspector_scroll: ScrollHandle,
-    /// The 结构比对 change list's scroll position (it can be longer than its 220px cap).
-    pub schema_changes_scroll: ScrollHandle,
     pub source_combo: Option<Entity<ComboBox>>,
     pub source_database_combo: Option<Entity<ComboBox>>,
     pub source_schema_combo: Option<Entity<ComboBox>>,
@@ -533,7 +531,6 @@ impl SyncState {
             elapsed: None,
             list_detail: DetailScroll::default(),
             inspector_scroll: ScrollHandle::new(),
-            schema_changes_scroll: ScrollHandle::new(),
             source_combo: None,
             source_database_combo: None,
             source_schema_combo: None,
@@ -3565,18 +3562,14 @@ impl AppView {
                     .text_color(rgb(theme.text_muted))
                     .child(side),
             )
+            // Each selector already draws its own trigger field; a second bordered box around the
+            // group made the pickers look nested inside a text input.
             .child(
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
                     .gap_1()
-                    .h(px(26.0))
-                    .px_2()
-                    .rounded(px(6.0))
-                    .border_1()
-                    .border_color(rgb(theme.border))
-                    .bg(rgb(theme.editor_bg))
                     .child(
                         div().w(px(130.0)).h(px(24.0)).child(
                             connection
@@ -3860,6 +3853,15 @@ impl AppView {
     fn render_hide_same_toggle(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
         let weak = cx.weak_entity();
+        let same_engine = self.sync_same_engine();
+        // How many rows the switch is currently taking out of the list, so its effect is visible
+        // before the user hides them.
+        let identical = self
+            .sync
+            .tables
+            .iter()
+            .filter(|table| table.is_identical(self.sync.mode, same_engine))
+            .count();
         div()
             .id("sync-hide-same")
             .flex()
@@ -3880,6 +3882,12 @@ impl AppView {
             })
             .child(ui::checkbox_box(self.sync.hide_same, theme))
             .child(t!("sync.hide_same").to_string())
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(format!("({identical})")),
+            )
             .into_any_element()
     }
 
@@ -4156,22 +4164,17 @@ impl AppView {
                 theme,
                 cx,
             ));
-        let mut content = div()
+        // The changed lines are marked directly in the DDL panes; the old list of change summaries
+        // above them only repeated what the red/green lines already show.
+        div()
             .flex()
             .flex_col()
             .flex_1()
             .min_h(px(0.0))
             .w_full()
-            .overflow_hidden();
-        if !schema_changes.is_empty() || !exists {
-            content = content.child(schema_changes_summary(
-                &schema_changes,
-                exists,
-                &self.sync.schema_changes_scroll,
-                theme,
-            ));
-        }
-        content.child(body).into_any_element()
+            .overflow_hidden()
+            .child(body)
+            .into_any_element()
     }
 
     /// One side of the 结构比对 tab: a title bar over a read-only DDL editor.
@@ -6241,83 +6244,6 @@ fn ddl_decorations(
 /// scrolled. The list scrolls instead, behind a real scrollbar, so the rows past the cap are
 /// reachable. A table the target does not have gets one line: every column of it counts as
 /// "added", and the DDL pane below already shows that definition.
-fn schema_changes_summary(
-    changes: &[SchemaChange],
-    in_target: bool,
-    scroll: &ScrollHandle,
-    theme: Theme,
-) -> AnyElement {
-    let rows: Vec<AnyElement> = if in_target {
-        changes
-            .iter()
-            .enumerate()
-            .map(|(index, change)| {
-                let color = match change.kind {
-                    SchemaChangeKind::Added => theme.icon_table,
-                    SchemaChangeKind::Removed => theme.danger,
-                    SchemaChangeKind::Modified => theme.warning,
-                };
-                div()
-                    .id(SharedString::from(format!("sync-schema-change-{index}")))
-                    .flex_none()
-                    .w_full()
-                    .truncate()
-                    .font_family("Consolas")
-                    .text_size(px(11.0))
-                    .text_color(rgb(color))
-                    .child(change.summary())
-                    .into_any_element()
-            })
-            .collect()
-    } else {
-        vec![
-            div()
-                .id("sync-schema-change-new-table")
-                .flex_none()
-                .w_full()
-                .truncate()
-                .text_size(px(11.0))
-                .text_color(rgb(theme.text_muted))
-                .child(t!("sync.new_table").to_string())
-                .into_any_element(),
-        ]
-    };
-    div()
-        .id("sync-schema-changes")
-        .flex()
-        .flex_row()
-        .flex_none()
-        .w_full()
-        // A generous cap still leaves the DDL panes most of the height, while the common case
-        // fits completely.
-        .max_h(px(220.0))
-        .border_b_1()
-        .border_color(rgb(theme.border))
-        .child(
-            div()
-                .id("sync-schema-change-list")
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_w(px(0.0))
-                .min_h(px(0.0))
-                .overflow_y_scroll()
-                .track_scroll(scroll)
-                .gap_0p5()
-                .px_3()
-                .py_2()
-                .children(rows),
-        )
-        // gpui paints no scrollbar for an `overflow_*` container; without this one the lines past
-        // the cap look cut off instead of scrollable.
-        .child(
-            Scrollbar::vertical(scroll)
-                .mode(ScrollbarMode::Always)
-                .id("sync-schema-changes-scrollbar"),
-        )
-        .into_any_element()
-}
-
 /// A status pill: a tinted rounded label.
 fn sync_pill(text: &str, tone: PillTone, theme: Theme) -> AnyElement {
     let color = tone.color(theme);
@@ -6661,92 +6587,5 @@ mod tests {
         };
         assert_eq!(render_row_keys(&change), "id=7");
         assert_eq!(render_row_summary(&change), "role: member → admin");
-    }
-
-    /// The change list above the DDL panes must stay readable when a table has more differences
-    /// than its 220px cap. A flex column shrinks its children by default, so the rows used to be
-    /// squeezed into the cap and clipped to a few pixels each (22 columns of `public.gen_table`
-    /// were unreadable fragments), and with nothing overflowing there was nothing to scroll.
-    #[gpui_kit::test]
-    fn the_schema_change_list_keeps_its_rows_and_scrolls(cx: &mut gpui::TestAppContext) {
-        use gpui::{Bounds, IntoElement, Point, Render, Window, WindowBounds, WindowOptions, size};
-        use gpui_kit::test::TestWindowExt as _;
-
-        struct Probe {
-            scroll: ScrollHandle,
-            changes: Vec<SchemaChange>,
-        }
-
-        impl Render for Probe {
-            fn render(
-                &mut self,
-                _window: &mut Window,
-                _cx: &mut gpui::Context<Self>,
-            ) -> impl IntoElement {
-                // The 结构比对 tab's shape: a fixed strip, the change list, then the DDL panes.
-                div()
-                    .size_full()
-                    .flex()
-                    .flex_col()
-                    .child(div().h(px(38.0)).flex_none())
-                    .child(schema_changes_summary(
-                        &self.changes,
-                        true,
-                        &self.scroll,
-                        Theme::light(),
-                    ))
-                    .child(div().flex_1())
-            }
-        }
-
-        cx.update(gpui_kit::init);
-        let changes: Vec<SchemaChange> = (0..22)
-            .map(|index| SchemaChange {
-                kind: SchemaChangeKind::Added,
-                column: format!("column_{index}"),
-                source_type: "varchar(255)".to_string(),
-                target_type: String::new(),
-            })
-            .collect();
-        let (handle, probe) = cx.update(|cx| {
-            let probe = cx.new(|_| Probe {
-                scroll: ScrollHandle::new(),
-                changes,
-            });
-            let (handle, _) = gpui_kit::open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(Bounds {
-                        origin: Point::default(),
-                        size: size(px(700.0), px(600.0)),
-                    })),
-                    ..Default::default()
-                },
-                cx,
-                |_, _| probe.clone(),
-            )
-            .expect("open test window");
-            (handle, probe)
-        });
-
-        cx.update_window(handle, |_, window, cx| {
-            window.render_frame(cx);
-        })
-        .unwrap();
-
-        let (viewport, max_offset) = cx.update(|cx| {
-            let scroll = &probe.read(cx).scroll;
-            (scroll.bounds().size.height, scroll.max_offset().y)
-        });
-        assert!(
-            (f32::from(viewport) - 220.0).abs() < 2.0,
-            "the change list should stop at its 220px cap, measured {viewport:?}"
-        );
-        // Every row keeps its line height and the 0.5 gap: 22 rows need far more than the cap, so
-        // the list overflows and scrolls to reach the rest (235px here; a squeezed list, which
-        // fitted the cap exactly, had nothing to scroll).
-        assert!(
-            f32::from(max_offset) > 150.0,
-            "22 change rows should overflow the cap and scroll, max offset {max_offset:?}"
-        );
     }
 }

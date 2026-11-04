@@ -1052,6 +1052,33 @@ impl GridView {
         cx.notify();
     }
 
+    /// Open the 筛选 panel and add a condition on `column` (the header's context menu). The
+    /// applied filters seed the draft exactly like the toolbar's 筛选 button, then the clicked
+    /// field is appended to the last group so the panel opens ready to take a value.
+    pub(super) fn filter_column(&mut self, column: usize, cx: &mut Context<'_, Self>) {
+        if self.state.sql.is_some() {
+            return;
+        }
+        let Some(name) = self
+            .state
+            .columns
+            .get(column)
+            .map(|column| column.name.clone())
+        else {
+            return;
+        };
+        if !self.state.filter_open {
+            self.state.filter_open = true;
+            self.state.filter_draft = self.state.filters.clone();
+        }
+        let condition = FilterNode::Condition(FilterCondition::new(name));
+        match self.state.filter_draft.last_mut() {
+            Some(FilterNode::Group(group)) => group.children.push(condition),
+            _ => self.state.filter_draft.push(condition),
+        }
+        self.after_filter_change(cx);
+    }
+
     /// Seed an empty draft with one parenthesized group holding a single condition.
     fn filter_draft_start(&mut self) {
         if let Some(group) = self.new_filter_group() {

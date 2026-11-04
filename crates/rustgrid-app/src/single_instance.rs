@@ -5,6 +5,12 @@
 //! exits). Elsewhere it is an advisory `flock` on a file under the temp dir, which is likewise
 //! released by the OS on exit — so a crash never leaves a stale lock. The returned guard must be
 //! kept alive for as long as the app runs.
+//!
+//! A later launch may carry file arguments (a SQLite database dragged onto the executable). It
+//! cannot show them itself, so [`forward_to_running`] leaves the paths in a small temp file that
+//! the running instance polls through [`take_forwarded_paths`].
+
+use std::path::PathBuf;
 
 /// The single-instance lock. Keep the value alive in `main`; dropping it releases the lock.
 pub struct Guard {
@@ -15,6 +21,46 @@ pub struct Guard {
 /// the lock, in which case the caller should exit immediately.
 pub fn acquire() -> Option<Guard> {
     imp::acquire().map(|_inner| Guard { _inner })
+}
+
+/// The file a second instance uses to hand paths to the running one.
+fn pending_paths_file() -> PathBuf {
+    std::env::temp_dir().join("rustgrid.pending-open")
+}
+
+/// Hand `paths` to the running instance. A no-op when there is nothing to open.
+pub fn forward_to_running(paths: &[PathBuf]) {
+    if paths.is_empty() {
+        return;
+    }
+    let body = paths
+        .iter()
+        .map(|path| path.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let target = pending_paths_file();
+    let temporary = target.with_extension(format!("tmp-{}", std::process::id()));
+    if std::fs::write(&temporary, body).is_err() {
+        return;
+    }
+    // `rename` replaces an existing file atomically on Unix; Windows refuses to overwrite, so the
+    // old request is cleared first. A running instance that reads in that instant simply sees no
+    // request and picks this one up on its next poll.
+    let _ = std::fs::remove_file(&target);
+    let _ = std::fs::rename(&temporary, &target);
+}
+
+/// Paths another launch asked this instance to open. Reading consumes the request.
+pub fn take_forwarded_paths() -> Vec<PathBuf> {
+    let target = pending_paths_file();
+    let Ok(body) = std::fs::read_to_string(&target) else {
+        return Vec::new();
+    };
+    let _ = std::fs::remove_file(&target);
+    body.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(PathBuf::from)
+        .collect()
 }
 
 #[cfg(target_os = "windows")]
