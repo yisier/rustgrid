@@ -1138,6 +1138,9 @@ impl GridView {
                 .into_any_element();
         }
         if temporal {
+            // The picker button sits flush against the field's right border, like the cell's, so
+            // only the left text keeps its padding.
+            field = field.pl_2().pr(px(1.0));
             // Record the field's inner rectangle every frame — well before the "…" button can be
             // pressed — so the popup is anchored under it on the very frame it opens, and follows
             // the field when the filter panel scrolls.
@@ -1155,6 +1158,9 @@ impl GridView {
         if temporal {
             let button_path = path.clone();
             field = field.child(
+                // The grid's in-place date cell draws this exact "…" button (18px wide, flush
+                // inside the cell's border); reuse that look so the filter's picker is just as
+                // obvious as the one on a temporal cell.
                 div()
                     .id(SharedString::from(format!(
                         "filter-date-{}-{slot}",
@@ -1166,15 +1172,17 @@ impl GridView {
                     .justify_center()
                     .w(px(18.0))
                     .h_full()
-                    .rounded_sm()
                     .cursor_pointer()
-                    .text_size(px(11.0))
-                    .text_color(rgb(if picker_open {
-                        theme.primary
+                    .border_1()
+                    .border_color(rgb(theme.button_border))
+                    .bg(rgb(if picker_open {
+                        theme.button_hover_bg
                     } else {
-                        theme.text_muted
+                        theme.button_bg
                     }))
-                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                    .text_size(px(11.0))
+                    .text_color(rgb(theme.text))
+                    .hover(move |style| style.bg(rgb(theme.button_hover_bg)))
                     .on_click(cx.listener(move |this, _event, window, cx| {
                         this.filter_toggle_date_picker(
                             button_path.clone(),
