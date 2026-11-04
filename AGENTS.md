@@ -640,6 +640,9 @@ shadcn chrome described above. Implemented today:
    active tab is markedly stronger and bold so it stands out, and the pinned 对象 tab keeps the
    colour while it is the active tab, so the environment stays visible on 用户/查询/备份 too), so
    production stands out. Tab titles ellipsize at 170px and show their full text on hover.
+   Dragging a file onto the window (or onto `RustGrid.exe`, which forwards it to the running
+   instance) opens it through the generic drop frame in `app/file_drop.rs`; SQLite is the only
+   recognised format today, and `classify_dropped_file` is the extension point for the next one.
 2. Enumerate databases; create/edit/delete a database (charset + collation) and edit defaults
 3. Per database, list tables and views
 4. Show a selected table's data in a grid with **pagination** — display only, **no editing** yet
@@ -805,12 +808,16 @@ shadcn chrome described above. Implemented today:
     (`OptionsSection::Data`, between 编辑器 and 关于) holds the two grid display switches, 展示备注
     (`AppSettings::grid_show_comments`) and 展示类型 (`grid_show_types`), both off by default, which
     paint each column's comment / data type under its name in the grid header. Right-clicking a
-    grid column header opens its own menu — 冻结列 / 取消冻结 / 隐藏列 / 刷新. Freezing pins every
-    column up to and including the clicked one (stored by field name in `GridState::frozen_column`)
-    while the columns after it pan inside their own clipped strip; the frozen column carries a lock
-    glyph in its header and in the 字段 list, and only that column's menu offers 取消冻结 (every
-    other header offers 冻结列). 隐藏列 writes the same `GridFieldLayout.hidden` set the 字段 popup
-    edits (and the menu listener persists it), so the field is listed unchecked there.
+    grid column header opens its own menu — 冻结列 / 取消冻结 / 取消冻结全部列 / 隐藏列 / 刷新.
+    Freezing moves the clicked field to the front of the display order and pins it there; freezing
+    more fields appends them in that order (first frozen field = first column, second = second,
+    ...), so the 字段 popup lists the frozen fields first too. The frozen set lives in
+    `GridState::frozen_columns` (by field name, in freeze order) while `GridState::field_layout`
+    keeps the unfrozen order, so 取消冻结 / 取消冻结全部列 puts every field back where it was
+    without a snapshot. Each frozen header and 字段 row carries a lock glyph; a frozen row cannot
+    be dragged in the popup, and 隐藏列 unfreezes a hidden field. The columns after the frozen block
+    pan inside their own clipped strip. 隐藏列 writes the same `GridFieldLayout.hidden` set the 字段
+    popup edits (and the menu listener persists it), so the field is listed unchecked there.
 
 17. 详细列表 density and sorting (`ui/views.rs` + every list page): all detail lists share one
     compact row metric — `DETAIL_ROW_HEIGHT` (28px), `DETAIL_BADGE_SIZE` (18px) and a 32px header —

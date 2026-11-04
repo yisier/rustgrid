@@ -1,16 +1,13 @@
 use super::*;
 
 impl GridView {
-    /// How many leading visible columns are frozen. Zero when no field is frozen (or the frozen
-    /// field was hidden since).
+    /// How many leading visible columns are frozen. The frozen fields are pinned to the front of
+    /// the display order, so this is also where the fixed block ends.
     pub(super) fn frozen_split(&self) -> usize {
-        self.state
-            .frozen_column_index()
-            .map(|index| index + 1)
-            .unwrap_or(0)
+        self.state.frozen_count()
     }
 
-    /// The total width of the frozen columns (the columns up to and including the frozen one).
+    /// The total width of the frozen columns (the leading `frozen_split` columns).
     pub(super) fn frozen_width(&self) -> f32 {
         let split = self.frozen_split();
         self.state

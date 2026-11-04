@@ -61,6 +61,7 @@ fn main() {
     let config = Arc::new(
         rustgrid_config::ConfigStore::new().expect("failed to resolve the configuration directory"),
     );
+    install_crash_log(config.root());
     let runtime = Arc::new(Runtime::new());
 
     let settings = app::load_startup_settings(&config);
@@ -159,6 +160,47 @@ fn application() -> gpui::Application {
 #[cfg(not(target_os = "macos"))]
 fn application() -> gpui::Application {
     gpui_kit::application()
+}
+
+/// Append a panic report to `crash.log` under the config directory before the default hook prints
+/// it. A release build is a Windows GUI subsystem binary with no console and macOS shows the crash
+/// only in Console, so a user report of a "闪退" otherwise carries no location. The log names the
+/// panic's file/line and, when the build kept symbols, a backtrace.
+fn install_crash_log(root: &std::path::Path) {
+    use std::io::Write as _;
+
+    let path = root.join("crash.log");
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|location| {
+                format!(
+                    "{}:{}:{}",
+                    location.file(),
+                    location.line(),
+                    location.column()
+                )
+            })
+            .unwrap_or_else(|| "unknown location".to_string());
+        let report = format!(
+            "[{}] RustGrid {} panic at {location}\n{info}\n{}\n\n",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+            env!("CARGO_PKG_VERSION"),
+            std::backtrace::Backtrace::force_capture()
+        );
+        if let Some(directory) = path.parent() {
+            let _ = std::fs::create_dir_all(directory);
+        }
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let _ = file.write_all(report.as_bytes());
+        }
+        default_hook(info);
+    }));
 }
 
 /// Register the SQL editing rules for gpui-kit's `Editor`. `set_language_config` replaces the

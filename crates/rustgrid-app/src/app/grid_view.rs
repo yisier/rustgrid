@@ -400,7 +400,7 @@ impl Render for GridView {
                     )
                 })
                 .when(
-                    !key_page && frozen_split > 0 && index + 1 == frozen_split,
+                    !key_page && self.state.is_frozen_column(&column.name),
                     |head| {
                         head.child(
                             svg()

@@ -72,11 +72,11 @@ impl GridView {
         if self.state.sql.is_some() || self.state.all_columns.is_empty() {
             return;
         }
-        // The popup works on a draft copy: nothing reaches the grid until 确定.
+        // The popup works on a draft copy: nothing reaches the grid until 确定. The draft shows the
+        // effective display order (frozen fields pinned to the front), which is what the grid and
+        // the header currently show.
         self.field_filter_draft = self.state.field_layout.clone();
-        self.field_filter_draft.order = self
-            .field_filter_draft
-            .resolved_order(&self.state.all_columns);
+        self.field_filter_draft.order = self.state.effective_field_order();
         self.field_filter_search.clear();
         let input = self.field_filter_search_input.clone();
         input.update(cx, |input, cx| input.set_text(String::new(), cx));
@@ -106,10 +106,22 @@ impl GridView {
     }
 
     /// 确定: install the popup's draft layout on the grid, remember it per table and close.
+    ///
+    /// The draft lists the frozen fields first (the order the grid shows). [`GridState::field_layout`]
+    /// must keep the unfrozen order, so the frozen names are taken out and put back at the positions
+    /// they held before they were frozen: that is what makes 取消冻结 restore the original field
+    /// order. A non-frozen field's new position is kept exactly where the user dropped it.
     pub(super) fn field_filter_apply(&mut self, cx: &mut Context<'_, Self>) {
-        self.state.field_layout = self.field_filter_draft.clone();
+        let layout = self.state.field_layout.with_display_order(
+            &self.field_filter_draft.order,
+            self.field_filter_draft.hidden.clone(),
+            &self.state.frozen_columns,
+            &self.state.all_columns,
+        );
+        self.state.field_layout = layout;
         self.state.reproject_fields();
         self.field_filter_draft = self.state.field_layout.clone();
+        self.field_filter_draft.order = self.state.effective_field_order();
         self.persist_field_layout(cx);
         self.close_field_filter(cx);
     }
@@ -134,14 +146,27 @@ impl GridView {
     }
 
     /// 重置: put the draft back the way the engine returns the fields — the table's own order with
-    /// every field shown.
+    /// every field shown — while keeping the frozen fields pinned to the front, exactly as the grid
+    /// displays them.
     pub(super) fn field_filter_reset(&mut self, cx: &mut Context<'_, Self>) {
-        self.field_filter_draft.order = self
+        let mut order: Vec<String> = self
             .state
-            .all_columns
+            .frozen_columns
             .iter()
-            .map(|column| column.name.clone())
+            .filter(|name| {
+                self.state
+                    .all_columns
+                    .iter()
+                    .any(|column| &column.name == *name)
+            })
+            .cloned()
             .collect();
+        for column in &self.state.all_columns {
+            if !order.contains(&column.name) {
+                order.push(column.name.clone());
+            }
+        }
+        self.field_filter_draft.order = order;
         self.field_filter_draft.hidden.clear();
         cx.notify();
     }
@@ -161,13 +186,38 @@ impl GridView {
         cx.notify();
     }
 
-    /// Start dragging a field row's handle.
+    /// The frozen fields the draft still shows, in the order they are pinned at the top.
+    fn field_filter_frozen_count(&self) -> usize {
+        self.field_filter_draft
+            .order
+            .iter()
+            .filter(|name| {
+                !self.field_filter_draft.hidden.contains(*name)
+                    && self
+                        .state
+                        .frozen_columns
+                        .iter()
+                        .any(|frozen| frozen == *name)
+            })
+            .count()
+    }
+
+    /// Start dragging a field row's handle. Frozen fields are pinned to the front, so their rows
+    /// cannot be dragged; the lock beside their name says why.
     pub(super) fn field_filter_press(
         &mut self,
         index: usize,
         position_y: f32,
         cx: &mut Context<'_, Self>,
     ) {
+        let frozen = self
+            .field_filter_draft
+            .order
+            .get(index)
+            .is_some_and(|name| self.state.is_frozen_column(name));
+        if frozen {
+            return;
+        }
         self.field_filter_drag = Some(FieldFilterDrag {
             from: index,
             current: index,
@@ -198,7 +248,13 @@ impl GridView {
         }
         let steps = ((f32::from(event.position.y) - drag.start_y) / FIELD_FILTER_ROW_HEIGHT).round()
             as isize;
-        let target = (drag.from as isize + steps).clamp(0, len as isize - 1) as usize;
+        // The frozen fields are pinned to the top, so a normal field can never be dropped into
+        // (or above) their block.
+        let floor = self.field_filter_frozen_count();
+        if floor >= len {
+            return;
+        }
+        let target = (drag.from as isize + steps).clamp(floor as isize, len as isize - 1) as usize;
         if target == drag.current {
             return;
         }
@@ -289,7 +345,7 @@ impl GridView {
         let columns = self.state.all_columns.clone();
         let order = self.field_filter_draft.order.clone();
         let hidden = self.field_filter_draft.hidden.clone();
-        let frozen_name = self.state.frozen_column.clone();
+        let frozen_columns = self.state.frozen_columns.clone();
         let needle = self.field_filter_search.trim().to_lowercase();
         let dragged = self.field_filter_drag.map(|drag| drag.current);
         let weak = self.self_weak.clone();
@@ -385,7 +441,7 @@ impl GridView {
                                 .text_color(rgb(theme.text))
                                 .child(row_name.clone()),
                         )
-                        .when(frozen_name.as_deref() == Some(name.as_str()), |row| {
+                        .when(frozen_columns.contains(name), |row| {
                             row.child(
                                 svg()
                                     .path("icons/lock.svg")

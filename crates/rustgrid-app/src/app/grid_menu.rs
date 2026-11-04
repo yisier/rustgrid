@@ -63,28 +63,70 @@ impl GridView {
         cx.notify();
     }
 
-    /// Freeze the columns up to and including `column`: they stay put while the columns after it
-    /// pan. A grid has at most one frozen field, so choosing another column moves the freeze.
+    /// Freeze the field at display position `column`: it moves to the front of the field order and
+    /// stays put while the other columns pan. Freezing another field later puts it after the
+    /// already frozen ones, so the first frozen field is the first column, the second the second,
+    /// and so on. The unfrozen order stays in [`GridState::field_layout`], so unfreezing restores
+    /// each field to its original position.
     pub(super) fn freeze_column(&mut self, column: usize, cx: &mut Context<'_, Self>) {
         if column >= self.state.visible_columns {
             return;
         }
         let scroll = self.grid_column_scroll();
         let name = self.state.columns[column].name.clone();
-        self.state.frozen_column = Some(name);
-        self.column_scroll = scroll;
+        if !self.state.frozen_columns.contains(&name) {
+            self.state.frozen_columns.push(name);
+        }
+        self.state.reproject_fields();
+        self.column_scroll = scroll.clamp(0.0, self.grid_scroll_max());
         cx.notify();
     }
 
-    /// 取消冻结: let the whole table pan again.
-    pub(super) fn unfreeze_columns(&mut self, cx: &mut Context<'_, Self>) {
-        if self.state.frozen_column.take().is_none() {
+    /// 取消冻结: unfreeze the field at display position `column` and put it back where it sat in
+    /// the field layout. The other frozen fields stay pinned to the front.
+    pub(super) fn unfreeze_columns(&mut self, column: usize, cx: &mut Context<'_, Self>) {
+        let Some(name) = self
+            .state
+            .columns
+            .get(column)
+            .map(|column| column.name.clone())
+        else {
+            return;
+        };
+        if !self
+            .state
+            .frozen_columns
+            .iter()
+            .any(|frozen| *frozen == name)
+        {
             return;
         }
-        let scroll = self.column_scroll;
-        self.column_scroll = 0.0;
-        let y = self.hscroll.offset().y;
-        self.hscroll.set_offset(Point::new(px(-scroll), y));
+        self.state.frozen_columns.retain(|frozen| *frozen != name);
+        self.finish_unfreeze(cx);
+    }
+
+    /// 取消冻结全部列: clear every frozen field of this grid at once.
+    pub(super) fn unfreeze_all_columns(&mut self, cx: &mut Context<'_, Self>) {
+        if self.state.frozen_columns.is_empty() {
+            return;
+        }
+        self.state.frozen_columns.clear();
+        self.finish_unfreeze(cx);
+    }
+
+    /// Re-project the grid after the frozen set changed and put the column pan back to a valid
+    /// position. Without a frozen field the tracked scroll handle drives the columns again; with
+    /// one still frozen the offset stays in `column_scroll`.
+    fn finish_unfreeze(&mut self, cx: &mut Context<'_, Self>) {
+        let scroll = self.grid_column_scroll();
+        self.state.reproject_fields();
+        if self.state.frozen_columns.is_empty() {
+            self.column_scroll = 0.0;
+            let y = self.hscroll.offset().y;
+            self.hscroll.set_offset(Point::new(px(-scroll), y));
+        } else {
+            self.column_scroll = scroll.clamp(0.0, self.grid_scroll_max());
+        }
         cx.notify();
     }
 
@@ -101,10 +143,10 @@ impl GridView {
             return false;
         }
         let name = self.state.columns[column].name.clone();
-        if self.state.frozen_column.as_deref() == Some(name.as_str()) {
-            self.state.frozen_column = None;
-            self.column_scroll = 0.0;
-        }
+        // Hiding a frozen field unfreezes it: it must not jump back to the front when it is shown
+        // again. `reproject_fields` also prunes it, but doing it here keeps the scroll maths below
+        // honest for this frame.
+        self.state.frozen_columns.retain(|frozen| *frozen != name);
         self.state.field_layout.set_hidden(&name, true);
         self.state.reproject_fields();
         self.column_scroll = self.column_scroll.min(self.grid_scroll_max());

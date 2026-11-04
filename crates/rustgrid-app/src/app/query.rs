@@ -1201,7 +1201,7 @@ impl AppView {
                             field_layout: GridFieldLayout::default(),
                             column_order: (0..column_count).collect(),
                             visible_columns: column_count,
-                            frozen_column: None,
+                            frozen_columns: Vec::new(),
                             rows: Arc::new(result.rows),
                             column_widths,
                             manual_column_widths: false,

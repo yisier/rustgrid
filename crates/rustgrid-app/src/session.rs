@@ -743,14 +743,49 @@ impl GridFieldLayout {
                 .all(|(name, column)| *name == column.name)
     }
 
-    /// The permutation from display position to the index into `columns` (natural order), with the
-    /// visible fields first, and how many leading entries are visible. A layout that would hide
-    /// every field falls back to the table's own order so a grid can never end up blank.
-    pub fn permutation(&self, columns: &[ColumnInfo]) -> (Vec<usize>, usize) {
+    /// The display order with the frozen fields pinned to the front, in the order they were
+    /// frozen, then every other field in the layout's own order. The frozen names are kept out of
+    /// [`Self::order`] by the caller, so unfreezing restores each field's original position
+    /// without another snapshot.
+    pub fn effective_order(&self, columns: &[ColumnInfo], frozen: &[String]) -> Vec<String> {
         let order = self.resolved_order(columns);
+        let mut effective: Vec<String> = Vec::with_capacity(order.len());
+        for name in frozen {
+            if self.hidden.contains(name) {
+                continue;
+            }
+            if columns.iter().any(|column| &column.name == name) && !effective.contains(name) {
+                effective.push(name.clone());
+            }
+        }
+        for name in order {
+            if !effective.contains(&name) {
+                effective.push(name);
+            }
+        }
+        effective
+    }
+
+    /// Like [`Self::permutation`], but with `frozen`'s visible fields pinned to the front of the
+    /// display order. `frozen` is in the order the user froze them, so the first frozen field is
+    /// the first column, the second the second, and so on.
+    pub fn permutation_with_frozen(
+        &self,
+        columns: &[ColumnInfo],
+        frozen: &[String],
+    ) -> (Vec<usize>, usize) {
+        let order = self.effective_order(columns, frozen);
+        self.permutation_for_order(columns, &order)
+    }
+
+    fn permutation_for_order(
+        &self,
+        columns: &[ColumnInfo],
+        order: &[String],
+    ) -> (Vec<usize>, usize) {
         let mut visible: Vec<usize> = Vec::with_capacity(columns.len());
         let mut hidden: Vec<usize> = Vec::new();
-        for name in &order {
+        for name in order {
             let Some(index) = columns.iter().position(|column| &column.name == name) else {
                 continue;
             };
@@ -766,6 +801,33 @@ impl GridFieldLayout {
         let visible_count = visible.len();
         visible.extend(hidden);
         (visible, visible_count)
+    }
+
+    /// Build the persisted layout from a display order that starts with the frozen fields. The
+    /// frozen names are taken out of `display` and put back at the positions they hold in this
+    /// layout, so the field order a 取消冻结 restores is the one that existed before freezing.
+    pub fn with_display_order(
+        &self,
+        display: &[String],
+        hidden: BTreeSet<String>,
+        frozen: &[String],
+        columns: &[ColumnInfo],
+    ) -> Self {
+        let previous = self.resolved_order(columns);
+        let mut order: Vec<String> = display
+            .iter()
+            .filter(|name| !frozen.iter().any(|field| field == *name))
+            .cloned()
+            .collect();
+        for name in frozen {
+            let position = previous
+                .iter()
+                .position(|field| field == name)
+                .unwrap_or(order.len())
+                .min(order.len());
+            order.insert(position, name.clone());
+        }
+        Self { order, hidden }
     }
 
     /// Show or hide one field.
@@ -881,10 +943,12 @@ pub struct GridState {
     pub column_order: Vec<usize>,
     /// How many leading entries of [`Self::columns`] are visible; the rest are hidden fields.
     pub visible_columns: usize,
-    /// The field the user froze from the header's context menu. The columns up to and including it
-    /// stay put while the ones after it pan horizontally; a grid freezes at most one field. Kept by
-    /// name so a field-layout change (hide/reorder) never points it at the wrong column.
-    pub frozen_column: Option<String>,
+    /// The fields the user froze from the header's context menu, in the order they were frozen.
+    /// They are pinned to the front of the display order (first frozen field = first column) and
+    /// stay put while the other columns pan horizontally. Kept by name so a field-layout change
+    /// (hide/reorder) never points them at the wrong column; [`Self::field_layout`] itself keeps
+    /// the unfrozen order, so clearing this list restores every field to its original place.
+    pub frozen_columns: Vec<String>,
     pub rows: Arc<Vec<Vec<CellValue>>>,
     pub column_widths: Vec<f32>,
     /// Set once the user drags a column edge. Keeps the widths for the rest of this grid's life
@@ -1288,14 +1352,30 @@ impl GridState {
         self.column_order.get(col).copied().unwrap_or(col)
     }
 
-    /// The visible display position of the frozen field, when it is still shown. A hidden or
-    /// renamed frozen field reports `None`, so the grid simply stops freezing it.
-    pub fn frozen_column_index(&self) -> Option<usize> {
-        let name = self.frozen_column.as_deref()?;
-        self.columns
+    /// How many leading display columns are frozen. The frozen fields are projected to the front
+    /// by [`Self::reproject_fields`], so this is also the split between the fixed and pannable
+    /// column groups.
+    pub fn frozen_count(&self) -> usize {
+        self.frozen_columns
             .iter()
-            .take(self.visible_columns)
-            .position(|column| column.name == name)
+            .filter(|name| {
+                self.columns
+                    .iter()
+                    .take(self.visible_columns)
+                    .any(|column| &column.name == *name)
+            })
+            .count()
+    }
+
+    /// Whether `name` is one of the fields frozen in this grid.
+    pub fn is_frozen_column(&self, name: &str) -> bool {
+        self.frozen_columns.iter().any(|frozen| frozen == name)
+    }
+
+    /// The display order the 字段筛选 popup shows: frozen fields first, then the layout order.
+    pub fn effective_field_order(&self) -> Vec<String> {
+        self.field_layout
+            .effective_order(&self.all_columns, &self.frozen_columns)
     }
 
     /// Whether the 字段筛选 popup holds a layout that differs from the table's natural columns.
@@ -1327,7 +1407,9 @@ impl GridState {
         if self.all_columns.is_empty() {
             return;
         }
-        let (permutation, visible) = self.field_layout.permutation(&self.all_columns);
+        let (permutation, visible) = self
+            .field_layout
+            .permutation_with_frozen(&self.all_columns, &self.frozen_columns);
         if permutation.len() != self.columns.len() || self.column_order.len() != permutation.len() {
             // A stale permutation (e.g. the first page after the layout changed shape): start from
             // the natural order instead of composing with a mapping that no longer applies. The
@@ -1345,9 +1427,10 @@ impl GridState {
         self.field_layout.order = self.field_layout.resolved_order(&self.all_columns);
         // A frozen field that the new layout hides (or the table no longer has) must not come back
         // frozen when it is shown again.
-        if self.frozen_column_index().is_none() {
-            self.frozen_column = None;
-        }
+        self.frozen_columns.retain(|name| {
+            self.all_columns.iter().any(|column| &column.name == name)
+                && !self.field_layout.hidden.contains(name)
+        });
     }
 }
 
@@ -1406,7 +1489,8 @@ mod tests {
             order: vec!["c".to_string(), "a".to_string(), "b".to_string()],
             hidden: hidden(&["a"]),
         };
-        let (permutation, visible) = layout.permutation(&columns(&["a", "b", "c"]));
+        let (permutation, visible) =
+            layout.permutation_with_frozen(&columns(&["a", "b", "c"]), &[]);
         // `c` and `b` are visible and lead; the hidden `a` is kept after them.
         assert_eq!(permutation, vec![2, 1, 0]);
         assert_eq!(visible, 2);
@@ -1418,9 +1502,77 @@ mod tests {
             order: vec!["a".to_string(), "b".to_string()],
             hidden: hidden(&["a", "b"]),
         };
-        let (permutation, visible) = layout.permutation(&columns(&["a", "b"]));
+        let (permutation, visible) = layout.permutation_with_frozen(&columns(&["a", "b"]), &[]);
         assert_eq!(permutation, vec![0, 1]);
         assert_eq!(visible, 2);
+    }
+
+    #[test]
+    fn frozen_fields_lead_the_display_order_in_the_order_they_were_frozen() {
+        let layout = GridFieldLayout::default();
+        let table = columns(&["a", "b", "c", "d"]);
+        let frozen = vec!["c".to_string(), "a".to_string()];
+        assert_eq!(
+            layout.effective_order(&table, &frozen),
+            vec!["c", "a", "b", "d"]
+        );
+        let (permutation, visible) = layout.permutation_with_frozen(&table, &frozen);
+        assert_eq!(permutation, vec![2, 0, 1, 3]);
+        assert_eq!(visible, 4);
+    }
+
+    #[test]
+    fn dropping_the_frozen_set_restores_the_layout_order() {
+        let layout = GridFieldLayout::default();
+        let table = columns(&["a", "b", "c", "d"]);
+        let frozen = vec!["d".to_string(), "b".to_string()];
+        assert_eq!(
+            layout.effective_order(&table, &frozen),
+            vec!["d", "b", "a", "c"]
+        );
+        assert_eq!(
+            layout.effective_order(&table, &[]),
+            vec!["a", "b", "c", "d"]
+        );
+    }
+
+    #[test]
+    fn applying_a_frozen_display_order_keeps_the_unfrozen_positions() {
+        let table = columns(&["a", "b", "c", "d"]);
+        let layout = GridFieldLayout::default();
+        let display = vec![
+            "c".to_string(),
+            "a".to_string(),
+            "d".to_string(),
+            "b".to_string(),
+        ];
+        let rebuilt =
+            layout.with_display_order(&display, BTreeSet::new(), &["c".to_string()], &table);
+        // `c` returns to its old index; the other fields keep the order the user dropped them in.
+        assert_eq!(rebuilt.order, vec!["a", "d", "c", "b"]);
+        assert_eq!(
+            rebuilt.effective_order(&table, &["c".to_string()]),
+            vec!["c", "a", "d", "b"]
+        );
+        assert_eq!(
+            rebuilt.effective_order(&table, &[]),
+            vec!["a", "d", "c", "b"]
+        );
+    }
+
+    #[test]
+    fn a_hidden_frozen_field_is_not_pinned() {
+        let layout = GridFieldLayout {
+            order: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            hidden: hidden(&["b"]),
+        };
+        let table = columns(&["a", "b", "c"]);
+        let frozen = vec!["b".to_string(), "c".to_string()];
+        // The hidden field stays at the tail; the visible frozen field still leads.
+        assert_eq!(
+            layout.permutation_with_frozen(&table, &frozen),
+            (vec![2, 0, 1], 2)
+        );
     }
 
     #[test]

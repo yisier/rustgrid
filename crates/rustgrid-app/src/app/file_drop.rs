@@ -1,11 +1,12 @@
-//! Opening SQLite database files by dragging them onto the window (or launching RustGrid with one
-//! as its argument).
+//! Opening files by dragging them onto the window (or launching RustGrid with one as its argument).
 //!
-//! A dropped file becomes an ordinary SQLite connection named after the file, added to the tree and
-//! opened. A file that already has a connection is not added twice: its connection is selected and
-//! opened again. While a file is dragged over the window, a scrim shows where it will land; the
-//! overlay is one element with a short opacity animation, so the indicator costs nothing per mouse
-//! move.
+//! The drop frame itself is deliberately generic: it says only that the file will be opened, so a
+//! future format plugs into [`classify_dropped_file`] instead of needing its own overlay. SQLite is
+//! the format implemented today: a dropped database file becomes an ordinary connection named after
+//! the file, added to the tree and opened. A file that already has a connection is not added twice:
+//! its connection is selected and opened again. While a file is dragged over the window, a scrim
+//! shows where it will land; the overlay is one element with a short opacity animation, so the
+//! indicator costs nothing per mouse move.
 
 use std::path::{Path, PathBuf};
 
@@ -20,6 +21,21 @@ const SQLITE_EXTENSIONS: &[&str] = &["db", "db3", "s3db", "sl3", "sqlite", "sqli
 
 /// The 16-byte header every SQLite database file starts with.
 const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
+
+/// What a dropped file should be opened as. This is the extension point for new drag-and-drop
+/// formats: add a variant, classify it below, and handle it in [`AppView::open_dropped_file`].
+enum DroppedFile {
+    SqliteDatabase(PathBuf),
+}
+
+/// Decide what a dropped file is. Unrecognised formats return `None`; the drop handler then shows
+/// the generic "unsupported file type" message.
+fn classify_dropped_file(path: &Path) -> Option<DroppedFile> {
+    if is_sqlite_file(path) {
+        return Some(DroppedFile::SqliteDatabase(path.to_path_buf()));
+    }
+    None
+}
 
 /// Whether `path` is a SQLite database file: either its header proves it, or it is an empty file
 /// with one of the conventional extensions (SQLite writes the header when the first page is
@@ -51,13 +67,12 @@ fn is_sqlite_file(path: &Path) -> bool {
                 }))
 }
 
-/// The dropped files that can be opened as SQLite databases.
-fn sqlite_drop_paths(paths: &ExternalPaths) -> Vec<PathBuf> {
+/// The dropped files this build can open, in the order they were dropped.
+fn dropped_files(paths: &ExternalPaths) -> Vec<DroppedFile> {
     paths
         .paths()
         .iter()
-        .filter(|path| is_sqlite_file(path))
-        .cloned()
+        .filter_map(|path| classify_dropped_file(path))
         .collect()
 }
 
@@ -124,13 +139,20 @@ impl AppView {
         }
     }
 
+    /// Open one classified dropped file. A new format adds its arm here and its classifier above.
+    fn open_dropped_file(&mut self, file: DroppedFile, cx: &mut Context<'_, Self>) {
+        match file {
+            DroppedFile::SqliteDatabase(path) => self.open_sqlite_path(path, cx),
+        }
+    }
+
     /// Open a dropped (or command-line) SQLite file: reuse its connection when the file is already
     /// configured, otherwise add and connect a new one named after the file.
     pub(crate) fn open_sqlite_path(&mut self, path: PathBuf, cx: &mut Context<'_, Self>) {
         if !is_sqlite_file(&path) {
             self.toast(
                 ToastKind::Error,
-                t!("sqlite_drop.unsupported").to_string(),
+                t!("file_drop.unsupported").to_string(),
                 cx,
             );
             return;
@@ -273,7 +295,7 @@ impl AppView {
                     view.toast(
                         ToastKind::Info,
                         t!(
-                            "sqlite_drop.opened",
+                            "file_drop.opened",
                             name = view.connections[index].profile.name
                         )
                         .to_string(),
@@ -288,58 +310,62 @@ impl AppView {
         .detach();
     }
 
-    /// The file drag crossed onto the window: show the drop scrim only when the drag carries a
-    /// SQLite database, and only when the state actually changes (a drag move fires constantly).
-    pub(super) fn sqlite_drop_entered(
-        &mut self,
-        paths: &ExternalPaths,
-        cx: &mut Context<'_, Self>,
-    ) {
-        if self.sqlite_drop_checked {
+    /// The file drag crossed onto the window: show the drop scrim. It is shown for any dragged
+    /// file, because the frame is generic; the classifier decides on release whether this build
+    /// knows how to open it. Only a change repaints (a drag move fires constantly).
+    pub(super) fn file_drop_entered(&mut self, paths: &ExternalPaths, cx: &mut Context<'_, Self>) {
+        if self.file_drop_checked {
             return;
         }
-        self.sqlite_drop_checked = true;
-        let active = !sqlite_drop_paths(paths).is_empty();
-        if self.sqlite_drop_active != active {
-            self.sqlite_drop_active = active;
+        self.file_drop_checked = true;
+        let active = !paths.paths().is_empty();
+        if self.file_drop_active != active {
+            self.file_drop_active = active;
             cx.notify();
         }
     }
 
-    /// The drag left the window (or the platform cancelled it): take the scrim down.
-    pub(super) fn sqlite_drop_exited(&mut self, cx: &mut Context<'_, Self>) {
-        self.sqlite_drop_checked = false;
-        if self.sqlite_drop_active {
-            self.sqlite_drop_active = false;
+    /// The drag left the window (or the platform cancelled it): take the scrim down. This is
+    /// called from both the window root and the overlay itself, because the overlay sits on top of
+    /// the root's hitbox and would otherwise be the element the exit event is tested against.
+    pub(super) fn file_drop_exited(&mut self, cx: &mut Context<'_, Self>) {
+        self.file_drop_checked = false;
+        if self.file_drop_active {
+            self.file_drop_active = false;
             cx.notify();
         }
     }
 
-    /// The files were dropped: open every SQLite database among them.
-    pub(super) fn sqlite_drop_submitted(
+    /// The files were dropped: open every one this build recognises, or say why none was opened.
+    pub(super) fn file_drop_submitted(
         &mut self,
         paths: &ExternalPaths,
         cx: &mut Context<'_, Self>,
     ) {
-        self.sqlite_drop_exited(cx);
-        let files = sqlite_drop_paths(paths);
+        self.file_drop_exited(cx);
+        let files = dropped_files(paths);
         if files.is_empty() {
             self.toast(
                 ToastKind::Error,
-                t!("sqlite_drop.unsupported").to_string(),
+                t!("file_drop.unsupported").to_string(),
                 cx,
             );
             return;
         }
-        for path in files {
-            self.open_sqlite_path(path, cx);
+        for file in files {
+            self.open_dropped_file(file, cx);
         }
     }
 
-    /// The drag indicator: the window dims and a dashed drop target names the action.
-    pub(super) fn render_sqlite_drop_overlay(&self, theme: Theme) -> AnyElement {
+    /// The drag indicator: the window dims and a dashed drop target names the action. The frame is
+    /// format-agnostic on purpose — a new droppable format only adds a classifier.
+    pub(super) fn render_file_drop_overlay(
+        &self,
+        theme: Theme,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
         div()
-            .id("sqlite-drop-overlay")
+            .id("file-drop-overlay")
             .absolute()
             .inset_0()
             .flex()
@@ -348,10 +374,30 @@ impl AppView {
             // A plain alpha scrim rather than a backdrop filter: it reads as the interface
             // receding, costs one quad, and works on every platform GPUI supports. It is
             // deliberately not `.occlude()`: the root still needs to stay hovered so its drop
-            // listener receives the release.
+            // listener receives the release. The overlay carries the exit/up handlers as well,
+            // because it is the topmost hitbox while it is shown; without them a cancelled drag
+            // left the frame on screen.
             .bg(rgba((theme.window_bg << 8) | 0xC8))
+            .on_file_drop_exit(
+                cx.listener(|this, _event: &gpui::FileDropEvent, _window, cx| {
+                    this.file_drop_exited(cx);
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                    this.file_drop_exited(cx);
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                // A cancelled platform drag may not deliver an exit event; the next ordinary
+                // pointer move (no button held) then takes the frame down.
+                if event.pressed_button.is_none() {
+                    this.file_drop_exited(cx);
+                }
+            }))
             .with_animation(
-                "sqlite-drop-overlay-fade",
+                "file-drop-overlay-fade",
                 Animation::new(Duration::from_millis(120)),
                 |overlay, delta| overlay.opacity(delta),
             )
@@ -370,7 +416,7 @@ impl AppView {
                     .bg(rgb(theme.dialog_bg))
                     .child(
                         svg()
-                            .path("icons/database.svg")
+                            .path("icons/file.svg")
                             .w(px(40.0))
                             .h(px(40.0))
                             .flex_none()
@@ -381,13 +427,13 @@ impl AppView {
                             .text_size(px(14.0))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(theme.text))
-                            .child(t!("sqlite_drop.title").to_string()),
+                            .child(t!("file_drop.title").to_string()),
                     )
                     .child(
                         div()
                             .text_size(px(12.0))
                             .text_color(rgb(theme.text_muted))
-                            .child(t!("sqlite_drop.hint").to_string()),
+                            .child(t!("file_drop.hint").to_string()),
                     ),
             )
             .into_any_element()

@@ -1490,11 +1490,15 @@ impl AppView {
                     .find(|grid| grid.read(cx).state.id == grid_id)
                     .cloned();
                 if let Some(grid) = grid {
-                    let (valid, on_frozen_column, can_hide, can_filter) = {
+                    let (valid, on_frozen_column, has_frozen, can_hide, can_filter) = {
                         let g = grid.read(cx);
                         (
                             column < g.state.visible_columns,
-                            g.state.frozen_column_index() == Some(column),
+                            g.state
+                                .columns
+                                .get(column)
+                                .is_some_and(|column| g.state.is_frozen_column(&column.name)),
+                            !g.state.frozen_columns.is_empty(),
                             g.state.sql.is_none() && g.state.visible_columns > 1,
                             g.state.sql.is_none(),
                         )
@@ -1502,6 +1506,7 @@ impl AppView {
                     let for_filter = grid.clone();
                     let for_freeze = grid.clone();
                     let for_unfreeze = grid.clone();
+                    let for_unfreeze_all = grid.clone();
                     let for_hide = grid.clone();
                     let for_refresh = grid.clone();
                     // 筛选 opens the WHERE panel with this field already added, the way Navicat's
@@ -1533,7 +1538,8 @@ impl AppView {
                             t!("grid.unfreeze_column").to_string(),
                             cx.listener(move |this, _event, _window, cx| {
                                 this.context_menu = None;
-                                for_unfreeze.update(cx, |grid, cx| grid.unfreeze_columns(cx));
+                                for_unfreeze
+                                    .update(cx, |grid, cx| grid.unfreeze_columns(column, cx));
                                 cx.notify();
                             }),
                         )
@@ -1553,6 +1559,25 @@ impl AppView {
                         self.context_item_disabled(
                             "grid-head-freeze",
                             t!("grid.freeze_column").to_string(),
+                        )
+                        .into_any_element()
+                    });
+                    items = items.child(if has_frozen {
+                        self.context_item(
+                            "grid-head-unfreeze-all",
+                            t!("grid.unfreeze_all_columns").to_string(),
+                            cx.listener(move |this, _event, _window, cx| {
+                                this.context_menu = None;
+                                for_unfreeze_all
+                                    .update(cx, |grid, cx| grid.unfreeze_all_columns(cx));
+                                cx.notify();
+                            }),
+                        )
+                        .into_any_element()
+                    } else {
+                        self.context_item_disabled(
+                            "grid-head-unfreeze-all",
+                            t!("grid.unfreeze_all_columns").to_string(),
                         )
                         .into_any_element()
                     });

@@ -2678,10 +2678,10 @@ pub struct AppView {
     /// is clamped to it.
     tree_bounds: Option<Bounds<Pixels>>,
     /// Whether a SQLite database file is being dragged over the window, so the drop scrim is up.
-    sqlite_drop_active: bool,
+    file_drop_active: bool,
     /// Whether the current drag's paths have already been inspected. A drag move fires constantly,
     /// and reading every dragged file's header on each move would be pointless disk I/O.
-    sqlite_drop_checked: bool,
+    file_drop_checked: bool,
     /// Raise the main window on the next frame. A second launch that forwards a SQLite file (the
     /// executable was the drop target) should bring the running app forward.
     pending_activate: bool,
@@ -2867,6 +2867,7 @@ mod design_view;
 mod dialogs;
 mod dump;
 mod export;
+mod file_drop;
 mod form;
 mod grid;
 mod grid_cell;
@@ -2898,7 +2899,6 @@ mod runsql;
 mod sidebar;
 mod sql_completion;
 pub(crate) mod sql_lex;
-mod sqlite_drop;
 mod sync;
 mod tabs;
 mod toolbar;
@@ -3469,8 +3469,8 @@ impl AppView {
             tree_drag: None,
             tree_row_rects: std::collections::HashMap::new(),
             tree_selection: ListSelection::default(),
-            sqlite_drop_active: false,
-            sqlite_drop_checked: false,
+            file_drop_active: false,
+            file_drop_checked: false,
             pending_activate: false,
             pending_open_databases: BTreeSet::new(),
             tree_marquee: None,
@@ -4945,24 +4945,24 @@ impl Render for AppView {
             .bg(rgb(theme.window_bg))
             .text_color(rgb(theme.text))
             .text_size(px(12.5))
-            // A SQLite database dragged onto the window opens as a connection. The move handler
-            // only flips the scrim when the dragged files actually qualify, and only on a change,
-            // so a drag over the window costs no repaints beyond the one it needs; `on_drop`
-            // receives the platform paths through gpui's `ExternalPaths` payload.
+            // A file dragged onto the window opens through the generic drop frame (SQLite today).
+            // The move handler only flips the scrim on a change, so a drag over the window costs no
+            // repaints beyond the one it needs; `on_drop` receives the platform paths through
+            // gpui's `ExternalPaths` payload.
             .on_drag_move::<ExternalPaths>(cx.listener(
                 |this, event: &DragMoveEvent<ExternalPaths>, _window, cx| {
                     if let Some(paths) = event.dragged_item().downcast_ref::<ExternalPaths>() {
-                        this.sqlite_drop_entered(paths, cx);
+                        this.file_drop_entered(paths, cx);
                     }
                 },
             ))
             .on_file_drop_exit(
                 cx.listener(|this, _event: &gpui::FileDropEvent, _window, cx| {
-                    this.sqlite_drop_exited(cx);
+                    this.file_drop_exited(cx);
                 }),
             )
             .on_drop::<ExternalPaths>(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
-                this.sqlite_drop_submitted(paths, cx);
+                this.file_drop_submitted(paths, cx);
             }))
             // A side-pane divider sits on its pane's edge, so the pointer leaves the pane while
             // dragging. These root-level handlers keep the drag alive anywhere in the window and
@@ -4975,6 +4975,11 @@ impl Render for AppView {
                 this.drag_query_split(event, cx);
                 this.tree_drag_move(event, cx);
                 this.drag_tree_marquee(event, cx);
+                // A cancelled platform drag does not always deliver `FileDropEvent::Exited`; the
+                // next ordinary pointer move (no button held) takes the drop frame down.
+                if event.pressed_button.is_none() && this.file_drop_active {
+                    this.file_drop_exited(cx);
+                }
             }))
             .on_mouse_up(
                 MouseButton::Left,
@@ -4986,6 +4991,9 @@ impl Render for AppView {
                     this.end_query_split_drag(cx);
                     this.tree_drag_end(cx);
                     this.end_tree_marquee(cx);
+                    if this.file_drop_active {
+                        this.file_drop_exited(cx);
+                    }
                 }),
             )
             .child(self.render_titlebar(cx))
@@ -5023,8 +5031,8 @@ impl Render for AppView {
         }
 
         // The SQLite file-drag scrim sits above every pane (but under `Root`'s dialogs).
-        if self.sqlite_drop_active {
-            root = root.child(self.render_sqlite_drop_overlay(theme));
+        if self.file_drop_active {
+            root = root.child(self.render_file_drop_overlay(theme, cx));
         }
 
         // Dialogs are hosted by `Root` (opened imperatively); AppView state remains the source
