@@ -89,13 +89,16 @@ impl GridView {
     }
 
     /// 隐藏列: hide the field through the same layout the 字段筛选 popup edits, so the popup lists
-    /// it unchecked the next time it opens. The applied layout is remembered per table.
-    pub(super) fn hide_column(&mut self, column: usize, cx: &mut Context<'_, Self>) {
+    /// it unchecked the next time it opens. Returns whether the field was hidden; the caller
+    /// persists [`Self::field_layout_snapshot`]. A menu listener already runs inside
+    /// `AppView::update`, so this method must not update `AppView` through its weak handle (that
+    /// would re-enter the same entity and crash).
+    pub(super) fn hide_column(&mut self, column: usize, cx: &mut Context<'_, Self>) -> bool {
         if self.state.sql.is_some()
             || column >= self.state.visible_columns
             || self.state.visible_columns <= 1
         {
-            return;
+            return false;
         }
         let name = self.state.columns[column].name.clone();
         if self.state.frozen_column.as_deref() == Some(name.as_str()) {
@@ -105,8 +108,8 @@ impl GridView {
         self.state.field_layout.set_hidden(&name, true);
         self.state.reproject_fields();
         self.column_scroll = self.column_scroll.min(self.grid_scroll_max());
-        self.persist_field_layout(cx);
         cx.notify();
+        true
     }
 
     /// The edit value of a cell: a staged edit/insert value if present, otherwise the loaded

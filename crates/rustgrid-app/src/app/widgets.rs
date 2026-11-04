@@ -1490,11 +1490,11 @@ impl AppView {
                     .find(|grid| grid.read(cx).state.id == grid_id)
                     .cloned();
                 if let Some(grid) = grid {
-                    let (valid, frozen, can_hide) = {
+                    let (valid, on_frozen_column, can_hide) = {
                         let g = grid.read(cx);
                         (
                             column < g.state.visible_columns,
-                            g.state.frozen_column_index().is_some(),
+                            g.state.frozen_column_index() == Some(column),
                             g.state.sql.is_none() && g.state.visible_columns > 1,
                         )
                     };
@@ -1502,7 +1502,20 @@ impl AppView {
                     let for_unfreeze = grid.clone();
                     let for_hide = grid.clone();
                     let for_refresh = grid.clone();
-                    items = items.child(if valid {
+                    // 冻结列 / 取消冻结 are one item: the frozen column itself offers 取消冻结,
+                    // every other column offers 冻结列.
+                    items = items.child(if on_frozen_column {
+                        self.context_item(
+                            "grid-head-unfreeze",
+                            t!("grid.unfreeze_column").to_string(),
+                            cx.listener(move |this, _event, _window, cx| {
+                                this.context_menu = None;
+                                for_unfreeze.update(cx, |grid, cx| grid.unfreeze_columns(cx));
+                                cx.notify();
+                            }),
+                        )
+                        .into_any_element()
+                    } else if valid {
                         self.context_item(
                             "grid-head-freeze",
                             t!("grid.freeze_column").to_string(),
@@ -1520,37 +1533,36 @@ impl AppView {
                         )
                         .into_any_element()
                     });
-                    items = items.child(if frozen {
-                        self.context_item(
-                            "grid-head-unfreeze",
-                            t!("grid.unfreeze_column").to_string(),
-                            cx.listener(move |this, _event, _window, cx| {
-                                this.context_menu = None;
-                                for_unfreeze.update(cx, |grid, cx| grid.unfreeze_columns(cx));
-                                cx.notify();
-                            }),
-                        )
-                        .into_any_element()
-                    } else {
-                        self.context_item_disabled(
-                            "grid-head-unfreeze",
-                            t!("grid.unfreeze_column").to_string(),
-                        )
-                        .into_any_element()
-                    });
                     items = items.child(if valid && can_hide {
                         self.context_item(
                             "grid-head-hide",
                             t!("grid.hide_column").to_string(),
-                            cx.listener(move |this, _event, window, cx| {
+                            cx.listener(move |this, _event, _window, cx| {
                                 this.context_menu = None;
-                                // Deferred: `hide_column` persists the field layout through
-                                // `AppView::set_field_layout`, and this listener already runs
-                                // inside an `AppView::update`.
-                                let grid = for_hide.clone();
-                                cx.defer_in(window, move |_this, _window, cx| {
-                                    grid.update(cx, |grid, cx| grid.hide_column(column, cx));
+                                // `hide_column` must not update `AppView` through the grid's weak
+                                // handle: this listener already runs inside an `AppView::update`,
+                                // and re-entering the same entity aborts the app. Take the grid's
+                                // new layout and store it from here instead.
+                                let g = for_hide.read(cx);
+                                let (connection_id, database, table) = (
+                                    g.state.connection_id.clone(),
+                                    g.state.database.clone(),
+                                    g.state.table.clone(),
+                                );
+                                let layout = for_hide.update(cx, |grid, cx| {
+                                    grid.hide_column(column, cx)
+                                        .then(|| grid.field_layout_snapshot())
                                 });
+                                if let Some(layout) = layout
+                                    && !connection_id.is_empty()
+                                {
+                                    this.set_field_layout(
+                                        &connection_id,
+                                        &database,
+                                        &table,
+                                        layout,
+                                    );
+                                }
                                 cx.notify();
                             }),
                         )

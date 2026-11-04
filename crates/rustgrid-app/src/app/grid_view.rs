@@ -397,6 +397,20 @@ impl Render for GridView {
                         theme,
                     )
                 })
+                .when(
+                    !key_page && frozen_split > 0 && index + 1 == frozen_split,
+                    |head| {
+                        head.child(
+                            svg()
+                                .path("icons/lock.svg")
+                                .w(px(11.0))
+                                .h(px(11.0))
+                                .ml_1()
+                                .flex_none()
+                                .text_color(rgb(theme.primary)),
+                        )
+                    },
+                )
                 .when(!key_page, |head| head.child(slot))
                 .when(!key_page, |head| {
                     head.child(

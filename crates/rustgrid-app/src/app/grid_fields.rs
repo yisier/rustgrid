@@ -219,6 +219,14 @@ impl GridView {
         }
     }
 
+    /// The applied layout in the persisted shape, for callers that store it through `AppView`.
+    pub(super) fn field_layout_snapshot(&self) -> FieldLayout {
+        FieldLayout {
+            order: self.state.field_layout.order.clone(),
+            hidden: self.state.field_layout.hidden.iter().cloned().collect(),
+        }
+    }
+
     /// Write the applied layout to settings so the next open of this table restores it.
     pub(super) fn persist_field_layout(&mut self, cx: &mut Context<'_, Self>) {
         let connection_id = self.state.connection_id.clone();
@@ -230,10 +238,7 @@ impl GridView {
         };
         let database = self.state.database.clone();
         let table = self.state.table.clone();
-        let layout = FieldLayout {
-            order: self.state.field_layout.order.clone(),
-            hidden: self.state.field_layout.hidden.iter().cloned().collect(),
-        };
+        let layout = self.field_layout_snapshot();
         app.update(cx, |app, cx| {
             app.set_field_layout(&connection_id, &database, &table, layout);
             cx.notify();
@@ -284,6 +289,7 @@ impl GridView {
         let columns = self.state.all_columns.clone();
         let order = self.field_filter_draft.order.clone();
         let hidden = self.field_filter_draft.hidden.clone();
+        let frozen_name = self.state.frozen_column.clone();
         let needle = self.field_filter_search.trim().to_lowercase();
         let dragged = self.field_filter_drag.map(|drag| drag.current);
         let weak = self.self_weak.clone();
@@ -379,6 +385,16 @@ impl GridView {
                                 .text_color(rgb(theme.text))
                                 .child(row_name.clone()),
                         )
+                        .when(frozen_name.as_deref() == Some(name.as_str()), |row| {
+                            row.child(
+                                svg()
+                                    .path("icons/lock.svg")
+                                    .w(px(11.0))
+                                    .h(px(11.0))
+                                    .flex_none()
+                                    .text_color(rgb(theme.primary)),
+                            )
+                        })
                         .child(
                             div()
                                 .flex_1()

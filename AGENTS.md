@@ -807,9 +807,10 @@ shadcn chrome described above. Implemented today:
     paint each column's comment / data type under its name in the grid header. Right-clicking a
     grid column header opens its own menu — 冻结列 / 取消冻结 / 隐藏列 / 刷新. Freezing pins every
     column up to and including the clicked one (stored by field name in `GridState::frozen_column`)
-    while the columns after it pan inside their own clipped strip; 隐藏列 writes the same
-    `GridFieldLayout.hidden` set the 字段 popup edits (and persists it), so the field is listed
-    unchecked there.
+    while the columns after it pan inside their own clipped strip; the frozen column carries a lock
+    glyph in its header and in the 字段 list, and only that column's menu offers 取消冻结 (every
+    other header offers 冻结列). 隐藏列 writes the same `GridFieldLayout.hidden` set the 字段 popup
+    edits (and the menu listener persists it), so the field is listed unchecked there.
 
 17. 详细列表 density and sorting (`ui/views.rs` + every list page): all detail lists share one
     compact row metric — `DETAIL_ROW_HEIGHT` (28px), `DETAIL_BADGE_SIZE` (18px) and a 32px header —
