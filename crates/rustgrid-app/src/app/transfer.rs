@@ -5,6 +5,7 @@
 
 use std::collections::HashSet;
 
+use super::file_dialog::open_dialog;
 use super::*;
 use crate::form::now_nanos;
 use rustgrid_config::transfer::{self, ParsedConnections, SourceFormat, TransferConnection};
@@ -62,9 +63,7 @@ impl AppView {
         let title = t!(kind.label_key()).to_string();
         let runtime = self.runtime.clone();
         cx.spawn(async move |this, cx| {
-            let Some(handle) = rfd::AsyncFileDialog::new()
-                .set_title(title)
-                .add_filter(filter_name, extensions)
+            let Some(handle) = open_dialog(title, filter_name, extensions)
                 .pick_file()
                 .await
             else {

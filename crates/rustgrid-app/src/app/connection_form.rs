@@ -8,6 +8,7 @@ use std::rc::Rc;
 
 use rfd::AsyncFileDialog;
 
+use super::file_dialog::open_dialog;
 use super::*;
 
 /// A text field outside the six general fields.
@@ -1246,9 +1247,7 @@ impl AppView {
     fn browse_database_file(&mut self, cx: &mut Context<'_, Self>) {
         let title = t!("form.database_file").to_string();
         cx.spawn(async move |this, cx| {
-            let Some(handle) = AsyncFileDialog::new()
-                .set_title(title)
-                .add_filter("SQLite", &["db", "sqlite", "sqlite3"])
+            let Some(handle) = open_dialog(title, "SQLite", super::file_drop::SQLITE_EXTENSIONS)
                 .pick_file()
                 .await
             else {

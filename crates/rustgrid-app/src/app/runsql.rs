@@ -6,6 +6,7 @@
 //! and skipped (遇到错误时继续) or aborts the run. Progress and the log mirror Navicat's window.
 
 use super::backup::{format_count, format_hms, log_summary_row, now_timestamp, render_log_lines};
+use super::file_dialog::open_dialog;
 use super::*;
 
 impl AppView {
@@ -120,9 +121,7 @@ impl AppView {
         let title = t!("sqlfile.choose_file").to_string();
         let default_dir = super::export::default_export_dir();
         cx.spawn(async move |this, cx| {
-            let mut dialog = rfd::AsyncFileDialog::new()
-                .set_title(title)
-                .add_filter("SQL", &["sql", "txt"]);
+            let mut dialog = open_dialog(title, "SQL", &["sql", "txt"]);
             if !default_dir.is_empty() {
                 dialog = dialog.set_directory(&default_dir);
             }

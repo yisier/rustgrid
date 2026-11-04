@@ -93,12 +93,7 @@ impl GridView {
         else {
             return;
         };
-        if !self
-            .state
-            .frozen_columns
-            .iter()
-            .any(|frozen| *frozen == name)
-        {
+        if !self.state.frozen_columns.contains(&name) {
             return;
         }
         self.state.frozen_columns.retain(|frozen| *frozen != name);

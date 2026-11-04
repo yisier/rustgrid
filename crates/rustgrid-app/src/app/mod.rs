@@ -2867,6 +2867,7 @@ mod design_view;
 mod dialogs;
 mod dump;
 mod export;
+mod file_dialog;
 mod file_drop;
 mod form;
 mod grid;

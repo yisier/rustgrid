@@ -16,8 +16,9 @@ use rustgrid_core::{ConnectionOptions, ConnectionProfile, DriverId};
 use super::*;
 
 /// The extensions a database file may carry. SQLite accepts any name, so these are only a hint for
-/// an empty file whose header has not been written yet; the header check below is authoritative.
-const SQLITE_EXTENSIONS: &[&str] = &["db", "db3", "s3db", "sl3", "sqlite", "sqlite3"];
+/// the file picker's filter and for an empty file whose header has not been written yet; the header
+/// check below is authoritative.
+pub(super) const SQLITE_EXTENSIONS: &[&str] = &["db", "db3", "s3db", "sl3", "sqlite", "sqlite3"];
 
 /// The 16-byte header every SQLite database file starts with.
 const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";

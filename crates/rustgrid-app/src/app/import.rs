@@ -15,13 +15,13 @@ use std::rc::Rc;
 
 use chrono::NaiveDateTime;
 use dtparse::Parser;
-use rfd::AsyncFileDialog;
 use rustgrid_core::{ColumnDef, RowInsert, TableSchema};
 use rustgrid_import::{SheetData, infer_columns};
 
 use super::export::{
     default_export_dir, export_check_row, export_summary_row, format_hms, now_timestamp,
 };
+use super::file_dialog::open_dialog;
 use super::*;
 
 /// Rows inserted per `insert_rows` call while importing: bounds memory and gives the log regular
@@ -374,9 +374,7 @@ impl AppView {
                 ImportFormat::Csv => ("CSV", &["csv"]),
                 ImportFormat::Text => ("Text", &["txt"]),
             };
-            let mut dialog = AsyncFileDialog::new()
-                .set_title(title)
-                .add_filter(filter_name, extensions);
+            let mut dialog = open_dialog(title, filter_name, extensions);
             if !start_dir.is_empty() {
                 dialog = dialog.set_directory(&start_dir);
             }
