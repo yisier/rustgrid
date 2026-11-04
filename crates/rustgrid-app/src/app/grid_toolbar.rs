@@ -1063,8 +1063,9 @@ impl GridView {
     /// One value field of a condition row. An enabled slot hosts a real [`TextInput`] (caret,
     /// mouse selection, clipboard and IME come from gpui-kit); a slot the operator does not use
     /// shows an inert placeholder instead. A value on a temporal column (`date`/`datetime`/
-    /// `timestamp`) also carries a "…" button that opens the date/time picker, like the grid's
-    /// in-place cell editor.
+    /// `timestamp`) gets a separate "…" button *beside* the field that opens the date/time picker,
+    /// so the field keeps its own rounded shape instead of having a square button clamped inside
+    /// its right edge.
     fn render_filter_value(
         &mut self,
         path: &[usize],
@@ -1120,27 +1121,29 @@ impl GridView {
             .flex_row()
             .items_center()
             .flex_1()
-            .min_w(px(FILTER_VALUE_WIDTH))
-            .max_w(px(FILTER_VALUE_MAX_WIDTH))
+            .min_w(px(0.0))
             .h(px(FILTER_CONTROL_HEIGHT))
             .px_2()
             .rounded(px(FILTER_CONTROL_RADIUS))
             .overflow_hidden();
         if !enabled {
-            return field
-                .bg(rgb(theme.dialog_face))
-                .text_size(px(12.0))
+            return div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .flex_1()
+                .min_w(px(FILTER_VALUE_WIDTH))
+                .max_w(px(FILTER_VALUE_MAX_WIDTH))
                 .child(
-                    div()
-                        .text_color(rgb(theme.text_null))
-                        .child(t!("filter.value_placeholder").to_string()),
+                    field.bg(rgb(theme.dialog_face)).text_size(px(12.0)).child(
+                        div()
+                            .text_color(rgb(theme.text_null))
+                            .child(t!("filter.value_placeholder").to_string()),
+                    ),
                 )
                 .into_any_element();
         }
         if temporal {
-            // The picker button sits flush against the field's right border, like the cell's, so
-            // only the left text keeps its padding.
-            field = field.pl_2().pr(px(1.0));
             // Record the field's inner rectangle every frame — well before the "…" button can be
             // pressed — so the popup is anchored under it on the very frame it opens, and follows
             // the field when the filter panel scrolls.
@@ -1155,12 +1158,25 @@ impl GridView {
         let picker_value = value.clone();
         let input = self.filter_value_input(&path, slot, value, cx);
         field = field.child(div().flex_1().min_w(px(0.0)).h_full().child(input));
+        let max_width = if temporal {
+            FILTER_VALUE_MAX_WIDTH + FILTER_ROW_ACTION_SIZE + 4.0
+        } else {
+            FILTER_VALUE_MAX_WIDTH
+        };
+        let mut value_box = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .flex_1()
+            .min_w(px(FILTER_VALUE_WIDTH))
+            .max_w(px(max_width))
+            .child(field);
         if temporal {
             let button_path = path.clone();
-            field = field.child(
-                // The grid's in-place date cell draws this exact "…" button (18px wide, flush
-                // inside the cell's border); reuse that look so the filter's picker is just as
-                // obvious as the one on a temporal cell.
+            value_box = value_box.child(
+                // A separate button beside the field, sized and rounded like the row's − / +
+                // actions. Its bordered "…" keeps the picker as obvious as the grid cell's.
                 div()
                     .id(SharedString::from(format!(
                         "filter-date-{}-{slot}",
@@ -1170,9 +1186,9 @@ impl GridView {
                     .flex_none()
                     .items_center()
                     .justify_center()
-                    .w(px(18.0))
-                    .h_full()
-                    .cursor_pointer()
+                    .w(px(FILTER_ROW_ACTION_SIZE))
+                    .h(px(FILTER_ROW_ACTION_SIZE))
+                    .rounded(px(FILTER_CONTROL_RADIUS))
                     .border_1()
                     .border_color(rgb(theme.button_border))
                     .bg(rgb(if picker_open {
@@ -1182,6 +1198,7 @@ impl GridView {
                     }))
                     .text_size(px(11.0))
                     .text_color(rgb(theme.text))
+                    .cursor_pointer()
                     .hover(move |style| style.bg(rgb(theme.button_hover_bg)))
                     .on_click(cx.listener(move |this, _event, window, cx| {
                         this.filter_toggle_date_picker(
@@ -1196,7 +1213,7 @@ impl GridView {
                     .child("…"),
             );
         }
-        field.into_any_element()
+        value_box.into_any_element()
     }
 
     /// The click-away backdrop under the filter builder's date/time picker. A press outside the
