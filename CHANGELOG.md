@@ -16,18 +16,21 @@ Russian ones.
 
 - Right-clicking a column header offers Filter, Freeze Column / Unfreeze Column / Unfreeze All
   Columns, Hide Column and Refresh.
-- Frozen columns stay pinned on the left while the rest scroll; the frozen field carries a lock in
-  its header and in the Field Filter list.
-- A date or time filter value has a "…" button that opens a calendar and time picker.
-- Dropping a SQLite database file onto the window opens it as a connection; dropping the same file
-  again reuses that connection.
-- A crash is recorded in `crash.log` under the config directory.
+- Frozen columns stay pinned on the left, with a lock in the header and in Field Filter.
+- Date and time filter values open a calendar and time picker.
+- Dropping a SQLite file onto the window opens it as a connection; dropping it again reuses that
+  connection.
+- Crashes are written to `crash.log` in the config directory.
 
 ### Changed
 
-- The Sync window drops the extra frame around its connection pickers and the repeated change list
-  above the DDL panes; Hide identical tables shows how many tables it hides.
+- The Sync window is tidier, and Hide identical tables shows how many tables it hides.
 - The query editor's right-click menu no longer lists Run and Redo.
+
+### Fixed
+
+- On macOS, open dialogs no longer grey out files such as `.db`, `.sqlite`, `.sql`, `.rgc` and
+  `.ncx`.
 
 ## [0.1.6] - 2026-11-03
 
