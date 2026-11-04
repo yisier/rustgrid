@@ -10,6 +10,25 @@ UI labels are quoted as the app shows them, so this file quotes the English stri
 [`CHANGELOG_zh.md`](CHANGELOG_zh.md) and [`CHANGELOG_ru.md`](CHANGELOG_ru.md) quote the 简体中文 and
 Russian ones.
 
+## [0.1.7] - 2026-11-04
+
+### Added
+
+- Right-clicking a column header offers Filter, Freeze Column / Unfreeze Column / Unfreeze All
+  Columns, Hide Column and Refresh.
+- Frozen columns stay pinned on the left while the rest scroll; the frozen field carries a lock in
+  its header and in the Field Filter list.
+- A date or time filter value has a "…" button that opens a calendar and time picker.
+- Dropping a SQLite database file onto the window opens it as a connection; dropping the same file
+  again reuses that connection.
+- A crash is recorded in `crash.log` under the config directory.
+
+### Changed
+
+- The Sync window drops the extra frame around its connection pickers and the repeated change list
+  above the DDL panes; Hide identical tables shows how many tables it hides.
+- The query editor's right-click menu no longer lists Run and Redo.
+
 ## [0.1.6] - 2026-11-03
 
 ### Added
