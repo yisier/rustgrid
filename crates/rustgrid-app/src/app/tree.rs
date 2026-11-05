@@ -1841,8 +1841,15 @@ impl AppView {
                     self.database_index_by_name(connection_index, &database)
                 {
                     self.tree_selection.clear();
-                    self.tree_pane.update(cx, |pane, cx| {
-                        pane.select_database(connection_index, database_index, cx);
+                    // A tab opened from the connection tree runs inside that pane's own update
+                    // (a table row's double-click / Enter). Selecting the database row here would
+                    // borrow the tree a second time and abort the app, so defer one cycle, like
+                    // the tree's other rows whose action updates it.
+                    let pane = self.tree_pane.clone();
+                    cx.defer(move |cx| {
+                        pane.update(cx, |pane, cx| {
+                            pane.select_database(connection_index, database_index, cx);
+                        });
                     });
                 }
             }
