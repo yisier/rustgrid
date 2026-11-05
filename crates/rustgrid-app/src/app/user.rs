@@ -376,6 +376,15 @@ impl AppView {
         visible
     }
 
+    /// Ctrl/Cmd+F while the Users list holds focus moves the caret into the toolbar's search box,
+    /// so filtering the list never needs the mouse. The box sits above the list's key context, so
+    /// taking focus also leaves that context — like clicking it does.
+    pub(super) fn focus_user_search(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.user_search_input
+            .update(cx, |input, cx| input.focus_state(window, cx));
+        cx.notify();
+    }
+
     /// The Users main tab body: the toolbar plus the account list.
     pub(super) fn render_users(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
@@ -514,6 +523,10 @@ impl AppView {
             .min_h(px(0.0))
             .overflow_hidden()
             .track_focus(&self.users_focus)
+            .key_context(USER_LIST_CONTEXT)
+            .on_action(cx.listener(|this, _: &UserFocusSearch, window, cx| {
+                this.focus_user_search(window, cx);
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {

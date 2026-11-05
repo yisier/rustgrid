@@ -483,6 +483,15 @@ impl AppView {
         }
     }
 
+    /// Ctrl/Cmd+F while the Backup list holds focus moves the caret into the toolbar's search
+    /// box, so filtering the list never needs the mouse. The box sits above the list's key
+    /// context, so taking focus also leaves that context — like clicking it does.
+    pub(super) fn focus_backup_search(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.backup_search_input
+            .update(cx, |input, cx| input.focus_state(window, cx));
+        cx.notify();
+    }
+
     fn render_backup_list(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         // Backups only belong to an opened (and selected) database, so without one the list is
         // empty and every toolbar action is disabled.
@@ -511,6 +520,9 @@ impl AppView {
             .overflow_hidden()
             .track_focus(&self.backup_focus)
             .key_context(BACKUP_LIST_CONTEXT)
+            .on_action(cx.listener(|this, _: &BackupFocusSearch, window, cx| {
+                this.focus_backup_search(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &RenameBackupFile, window, cx| {
                 if let Some(entry) = this.backup_single_selection(cx) {
                     let target = match entry {

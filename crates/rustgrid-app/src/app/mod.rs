@@ -84,7 +84,8 @@ gpui::actions!(
         CopyBackupFile,
         PasteBackupFile,
         RenameBackupFile,
-        SelectAllBackups
+        SelectAllBackups,
+        BackupFocusSearch
     ]
 );
 
@@ -96,9 +97,13 @@ gpui::actions!(
         CopyQueryFile,
         PasteQueryFile,
         RenameQueryFile,
-        SelectAllQueries
+        SelectAllQueries,
+        QueryFocusSearch
     ]
 );
+
+// Users-list actions. Ctrl+F focuses its search box, like the other list pages.
+gpui::actions!(userlist, [UserFocusSearch]);
 
 // Transfer-configuration list actions: Enter opens the selected configuration, Delete deletes it
 // and Ctrl+A selects every visible row, matching the other main-tab lists.
@@ -274,6 +279,9 @@ const BACKUP_LIST_CONTEXT: &str = "BackupList";
 
 /// Key context applied to the saved-query file list.
 const QUERY_LIST_CONTEXT: &str = "QueryList";
+
+/// Key context applied to the Users main tab's list, so Ctrl+F reaches its search box.
+const USER_LIST_CONTEXT: &str = "UserList";
 
 /// Key context applied to the Transfer main tab's saved-configuration list.
 const TRANSFER_LIST_CONTEXT: &str = "TransferList";

@@ -1128,8 +1128,8 @@ impl AppView {
     }
 
     /// Ctrl/Cmd+F while the object list holds focus moves the caret into the toolbar's search box,
-    /// so filtering the list never needs the mouse. The box sits in the toolbar (outside the
-    /// list's key context), so taking focus also leaves that context — like clicking it does.
+    /// so filtering the list never needs the mouse. The toolbar — and so the box — renders inside
+    /// the list's key context, so pressing the shortcut again just re-focuses the same field.
     pub(super) fn focus_object_search(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         self.object_search_input
             .update(cx, |input, cx| input.focus_state(window, cx));

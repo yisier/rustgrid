@@ -547,6 +547,9 @@ impl AppView {
             .overflow_hidden()
             .track_focus(&self.query_list_focus)
             .key_context(QUERY_LIST_CONTEXT)
+            .on_action(cx.listener(|this, _: &QueryFocusSearch, window, cx| {
+                this.focus_object_search(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &RenameQueryFile, window, cx| {
                 if let Some(index) = this.saved_query_selected {
                     this.begin_rename_query(index, window, cx);
