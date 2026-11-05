@@ -1097,6 +1097,21 @@ impl AppView {
 
     // ----- Saved transfer configurations ---------------------------------------------------------
 
+    /// Explicit 刷新 of the Sync page's saved-configuration list: re-read `transfers.json` and
+    /// drop selections whose configuration disappeared.
+    pub(super) fn refresh_transfer_configs(&mut self, cx: &mut Context<'_, Self>) {
+        self.transfer_configs = self.config.load_transfers().unwrap_or_default();
+        let keys: std::collections::HashSet<String> = self
+            .transfer_configs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, _)| self.transfer_key(index))
+            .collect();
+        self.transfers_selection.retain(|key| keys.contains(key));
+        self.refresh_toast(ToastKind::Success, t!("grid.refreshed").to_string(), cx);
+        cx.notify();
+    }
+
     /// The saved configurations after the list's search filter, in model order.
     pub(super) fn visible_transfer_indices(&self) -> Vec<usize> {
         let needle = self.sync.transfer_search.trim().to_lowercase();
@@ -2560,6 +2575,14 @@ impl AppView {
                         t!("sync.delete").to_string(),
                         has_selection,
                         cx.listener(|this, _event, _window, cx| this.confirm_delete_transfer(cx)),
+                    ))
+                    .child(toolbar_separator(theme))
+                    .child(self.toolbar_item(
+                        "transfer-refresh",
+                        "icons/refresh.svg",
+                        t!("common.refresh").to_string(),
+                        true,
+                        cx.listener(|this, _event, _window, cx| this.refresh_transfer_configs(cx)),
                     )),
             )
             .child(

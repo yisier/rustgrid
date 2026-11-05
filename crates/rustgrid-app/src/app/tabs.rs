@@ -133,7 +133,7 @@ impl AppView {
             MainTab::Users => self.refresh_users_feedback(cx),
             MainTab::Queries => self.refresh_query_files_feedback(cx),
             MainTab::Backups => self.refresh_selected_backup(cx),
-            MainTab::Sync => self.sync_recompare_all(cx),
+            MainTab::Sync => self.refresh_transfer_configs(cx),
             MainTab::Tables | MainTab::Views | MainTab::Functions => {
                 let Some(pane) = self.object_pane.as_ref() else {
                     return;

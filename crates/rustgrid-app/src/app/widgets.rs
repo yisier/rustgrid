@@ -1279,17 +1279,36 @@ impl AppView {
                             }
                             this.confirm_delete_transfer(cx);
                         }),
+                    ))
+                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(self.context_item(
+                        "transfer-ctx-refresh",
+                        t!("connection.refresh").to_string(),
+                        cx.listener(|this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.refresh_transfer_configs(cx);
+                        }),
                     ));
             }
             ContextTarget::TransferList => {
-                items = items.child(self.context_item(
-                    "transferlist-ctx-new",
-                    t!("sync.new").to_string(),
-                    cx.listener(|this, _event, _window, cx| {
-                        this.context_menu = None;
-                        this.open_new_transfer(cx);
-                    }),
-                ));
+                items = items
+                    .child(self.context_item(
+                        "transferlist-ctx-new",
+                        t!("sync.new").to_string(),
+                        cx.listener(|this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.open_new_transfer(cx);
+                        }),
+                    ))
+                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(self.context_item(
+                        "transferlist-ctx-refresh",
+                        t!("connection.refresh").to_string(),
+                        cx.listener(|this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.refresh_transfer_configs(cx);
+                        }),
+                    ));
             }
             ContextTarget::BackupList => {
                 items = items
