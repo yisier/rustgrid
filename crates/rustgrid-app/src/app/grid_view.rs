@@ -92,6 +92,7 @@ impl GridView {
             selecting_cells: false,
             cell_press: None,
             cell_press_reselect: false,
+            fill_drag: None,
             value_editor: None,
             cell_dragged: false,
             cell_editor: None,
@@ -468,6 +469,17 @@ impl Render for GridView {
         let inserts = self.inserts.clone();
         let data_rows = rows.len();
         let column_count = widths.len();
+        // The fill handle sits on the active selection's bottom-right cell (Excel's 自动填充).
+        let fill_anchor = if !key_page && self.state.editable && self.cell_editor.is_none() {
+            self.state.selection.as_ref().map(|selection| {
+                let range = selection.active();
+                (range.rows().1, range.cols().1)
+            })
+        } else {
+            None
+        };
+        let fill_drag = self.fill_drag;
+        let grid_id = self.state.id;
         // Whether the grid has nothing to paint, captured before `inserts` moves into the list
         // closure below (the empty body is drawn instead of an empty list).
         let empty_page = data_rows + inserts.len() == 0;
@@ -613,6 +625,12 @@ impl Render for GridView {
                                 theme.input_bg
                             } else if selected {
                                 theme.grid_selection_bg
+                            } else if fill_drag
+                                .as_ref()
+                                .is_some_and(|drag| drag.previews(row_index, index))
+                            {
+                                // The range a running fill-handle drag would write, before release.
+                                theme.cell_edit_bg
                             } else if edited.is_some() || staged.is_some() || previewed.is_some() {
                                 theme.cell_edit_bg
                             } else {
@@ -770,6 +788,36 @@ impl Render for GridView {
                                     );
                                 }
                             }
+                            // Excel's fill handle: a small square on the active selection's
+                            // bottom-right cell. A press snapshots the source block, a drag sets
+                            // the extended range, and releasing stages the inferred series.
+                            if fill_anchor == Some((row_index, index)) {
+                                let fill_weak = action_weak.clone();
+                                cell_element = cell_element.relative().child(
+                                    div()
+                                        .id(SharedString::from(format!(
+                                            "grid-fill-{grid_id}-{row_index}-{index}"
+                                        )))
+                                        .absolute()
+                                        .right(px(0.0))
+                                        .bottom(px(0.0))
+                                        .w(px(7.0))
+                                        .h(px(7.0))
+                                        .cursor(CursorStyle::Crosshair)
+                                        .bg(rgb(theme.brand))
+                                        .border_1()
+                                        .border_color(rgb(theme.editor_bg))
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            move |_event: &MouseDownEvent, window, cx| {
+                                                let _ = fill_weak.update(cx, |grid, cx| {
+                                                    grid.begin_fill_drag(window, cx);
+                                                });
+                                                cx.stop_propagation();
+                                            },
+                                        ),
+                                );
+                            }
                             if frozen_split > 0 && index >= frozen_split {
                                 scrolling_row_cells.push(cell_element.into_any_element());
                             } else {
@@ -913,6 +961,13 @@ impl Render for GridView {
                     .on_mouse_up(
                         MouseButton::Left,
                         cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                            // A fill drag may end before its window-level listener's first paint
+                            // (a very quick press-release); the grid still owns the release.
+                            if this.fill_drag.is_some() {
+                                this.finish_fill_drag(cx);
+                                this.selecting_cells = false;
+                                return;
+                            }
                             this.selecting_cells = false;
                             let press = this.cell_press.take();
                             let dragged = this.cell_dragged;
@@ -972,6 +1027,40 @@ impl Render for GridView {
                 *pane_bounds.borrow_mut() = union;
             }
         });
+        // A running fill drag listens at the window level (capture phase), so the target row keeps
+        // following the pointer even when it leaves the grid's rows, and the release is never
+        // missed. The listeners are registered from a paint pass, which is the only place gpui
+        // accepts window event listeners, and re-registered every frame while the drag lasts.
+        if self.fill_drag.is_some() {
+            let fill_weak = self.self_weak.clone();
+            root = root.child(
+                canvas(
+                    |_bounds, _window, _cx| {},
+                    move |_bounds, _hitbox, window, _cx| {
+                        let move_weak = fill_weak.clone();
+                        window.on_mouse_event(move |event: &MouseMoveEvent, phase, _window, cx| {
+                            if phase != DispatchPhase::Capture {
+                                return;
+                            }
+                            let _ = move_weak.update(cx, |grid, cx| {
+                                grid.fill_drag_move(event.position, cx);
+                            });
+                        });
+                        let up_weak = fill_weak.clone();
+                        window.on_mouse_event(move |_event: &MouseUpEvent, phase, _window, cx| {
+                            if phase != DispatchPhase::Capture {
+                                return;
+                            }
+                            let _ = up_weak.update(cx, |grid, cx| {
+                                grid.finish_fill_drag(cx);
+                            });
+                        });
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            );
+        }
         // Surface a failed fetch above the table. A running one is a spinner inside the toolbar
         // (or the status bar when there is none) — never a row of its own, which would push the
         // rows down and back up on every refresh.

@@ -190,6 +190,7 @@ impl GridView {
         self.cell_editor = None;
         self.cell_editor_blur_subscription = None;
         self.date_picker = None;
+        self.fill_drag = None;
         cx.notify();
     }
 

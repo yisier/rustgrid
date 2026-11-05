@@ -8,6 +8,7 @@ impl GridView {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
+        self.fill_drag = None;
         if self.cell_editor.is_some() {
             // The in-place editor owns the mouse inside its own cell: let gpui-kit's input place
             // the caret and drag-select text instead of driving a cell selection under it.

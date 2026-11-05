@@ -460,7 +460,7 @@ fn normalize_clipboard_text(text: &str) -> String {
 /// Whether an empty pasted cell must become SQL `NULL` for this column type: numeric and temporal
 /// columns reject `''`, while text columns can hold an explicit empty string. Unknown types keep
 /// the empty string (the conservative choice, since the engine may accept it).
-fn empty_paste_is_null(data_type: &str) -> bool {
+pub(super) fn empty_paste_is_null(data_type: &str) -> bool {
     let kind = data_type.to_ascii_lowercase();
     if kind.contains("char") || kind.contains("text") || kind.contains("clob") {
         return false;

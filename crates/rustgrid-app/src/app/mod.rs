@@ -1759,6 +1759,9 @@ struct GridView {
     cell_press: Option<(usize, usize)>,
     /// Whether the pressed cell was already the single selected cell (a click then edits it).
     cell_press_reselect: bool,
+    /// The selection's fill handle being dragged down/up (Excel's 自动填充). Holds the source
+    /// cells' snapshot and the row the pointer currently targets; the fill is staged on mouse-up.
+    fill_drag: Option<grid_fill::FillDrag>,
     /// F2's value editor panel, when open (see `grid_value.rs`).
     value_editor: Option<grid_value::ValueEditor>,
     cell_dragged: bool,
@@ -2911,6 +2914,7 @@ mod grid;
 mod grid_cell;
 mod grid_commit;
 mod grid_fields;
+mod grid_fill;
 mod grid_input;
 mod grid_key;
 mod grid_menu;
