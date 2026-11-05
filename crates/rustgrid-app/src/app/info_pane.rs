@@ -596,6 +596,9 @@ impl InfoPane {
                 let pretty = form_field_is_pretty(field);
                 if *formatted != pretty {
                     *formatted = pretty;
+                    if let FormInput::Multi(ref editor) = input {
+                        editor.update(cx, |editor, cx| editor.set_line_numbers(pretty, cx));
+                    }
                 }
             }
             input.set_theme(theme, cx);
@@ -758,7 +761,10 @@ impl InfoPane {
         let Ok(rendered) = rendered else {
             return;
         };
-        editor.update(cx, |editor, cx| editor.set_text(rendered.clone(), cx));
+        editor.update(cx, |editor, cx| {
+            editor.set_text(rendered.clone(), cx);
+            editor.set_line_numbers(formatted, cx);
+        });
         if let Some(grid) = grid.upgrade() {
             grid.update(cx, |grid, cx| {
                 grid.stage_form_edit(row, col, &rendered, true, cx)
@@ -1928,7 +1934,7 @@ fn build_form_inputs(
                         value.clone(),
                         ui::TextAreaOptions {
                             json: form_field_is_json(field),
-                            line_numbers: form_field_is_json(field),
+                            line_numbers: form_field_is_pretty(field),
                             placeholder: placeholder.clone(),
                             text_size: 12.0,
                         },

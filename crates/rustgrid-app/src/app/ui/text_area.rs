@@ -49,6 +49,8 @@ pub(crate) struct TextArea {
     /// The text queued for the next render, where a `Window` is available.
     pending_text: Option<String>,
     pending_placeholder: Option<SharedString>,
+    /// A line-number toggle queued for the next render, where the state can take a window.
+    pending_line_numbers: Option<bool>,
     /// The gpui-kit editor state, created on the first render.
     state: Option<gpui::Entity<EditorState>>,
     subscriptions: Vec<Subscription>,
@@ -79,6 +81,7 @@ impl TextArea {
             text_size: options.text_size,
             pending_text: None,
             pending_placeholder: None,
+            pending_line_numbers: None,
             state: None,
             subscriptions: Vec::new(),
             on_change: None,
@@ -130,6 +133,17 @@ impl TextArea {
         cx: &mut Context<Self>,
     ) {
         self.pending_placeholder = Some(placeholder.into());
+        cx.notify();
+    }
+
+    /// Show or hide the line-number gutter. The JSON code block shows it only while the value is
+    /// formatted, where the lines are the point of the view.
+    pub(crate) fn set_line_numbers(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.line_numbers == enabled {
+            return;
+        }
+        self.line_numbers = enabled;
+        self.pending_line_numbers = Some(enabled);
         cx.notify();
     }
 
@@ -212,6 +226,9 @@ impl TextArea {
             state.update(cx, |state, cx| {
                 state.set_placeholder(placeholder, window, cx)
             });
+        }
+        if let Some(enabled) = self.pending_line_numbers.take() {
+            state.update(cx, |state, cx| state.set_line_number(enabled, window, cx));
         }
         if let Some(text) = self.pending_change.take()
             && let Some(callback) = self.on_change.clone()

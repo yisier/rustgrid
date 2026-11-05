@@ -287,14 +287,18 @@ impl AppView {
         let theme = self.theme;
         let weak = cx.weak_entity();
         let combo = cx.new(|cx| {
-            ComboBox::new(theme, language_options(), self.language.locale(), 220.0, cx).on_select(
-                Rc::new(move |value, _window, cx| {
+            ComboBox::new(theme, language_options(), self.language.locale(), 220.0, cx)
+                // The language picker is the only setting on this page whose value is a full
+                // sentence-like label; give it a slightly taller field than the compact 20px
+                // default so the selected name is comfortable to read.
+                .height(28.0)
+                .text_size(12.5)
+                .on_select(Rc::new(move |value, _window, cx| {
                     let _ = weak.update(cx, |app, cx| {
                         app.options_language = language_from_locale(value);
                         cx.notify();
                     });
-                }),
-            )
+                }))
         });
         self.language_combo = Some(combo);
     }
