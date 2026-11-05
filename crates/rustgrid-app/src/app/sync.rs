@@ -368,6 +368,23 @@ impl SyncTable {
     }
 }
 
+/// One side's schema-picker load: the connection/database its list was requested for, plus a token
+/// that drops a superseded request. Keeping this beside the list is what lets the picker load
+/// before the other side exists without re-querying the catalogs on every render.
+#[derive(Default)]
+pub(super) struct SchemaLoad {
+    scope: Option<(usize, String)>,
+    token: u64,
+}
+
+impl SchemaLoad {
+    /// Forget the loaded scope, so the next render requests the list again.
+    fn invalidate(&mut self) {
+        self.scope = None;
+        self.token = self.token.wrapping_add(1);
+    }
+}
+
 /// The 数据传输/同步 page's state.
 pub(super) struct SyncState {
     pub source_connection: Option<usize>,
@@ -382,6 +399,9 @@ pub(super) struct SyncState {
     /// `list_schemas` (or derived from the table list when the driver does not report them).
     pub source_schemas: Vec<String>,
     pub target_schemas: Vec<String>,
+    /// Which scope each side's schema list belongs to, and the in-flight request token.
+    pub source_schema_load: SchemaLoad,
+    pub target_schema_load: SchemaLoad,
     pub mode: SyncMode,
     pub tables: Vec<SyncTable>,
     pub selected: Option<usize>,
@@ -506,6 +526,8 @@ impl SyncState {
             target_schema: String::new(),
             source_schemas: Vec::new(),
             target_schemas: Vec::new(),
+            source_schema_load: SchemaLoad::default(),
+            target_schema_load: SchemaLoad::default(),
             mode: SyncMode::All,
             tables: Vec::new(),
             selected: None,
@@ -904,6 +926,98 @@ impl AppView {
         }
     }
 
+    /// Load one side's schema list as soon as that side has a connected connection and a database,
+    /// so the 模式 picker works before a target is chosen. The comparison used to be the only
+    /// loader, which left the picker disabled on a new sync until both sides were set.
+    fn sync_load_schemas(&mut self, source: bool, cx: &mut Context<'_, Self>) {
+        let (connection, database) = if source {
+            (
+                self.sync.source_connection,
+                self.sync.source_database.clone(),
+            )
+        } else {
+            (
+                self.sync.target_connection,
+                self.sync.target_database.clone(),
+            )
+        };
+        let Some(index) = connection else {
+            return;
+        };
+        if database.is_empty()
+            || !self.driver_supports(index, DriverCapability::Schemas)
+            || !matches!(
+                self.connections.get(index).map(|node| &node.status),
+                Some(ConnectionStatus::Connected(_))
+            )
+        {
+            return;
+        }
+        let Some(connection) = self.connection_arc(index) else {
+            return;
+        };
+        let load = if source {
+            &self.sync.source_schema_load
+        } else {
+            &self.sync.target_schema_load
+        };
+        // Already loaded (or loading) for this scope: a render must not query the catalog again.
+        if load
+            .scope
+            .as_ref()
+            .is_some_and(|(scoped, name)| *scoped == index && name.eq_ignore_ascii_case(&database))
+        {
+            return;
+        }
+        let token = load.token.wrapping_add(1);
+        if source {
+            self.sync.source_schema_load.scope = Some((index, database.clone()));
+            self.sync.source_schema_load.token = token;
+            // The old scope's list is not this database's; the selected schema may still be a
+            // saved configuration's, so keep it for `choose_schema` to honor.
+            self.sync.source_schemas.clear();
+        } else {
+            self.sync.target_schema_load.scope = Some((index, database.clone()));
+            self.sync.target_schema_load.token = token;
+            self.sync.target_schemas.clear();
+        }
+        let preferred = self.sync_preferred_schema(index);
+        let runtime = self.runtime.clone();
+        cx.spawn(async move |this, cx| {
+            let schemas = list_schemas(runtime, connection, database)
+                .await
+                .unwrap_or_default();
+            let _ = this.update(cx, |app, cx| {
+                let current = if source {
+                    app.sync.source_schema_load.token
+                } else {
+                    app.sync.target_schema_load.token
+                };
+                // An empty answer leaves the picker alone: the comparison falls back to the
+                // schema prefixes the table list exposes.
+                if current != token || schemas.is_empty() {
+                    return;
+                }
+                let previous = if source {
+                    app.sync.source_schema.clone()
+                } else {
+                    app.sync.target_schema.clone()
+                };
+                let chosen = choose_schema(&previous, &schemas, &preferred, true);
+                if source {
+                    app.sync.source_schemas = schemas;
+                    app.sync.source_schema = chosen;
+                } else {
+                    app.sync.target_schemas = schemas;
+                    app.sync.target_schema = chosen;
+                }
+                app.sync_sync_combos(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// The checked tables a run would actually write: unchanged tables are skipped, and
     /// 只同步目标已存在的表 drops the ones the target does not have.
     fn planned_sync_tables(&self) -> usize {
@@ -956,6 +1070,7 @@ impl AppView {
             .unwrap_or_default();
         self.sync.source_schema.clear();
         self.sync.source_schemas.clear();
+        self.sync.source_schema_load.invalidate();
         self.sync.config_saved = false;
         if let Some(index) = index
             && !matches!(
@@ -977,6 +1092,7 @@ impl AppView {
             .unwrap_or_default();
         self.sync.target_schema.clear();
         self.sync.target_schemas.clear();
+        self.sync.target_schema_load.invalidate();
         self.sync.config_saved = false;
         if let Some(index) = index
             && !matches!(
@@ -998,6 +1114,7 @@ impl AppView {
         self.sync.source_database = value.to_string();
         self.sync.source_schema.clear();
         self.sync.source_schemas.clear();
+        self.sync.source_schema_load.invalidate();
         self.sync.config_saved = false;
         self.sync_refresh(cx);
         cx.notify();
@@ -1011,6 +1128,7 @@ impl AppView {
         self.sync.target_database = value.to_string();
         self.sync.target_schema.clear();
         self.sync.target_schemas.clear();
+        self.sync.target_schema_load.invalidate();
         self.sync.config_saved = false;
         self.sync_refresh(cx);
         cx.notify();
@@ -1392,6 +1510,8 @@ impl AppView {
         self.sync.pending_selected = None;
         self.sync.source_schemas.clear();
         self.sync.target_schemas.clear();
+        self.sync.source_schema_load.invalidate();
+        self.sync.target_schema_load.invalidate();
         self.sync.sub_tab = self.sync.mode.default_sub_tab();
         self.sync.data_filter = SyncDataFilter::All;
         self.sync.search.clear();
@@ -2919,6 +3039,10 @@ impl AppView {
     /// names and saves the configuration.
     pub(super) fn sync_window_contents(&mut self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
+        // Both sides list their schemas independently of the comparison, so 模式 is usable as soon
+        // as a connection and database are picked (the comparison is no longer the only loader).
+        self.sync_load_schemas(true, cx);
+        self.sync_load_schemas(false, cx);
         let title = if self.sync.config_name.trim().is_empty() {
             t!("sync.window.new").to_string()
         } else {
