@@ -3005,6 +3005,11 @@ impl Render for TreePane {
                             this.tree_select_all(cx)
                         }),
                     )
+                    .on_action(cx.listener(|this, _: &TreeFocusSearch, window, cx| {
+                        if let Some(app) = this.app.upgrade() {
+                            app.update(cx, |app, cx| app.focus_tree_search(window, cx));
+                        }
+                    }))
                     .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                         this.tree_key(event, window, cx);
                     }))

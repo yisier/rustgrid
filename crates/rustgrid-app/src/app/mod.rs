@@ -213,7 +213,8 @@ gpui::actions!(
         TreeCollapse,
         TreeOpen,
         TreeRename,
-        TreeSelectAll
+        TreeSelectAll,
+        TreeFocusSearch
     ]
 );
 
@@ -237,7 +238,8 @@ gpui::actions!(
         ObjectEnd,
         ObjectOpen,
         ObjectRename,
-        ObjectSelectAll
+        ObjectSelectAll,
+        ObjectFocusSearch
     ]
 );
 
