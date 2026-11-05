@@ -788,9 +788,11 @@ impl Render for GridView {
                                     );
                                 }
                             }
-                            // Excel's fill handle: a small square on the active selection's
-                            // bottom-right cell. A press snapshots the source block, a drag sets
-                            // the extended range, and releasing stages the inferred series.
+                            // Excel's fill handle has no visible marker: the bottom-right
+                            // corner of the active selection is an invisible drag target (the
+                            // pointer turns into a crosshair over it), so the grid stays clean
+                            // while a press still snapshots the source block and a drag sets the
+                            // extended range.
                             if fill_anchor == Some((row_index, index)) {
                                 let fill_weak = action_weak.clone();
                                 cell_element = cell_element.relative().child(
@@ -801,12 +803,9 @@ impl Render for GridView {
                                         .absolute()
                                         .right(px(0.0))
                                         .bottom(px(0.0))
-                                        .w(px(7.0))
-                                        .h(px(7.0))
+                                        .w(px(10.0))
+                                        .h(px(10.0))
                                         .cursor(CursorStyle::Crosshair)
-                                        .bg(rgb(theme.brand))
-                                        .border_1()
-                                        .border_color(rgb(theme.editor_bg))
                                         .on_mouse_down(
                                             MouseButton::Left,
                                             move |_event: &MouseDownEvent, window, cx| {
