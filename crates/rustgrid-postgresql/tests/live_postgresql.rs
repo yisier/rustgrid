@@ -255,6 +255,15 @@ async fn round_trips_a_live_postgresql() {
             .iter()
             .any(|column| column.name == "id" && column.auto_increment)
     );
+    let table_ddl = connection
+        .object_ddl(&database, table, false)
+        .await
+        .unwrap()
+        .expect("the table's DDL");
+    assert!(
+        table_ddl.to_ascii_uppercase().contains("CREATE TABLE"),
+        "{table_ddl}"
+    );
     let _ = connection
         .execute_query(
             Some(&database),
@@ -273,6 +282,15 @@ async fn round_trips_a_live_postgresql() {
         views.iter().any(
             |entry| entry.name == "public.rustgrid_live_view" && entry.kind == ObjectKind::View
         )
+    );
+    let view_ddl = connection
+        .object_ddl(&database, "public.rustgrid_live_view", true)
+        .await
+        .unwrap()
+        .expect("the view's DDL");
+    assert!(
+        view_ddl.to_ascii_uppercase().contains("CREATE VIEW"),
+        "{view_ddl}"
     );
     // Opening a view must not fail on the missing `ctid`.
     connection
@@ -551,5 +569,7 @@ async fn script_session_returns_result_sets() {
     assert_eq!(empty[0].columns.len(), 1);
     assert!(empty[0].rows.is_empty());
 
+    // Return the pinned connection before closing the pool; `close` waits for checked-out ones.
+    drop(session);
     connection.close().await.unwrap();
 }
