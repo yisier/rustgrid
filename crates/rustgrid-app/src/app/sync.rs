@@ -3413,7 +3413,7 @@ impl AppView {
         let recompare = ui::toolbar_item(
             "sync-recompare-all",
             "icons/refresh.svg",
-            t!("sync.recompare_all").to_string(),
+            t!("common.refresh").to_string(),
             !running && !self.sync.comparing && ready,
             theme,
             cx.listener(|this, _event, _window, cx| this.sync_recompare_all(cx)),
@@ -3845,7 +3845,24 @@ impl AppView {
                         )
                     }),
             )
-            .child(list.render(theme))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                            this.context_menu = Some(ContextMenu {
+                                target: ContextTarget::SyncList,
+                                position: event.position,
+                            });
+                            cx.notify();
+                        }),
+                    )
+                    .child(list.render(theme)),
+            )
     }
 
     /// The 隐藏一致 switch under the table search: drop every row whose comparison found nothing

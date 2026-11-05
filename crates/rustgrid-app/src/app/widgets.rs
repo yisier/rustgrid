@@ -887,6 +887,21 @@ impl AppView {
                             }),
                         ));
                 }
+                items = items
+                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(self.context_item(
+                        "table-refresh",
+                        t!("connection.refresh").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            let category = if is_view {
+                                Category::Views
+                            } else {
+                                Category::Tables
+                            };
+                            this.refresh_object_category(category, ci, di, cx);
+                        }),
+                    ));
             }
             ContextTarget::TableCategory {
                 connection_index,
@@ -1002,6 +1017,15 @@ impl AppView {
                         cx.listener(move |this, _event, _window, cx| {
                             this.context_menu = None;
                             this.confirm_delete_routine(ci, di, drop_name.clone(), kind, cx);
+                        }),
+                    ))
+                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(self.context_item(
+                        "routine-refresh",
+                        t!("connection.refresh").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.refresh_object_category(Category::Functions, ci, di, cx);
                         }),
                     ));
             }
@@ -1157,6 +1181,16 @@ impl AppView {
                         }),
                     ));
             }
+            ContextTarget::SyncList => {
+                items = items.child(self.context_item(
+                    "synclist-ctx-refresh",
+                    t!("connection.refresh").to_string(),
+                    cx.listener(|this, _event, _window, cx| {
+                        this.context_menu = None;
+                        this.sync_recompare_all(cx);
+                    }),
+                ));
+            }
             ContextTarget::QueryFile { index } => {
                 let index = *index;
                 items = items
@@ -1285,6 +1319,16 @@ impl AppView {
                             this.refresh_selected_backup(cx);
                         }),
                     ));
+            }
+            ContextTarget::UserList => {
+                items = items.child(self.context_item(
+                    "userlist-ctx-refresh",
+                    t!("connection.refresh").to_string(),
+                    cx.listener(|this, _event, _window, cx| {
+                        this.context_menu = None;
+                        this.refresh_users_feedback(cx);
+                    }),
+                ));
             }
             ContextTarget::QueryList => {
                 items = items

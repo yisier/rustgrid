@@ -372,7 +372,10 @@ touching UI code.
 - **Shortcuts are commands.** A user-facing keystroke is a `keymap::Command` (`src/app/keymap.rs`):
   an id stored in `settings.json`, a label, a group for Options → Shortcuts, a key context and its
   defaults. Add a command there (and its action and label) instead of a hard-coded `KeyBinding`, so
-  it is listed, searchable and rebindable. See `docs/keyboard-and-query.md`.
+  it is listed, searchable and rebindable. See `docs/keyboard-and-query.md`. Every list page offers
+  刷新 in its toolbar and in the row/blank-area context menu; F5 is the `general.refresh_page`
+  command bound in the content pane's `PAGE_CONTEXT`, while a focused grid's deeper
+  `grid.refresh` binding still wins.
 - **SQL text is lexed once.** `src/app/sql_lex.rs` colours the query editor, decides what is a
   comment (`--`, `//`, `#` on MySQL, `/*` to the end while unclosed), rewrites what the engine
   would not accept before a run, and splits MySQL scripts (`DELIMITER`, routine bodies). Keep

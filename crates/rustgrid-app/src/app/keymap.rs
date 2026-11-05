@@ -26,13 +26,14 @@ use super::{
     GridSelectPageUp, MoveLinesDown, MoveLinesUp, NewQueryTab, NextTab, OBJECT_LIST_CONTEXT,
     ObjectDown, ObjectEnd, ObjectFocusSearch, ObjectHome, ObjectLeft, ObjectOpen, ObjectPageDown,
     ObjectPageUp, ObjectRename, ObjectRight, ObjectSelectAll, ObjectUp, OpenTransferConfig,
-    PasteBackupFile, PasteQueryFile, PrevTab, QUERY_EDITOR_CONTEXT, QUERY_LIST_CONTEXT,
-    QueryFocusSearch, ROW_FORM_CONTEXT, RenameBackupFile, RenameQueryFile, RunQuery,
-    RunSelectedQuery, SaveDesign, SaveQuery, SaveRowForm, SelectAllBackups, SelectAllOccurrences,
-    SelectAllQueries, SelectAllStatusSql, SelectAllTransfers, SwapLineUp, TRANSFER_LIST_CONTEXT,
-    TREE_CONTEXT, ToggleComment, TreeCollapse, TreeDown, TreeEnd, TreeExpand, TreeFocusSearch,
-    TreeHome, TreeOpen, TreePageDown, TreePageUp, TreeRename, TreeSelectAll, TreeUp,
-    USER_LIST_CONTEXT, UserFocusSearch, WORKSPACE_CONTEXT,
+    PAGE_CONTEXT, PasteBackupFile, PasteQueryFile, PrevTab, QUERY_EDITOR_CONTEXT,
+    QUERY_LIST_CONTEXT, QueryFocusSearch, ROW_FORM_CONTEXT, RefreshPage, RenameBackupFile,
+    RenameQueryFile, RunQuery, RunSelectedQuery, SaveDesign, SaveQuery, SaveRowForm,
+    SelectAllBackups, SelectAllOccurrences, SelectAllQueries, SelectAllStatusSql,
+    SelectAllTransfers, SwapLineUp, TRANSFER_LIST_CONTEXT, TREE_CONTEXT, ToggleComment,
+    TreeCollapse, TreeDown, TreeEnd, TreeExpand, TreeFocusSearch, TreeHome, TreeOpen, TreePageDown,
+    TreePageUp, TreeRename, TreeSelectAll, TreeUp, USER_LIST_CONTEXT, UserFocusSearch,
+    WORKSPACE_CONTEXT,
 };
 
 /// Where a command lives, for grouping the 快捷键 page.
@@ -290,6 +291,14 @@ pub(super) const COMMANDS: &[Command] = &[
         mac_defaults: Some(&["cmd-shift-n"]),
         bind: bind!(NewQueryTab),
     },
+    nav_command!(
+        CommandGroup::General,
+        PAGE_CONTEXT,
+        "general.refresh_page",
+        "keymap.general.refresh_page",
+        &["f5"],
+        RefreshPage
+    ),
     nav_command!(
         CommandGroup::General,
         WORKSPACE_CONTEXT,

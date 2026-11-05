@@ -449,6 +449,14 @@ impl AppView {
                         t!("backup.extract_sql").to_string(),
                         has_file,
                         cx.listener(|this, _event, _window, cx| this.extract_selected_backup(cx)),
+                    ))
+                    .child(toolbar_separator(theme))
+                    .child(self.toolbar_item(
+                        "backup-refresh",
+                        "icons/refresh.svg",
+                        t!("common.refresh").to_string(),
+                        true,
+                        cx.listener(|this, _event, _window, cx| this.refresh_selected_backup(cx)),
                     )),
             )
             .child(

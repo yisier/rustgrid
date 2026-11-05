@@ -145,13 +145,19 @@ gpui::actions!(
         CloseOtherTabs,
         CloseAllTabs,
         NextTab,
-        PrevTab
+        PrevTab,
+        RefreshPage
     ]
 );
 
 /// The keymap's marker for a workspace-wide command: bound with no key context, so it fires
 /// whatever has focus (or nothing), and handled at app level (`AppView::new`).
 const WORKSPACE_CONTEXT: &str = "Workspace";
+
+/// The main content pane's key context (below the workspace commands and above a page's own list
+/// or grid contexts). F5 refreshes the current page from here; a focused grid's deeper
+/// `GRID_CONTEXT` binding still wins.
+const PAGE_CONTEXT: &str = "Page";
 
 // Table-grid keyboard commands (the arrow keys stay on the grid's `on_key_down`). Shift variants
 // extend the selection.
@@ -1437,6 +1443,10 @@ enum ContextTarget {
     BackupList,
     /// The blank area of the Queries main tab's list.
     QueryList,
+    /// The Sync main tab's comparison list (right-click → 刷新).
+    SyncList,
+    /// The Users main tab's list (right-click → 刷新).
+    UserList,
     /// A data/result grid (right-click → 删除记录 / 复制 / 复制为 INSERT / 粘贴 / 刷新).
     Grid {
         grid_id: u64,
@@ -2761,6 +2771,8 @@ pub struct AppView {
     /// Whether the **server** supports roles, as reported when the account list loaded. A server
     /// without them (MySQL ≤ 5.7) hides the 用户 / 角色 switch instead of offering an empty list.
     users_roles_supported: bool,
+    /// An explicit 刷新 of the Users list, so its load confirms the click with a toast.
+    users_refresh_feedback: bool,
     /// The Users list's row rectangles in window space, keyed by selection key, for the marquee.
     users_row_rects: std::collections::HashMap<String, Bounds<Pixels>>,
     /// The Users list's focus target.
@@ -3105,6 +3117,10 @@ impl AppView {
             let weak = cx.weak_entity();
             (**cx).on_action(move |_: &NewQueryTab, cx: &mut App| {
                 let _ = weak.update(cx, |view, cx| view.open_new_query(cx));
+            });
+            let weak = cx.weak_entity();
+            (**cx).on_action(move |_: &RefreshPage, cx: &mut App| {
+                let _ = weak.update(cx, |view, cx| view.refresh_current_page(cx));
             });
             let weak = cx.weak_entity();
             (**cx).on_action(move |_: &CloseActiveTab, cx: &mut App| {
@@ -3582,6 +3598,7 @@ impl AppView {
             users_selection: ListSelection::default(),
             users_scope: UserScope::Users,
             users_roles_supported: false,
+            users_refresh_feedback: false,
             users_row_rects: std::collections::HashMap::new(),
             users_focus: cx.focus_handle(),
             users_grid: ColumnGrid::default(),

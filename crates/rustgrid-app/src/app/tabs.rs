@@ -99,6 +99,7 @@ impl AppView {
             .flex_1()
             .h_full()
             .overflow_hidden()
+            .key_context(PAGE_CONTEXT)
             .bg(rgb(theme.editor_bg));
         if has_tabs {
             content = content.child(self.tab_bar.clone().cached(cached_style(|d| {
@@ -113,6 +114,37 @@ impl AppView {
                 .overflow_hidden()
                 .child(body),
         )
+    }
+
+    /// F5 / the Shortcuts command: refresh whatever the page is showing. A focused grid keeps its
+    /// own `GridRefresh` binding; this path covers the list pages and a grid whose focus sits
+    /// elsewhere.
+    pub(super) fn refresh_current_page(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(index) = self.active_grid
+            && let Some(grid) = self.grids.get(index).cloned()
+        {
+            grid.update(cx, |grid, cx| grid.refresh(cx));
+            return;
+        }
+        if self.active_query.is_some() || self.active_design.is_some() {
+            return;
+        }
+        match self.main_tab {
+            MainTab::Users => self.refresh_users_feedback(cx),
+            MainTab::Queries => self.refresh_query_files_feedback(cx),
+            MainTab::Backups => self.refresh_selected_backup(cx),
+            MainTab::Sync => self.sync_recompare_all(cx),
+            MainTab::Tables | MainTab::Views | MainTab::Functions => {
+                let Some(pane) = self.object_pane.as_ref() else {
+                    return;
+                };
+                let (connection_index, database_index, category) = {
+                    let pane = pane.read(cx);
+                    (pane.connection_index, pane.database_index, pane.category)
+                };
+                self.refresh_object_category(category, connection_index, database_index, cx);
+            }
+        }
     }
 }
 

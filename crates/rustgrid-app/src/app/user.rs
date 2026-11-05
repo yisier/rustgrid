@@ -276,17 +276,20 @@ impl AppView {
         self.selected_user = None;
         let Some(connection_index) = connection_index else {
             self.users = Loadable::Loaded(Vec::new());
+            self.finish_users_refresh(true, cx);
             cx.notify();
             return;
         };
         // An engine without accounts (SQLite) reports an empty list instead of an error.
         if !self.driver_supports(connection_index, DriverCapability::Users) {
             self.users = Loadable::Loaded(Vec::new());
+            self.finish_users_refresh(true, cx);
             cx.notify();
             return;
         }
         let Some(connection) = self.connection_arc(connection_index) else {
             self.users = Loadable::Failed(t!("info.not_connected").to_string());
+            self.finish_users_refresh(false, cx);
             cx.notify();
             return;
         };
@@ -304,6 +307,7 @@ impl AppView {
                 })
                 .await;
             let _ = this.update(cx, |app, cx| {
+                let ok = matches!(&result, Ok((Ok(_), _)));
                 match result {
                     Ok((users, roles)) => {
                         app.users_roles_supported = roles;
@@ -322,11 +326,31 @@ impl AppView {
                 {
                     app.selected_user = None;
                 }
+                app.finish_users_refresh(ok, cx);
                 cx.notify();
             });
         })
         .detach();
         cx.notify();
+    }
+
+    /// Explicit 刷新 of the Users list: reload the accounts and confirm the click with a toast.
+    pub(super) fn refresh_users_feedback(&mut self, cx: &mut Context<'_, Self>) {
+        self.users_refresh_feedback = true;
+        self.refresh_toast(ToastKind::Info, t!("grid.refreshing").to_string(), cx);
+        self.refresh_users(cx);
+    }
+
+    /// Report an explicit Users-list refresh as finished, if one is waiting.
+    fn finish_users_refresh(&mut self, ok: bool, cx: &mut Context<'_, Self>) {
+        if std::mem::take(&mut self.users_refresh_feedback) {
+            let (kind, message) = if ok {
+                (ToastKind::Success, t!("grid.refreshed").to_string())
+            } else {
+                (ToastKind::Error, t!("grid.refresh_failed").to_string())
+            };
+            self.refresh_toast(kind, message, cx);
+        }
     }
 
     /// The indices of the accounts matching the current search text.
@@ -475,6 +499,14 @@ impl AppView {
                             self.user_editor_spec(index).object_privilege_manager
                         }),
                         cx.listener(|this, _event, _window, cx| this.open_privilege_manager(cx)),
+                    ))
+                    .child(toolbar_separator(theme))
+                    .child(self.toolbar_item(
+                        "user-refresh",
+                        "icons/refresh.svg",
+                        t!("common.refresh").to_string(),
+                        self.users_connection.is_some(),
+                        cx.listener(|this, _event, _window, cx| this.refresh_users_feedback(cx)),
                     )),
             )
             .child(
@@ -693,8 +725,11 @@ impl AppView {
                         if !this.users_selection.contains(&key) {
                             this.set_user_selection_one(&key);
                         }
+                        this.context_menu = Some(ContextMenu {
+                            target: ContextTarget::UserList,
+                            position: event.position,
+                        });
                         cx.notify();
-                        let _ = event;
                     }
                 }),
             );
@@ -780,10 +815,14 @@ impl AppView {
                 MouseButton::Right,
                 cx.listener({
                     let key = key.clone();
-                    move |this, _event: &MouseDownEvent, _window, cx| {
+                    move |this, event: &MouseDownEvent, _window, cx| {
                         if !this.users_selection.contains(&key) {
                             this.set_user_selection_one(&key);
                         }
+                        this.context_menu = Some(ContextMenu {
+                            target: ContextTarget::UserList,
+                            position: event.position,
+                        });
                         cx.notify();
                     }
                 }),
