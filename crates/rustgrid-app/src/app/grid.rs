@@ -1222,6 +1222,8 @@ impl GridView {
         }
     }
 
+    /// Remove one node from the draft and apply the change at once, so a removed condition does not
+    /// silently reappear when the panel is reopened.
     pub(super) fn filter_remove_node(&mut self, path: Vec<usize>, cx: &mut Context<'_, Self>) {
         let Some((index, parents)) = path.split_last() else {
             return;
@@ -1233,6 +1235,7 @@ impl GridView {
             children.remove(index);
         }
         self.after_filter_change(cx);
+        self.filter_apply(cx);
     }
 
     /// Reset the popups/editors after a structural change. Groups left without conditions are
@@ -1634,6 +1637,13 @@ impl GridView {
             return;
         }
         self.filter_apply_now(cx);
+    }
+
+    /// Remove every filter condition and apply the empty filter at once (the panel's 清空).
+    pub(super) fn filter_clear(&mut self, cx: &mut Context<'_, Self>) {
+        self.state.filter_draft.clear();
+        self.after_filter_change(cx);
+        self.filter_apply(cx);
     }
 
     pub(super) fn filter_apply_now(&mut self, cx: &mut Context<'_, Self>) {

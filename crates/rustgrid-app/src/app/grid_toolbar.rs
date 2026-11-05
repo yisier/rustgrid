@@ -591,7 +591,8 @@ impl GridView {
             .px_3()
             .h(px(26.0))
             .flex_none()
-            .child(self.filter_apply_button(cx));
+            .child(self.filter_apply_button(cx))
+            .child(self.filter_clear_button(cx));
 
         div()
             .flex()
@@ -1437,6 +1438,33 @@ impl GridView {
                     .text_color(rgb(theme.text_muted)),
             )
             .child(t!("grid.apply").to_string())
+    }
+
+    /// The filter panel's 清空: drop every condition and apply the empty filter.
+    fn filter_clear_button(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let theme = self.theme;
+        div()
+            .id("filter-clear")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .h(px(20.0))
+            .cursor_pointer()
+            .text_size(px(12.0))
+            .text_color(rgb(theme.text_muted))
+            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            .on_click(cx.listener(|this, _event, _window, cx| this.filter_clear(cx)))
+            .child(
+                svg()
+                    .path("icons/cross.svg")
+                    .w(px(12.0))
+                    .h(px(12.0))
+                    .flex_none()
+                    .text_color(rgb(theme.text_muted)),
+            )
+            .child(t!("grid.filter_clear").to_string())
     }
 
     pub(super) fn render_grid_controls(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
