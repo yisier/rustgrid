@@ -363,13 +363,15 @@ impl Connection for OracleConnection {
             let primary = primary_key_columns(connection, &schema, &bare)?;
             let cursor = connection
                 .query(
+                    // `ALL_TAB_COLUMNS` has no VIRTUAL_COLUMN on 19c; `ALL_TAB_COLS` does, but it
+                    // also lists the system-generated hidden columns `ALL_TAB_COLUMNS` filters out.
                     "SELECT c.column_name, c.data_type, c.nullable, cc.comments, \
                             c.identity_column, c.virtual_column \
-                     FROM all_tab_columns c \
+                     FROM all_tab_cols c \
                      LEFT JOIN all_col_comments cc \
                        ON cc.owner = c.owner AND cc.table_name = c.table_name \
                       AND cc.column_name = c.column_name \
-                     WHERE c.owner = :1 AND c.table_name = :2 \
+                     WHERE c.owner = :1 AND c.table_name = :2 AND c.hidden_column = 'NO' \
                      ORDER BY c.column_id",
                     &refs,
                 )
