@@ -1,11 +1,11 @@
 use super::*;
+use gpui_kit::component::Sizable;
+use gpui_kit::component::spinner::Spinner;
 
-/// The connection status shown by a tree row, reduced to what rendering needs. A failed connection
-/// keeps only its state: the error itself is surfaced in a dialog when it happens.
+/// The connection status shown by a tree row, reduced to what rendering needs.
 enum TreeStatus {
     Connected,
     Connecting,
-    Failed,
     Disconnected,
 }
 
@@ -31,8 +31,6 @@ struct TreeConnection {
     /// tree shows namespace folders instead of table/view/function categories.
     supports_key_value: bool,
     status: TreeStatus,
-    /// The error from the last failed connect, shown as a tooltip on the node.
-    failed_error: Option<String>,
     expanded: bool,
     /// The connection's environment colour, tinting this connection's whole subtree (参考 Navicat).
     color: Option<ConnectionColor>,
@@ -258,12 +256,7 @@ fn snapshot_connections(app: &AppView, search: Option<&str>) -> Vec<TreeConnecti
             let status = match &node.status {
                 ConnectionStatus::Connected(_) => TreeStatus::Connected,
                 ConnectionStatus::Connecting => TreeStatus::Connecting,
-                ConnectionStatus::Failed(_) => TreeStatus::Failed,
                 ConnectionStatus::Disconnected => TreeStatus::Disconnected,
-            };
-            let failed_error = match &node.status {
-                ConnectionStatus::Failed(message) => Some(message.clone()),
-                _ => None,
             };
             let key_value = app.driver_supports(index, DriverCapability::KeyValue);
             let name = node.profile.name.clone();
@@ -316,7 +309,6 @@ fn snapshot_connections(app: &AppView, search: Option<&str>) -> Vec<TreeConnecti
                 supports_backups: app.driver_supports_backup(index),
                 supports_key_value: key_value,
                 status,
-                failed_error,
                 expanded: if searching {
                     connection_matches
                         || matches!(&databases, Loadable::Loaded(databases) if !databases.is_empty())
@@ -1041,7 +1033,6 @@ impl TreePane {
         let badge = match &connection.status {
             TreeStatus::Connected => 0x2e9e5b,
             TreeStatus::Connecting => 0xb58900,
-            TreeStatus::Failed => 0xd13438,
             TreeStatus::Disconnected => 0x6b6b6b,
         };
 
@@ -1192,10 +1183,16 @@ impl TreePane {
             .when(matches!(connection.status, TreeStatus::Connecting), |row| {
                 row.child(
                     div()
+                        .id(SharedString::from(format!("conn-loading-{index}")))
                         .flex_none()
-                        .text_size(px(11.0))
-                        .text_color(rgb(theme.warning))
-                        .child(t!("connection.connecting").to_string()),
+                        .flex()
+                        .items_center()
+                        .tooltip(ui::text_tooltip(t!("connection.connecting").to_string()))
+                        .child(
+                            Spinner::new()
+                                .with_size(gpui_kit::component::Size::Small)
+                                .color(rgb(theme.warning).into()),
+                        ),
                 )
             })
             // Keep the environment colour readable on the selected row as a thin left strip.
@@ -1210,13 +1207,6 @@ impl TreePane {
                         .bg(rgb(color)),
                 )
             });
-
-        // A failed connection keeps its error, surfaced when the row is hovered (the dialog from
-        // the attempt is long gone by then).
-        let row = match connection.failed_error.clone() {
-            Some(error) => row.tooltip(ui::text_tooltip(error)),
-            None => row,
-        };
 
         // A connection's environment colour paints a tint behind the connection and every row
         // under it, so the environment is visible at a glance (参考 Navicat). Rows keep their own

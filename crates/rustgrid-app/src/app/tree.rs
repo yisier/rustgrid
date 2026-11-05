@@ -379,6 +379,15 @@ impl AppView {
     }
 
     pub(super) fn connect(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        // A second click while the first attempt is still in flight must not start another one:
+        // both would race to set the node's final state.
+        if matches!(
+            self.connections.get(index).map(|node| &node.status),
+            Some(ConnectionStatus::Connecting)
+        ) {
+            return;
+        }
+
         let Some(profile) = self.connections.get(index).map(|node| node.profile.clone()) else {
             return;
         };
@@ -389,9 +398,7 @@ impl AppView {
 
         let Some(driver) = self.registry.get(&profile.driver) else {
             let message = t!("error.driver_missing").to_string();
-            if let Some(node) = self.connections.get_mut(index) {
-                node.status = ConnectionStatus::Failed(message.clone());
-            }
+            self.disconnect(index, cx);
             self.error_dialog = Some(message);
             cx.notify();
             return;
@@ -434,12 +441,22 @@ impl AppView {
                         view.restore_session_tables(index, cx);
                     }
                     Err(error) => {
+                        // Only the attempt's own node can be closed: when the connection was
+                        // closed or reconnected meanwhile, this result belongs to an attempt that
+                        // is already superseded.
+                        let waiting = view.connections.get(index).is_some_and(|node| {
+                            matches!(node.status, ConnectionStatus::Connecting)
+                        });
+                        if !waiting {
+                            return;
+                        }
+
                         let authentication = matches!(&error, Error::Authentication(_));
                         let message = error.to_string();
 
-                        if let Some(node) = view.connections.get_mut(index) {
-                            node.status = ConnectionStatus::Failed(message.clone());
-                        }
+                        // A failed attempt leaves nothing to keep open: drop back to the normal
+                        // closed state (grey icon) instead of a red failed one.
+                        view.disconnect(index, cx);
 
                         if authentication {
                             let weak = cx.weak_entity();
@@ -454,7 +471,7 @@ impl AppView {
                             view.password_focus_pending = true;
                         } else {
                             // Surface the failure in a dialog rather than dumping the (often long)
-                            // driver message under the tree node; the red icon still marks it.
+                            // driver message under the tree node.
                             view.error_dialog = Some(message);
                         }
                     }
@@ -481,7 +498,7 @@ impl AppView {
         for index in self.tree_selection_connection_indexes() {
             let closed = matches!(
                 self.connections.get(index).map(|node| &node.status),
-                Some(ConnectionStatus::Disconnected) | Some(ConnectionStatus::Failed(_))
+                Some(ConnectionStatus::Disconnected)
             );
             if closed {
                 self.connect(index, cx);
@@ -498,9 +515,7 @@ impl AppView {
             .filter(|index| {
                 matches!(
                     self.connections.get(*index).map(|node| &node.status),
-                    Some(ConnectionStatus::Connected(_))
-                        | Some(ConnectionStatus::Connecting)
-                        | Some(ConnectionStatus::Failed(_))
+                    Some(ConnectionStatus::Connected(_)) | Some(ConnectionStatus::Connecting)
                 )
             })
             .collect();

@@ -4234,10 +4234,6 @@ impl AppView {
             match &node.status {
                 ConnectionStatus::Connected(_) => 0u8.hash(&mut hasher),
                 ConnectionStatus::Connecting => 1u8.hash(&mut hasher),
-                ConnectionStatus::Failed(error) => {
-                    2u8.hash(&mut hasher);
-                    error.hash(&mut hasher);
-                }
                 ConnectionStatus::Disconnected => 3u8.hash(&mut hasher),
             }
             node.expanded.hash(&mut hasher);

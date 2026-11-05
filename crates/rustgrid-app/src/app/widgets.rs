@@ -112,18 +112,16 @@ impl AppView {
                 let status = self.connections.get(index).map(|node| &node.status);
                 let connected = matches!(status, Some(ConnectionStatus::Connected(_)));
                 let connecting = matches!(status, Some(ConnectionStatus::Connecting));
-                // A failed or connecting connection has no live session, but it does hold state (its
-                // error message), so it can still be closed to reset it. Only a connected one is
-                // "open"; an untouched one is neither.
+                // A connecting connection has no live session yet, but it still has an attempt in
+                // flight, so it can be closed to cancel it. Only a connected one is "open"; an
+                // untouched one is neither.
                 let closeable = matches!(
                     status,
-                    Some(ConnectionStatus::Connected(_))
-                        | Some(ConnectionStatus::Connecting)
-                        | Some(ConnectionStatus::Failed(_))
+                    Some(ConnectionStatus::Connected(_)) | Some(ConnectionStatus::Connecting)
                 );
 
                 // Show only the action that applies: an open (or opening) connection offers just
-                // 关闭连接, an untouched one just 打开连接, and a failed one both (retry, or reset).
+                // 关闭连接, an untouched one just 打开连接.
                 if !connected && !connecting {
                     items = items.child(self.context_item(
                         "ctx-connect",
@@ -268,15 +266,13 @@ impl AppView {
                 let any_open = indexes.iter().any(|index| {
                     matches!(
                         self.connections.get(*index).map(|node| &node.status),
-                        Some(ConnectionStatus::Connected(_))
-                            | Some(ConnectionStatus::Connecting)
-                            | Some(ConnectionStatus::Failed(_))
+                        Some(ConnectionStatus::Connected(_)) | Some(ConnectionStatus::Connecting)
                     )
                 });
                 let any_closed = indexes.iter().any(|index| {
                     matches!(
                         self.connections.get(*index).map(|node| &node.status),
-                        Some(ConnectionStatus::Disconnected) | Some(ConnectionStatus::Failed(_))
+                        Some(ConnectionStatus::Disconnected)
                     )
                 });
                 let deletable = !indexes.is_empty() || !self.tree_selection_group_ids().is_empty();

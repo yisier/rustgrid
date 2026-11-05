@@ -19,11 +19,12 @@ pub enum Loadable<T> {
     Failed(String),
 }
 
+/// A connection's live state. There is no "failed" state: a failed attempt closes the node again
+/// (its error is reported by the connect flow), so the tree shows closed, connecting or connected.
 pub enum ConnectionStatus {
     Disconnected,
     Connecting,
     Connected(Arc<dyn Connection>),
-    Failed(String),
 }
 
 pub struct ConnectionNode {
