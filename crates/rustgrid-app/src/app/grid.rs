@@ -1120,12 +1120,18 @@ impl GridView {
             self.state.filter_open = true;
             self.state.filter_draft = self.state.filters.clone();
         }
-        match self.state.filter_draft.last_mut() {
-            Some(FilterNode::Group(group)) => group.children.push(FilterNode::Condition(condition)),
-            _ => self
-                .state
-                .filter_draft
-                .push(FilterNode::Condition(condition)),
+        let node = FilterNode::Condition(condition);
+        if self.state.filter_draft.is_empty() {
+            // Match a manually started filter: the first condition lives in a group card, whose
+            // in-group rail is what carries the enable checkbox and the 并且/或者 pill.
+            let mut group = FilterGroup::new(FilterConjunction::And);
+            group.children.push(node);
+            self.state.filter_draft.push(FilterNode::Group(group));
+        } else {
+            match self.state.filter_draft.last_mut() {
+                Some(FilterNode::Group(group)) => group.children.push(node),
+                _ => self.state.filter_draft.push(node),
+            }
         }
         self.after_filter_change(cx);
         self.filter_apply(cx);
