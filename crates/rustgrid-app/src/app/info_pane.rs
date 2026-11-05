@@ -6,6 +6,7 @@
 //! The info pane observes `AppView`, so it refreshes whenever the selection changes.
 
 use super::*;
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::text::TextView;
 use rustgrid_core::DatabaseOptions;
 
@@ -130,18 +131,30 @@ impl FormInput {
 
 /// The default height of a multi-line form editor: three compact input rows.
 const FORM_TEXTAREA_HEIGHT: f32 = 72.0;
+/// The height of a multi-line editor's header strip (the `json` label + 格式化 switch).
+const FORM_JSON_HEADER_HEIGHT: f32 = 28.0;
 /// The height of a single-line form editor.
 const FORM_INPUT_HEIGHT: f32 = 24.0;
 
-/// Whether a form value should use the multi-line editor: a JSON/JSONB column (or a value that
-/// parses as JSON), and long text detected from its length, newlines or column type.
+/// Whether a form value should be presented as a JSON code block.
+///
+/// A JSON/JSONB column counts as one — except when it stores a scalar (`123`, `"text"`, `true`,
+/// `null`): those are ordinary values and must keep the plain editor. A non-JSON column also gets
+/// the code block when its value is a JSON object or array, regardless of the declared type.
 fn form_field_is_json(field: &FormField) -> bool {
-    if field.data_type.to_ascii_lowercase().contains("json") {
-        return true;
-    }
     let value = field.value.trim();
-    (value.starts_with('{') || value.starts_with('['))
-        && serde_json::from_str::<serde_json::Value>(value).is_ok()
+    let column_is_json = field.data_type.to_ascii_lowercase().contains("json");
+    if value.is_empty() {
+        // An empty JSON column is waiting for structured data; an empty ordinary column is not.
+        return column_is_json;
+    }
+    match serde_json::from_str::<serde_json::Value>(value) {
+        Ok(serde_json::Value::Object(_) | serde_json::Value::Array(_)) => true,
+        // A populated JSON column holding valid scalar JSON (the number in the report) is still
+        // just a value; a malformed JSON column stays in the code editor so it can be fixed.
+        Ok(_) => false,
+        Err(_) => column_is_json,
+    }
 }
 
 fn form_field_is_multiline(field: &FormField) -> bool {
@@ -157,6 +170,20 @@ fn form_field_is_multiline(field: &FormField) -> bool {
         .any(|kind| data_type.contains(kind))
 }
 
+/// Whether the value is already in serde's pretty-printed JSON form (so the 格式化 switch starts
+/// on for a field that was stored formatted).
+fn form_field_is_pretty(field: &FormField) -> bool {
+    if !form_field_is_json(field) {
+        return false;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&field.value) else {
+        return false;
+    };
+    serde_json::to_string_pretty(&value)
+        .map(|pretty| pretty.trim() == field.value.trim())
+        .unwrap_or(false)
+}
+
 /// The row form's field editors, rebuilt when the form moves to another row or grid or the field
 /// layout changes. The values themselves are re-read from the grid on every render, so a staged
 /// edit or a page reload never leaves the editors out of date.
@@ -170,6 +197,8 @@ struct FormState {
     inputs: Vec<FormInput>,
     /// Each multi-line editor's dragged height; single-line fields keep [`FORM_INPUT_HEIGHT`].
     heights: Vec<f32>,
+    /// Whether each JSON field's 格式化 switch is on (its value is pretty-printed).
+    json_formatted: Vec<bool>,
     /// Whether each editor's field is `NULL`, to update its placeholder only when that changes.
     nulls: Vec<bool>,
 }
@@ -517,13 +546,16 @@ impl InfoPane {
             let heights = fields
                 .iter()
                 .map(|field| {
-                    if form_field_is_multiline(field) {
+                    if form_field_is_json(field) {
+                        FORM_TEXTAREA_HEIGHT + FORM_JSON_HEADER_HEIGHT
+                    } else if form_field_is_multiline(field) {
                         FORM_TEXTAREA_HEIGHT
                     } else {
                         FORM_INPUT_HEIGHT
                     }
                 })
                 .collect();
+            let json_formatted = fields.iter().map(form_field_is_pretty).collect();
             self.form = Some(FormState {
                 grid_id: grid.id,
                 row,
@@ -531,6 +563,7 @@ impl InfoPane {
                 columns,
                 inputs,
                 heights,
+                json_formatted,
                 nulls: fields.iter().map(|field| field.null).collect(),
             });
             // The picker belonged to the previous row/field layout.
@@ -558,6 +591,12 @@ impl InfoPane {
                 }
                 let placeholder: SharedString = if field.null { "NULL".into() } else { "".into() };
                 input.set_placeholder(placeholder, cx);
+            }
+            if !focused && let Some(formatted) = form.json_formatted.get_mut(index) {
+                let pretty = form_field_is_pretty(field);
+                if *formatted != pretty {
+                    *formatted = pretty;
+                }
             }
             input.set_theme(theme, cx);
         }
@@ -669,7 +708,9 @@ impl InfoPane {
     }
 
     /// Pretty-print the JSON in a form field and stage the formatted text into the grid.
-    fn format_form_json(&mut self, col: usize, cx: &mut Context<'_, Self>) {
+    /// The JSON code block's 格式化 switch: on pretty-prints the value, off compacts it. Both forms
+    /// stage the rewritten text into the grid; an invalid JSON value leaves the switch untouched.
+    fn set_form_json_formatted(&mut self, col: usize, formatted: bool, cx: &mut Context<'_, Self>) {
         let Some((editor, row, grid)) =
             self.form
                 .as_ref()
@@ -683,6 +724,17 @@ impl InfoPane {
             return;
         };
         let text = editor.read(cx).current_text(cx).unwrap_or_default();
+        if text.trim().is_empty() {
+            // Nothing to format yet; just let the switch move so the field does not report an
+            // invalid JSON error before the user has typed anything.
+            if let Some(form) = self.form.as_mut()
+                && let Some(slot) = form.json_formatted.get_mut(col)
+            {
+                *slot = formatted;
+            }
+            cx.notify();
+            return;
+        }
         let value = match serde_json::from_str::<serde_json::Value>(&text) {
             Ok(value) => value,
             Err(_) => {
@@ -698,14 +750,24 @@ impl InfoPane {
                 return;
             }
         };
-        let Ok(pretty) = serde_json::to_string_pretty(&value) else {
+        let rendered = if formatted {
+            serde_json::to_string_pretty(&value)
+        } else {
+            serde_json::to_string(&value)
+        };
+        let Ok(rendered) = rendered else {
             return;
         };
-        editor.update(cx, |editor, cx| editor.set_text(pretty.clone(), cx));
+        editor.update(cx, |editor, cx| editor.set_text(rendered.clone(), cx));
         if let Some(grid) = grid.upgrade() {
             grid.update(cx, |grid, cx| {
-                grid.stage_form_edit(row, col, &pretty, false, cx)
+                grid.stage_form_edit(row, col, &rendered, true, cx)
             });
+        }
+        if let Some(form) = self.form.as_mut()
+            && let Some(slot) = form.json_formatted.get_mut(col)
+        {
+            *slot = formatted;
         }
         cx.notify();
     }
@@ -1866,6 +1928,7 @@ fn build_form_inputs(
                         value.clone(),
                         ui::TextAreaOptions {
                             json: form_field_is_json(field),
+                            line_numbers: form_field_is_json(field),
                             placeholder: placeholder.clone(),
                             text_size: 12.0,
                         },
@@ -2070,6 +2133,7 @@ fn render_row_form(
                 .get(index)
                 .copied()
                 .unwrap_or(FORM_INPUT_HEIGHT),
+            form.json_formatted.get(index).copied().unwrap_or(false),
             picker.filter(|picker| picker.col == index),
             pane,
         ));
@@ -2116,12 +2180,14 @@ fn render_row_form(
 /// One field of the row form: the `字段 · 类型 · 注释` line above its value editor. Each segment is
 /// clipped with an ellipsis when the pane is too narrow, and shows its full text in a hover
 /// tooltip in that case. Type and comment only appear while the 表格 options are on.
+#[allow(clippy::too_many_arguments)]
 fn render_form_field(
     style: &FormStyle<'_>,
     index: usize,
     field: &FormField,
     input: Option<&FormInput>,
     height: f32,
+    json_formatted: bool,
     picker: Option<&FormPicker>,
     pane: &WeakEntity<InfoPane>,
 ) -> AnyElement {
@@ -2225,16 +2291,33 @@ fn render_form_field(
                 data_type.contains("datetime") || data_type.contains("timestamp")
             };
             let multiline = matches!(input, FormInput::Multi(_));
+            let json = form_field_is_json(field);
             let editor_height = if multiline { height } else { FORM_INPUT_HEIGHT };
             let mut editor = div().flex_1().min_w(px(0.0)).h(px(editor_height));
-            if multiline {
+            if json {
+                // A code block: the `json` language label and 格式化 switch sit in a header strip,
+                // above the editor's line numbers and syntax colours.
+                editor = editor
+                    .flex()
+                    .flex_col()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(rgb(theme.button_border))
+                    .bg(rgb(theme.input_bg))
+                    .overflow_hidden()
+                    .child(form_json_code_header(theme, index, json_formatted, pane))
+                    .child(div().flex_1().min_h(px(0.0)).p_1().child(input.element()));
+            } else if multiline {
                 editor = editor
                     .rounded_sm()
                     .border_1()
                     .border_color(rgb(theme.button_border))
                     .bg(rgb(theme.input_bg))
                     .p_1()
-                    .overflow_hidden();
+                    .overflow_hidden()
+                    .child(input.element());
+            } else {
+                editor = editor.child(input.element());
             }
             let mut value_row = div()
                 .flex()
@@ -2242,7 +2325,7 @@ fn render_form_field(
                 .items_center()
                 .gap_1()
                 .w_full()
-                .child(editor.child(input.element()));
+                .child(editor);
             if temporal {
                 value_row = value_row.child(form_picker_toggle(
                     theme,
@@ -2256,9 +2339,6 @@ fn render_form_field(
             block = block.child(value_row);
             if multiline {
                 block = block.child(form_resize_grip(theme, index, pane));
-                if form_field_is_json(field) {
-                    block = block.child(form_json_format_row(theme, index, pane));
-                }
             }
             if let Some(picker) = picker {
                 block = block.child(render_form_picker(theme, picker, pane));
@@ -2303,23 +2383,47 @@ fn form_resize_grip(theme: Theme, col: usize, pane: &WeakEntity<InfoPane>) -> St
         })
 }
 
-/// The small footer under a JSON field: 格式化 pretty-prints the value in place.
-fn form_json_format_row(theme: Theme, col: usize, pane: &WeakEntity<InfoPane>) -> impl IntoElement {
+/// The header strip of a JSON code block: the `json` language label on the left and the 格式化
+/// switch on the right. The switch pretty-prints the value when on and compacts it when off.
+fn form_json_code_header(
+    theme: Theme,
+    col: usize,
+    formatted: bool,
+    pane: &WeakEntity<InfoPane>,
+) -> impl IntoElement {
     let weak = pane.clone();
-    div().flex().flex_row().justify_end().w_full().child(
-        ui::plain_button(
-            format!("info-form-json-format-{col}"),
-            t!("info.form.format_json").to_string(),
-            true,
-            theme,
-            move |_event, _window, cx| {
-                let _ = weak.update(cx, |pane, cx| pane.format_form_json(col, cx));
-            },
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .w_full()
+        .h(px(FORM_JSON_HEADER_HEIGHT))
+        .flex_none()
+        .px_2()
+        .bg(rgb(theme.toolbar_bg))
+        .border_b_1()
+        .border_color(rgb(theme.button_border))
+        .child(
+            div()
+                .font_family("Consolas")
+                .text_size(px(11.0))
+                .text_color(rgb(theme.text_muted))
+                .child("json"),
         )
-        .tooltip(ui::text_tooltip(
-            t!("info.form.format_json_hint").to_string(),
-        )),
-    )
+        .child(
+            Switch::new(SharedString::from(format!("info-form-json-format-{col}")))
+                .xsmall()
+                .checked(formatted)
+                .label(t!("info.form.format").to_string())
+                .tooltip(t!("info.form.format_json_hint").to_string())
+                .on_change(move |checked, _window, cx| {
+                    let checked = *checked;
+                    let _ = weak.update(cx, |pane, cx| {
+                        pane.set_form_json_formatted(col, checked, cx)
+                    });
+                }),
+        )
 }
 
 /// The "…" button a temporal form field shows next to its editor: it opens the field's inline
@@ -2610,7 +2714,12 @@ mod tests {
             "varchar",
             "{\"date\": \"2026-11-04\", \"week\": 45}"
         )));
+        assert!(form_field_is_json(&field("json", "")));
         assert!(!form_field_is_json(&field("varchar", "hello")));
+        // A JSON column that holds a scalar is an ordinary value, not a code block.
+        assert!(!form_field_is_json(&field("json", "3312312")));
+        assert!(!form_field_is_json(&field("json", "\"a string\"")));
+        assert!(!form_field_is_json(&field("json", "null")));
     }
 
     #[test]

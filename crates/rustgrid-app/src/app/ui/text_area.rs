@@ -23,6 +23,8 @@ pub(crate) type TextAreaVoid = Rc<dyn Fn(&mut Window, &mut App) + 'static>;
 pub(crate) struct TextAreaOptions {
     /// `true` colours the value with the `json` grammar; `false` leaves it uncoloured.
     pub json: bool,
+    /// Show a line-number gutter (JSON code blocks use it; plain long text does not).
+    pub line_numbers: bool,
     pub placeholder: SharedString,
     pub text_size: f32,
 }
@@ -31,6 +33,7 @@ impl Default for TextAreaOptions {
     fn default() -> Self {
         Self {
             json: false,
+            line_numbers: false,
             placeholder: SharedString::default(),
             text_size: 12.0,
         }
@@ -40,6 +43,7 @@ impl Default for TextAreaOptions {
 pub(crate) struct TextArea {
     initial_text: String,
     json: bool,
+    line_numbers: bool,
     placeholder: SharedString,
     text_size: f32,
     /// The text queued for the next render, where a `Window` is available.
@@ -70,6 +74,7 @@ impl TextArea {
         Self {
             initial_text: text.into(),
             json: options.json,
+            line_numbers: options.line_numbers,
             placeholder: options.placeholder,
             text_size: options.text_size,
             pending_text: None,
@@ -160,7 +165,7 @@ impl TextArea {
         let state = cx.new(|cx| {
             let mut state = EditorState::new(window, cx)
                 .language(language)
-                .line_number(false)
+                .line_number(self.line_numbers)
                 .folding(false);
             state.set_soft_wrap(true, window, cx);
             state.set_placeholder(placeholder, window, cx);

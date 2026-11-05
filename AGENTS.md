@@ -913,9 +913,12 @@ shadcn chrome described above. Implemented today:
     Enter saves through the grid's normal commit path, Ctrl+S (`keymap.form.save`, bound in the
     form's `RowForm` context) saves too, and Escape restores the page's value for that field.
     A long text value (over 80 characters, containing a newline, or a `text`/`blob`-like column) and
-    every JSON/JSONB column use the multi-line `ui::TextArea` (`EditorState` with the `json`
-    grammar) with a three-row default height, a bottom drag handle that resizes it, and — for JSON
-    — a 格式化 JSON footer that pretty-prints the value in place. The header (table name + ✓ / ✕) stays fixed above the field list, which is the only part that
+    every multi-line JSON value use the multi-line `ui::TextArea` (`EditorState`; JSON points it at
+    the `json` grammar) with a three-row default height and a bottom drag handle that resizes it.
+    A JSON value renders as a code block: a header strip carries the `json` label on the left and a
+    `格式化` switch on the right (on = pretty-print, off = compact; both stage the rewritten text),
+    and the editor underneath shows line numbers and syntax colours. JSON/JSONB columns holding a
+    scalar value (`123`, `"text"`, `true`, `null`) keep the ordinary single-line editor. The header (table name + ✓ / ✕) stays fixed above the field list, which is the only part that
     scrolls; the buttons are muted grey while the grid has nothing staged and take their save /
     rollback colours once it does. A `NULL` cell shows an empty field
     with a `NULL` placeholder. A temporal field (`date` / `datetime` / `timestamp`, the same types
