@@ -1840,10 +1840,6 @@ struct GridView {
     status_sql_cursor: usize,
     status_sql_selecting: bool,
 
-    /// Height of the body area left for rows, measured each frame. When the page has no rows the
-    /// grid paints an empty table (gutter + column separators) tall enough to fill it.
-    empty_grid_height: f32,
-
     /// A weak handle to this view, used for the pager's field callbacks and the toolbar's
     /// deferred work without forming an `Entity` reference cycle.
     self_weak: WeakEntity<GridView>,
@@ -2532,6 +2528,14 @@ pub struct AppView {
     /// Transient notifications queued for the next frame, which has the window needed to hand
     /// them to `Root`.
     pending_toasts: Vec<(ToastKind, String)>,
+    /// An explicit refresh of the object list: the connection/database whose load will confirm it
+    /// with a "refreshed" toast once the data lands.
+    refresh_object_feedback: Option<(usize, usize)>,
+    /// Connections whose databases are being re-fetched by an explicit tree refresh; when the
+    /// last one lands, a "refreshed" toast confirms the click.
+    refresh_tree_feedback: Vec<usize>,
+    /// Whether any connection of that tree refresh failed, so the closing toast reports it.
+    refresh_tree_failed: bool,
     /// A close/navigate action waiting on the "discard unsaved changes?" confirmation.
     unsaved_confirm: Option<PendingAction>,
     /// Whether the currently-open modal dialog has already given its first field the focus.
@@ -3404,6 +3408,9 @@ impl AppView {
             error_dialog: None,
             grid_clipboard: Rc::new(RefCell::new(GridClipboard::default())),
             pending_toasts: Vec::new(),
+            refresh_object_feedback: None,
+            refresh_tree_feedback: Vec::new(),
+            refresh_tree_failed: false,
             unsaved_confirm: None,
             dialog_focus_done: false,
             opened_dialog: None,

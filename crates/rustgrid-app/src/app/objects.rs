@@ -359,7 +359,12 @@ impl AppView {
             true,
             theme,
             cx.listener(move |this, _event, _window, cx| {
-                this.reload_tables(connection_index, database_index, cx);
+                this.refresh_object_category(
+                    Category::Tables,
+                    connection_index,
+                    database_index,
+                    cx,
+                );
             }),
         ));
         if let Some(namespace) = namespace {
@@ -650,7 +655,12 @@ impl AppView {
                                 let pane = pane_for_refresh.read(cx);
                                 (pane.connection_index, pane.database_index)
                             };
-                            this.reload_tables(connection_index, database_index, cx);
+                            this.refresh_object_category(
+                                Category::Tables,
+                                connection_index,
+                                database_index,
+                                cx,
+                            );
                         }),
                     )),
             )
@@ -700,7 +710,9 @@ impl AppView {
                         "icons/refresh.svg",
                         t!("common.refresh").to_string(),
                         true,
-                        cx.listener(|this, _event, _window, cx| this.refresh_query_files(cx)),
+                        cx.listener(|this, _event, _window, cx| {
+                            this.refresh_query_files_feedback(cx)
+                        }),
                     )),
             )
             .child(self.render_object_view_controls(Category::Queries, cx))

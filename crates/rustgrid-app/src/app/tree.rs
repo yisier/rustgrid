@@ -651,6 +651,7 @@ impl AppView {
                 // `reload_objects`): the database's position in the new list, its name, and which
                 // of its lists were loaded before.
                 let mut reload: Vec<(usize, String, bool, bool)> = Vec::new();
+                let refresh_ok = result.is_ok();
                 if let Some(node) = view.connections.get_mut(index) {
                     // `previous` was taken before the node went `Loading`, so the databases that
                     // survive the refresh keep their open/expanded state and loaded tables.
@@ -759,6 +760,7 @@ impl AppView {
                         );
                     }
                 }
+                view.finish_tree_refresh(index, refresh_ok, cx);
             });
         })
         .detach();
@@ -1492,6 +1494,7 @@ impl AppView {
                 view.completion_generation = view.completion_generation.wrapping_add(1);
                 view.refresh_completion_catalog();
                 view.notify_object_pane(cx);
+                view.finish_object_refresh(connection_index, database_index, !failed, cx);
                 cx.notify();
                 // The object list's scroll extents are only known after the
                 // frame's paint, so schedule one more frame to reveal the
@@ -1577,6 +1580,7 @@ impl AppView {
             };
 
             let _ = this.update(cx, |view, cx| {
+                let routines_ok = result.is_ok();
                 if let Some(node) = view.connections.get_mut(connection_index)
                     && let Loadable::Loaded(databases) = &mut node.databases
                     && let Some(database) = databases.get_mut(database_index)
@@ -1587,6 +1591,7 @@ impl AppView {
                     };
                 }
                 view.notify_object_pane(cx);
+                view.finish_object_refresh(connection_index, database_index, routines_ok, cx);
                 cx.notify();
             });
         })
@@ -2088,6 +2093,8 @@ impl AppView {
         database_index: usize,
         cx: &mut Context<'_, Self>,
     ) {
+        self.refresh_object_feedback = Some((connection_index, database_index));
+        self.toast(ToastKind::Info, t!("grid.refreshing").to_string(), cx);
         if category == Category::Functions {
             if let (Some(connection), Some(database)) = (
                 self.connection_arc(connection_index),
@@ -2097,6 +2104,25 @@ impl AppView {
             }
         } else {
             self.reload_tables(connection_index, database_index, cx);
+        }
+    }
+
+    /// Report an explicit object-list refresh as finished, if it targeted this database.
+    pub(super) fn finish_object_refresh(
+        &mut self,
+        connection_index: usize,
+        database_index: usize,
+        ok: bool,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.refresh_object_feedback == Some((connection_index, database_index)) {
+            self.refresh_object_feedback = None;
+            let (kind, message) = if ok {
+                (ToastKind::Success, t!("grid.refreshed").to_string())
+            } else {
+                (ToastKind::Error, t!("grid.refresh_failed").to_string())
+            };
+            self.toast(kind, message, cx);
         }
     }
 

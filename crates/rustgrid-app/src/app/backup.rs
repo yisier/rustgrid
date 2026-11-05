@@ -1327,6 +1327,7 @@ impl AppView {
     /// Refresh the backup list from disk (also called from the row context menu).
     pub(super) fn refresh_selected_backup(&mut self, cx: &mut Context<'_, Self>) {
         self.refresh_backups(cx);
+        self.toast(ToastKind::Success, t!("grid.refreshed").to_string(), cx);
         cx.notify();
     }
 

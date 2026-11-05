@@ -383,10 +383,58 @@ impl AppView {
             .filter(|(_, node)| matches!(node.status, ConnectionStatus::Connected(_)))
             .map(|(index, _)| index)
             .collect();
+        if indexes.is_empty() {
+            self.toast(ToastKind::Success, t!("grid.refreshed").to_string(), cx);
+            return;
+        }
+        // Remember which nodes the click asked for, so the toast that confirms the refresh waits
+        // until the last one has actually landed.
+        self.refresh_tree_feedback = indexes.clone();
+        self.refresh_tree_failed = false;
+        self.toast(ToastKind::Info, t!("grid.refreshing").to_string(), cx);
         for index in indexes {
             self.load_databases(index, cx);
         }
         cx.notify();
+    }
+
+    /// Report one connection of an explicit tree refresh as finished.
+    pub(super) fn finish_tree_refresh(
+        &mut self,
+        index: usize,
+        ok: bool,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(position) = self
+            .refresh_tree_feedback
+            .iter()
+            .position(|pending| *pending == index)
+        else {
+            return;
+        };
+        self.refresh_tree_feedback.remove(position);
+        self.refresh_tree_failed |= !ok;
+        if self.refresh_tree_feedback.is_empty() {
+            let (kind, message) = if self.refresh_tree_failed {
+                (ToastKind::Error, t!("grid.refresh_failed").to_string())
+            } else {
+                (ToastKind::Success, t!("grid.refreshed").to_string())
+            };
+            self.refresh_tree_failed = false;
+            self.toast(kind, message, cx);
+        }
+    }
+
+    /// Re-fetch one database row's connection list with refresh feedback (the tree's 刷新).
+    pub(super) fn refresh_databases(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        if self.refresh_tree_feedback.is_empty() {
+            self.refresh_tree_failed = false;
+        }
+        if !self.refresh_tree_feedback.contains(&index) {
+            self.refresh_tree_feedback.push(index);
+        }
+        self.toast(ToastKind::Info, t!("grid.refreshing").to_string(), cx);
+        self.load_databases(index, cx);
     }
 
     /// Open the engine picker for a New Connection that will be filed under `id`.

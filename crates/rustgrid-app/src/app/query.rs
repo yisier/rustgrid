@@ -1812,6 +1812,12 @@ impl AppView {
         cx.notify();
     }
 
+    /// Explicit 刷新 of the query list: rescan and confirm the click with a toast.
+    pub(super) fn refresh_query_files_feedback(&mut self, cx: &mut Context<'_, Self>) {
+        self.refresh_query_files(cx);
+        self.toast(ToastKind::Success, t!("grid.refreshed").to_string(), cx);
+    }
+
     /// Drop selected keys whose file no longer exists (e.g. after a rescan).
     fn prune_query_selection(&mut self) {
         let keys: std::collections::HashSet<String> =
@@ -2322,7 +2328,7 @@ impl AppView {
 
     /// Refresh the query file list from disk (also called from the row context menu).
     pub(super) fn refresh_selected_query(&mut self, cx: &mut Context<'_, Self>) {
-        self.refresh_query_files(cx);
+        self.refresh_query_files_feedback(cx);
     }
 }
 

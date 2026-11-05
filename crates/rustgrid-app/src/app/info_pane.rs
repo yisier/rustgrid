@@ -64,6 +64,99 @@ struct FormField {
     null: bool,
 }
 
+/// A form field's editor: a single-line input for ordinary values, or a resizable multi-line
+/// editor for long text and JSON.
+#[derive(Clone)]
+enum FormInput {
+    Single(Entity<TextInput>),
+    Multi(Entity<ui::TextArea>),
+}
+
+impl FormInput {
+    fn set_text(&self, text: impl Into<String>, cx: &mut App) {
+        let text = text.into();
+        match self {
+            Self::Single(input) => input.update(cx, |input, cx| input.set_text(text, cx)),
+            Self::Multi(input) => input.update(cx, |input, cx| input.set_text(text, cx)),
+        }
+    }
+
+    fn current_text(&self, cx: &App) -> Option<String> {
+        match self {
+            Self::Single(input) => input.read(cx).current_text(cx),
+            Self::Multi(input) => input.read(cx).current_text(cx),
+        }
+    }
+
+    fn is_focused(&self, window: &Window, cx: &App) -> bool {
+        match self {
+            Self::Single(input) => input.read(cx).is_focused(window, cx),
+            Self::Multi(input) => input.read(cx).is_focused(window, cx),
+        }
+    }
+
+    fn set_placeholder(&self, placeholder: impl Into<SharedString>, cx: &mut App) {
+        let placeholder = placeholder.into();
+        match self {
+            Self::Single(input) => {
+                input.update(cx, |input, cx| input.set_placeholder(placeholder, cx))
+            }
+            Self::Multi(input) => {
+                input.update(cx, |input, cx| input.set_placeholder(placeholder, cx))
+            }
+        }
+    }
+
+    fn set_theme(&self, theme: Theme, cx: &mut App) {
+        if let Self::Single(input) = self {
+            input.update(cx, |input, cx| input.set_theme(theme, cx));
+        }
+    }
+
+    fn focus_state(&self, window: &mut Window, cx: &mut App) {
+        match self {
+            Self::Single(input) => input.update(cx, |input, cx| input.focus_state(window, cx)),
+            Self::Multi(input) => input.update(cx, |input, cx| input.focus_state(window, cx)),
+        }
+    }
+
+    fn element(&self) -> AnyElement {
+        match self {
+            Self::Single(input) => input.clone().into_any_element(),
+            Self::Multi(input) => input.clone().into_any_element(),
+        }
+    }
+}
+
+/// The default height of a multi-line form editor: three compact input rows.
+const FORM_TEXTAREA_HEIGHT: f32 = 72.0;
+/// The height of a single-line form editor.
+const FORM_INPUT_HEIGHT: f32 = 24.0;
+
+/// Whether a form value should use the multi-line editor: a JSON/JSONB column (or a value that
+/// parses as JSON), and long text detected from its length, newlines or column type.
+fn form_field_is_json(field: &FormField) -> bool {
+    if field.data_type.to_ascii_lowercase().contains("json") {
+        return true;
+    }
+    let value = field.value.trim();
+    (value.starts_with('{') || value.starts_with('['))
+        && serde_json::from_str::<serde_json::Value>(value).is_ok()
+}
+
+fn form_field_is_multiline(field: &FormField) -> bool {
+    if form_field_is_json(field) {
+        return true;
+    }
+    if field.value.contains('\n') || field.value.chars().count() > 80 {
+        return true;
+    }
+    let data_type = field.data_type.to_ascii_lowercase();
+    ["text", "blob", "clob", "ntext"]
+        .iter()
+        .any(|kind| data_type.contains(kind))
+}
+
 /// The row form's field editors, rebuilt when the form moves to another row or grid or the field
 /// layout changes. The values themselves are re-read from the grid on every render, so a staged
 /// edit or a page reload never leaves the editors out of date.
@@ -74,7 +167,9 @@ struct FormState {
     grid: WeakEntity<GridView>,
     /// Display-column names, in form order.
     columns: Vec<String>,
-    inputs: Vec<Entity<TextInput>>,
+    inputs: Vec<FormInput>,
+    /// Each multi-line editor's dragged height; single-line fields keep [`FORM_INPUT_HEIGHT`].
+    heights: Vec<f32>,
     /// Whether each editor's field is `NULL`, to update its placeholder only when that changes.
     nulls: Vec<bool>,
 }
@@ -247,6 +342,8 @@ pub(super) struct InfoPane {
     form: Option<FormState>,
     /// The form field whose inline date/time picker is open, if any.
     form_picker: Option<FormPicker>,
+    /// The form's multi-line editor being resized: `(col, pointer y at start, height at start)`.
+    form_resize: Option<(usize, f32, f32)>,
 }
 
 impl InfoPane {
@@ -267,6 +364,7 @@ impl InfoPane {
             form_grid: None,
             form: None,
             form_picker: None,
+            form_resize: None,
         }
     }
 
@@ -317,6 +415,7 @@ impl InfoPane {
             // choice and does not pop open.
             self.form = None;
             self.form_picker = None;
+            self.form_resize = None;
             if let Some(app) = self.app.upgrade() {
                 // Leave the update for after this frame: the pane is being rendered and the grids
                 // may still be busy drawing.
@@ -336,6 +435,7 @@ impl InfoPane {
         self.sync_form_grid(None, cx);
         self.form = None;
         self.form_picker = None;
+        self.form_resize = None;
         let app = app_entity.read(cx);
         let weak = self.app.clone();
         (app.info_body(&weak, cx), false)
@@ -351,6 +451,7 @@ impl InfoPane {
         }
         self.form = None;
         self.form_picker = None;
+        self.form_resize = None;
         self.form_grid = grid.map(|grid| {
             let subscription = cx.observe(&grid.entity, |_, _, cx| cx.notify());
             (grid.id, subscription)
@@ -413,16 +514,28 @@ impl InfoPane {
         });
         if rebuild {
             let inputs = build_form_inputs(theme, &fields, &grid.entity, row, cx);
+            let heights = fields
+                .iter()
+                .map(|field| {
+                    if form_field_is_multiline(field) {
+                        FORM_TEXTAREA_HEIGHT
+                    } else {
+                        FORM_INPUT_HEIGHT
+                    }
+                })
+                .collect();
             self.form = Some(FormState {
                 grid_id: grid.id,
                 row,
                 grid: grid.entity.downgrade(),
                 columns,
                 inputs,
+                heights,
                 nulls: fields.iter().map(|field| field.null).collect(),
             });
             // The picker belonged to the previous row/field layout.
             self.form_picker = None;
+            self.form_resize = None;
         }
         let form = self.form.as_mut()?;
         // Mirror the model into the editors. Typing already staged the same value, so this only
@@ -435,20 +548,18 @@ impl InfoPane {
             let Some(input) = form.inputs.get(index).cloned() else {
                 continue;
             };
-            let focused = input.read(cx).is_focused(window, cx);
-            if !focused && input.read(cx).current_text(cx).as_deref() != Some(field.value.as_str())
-            {
-                let value = field.value.clone();
-                input.update(cx, |input, cx| input.set_text(value, cx));
+            let focused = input.is_focused(window, cx);
+            if !focused && input.current_text(cx).as_deref() != Some(field.value.as_str()) {
+                input.set_text(field.value.clone(), cx);
             }
             if form.nulls.get(index).copied() != Some(field.null) {
                 if let Some(null) = form.nulls.get_mut(index) {
                     *null = field.null;
                 }
                 let placeholder: SharedString = if field.null { "NULL".into() } else { "".into() };
-                input.update(cx, |input, cx| input.set_placeholder(placeholder, cx));
+                input.set_placeholder(placeholder, cx);
             }
-            input.update(cx, |input, cx| input.set_theme(theme, cx));
+            input.set_theme(theme, cx);
         }
 
         let style = FormStyle {
@@ -492,7 +603,7 @@ impl InfoPane {
             .inputs
             .iter()
             .enumerate()
-            .filter_map(|(col, input)| input.read(cx).current_text(cx).map(|text| (col, text)))
+            .filter_map(|(col, input)| input.current_text(cx).map(|text| (col, text)))
             .collect();
         grid.update(cx, |grid, cx| {
             for (col, text) in &values {
@@ -515,6 +626,87 @@ impl InfoPane {
         grid.update(cx, |grid, cx| grid.cancel_edits(cx));
         self.form = None;
         self.form_picker = None;
+        cx.notify();
+    }
+
+    /// Begin dragging a multi-line field's bottom grip.
+    fn start_form_resize(&mut self, col: usize, y: f32, cx: &mut Context<'_, Self>) {
+        let Some(height) = self
+            .form
+            .as_ref()
+            .and_then(|form| form.heights.get(col).copied())
+        else {
+            return;
+        };
+        self.form_resize = Some((col, y, height));
+        cx.notify();
+    }
+
+    /// Follow the pointer while a field grip is being dragged, clamped to a usable range.
+    fn form_resize_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<'_, Self>) {
+        let Some((col, start_y, start_height)) = self.form_resize else {
+            return;
+        };
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.form_resize = None;
+            cx.notify();
+            return;
+        }
+        let delta = f32::from(event.position.y) - start_y;
+        let height = (start_height + delta).clamp(FORM_INPUT_HEIGHT, 600.0);
+        if let Some(form) = self.form.as_mut()
+            && let Some(slot) = form.heights.get_mut(col)
+        {
+            *slot = height;
+        }
+        cx.notify();
+    }
+
+    fn form_resize_end(&mut self, cx: &mut Context<'_, Self>) {
+        if self.form_resize.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Pretty-print the JSON in a form field and stage the formatted text into the grid.
+    fn format_form_json(&mut self, col: usize, cx: &mut Context<'_, Self>) {
+        let Some((editor, row, grid)) =
+            self.form
+                .as_ref()
+                .and_then(|form| match form.inputs.get(col) {
+                    Some(FormInput::Multi(editor)) => {
+                        Some((editor.clone(), form.row, form.grid.clone()))
+                    }
+                    _ => None,
+                })
+        else {
+            return;
+        };
+        let text = editor.read(cx).current_text(cx).unwrap_or_default();
+        let value = match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(value) => value,
+            Err(_) => {
+                if let Some(app) = self.app.upgrade() {
+                    app.update(cx, |app, cx| {
+                        app.toast(
+                            ToastKind::Error,
+                            t!("info.form.json_invalid").to_string(),
+                            cx,
+                        );
+                    });
+                }
+                return;
+            }
+        };
+        let Ok(pretty) = serde_json::to_string_pretty(&value) else {
+            return;
+        };
+        editor.update(cx, |editor, cx| editor.set_text(pretty.clone(), cx));
+        if let Some(grid) = grid.upgrade() {
+            grid.update(cx, |grid, cx| {
+                grid.stage_form_edit(row, col, &pretty, false, cx)
+            });
+        }
         cx.notify();
     }
 
@@ -585,10 +777,8 @@ impl InfoPane {
                 grid.stage_form_edit(row, col, &text, true, cx)
             });
         }
-        input.update(cx, |input, cx| {
-            input.set_text(value, cx);
-            input.focus_state(window, cx);
-        });
+        input.set_text(value.clone(), cx);
+        input.focus_state(window, cx);
         cx.notify();
     }
 
@@ -622,7 +812,7 @@ impl InfoPane {
             .and_then(|form| form.inputs.get(picker.col))
             .cloned()
         {
-            input.update(cx, |input, cx| input.focus_state(window, cx));
+            input.focus_state(window, cx);
         }
         cx.notify();
     }
@@ -670,6 +860,13 @@ impl Render for InfoPane {
             .flex_row()
             .h_full()
             .flex_none()
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                this.form_resize_move(event, cx);
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _event, _window, cx| this.form_resize_end(cx)),
+            )
             .child(
                 ui::pane_resize_divider("pane-divider-info", theme)
                     .on_mouse_down(MouseButton::Left, start),
@@ -1630,9 +1827,10 @@ fn form_row(grid: &FormGrid, cx: &App) -> Option<usize> {
         })
 }
 
-/// Build one [`TextInput`] per form field. Every edit is staged straight into the grid, so the
-/// form and the grid's own cells always agree on the pending value; Enter saves the staged edits
-/// and Escape restores the page's value for this field.
+/// Build one editor per form field: a [`TextInput`] for ordinary values, a [`ui::TextArea`] for long
+/// text and JSON. Every edit is staged straight into the grid, so the form and the grid's own cells
+/// always agree on the pending value; Enter saves the staged edits (multi-line fields insert a
+/// newline instead) and Escape restores the page's value for this field.
 ///
 /// Typing stages **without notifying** the grid: a per-keystroke repaint of the grid (which clones
 /// its whole page) and of the pane (which rebuilds every field) made typing, and IME composition
@@ -1644,7 +1842,7 @@ fn build_form_inputs(
     grid: &Entity<GridView>,
     row: usize,
     cx: &mut Context<'_, InfoPane>,
-) -> Vec<Entity<TextInput>> {
+) -> Vec<FormInput> {
     fields
         .iter()
         .enumerate()
@@ -1652,58 +1850,109 @@ fn build_form_inputs(
             let value = field.value.clone();
             let original = field.original.clone();
             let null = field.null;
+            let placeholder: SharedString = if null { "NULL".into() } else { "".into() };
             let changed = grid.downgrade();
-            let submitted = changed.clone();
             let committed = changed.clone();
             let cancelled = changed.clone();
-            // The field's own entity, so Escape can put its text back before dropping the staged
-            // edit (the pane skips a focused field when it mirrors the model).
-            let input_slot: Rc<std::cell::RefCell<Option<WeakEntity<TextInput>>>> =
-                Rc::new(std::cell::RefCell::new(None));
-            let cancel_slot = input_slot.clone();
-            let input = cx.new(|cx| {
-                TextInput::new(
-                    theme,
-                    value.clone(),
-                    TextInputOptions {
-                        text_size: Some(12.0),
-                        placeholder: if null { "NULL".into() } else { "".into() },
-                        ..Default::default()
-                    },
-                    cx,
-                )
-                .on_change(Rc::new(move |text, _window, cx| {
-                    let _ = changed.update(cx, |grid, cx| {
-                        grid.stage_form_edit(row, col, text, false, cx)
-                    });
-                }))
-                .on_submit(Rc::new(move |_window, cx| {
-                    let _ = submitted.update(cx, |grid, cx| grid.submit_form(cx));
-                }))
-                .on_blur(Rc::new(move |_window, cx| {
-                    let _ = committed.update(cx, |grid, cx| grid.form_field_committed(cx));
-                }))
-                .on_cancel(Rc::new(move |_window, cx| {
-                    let Some(input) = cancel_slot.borrow().as_ref().cloned() else {
-                        return;
-                    };
-                    let grid = cancelled.clone();
-                    let fallback = original.clone();
-                    // Escape arrives through this field's own `handle_key_down`, so rewriting the
-                    // field must wait until that update has ended; doing it inline would
-                    // re-enter the entity. The deferred rewrite also clears the change callback
-                    // still queued for the keystroke being undone.
-                    cx.defer(move |cx| {
-                        let value = grid
-                            .update(cx, |grid, _cx| grid.form_original_text(row, col))
-                            .unwrap_or(fallback);
-                        let _ = input.update(cx, |input, cx| input.set_text(value, cx));
-                        let _ = grid.update(cx, |grid, cx| grid.cancel_form_edit(row, col, cx));
-                    });
-                }))
-            });
-            *input_slot.borrow_mut() = Some(input.downgrade());
-            input
+            if form_field_is_multiline(field) {
+                // The field's own entity, so Escape can put its text back before dropping the
+                // staged edit (the pane skips a focused field when it mirrors the model).
+                let input_slot: Rc<std::cell::RefCell<Option<WeakEntity<ui::TextArea>>>> =
+                    Rc::new(std::cell::RefCell::new(None));
+                let cancel_slot = input_slot.clone();
+                let input = cx.new(|cx| {
+                    ui::TextArea::new(
+                        theme,
+                        value.clone(),
+                        ui::TextAreaOptions {
+                            json: form_field_is_json(field),
+                            placeholder: placeholder.clone(),
+                            text_size: 12.0,
+                        },
+                        cx,
+                    )
+                    .on_change(Rc::new(move |text, _window, cx| {
+                        let _ = changed.clone().update(cx, |grid, cx| {
+                            grid.stage_form_edit(row, col, text, false, cx)
+                        });
+                    }))
+                    .on_blur(Rc::new(move |_window, cx| {
+                        let _ = committed
+                            .clone()
+                            .update(cx, |grid, cx| grid.form_field_committed(cx));
+                    }))
+                    .on_cancel(Rc::new(move |_window, cx| {
+                        let Some(input) = cancel_slot.borrow().as_ref().cloned() else {
+                            return;
+                        };
+                        let grid = cancelled.clone();
+                        let fallback = original.clone();
+                        cx.defer(move |cx| {
+                            let value = grid
+                                .update(cx, |grid, _cx| grid.form_original_text(row, col))
+                                .unwrap_or(fallback);
+                            let _ = input.update(cx, |input, cx| input.set_text(value, cx));
+                            let _ = grid.update(cx, |grid, cx| grid.cancel_form_edit(row, col, cx));
+                        });
+                    }))
+                });
+                *input_slot.borrow_mut() = Some(input.downgrade());
+                FormInput::Multi(input)
+            } else {
+                let submitted = changed.clone();
+                // The field's own entity, so Escape can put its text back before dropping the
+                // staged edit (the pane skips a focused field when it mirrors the model).
+                let input_slot: Rc<std::cell::RefCell<Option<WeakEntity<TextInput>>>> =
+                    Rc::new(std::cell::RefCell::new(None));
+                let cancel_slot = input_slot.clone();
+                let input = cx.new(|cx| {
+                    TextInput::new(
+                        theme,
+                        value.clone(),
+                        TextInputOptions {
+                            text_size: Some(12.0),
+                            placeholder: placeholder.clone(),
+                            ..Default::default()
+                        },
+                        cx,
+                    )
+                    .on_change(Rc::new(move |text, _window, cx| {
+                        let _ = changed.clone().update(cx, |grid, cx| {
+                            grid.stage_form_edit(row, col, text, false, cx)
+                        });
+                    }))
+                    .on_submit(Rc::new(move |_window, cx| {
+                        let _ = submitted
+                            .clone()
+                            .update(cx, |grid, cx| grid.submit_form(cx));
+                    }))
+                    .on_blur(Rc::new(move |_window, cx| {
+                        let _ = committed
+                            .clone()
+                            .update(cx, |grid, cx| grid.form_field_committed(cx));
+                    }))
+                    .on_cancel(Rc::new(move |_window, cx| {
+                        let Some(input) = cancel_slot.borrow().as_ref().cloned() else {
+                            return;
+                        };
+                        let grid = cancelled.clone();
+                        let fallback = original.clone();
+                        // Escape arrives through this field's own `handle_key_down`, so rewriting
+                        // the field must wait until that update has ended; doing it inline would
+                        // re-enter the entity. The deferred rewrite also clears the change callback
+                        // still queued for the keystroke being undone.
+                        cx.defer(move |cx| {
+                            let value = grid
+                                .update(cx, |grid, _cx| grid.form_original_text(row, col))
+                                .unwrap_or(fallback);
+                            let _ = input.update(cx, |input, cx| input.set_text(value, cx));
+                            let _ = grid.update(cx, |grid, cx| grid.cancel_form_edit(row, col, cx));
+                        });
+                    }))
+                });
+                *input_slot.borrow_mut() = Some(input.downgrade());
+                FormInput::Single(input)
+            }
         })
         .collect()
 }
@@ -1816,7 +2065,11 @@ fn render_row_form(
             style,
             index,
             field,
-            form.inputs.get(index).cloned(),
+            form.inputs.get(index),
+            form.heights
+                .get(index)
+                .copied()
+                .unwrap_or(FORM_INPUT_HEIGHT),
             picker.filter(|picker| picker.col == index),
             pane,
         ));
@@ -1862,12 +2115,13 @@ fn render_row_form(
 
 /// One field of the row form: the `字段 · 类型 · 注释` line above its value editor. Each segment is
 /// clipped with an ellipsis when the pane is too narrow, and shows its full text in a hover
-/// tooltip in that case. Type and comment only appear while the 数据 options are on.
+/// tooltip in that case. Type and comment only appear while the 表格 options are on.
 fn render_form_field(
     style: &FormStyle<'_>,
     index: usize,
     field: &FormField,
-    input: Option<Entity<TextInput>>,
+    input: Option<&FormInput>,
+    height: f32,
     picker: Option<&FormPicker>,
     pane: &WeakEntity<InfoPane>,
 ) -> AnyElement {
@@ -1946,11 +2200,11 @@ fn render_form_field(
             .child(comment.child(field.comment.clone()));
     }
 
-    if let Some(input) = input.as_ref() {
+    if let Some(input) = input {
         // Clicking the label line focuses the value editor, like a form field label.
         let focus_input = input.clone();
         header = header.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
-            focus_input.update(cx, |input, cx| input.focus_state(window, cx));
+            focus_input.focus_state(window, cx);
         });
     }
 
@@ -1970,13 +2224,25 @@ fn render_form_field(
                 let data_type = field.data_type.to_ascii_lowercase();
                 data_type.contains("datetime") || data_type.contains("timestamp")
             };
+            let multiline = matches!(input, FormInput::Multi(_));
+            let editor_height = if multiline { height } else { FORM_INPUT_HEIGHT };
+            let mut editor = div().flex_1().min_w(px(0.0)).h(px(editor_height));
+            if multiline {
+                editor = editor
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(rgb(theme.button_border))
+                    .bg(rgb(theme.input_bg))
+                    .p_1()
+                    .overflow_hidden();
+            }
             let mut value_row = div()
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap_1()
                 .w_full()
-                .child(div().flex_1().min_w(px(0.0)).h(px(24.0)).child(input));
+                .child(editor.child(input.element()));
             if temporal {
                 value_row = value_row.child(form_picker_toggle(
                     theme,
@@ -1988,6 +2254,12 @@ fn render_form_field(
                 ));
             }
             block = block.child(value_row);
+            if multiline {
+                block = block.child(form_resize_grip(theme, index, pane));
+                if form_field_is_json(field) {
+                    block = block.child(form_json_format_row(theme, index, pane));
+                }
+            }
             if let Some(picker) = picker {
                 block = block.child(render_form_picker(theme, picker, pane));
             }
@@ -2003,6 +2275,51 @@ fn render_form_field(
         }
     }
     block.into_any_element()
+}
+
+/// The drag handle under a multi-line form field: dragging it changes that field's editor height.
+fn form_resize_grip(theme: Theme, col: usize, pane: &WeakEntity<InfoPane>) -> Stateful<Div> {
+    let weak = pane.clone();
+    div()
+        .id(SharedString::from(format!("info-form-resize-{col}")))
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .w_full()
+        .h(px(7.0))
+        .cursor_row_resize()
+        .child(
+            div()
+                .w(px(28.0))
+                .h(px(2.0))
+                .rounded_full()
+                .bg(rgb(theme.border)),
+        )
+        .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+            let y = f32::from(event.position.y);
+            let _ = weak.update(cx, |pane, cx| pane.start_form_resize(col, y, cx));
+            cx.stop_propagation();
+        })
+}
+
+/// The small footer under a JSON field: 格式化 pretty-prints the value in place.
+fn form_json_format_row(theme: Theme, col: usize, pane: &WeakEntity<InfoPane>) -> impl IntoElement {
+    let weak = pane.clone();
+    div().flex().flex_row().justify_end().w_full().child(
+        ui::plain_button(
+            format!("info-form-json-format-{col}"),
+            t!("info.form.format_json").to_string(),
+            true,
+            theme,
+            move |_event, _window, cx| {
+                let _ = weak.update(cx, |pane, cx| pane.format_form_json(col, cx));
+            },
+        )
+        .tooltip(ui::text_tooltip(
+            t!("info.form.format_json_hint").to_string(),
+        )),
+    )
 }
 
 /// The "…" button a temporal form field shows next to its editor: it opens the field's inline
@@ -2268,5 +2585,39 @@ fn format_size(bytes: u64) -> String {
         format!("{:.2} KB ({})", bytes as f64 / 1024.0, format_count(bytes))
     } else {
         format!("{bytes} B ({bytes})")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn field(data_type: &str, value: &str) -> FormField {
+        FormField {
+            name: "value".to_string(),
+            data_type: data_type.to_string(),
+            comment: String::new(),
+            value: value.to_string(),
+            original: value.to_string(),
+            null: false,
+        }
+    }
+
+    #[test]
+    fn json_columns_and_json_values_get_the_json_editor() {
+        assert!(form_field_is_json(&field("json", "not checked")));
+        assert!(form_field_is_json(&field(
+            "varchar",
+            "{\"date\": \"2026-11-04\", \"week\": 45}"
+        )));
+        assert!(!form_field_is_json(&field("varchar", "hello")));
+    }
+
+    #[test]
+    fn long_text_gets_the_multi_line_editor_and_short_values_do_not() {
+        assert!(form_field_is_multiline(&field("varchar", &"x".repeat(81))));
+        assert!(form_field_is_multiline(&field("varchar", "a\nb")));
+        assert!(form_field_is_multiline(&field("longtext", "")));
+        assert!(!form_field_is_multiline(&field("varchar", "short")));
     }
 }

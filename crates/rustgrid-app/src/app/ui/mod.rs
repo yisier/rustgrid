@@ -18,6 +18,7 @@ use crate::theme::Theme;
 mod calendar;
 mod combo;
 mod sql_editor;
+mod text_area;
 mod text_input;
 mod titlebar;
 mod views;
@@ -25,6 +26,7 @@ mod views;
 pub(crate) use calendar::compact_calendar;
 pub(crate) use combo::{ComboBox, ComboOption};
 pub(crate) use sql_editor::{SqlEditor, SqlEditorOptions};
+pub(crate) use text_area::{TextArea, TextAreaOptions};
 pub(crate) use text_input::{TextInput, TextInputOptions};
 pub(crate) use titlebar::{action_cluster, bar_title, title_bar, window_options, window_title_bar};
 pub(super) use views::{

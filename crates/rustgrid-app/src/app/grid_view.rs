@@ -2,6 +2,7 @@ use super::grid::{make_page_input, make_page_size_input, row_origin};
 use super::grid_fields::make_field_filter_search_input;
 use super::*;
 use gpui::HitboxBehavior;
+use gpui_kit::component::empty::{Empty, EmptyHeader, EmptyMedia, EmptyMediaVariant, EmptyTitle};
 use gpui_kit::component::{Icon, IconName};
 
 impl GridView {
@@ -138,7 +139,6 @@ impl GridView {
             status_sql_anchor: 0,
             status_sql_cursor: 0,
             status_sql_selecting: false,
-            empty_grid_height: 0.0,
             self_weak: cx.weak_entity(),
             sum_cache: RefCell::new(None),
         }
@@ -499,8 +499,6 @@ impl Render for GridView {
             .filter(|editor| editor.cells.len() > 1)
             .map(|editor| (editor.cells.clone(), editor.value.clone()));
         let widths = Arc::new(widths);
-        // The empty-table filler needs the widths after the list closure below has taken the Arc.
-        let filler_widths = Arc::clone(&widths);
         let list = uniform_list(
             SharedString::from(format!("grid-rows-{}", self.state.id)),
             data_rows + inserts.len(),
@@ -851,21 +849,18 @@ impl Render for GridView {
             this.grid_jump(super::grid_input::GridJump::Prev, false, cx)
         }));
 
-        // With no rows to paint, keep the table visible: draw the empty body (gutter + one bordered
-        // cell per column, alternating row bands) tall enough to fill the area, instead of leaving a
-        // blank pane under the header. It is decorative — no hit-testing — so nothing can be
-        // selected; clicking it just focuses the grid.
+        // With no rows to paint, show the kit's empty state instead of a blank pane under the
+        // header. It is decorative — no hit-testing — so nothing can be selected; clicking it
+        // just focuses the grid.
         let list_body: AnyElement =
             if empty_page && !self.state.loading && !self.state.columns.is_empty() {
-                let rows_to_fill =
-                    ((self.empty_grid_height / GRID_ROW_HEIGHT).ceil() as usize).max(1) + 1;
-                let measure = cx.weak_entity();
                 div()
                     .flex()
                     .flex_col()
                     .flex_1()
                     .min_h(px(0.0))
                     .w_full()
+                    .p_4()
                     .track_focus(&self.focus)
                     .on_mouse_down(
                         MouseButton::Left,
@@ -873,34 +868,20 @@ impl Render for GridView {
                             window.focus(&this.focus, cx);
                         }),
                     )
-                    // The body area's height, measured from this flex-sized child (its rows are
-                    // clipped by it), so the next frame draws exactly enough rows to fill it.
-                    .on_children_prepainted(move |bounds, _window, cx| {
-                        let Some(rect) = bounds.first().copied() else {
-                            return;
-                        };
-                        let height = f32::from(rect.size.height);
-                        let _ = measure.update(cx, |grid, cx| {
-                            if (grid.empty_grid_height - height).abs() > 0.5 {
-                                grid.empty_grid_height = height;
-                                cx.notify();
-                            }
-                        });
-                    })
                     .child(
-                        div()
-                            .flex_1()
-                            .min_h(px(0.0))
-                            .w_full()
-                            .overflow_hidden()
-                            .child(empty_grid_rows(
-                                &filler_widths,
-                                rows_to_fill,
-                                gutter_width,
-                                frozen_split,
-                                column_scroll,
-                                theme,
-                            )),
+                        Empty::new().header(
+                            EmptyHeader::new()
+                                .media(
+                                    EmptyMedia::new()
+                                        .with_variant(EmptyMediaVariant::Icon)
+                                        .child(
+                                            Icon::default()
+                                                .path("icons/table.svg")
+                                                .text_color(rgb(theme.text_muted)),
+                                        ),
+                                )
+                                .title(EmptyTitle::new().child(t!("grid.no_rows").to_string())),
+                        ),
                     )
                     .into_any_element()
             } else {
@@ -1276,75 +1257,4 @@ fn header_cell_text(
             .into_any_element()
     };
     container.child(text).into_any_element()
-}
-
-/// The decorative body of a table with no rows: the gutter and one bordered cell per column,
-/// repeated `rows` times with the same alternating bands as real rows, so an empty page still reads
-/// as an empty table rather than a blank pane under the header. The rows carry no hit-testing.
-fn empty_grid_rows(
-    widths: &[f32],
-    rows: usize,
-    gutter_width: f32,
-    frozen_split: usize,
-    column_scroll: f32,
-    theme: Theme,
-) -> impl IntoElement {
-    let mut column = div().flex().flex_col().w_full();
-    for row in 0..rows {
-        let background = if row % 2 == 1 {
-            theme.row_alt_bg
-        } else {
-            theme.editor_bg
-        };
-        let mut row_element = div()
-            .flex()
-            .flex_row()
-            .flex_none()
-            .h(px(GRID_ROW_HEIGHT))
-            .when(frozen_split > 0, |row| row.w_full())
-            .bg(rgb(background));
-        if gutter_width > 0.0 {
-            row_element = row_element.child(
-                div()
-                    .w(px(gutter_width))
-                    .h(px(GRID_ROW_HEIGHT))
-                    .flex_none()
-                    .border_r_1()
-                    .border_color(rgb(theme.grid_line)),
-            );
-        }
-        let fixed = if frozen_split > 0 {
-            &widths[..frozen_split.min(widths.len())]
-        } else {
-            widths
-        };
-        for width in fixed {
-            row_element = row_element.child(empty_grid_cell(*width, theme));
-        }
-        if frozen_split > 0 {
-            let cells = widths[frozen_split.min(widths.len())..]
-                .iter()
-                .map(|width| empty_grid_cell(*width, theme))
-                .collect();
-            row_element = row_element.child(scrolling_column_group(
-                cells,
-                column_scroll,
-                GRID_ROW_HEIGHT,
-            ));
-        }
-        column = column.child(row_element);
-    }
-    column
-}
-
-/// One decorative cell of the empty-table filler.
-fn empty_grid_cell(width: f32, theme: Theme) -> AnyElement {
-    div()
-        .w(px(width))
-        .h(px(GRID_ROW_HEIGHT))
-        .flex_none()
-        .border_r_1()
-        .border_b_1()
-        .border_color(rgb(theme.grid_line))
-        .into_any_element()
 }

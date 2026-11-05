@@ -2589,7 +2589,8 @@ impl TableDesignView {
             popup = popup.child(
                 div()
                     .flex_none()
-                    .p_1()
+                    .px_1p5()
+                    .py_1()
                     .border_b_1()
                     .border_color(rgb(theme.grid_line))
                     .child(div().h(px(20.0)).child(search)),

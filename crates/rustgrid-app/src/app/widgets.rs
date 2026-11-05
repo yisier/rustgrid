@@ -214,7 +214,7 @@ impl AppView {
                             t!("connection.refresh").to_string(),
                             cx.listener(move |this, _event, _window, cx| {
                                 this.context_menu = None;
-                                this.load_databases(index, cx);
+                                this.refresh_databases(index, cx);
                             }),
                         ))
                     } else {
@@ -469,7 +469,7 @@ impl AppView {
                             t!("database.refresh").to_string(),
                             cx.listener(move |this, _event, _window, cx| {
                                 this.context_menu = None;
-                                this.load_databases(ci, cx);
+                                this.refresh_databases(ci, cx);
                             }),
                         ));
                 } else {
@@ -489,7 +489,7 @@ impl AppView {
                             t!("database.refresh").to_string(),
                             cx.listener(move |this, _event, _window, cx| {
                                 this.context_menu = None;
-                                this.load_databases(ci, cx);
+                                this.refresh_databases(ci, cx);
                             }),
                         ));
                 }
@@ -935,7 +935,7 @@ impl AppView {
                         t!("connection.refresh").to_string(),
                         cx.listener(move |this, _event, _window, cx| {
                             this.context_menu = None;
-                            this.reload_tables(ci, di, cx);
+                            this.refresh_object_category(Category::Tables, ci, di, cx);
                         }),
                     ));
             }
@@ -953,8 +953,8 @@ impl AppView {
                     cx.listener(move |this, _event, _window, cx| {
                         this.context_menu = None;
                         match category {
-                            Category::Queries => this.refresh_query_files(cx),
-                            Category::Backups => this.refresh_backups(cx),
+                            Category::Queries => this.refresh_query_files_feedback(cx),
+                            Category::Backups => this.refresh_selected_backup(cx),
                             other => this.refresh_object_category(other, ci, di, cx),
                         }
                     }),

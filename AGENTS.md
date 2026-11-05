@@ -804,7 +804,7 @@ shadcn chrome described above. Implemented today:
     (`grid_field_layouts`), so the table reopens with the same field set (a field added to the table
     afterwards is appended rather than lost). One icon serves both states, told apart by colour —
     the plain `theme.text` for the table's own field set, the accent `theme.brand` once a field is
-    hidden or re-ordered — and the popup's counter reads `visible/total`. The 数据 page of the Options window
+    hidden or re-ordered — and the popup's counter reads `visible/total`. The 表格 page of the Options window
     (`OptionsSection::Data`, between 编辑器 and 关于) holds the two grid display switches, 展示备注
     (`AppSettings::grid_show_comments`) and 展示类型 (`grid_show_types`), both off by default, which
     paint each column's comment / data type under its name in the grid header. Right-clicking a
@@ -905,14 +905,17 @@ shadcn chrome described above. Implemented today:
     opening the details pane from the status bar closes the form). The form turns itself off when
     the selection disappears (page turn, refresh, tab close), so it never sits over an empty
     selection. Because the pane is narrow, each field is one `字段 · 类型 · 注释` line with its
-    editor below instead of Navicat's three columns; the type and comment follow the 数据 options
+    editor below instead of Navicat's three columns; the type and comment follow the 表格 options
     (`grid_show_types` / `grid_show_comments`) and every segment is ellipsized with the full text
     on hover when it does not fit. Typing stages straight into the grid's `edits` (the grid cell
     shows the pending value after the field is left; undo/redo is the focused input's own,
     Ctrl+Z / Ctrl+Y — Cmd+Z / Cmd+Shift+Z on macOS — exactly like the grid's in-place cell editor),
     Enter saves through the grid's normal commit path, Ctrl+S (`keymap.form.save`, bound in the
-    form's `RowForm` context) saves too, and Escape restores the page's value for that field. The
-    header (table name + ✓ / ✕) stays fixed above the field list, which is the only part that
+    form's `RowForm` context) saves too, and Escape restores the page's value for that field.
+    A long text value (over 80 characters, containing a newline, or a `text`/`blob`-like column) and
+    every JSON/JSONB column use the multi-line `ui::TextArea` (`EditorState` with the `json`
+    grammar) with a three-row default height, a bottom drag handle that resizes it, and — for JSON
+    — a 格式化 JSON footer that pretty-prints the value in place. The header (table name + ✓ / ✕) stays fixed above the field list, which is the only part that
     scrolls; the buttons are muted grey while the grid has nothing staged and take their save /
     rollback colours once it does. A `NULL` cell shows an empty field
     with a `NULL` placeholder. A temporal field (`date` / `datetime` / `timestamp`, the same types
@@ -983,13 +986,12 @@ make more engines cheap later — do not build those features early.
   `stop_propagation` there silently made the group rename editor untypable in every non-IME input
   mode. A claimed character is fine only where the handler itself inserts text.
 
-- **An empty grid still shows an empty table.** With no rows to paint, `GridView::render` swaps the
-  `uniform_list` for a decorative body (`grid_view.rs::empty_grid_rows`): the gutter plus one bordered
-  cell per column, repeated with the same alternating bands, tall enough to fill the body area, so
-  the page reads as an empty table instead of a blank pane under the header. The row count comes from
-  `empty_grid_height`, measured from the body's flex-sized child each frame (`on_children_prepainted`)
-  — never from the filler's own height, which would feed back and grow. The filler carries no
-  hitboxes, so nothing in it is selectable; a click just focuses the grid.
+- **An empty grid shows gpui-kit's empty state, not a painted empty table.** With no rows to paint,
+  `GridView::render` swaps the `uniform_list` for `gpui_kit::component::empty::Empty` (an icon +
+  `grid.no_rows` title inside the kit's dashed surface). It carries no hitboxes, so nothing in it is
+  selectable; a click just focuses the grid. Do not bring back a decorative per-column filler: it
+  repeated the table header as blank cells and needed a measured `empty_grid_height` that fed back
+  into layout.
 
 - **A pending insert row is not always at the bottom, so never index a displayed row into
   `state.rows`.** `GridView::inserts` holds `PendingInsert { values, after }`: the `+` button appends

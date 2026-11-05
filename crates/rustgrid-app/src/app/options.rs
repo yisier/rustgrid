@@ -952,7 +952,7 @@ impl AppView {
             .into_any_element()
     }
 
-    /// The 数据 page: how the grid presents a table's data.
+    /// The 表格 page: how the grid presents a table's data.
     fn options_data_body(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
         div()
@@ -960,11 +960,6 @@ impl AppView {
             .flex_col()
             .gap_3()
             .w_full()
-            .child(
-                div()
-                    .text_size(px(12.5))
-                    .child(t!("options.data").to_string()),
-            )
             .child(
                 toggle_row(
                     theme,
@@ -1005,11 +1000,6 @@ impl AppView {
             .flex()
             .flex_col()
             .gap_3()
-            .child(
-                div()
-                    .text_size(px(12.5))
-                    .child(t!("options.general").to_string()),
-            )
             .child(
                 div()
                     .flex()

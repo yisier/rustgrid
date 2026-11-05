@@ -1951,6 +1951,11 @@ impl TableDesignView {
                         TextInputOptions {
                             size: Some(Size::XSmall),
                             text_size: Some(12.0),
+                            placeholder: t!("design.type_search").to_string().into(),
+                            icon: Some("icons/search.svg"),
+                            icon_color: Some(theme.text_muted),
+                            clearable: true,
+                            bare: true,
                             ..Default::default()
                         },
                         cx,
