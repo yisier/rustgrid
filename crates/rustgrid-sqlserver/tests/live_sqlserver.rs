@@ -191,6 +191,28 @@ async fn round_trips_a_live_sql_server() {
     assert_eq!(schema.columns.len(), 4);
     assert!(schema.columns[0].auto_increment);
 
+    // The info pane's DDL view rebuilds a table's CREATE script from the catalog. Identity and
+    // default must not be swapped, and a descending index column must keep its direction.
+    connection
+        .execute_query(
+            Some(&database),
+            &format!("CREATE INDEX [ix_{table}_age] ON [dbo].[{table}] ([age] DESC, [name])"),
+        )
+        .await
+        .unwrap();
+    let ddl = connection
+        .object_ddl(&database, &format!("dbo.{table}"), false)
+        .await
+        .unwrap()
+        .expect("the table's DDL");
+    assert!(ddl.contains("CREATE TABLE"), "{ddl}");
+    assert!(ddl.contains("[id] int IDENTITY(1,1)"), "{ddl}");
+    assert!(
+        !ddl.contains("DEFAULT"),
+        "a column default was invented: {ddl}"
+    );
+    assert!(ddl.contains("[age] DESC"), "{ddl}");
+
     // Backup metadata + row streaming + restore.
     let mut dump = connection
         .backup_object_metadata(&database, BackupObjectKind::Table, table)
@@ -248,6 +270,15 @@ async fn round_trips_a_live_sql_server() {
             .definition
             .to_ascii_uppercase()
             .contains("CREATE VIEW")
+    );
+    let view_ddl = connection
+        .object_ddl(&database, &format!("dbo.{view}"), true)
+        .await
+        .unwrap()
+        .expect("the view's DDL");
+    assert!(
+        view_ddl.to_ascii_uppercase().contains("CREATE VIEW"),
+        "{view_ddl}"
     );
     connection
         .save_view(

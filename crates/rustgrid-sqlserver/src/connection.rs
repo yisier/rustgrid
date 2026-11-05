@@ -198,7 +198,9 @@ impl SqlServerConnection {
                 quote_identifier(table)
             ));
         }
-        let status = self.table_status(database, table).await?;
+        let status = self
+            .table_status(database, &format!("{schema}.{table}"))
+            .await?;
         let db = quote_identifier(database);
         let column_sql = format!(
             "SELECT c.name, t.name, c.max_length, c.precision, c.scale, c.is_nullable, \
@@ -238,7 +240,7 @@ impl SqlServerConnection {
                 u64_cell(row, 4),
             );
             let mut definition = format!("  {name} {type_sql}");
-            if bool_cell(row, 7) {
+            if bool_cell(row, 6) {
                 definition.push_str(" IDENTITY(1,1)");
             }
             definition.push_str(if bool_cell(row, 5) {
@@ -246,7 +248,7 @@ impl SqlServerConnection {
             } else {
                 " NOT NULL"
             });
-            let default = text_cell(row, 6);
+            let default = text_cell(row, 7);
             if !default.is_empty() {
                 definition.push_str(&format!(" DEFAULT {default}"));
             }
@@ -288,14 +290,15 @@ impl SqlServerConnection {
         }
 
         let index_sql = format!(
-            "SELECT i.name, i.is_unique, c.name, i.is_descending_key \
+            "SELECT i.name, i.is_unique, c.name, ic.is_descending_key, i.type \
              FROM {db}.sys.indexes i \
              JOIN {db}.sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id \
              JOIN {db}.sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id \
              JOIN {db}.sys.objects o ON o.object_id = i.object_id \
              JOIN {db}.sys.schemas s ON s.schema_id = o.schema_id \
              WHERE i.is_primary_key = 0 AND i.is_unique_constraint = 0 \
-               AND i.type = 2 AND i.name IS NOT NULL AND o.name = @P1 AND s.name = @P2 \
+               AND i.type IN (1, 2) AND i.name IS NOT NULL \
+               AND ic.is_included_column = 0 AND o.name = @P1 AND s.name = @P2 \
              ORDER BY i.name, ic.key_ordinal",
             db = db
         );
@@ -306,15 +309,16 @@ impl SqlServerConnection {
                 &[Some(table.to_string()), Some(schema.to_string())],
             )
             .await?;
-        let mut current: Option<(String, bool, Vec<String>)> = None;
+        let mut current: Option<(String, bool, bool, Vec<String>)> = None;
         let mut index_scripts: Vec<String> = Vec::new();
-        let flush = |current: Option<(String, bool, Vec<String>)>, out: &mut Vec<String>| {
-            if let Some((name, unique, columns)) = current
+        let flush = |current: Option<(String, bool, bool, Vec<String>)>, out: &mut Vec<String>| {
+            if let Some((name, unique, clustered, columns)) = current
                 && !columns.is_empty()
             {
                 out.push(format!(
-                    "CREATE {}INDEX {} ON {}.{} ({})\nGO",
+                    "CREATE {}{}INDEX {} ON {}.{} ({})\nGO",
                     if unique { "UNIQUE " } else { "" },
+                    if clustered { "CLUSTERED " } else { "" },
                     quote_identifier(&name),
                     quote_identifier(schema),
                     quote_identifier(table),
@@ -325,16 +329,17 @@ impl SqlServerConnection {
         for row in &indexes.rows {
             let index_name = text_cell(row, 0);
             let unique = bool_cell(row, 1);
+            let clustered = int_cell(row, 4) == Some(1);
             let column = if bool_cell(row, 3) {
                 format!("{} DESC", quote_identifier(&text_cell(row, 2)))
             } else {
                 quote_identifier(&text_cell(row, 2))
             };
             match current.as_mut() {
-                Some((name, _, columns)) if *name == index_name => columns.push(column),
+                Some((name, _, _, columns)) if *name == index_name => columns.push(column),
                 _ => {
                     flush(current.take(), &mut index_scripts);
-                    current = Some((index_name, unique, vec![column]));
+                    current = Some((index_name, unique, clustered, vec![column]));
                 }
             }
         }
@@ -1238,7 +1243,8 @@ impl Connection for SqlServerConnection {
              LEFT JOIN {db}.sys.default_constraints dc \
                ON dc.parent_object_id = c.object_id AND dc.parent_column_id = c.column_id \
              LEFT JOIN {db}.sys.extended_properties ep \
-               ON ep.major_id = c.object_id AND ep.minor_id = c.column_id AND ep.name = N'MS_Description' \
+               ON ep.major_id = c.object_id AND ep.minor_id = c.column_id \
+                  AND ep.name = N'MS_Description' AND ep.class = 1 \
              LEFT JOIN {db}.sys.computed_columns cc ON cc.object_id = c.object_id AND cc.column_id = c.column_id \
              LEFT JOIN (SELECT ic.object_id, ic.column_id FROM {db}.sys.indexes i \
                         JOIN {db}.sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id \
@@ -1295,7 +1301,7 @@ impl Connection for SqlServerConnection {
             "SELECT i.name, i.is_unique, i.is_primary_key, i.type_desc, \
                     (SELECT CAST(ep.value AS nvarchar(max)) FROM {db}.sys.extended_properties ep \
                      WHERE ep.major_id = i.object_id AND ep.minor_id = i.index_id \
-                       AND ep.name = N'MS_Description') AS comment \
+                       AND ep.name = N'MS_Description' AND ep.class = 7) AS comment \
              FROM {db}.sys.indexes i \
              JOIN {db}.sys.objects o ON o.object_id = i.object_id \
              JOIN {db}.sys.schemas s ON s.schema_id = o.schema_id \
@@ -1354,7 +1360,7 @@ impl Connection for SqlServerConnection {
                      JOIN {db}.sys.tables t ON t.object_id = ep.major_id \
                      JOIN {db}.sys.schemas s ON s.schema_id = t.schema_id \
                      WHERE s.name = @P1 AND t.name = @P2 AND ep.minor_id = 0 \
-                       AND ep.name = N'MS_Description'"
+                       AND ep.name = N'MS_Description' AND ep.class = 1"
                 ),
                 &[Some(schema_name), Some(table)],
             )
@@ -1394,7 +1400,7 @@ impl Connection for SqlServerConnection {
         let (schema, bare) = split_schema(table)
             .map(|(schema, bare)| (schema.to_string(), bare.to_string()))
             .unwrap_or_else(|| (DEFAULT_SCHEMA.to_string(), table.to_string()));
-        table_schema_sql(&quote_identifier(&schema), &bare, original, modified)
+        table_schema_sql(&schema, &bare, original, modified)
     }
 
     fn table_schema_trigger_sql(
@@ -2721,7 +2727,7 @@ fn table_schema_sql(
     original: Option<&TableSchema>,
     modified: &TableSchema,
 ) -> String {
-    let qualified = format!("{schema}.{}", quote_identifier(table));
+    let qualified = format!("{}.{}", quote_identifier(schema), quote_identifier(table));
     let comments = comment_statements(schema, table, original, modified);
     match original {
         None => {
@@ -3303,19 +3309,19 @@ mod tests {
 
         let sql = table_schema_sql("dbo", "t", Some(&original), &modified);
         assert!(
-            sql.contains("ALTER TABLE dbo.[t] DROP CONSTRAINT [uq_code]"),
+            sql.contains("ALTER TABLE [dbo].[t] DROP CONSTRAINT [uq_code]"),
             "{sql}"
         );
         assert!(
-            sql.contains("ALTER TABLE dbo.[t] ADD CONSTRAINT [uq_code] UNIQUE ([id], [code])"),
+            sql.contains("ALTER TABLE [dbo].[t] ADD CONSTRAINT [uq_code] UNIQUE ([id], [code])"),
             "{sql}"
         );
         assert!(
-            sql.contains("ALTER TABLE dbo.[t] DROP CONSTRAINT [ck_positive]"),
+            sql.contains("ALTER TABLE [dbo].[t] DROP CONSTRAINT [ck_positive]"),
             "{sql}"
         );
         assert!(
-            sql.contains("ALTER TABLE dbo.[t] ADD CONSTRAINT [ck_positive] CHECK ([id]>=(0))"),
+            sql.contains("ALTER TABLE [dbo].[t] ADD CONSTRAINT [ck_positive] CHECK ([id]>=(0))"),
             "{sql}"
         );
     }
@@ -3364,7 +3370,7 @@ mod tests {
         let mut modified = schema.clone();
         modified.indexes[0].comment = "new lookup".to_string();
         let sql = table_schema_sql("dbo", "t", Some(&schema), &modified);
-        assert!(sql.contains("DROP INDEX [ix_id] ON dbo.[t]"), "{sql}");
+        assert!(sql.contains("DROP INDEX [ix_id] ON [dbo].[t]"), "{sql}");
         assert!(sql.contains("@value=N'new lookup'"), "{sql}");
     }
 
@@ -3433,7 +3439,7 @@ mod tests {
         modified.foreign_keys[0].referenced_schema = "audit".to_string();
         let sql = table_schema_sql("dbo", "t", Some(&schema), &modified);
         assert!(
-            sql.contains("ALTER TABLE dbo.[t] DROP CONSTRAINT [fk_parent]"),
+            sql.contains("ALTER TABLE [dbo].[t] DROP CONSTRAINT [fk_parent]"),
             "{sql}"
         );
         assert!(sql.contains("REFERENCES [audit].[parent]"), "{sql}");
@@ -3441,7 +3447,7 @@ mod tests {
         // Removing it drops the constraint.
         let sql = table_schema_sql("dbo", "t", Some(&schema), &base_schema());
         assert!(
-            sql.contains("ALTER TABLE dbo.[t] DROP CONSTRAINT [fk_parent]"),
+            sql.contains("ALTER TABLE [dbo].[t] DROP CONSTRAINT [fk_parent]"),
             "{sql}"
         );
     }
