@@ -10,6 +10,29 @@ UI labels are quoted as the app shows them, so this file quotes the English stri
 [`CHANGELOG_zh.md`](CHANGELOG_zh.md) and [`CHANGELOG_ru.md`](CHANGELOG_ru.md) quote the 简体中文 and
 Russian ones.
 
+## [0.1.8] - 2026-11-05
+
+### Added
+
+- A grid selection's fill handle continues number and date series, or repeats values.
+- Right-clicking a cell and choosing Filter filters the table by that value.
+- Every list page has Refresh (also F5), and the Sync configuration list refreshes too.
+- Ctrl+F focuses the search box in the connection tree, object lists, Users, Backups and Queries.
+- The row form edits long text and JSON in a multi-line editor; JSON shows as a code block with a
+  Format switch.
+- Copying a table or view DDL confirms with Copied.
+
+### Fixed
+
+- A failed connection closes instead of staying red, and a connecting one shows a spinner.
+- An empty grid shows a compact No data card.
+- Removing a filter condition applies immediately, and the filter panel has Clear.
+- SQL Server table DDL and comments, SQLite table/view DDL and Oracle virtual columns now read
+  correctly.
+- Opening an already-open table from the tree no longer crashes.
+- The row-form toggle stays highlighted while the form is open.
+- The Sync window's Schema picker no longer waits for both sides to be selected.
+
 ## [0.1.7] - 2026-11-04
 
 ### Added
