@@ -569,17 +569,30 @@ impl AppView {
 
     /// Hand queued notifications to `Root`. Called every render, which owns the window.
     pub(super) fn flush_toasts(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        if self.pending_toasts.is_empty() {
+        if self.pending_toasts.is_empty() && self.refresh_toasts.is_empty() {
             return;
         }
-        for (kind, message) in self.pending_toasts.drain(..) {
-            let notification = match kind {
+        let mut notes: Vec<(ToastKind, String, bool)> = self
+            .pending_toasts
+            .drain(..)
+            .map(|(kind, message)| (kind, message, false))
+            .chain(
+                self.refresh_toasts
+                    .drain(..)
+                    .map(|(kind, message)| (kind, message, true)),
+            )
+            .collect();
+        for (kind, message, refresh) in notes.drain(..) {
+            let mut notification = match kind {
                 ToastKind::Success => {
                     gpui_kit::component::notification::Notification::success(message)
                 }
                 ToastKind::Info => gpui_kit::component::notification::Notification::info(message),
                 ToastKind::Error => gpui_kit::component::notification::Notification::error(message),
             };
+            if refresh {
+                notification = notification.id::<RefreshToast>();
+            }
             window.push_notification(notification, cx);
         }
     }
@@ -592,6 +605,18 @@ impl AppView {
         cx: &mut Context<'_, Self>,
     ) {
         self.pending_toasts.push((kind, message.into()));
+        cx.notify();
+    }
+
+    /// Queue refresh feedback. Unlike [`Self::toast`], these notifications share one id, so the
+    /// latest refresh state replaces the one before it instead of stacking.
+    pub(super) fn refresh_toast(
+        &mut self,
+        kind: ToastKind,
+        message: impl Into<String>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.refresh_toasts.push((kind, message.into()));
         cx.notify();
     }
 

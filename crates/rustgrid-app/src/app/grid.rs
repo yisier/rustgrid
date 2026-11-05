@@ -531,7 +531,7 @@ impl GridView {
                             grid.reset_scroll();
                         }
                         if refreshed {
-                            grid.show_toast(
+                            grid.show_refresh_toast(
                                 ToastKind::Success,
                                 t!("grid.refreshed").to_string(),
                                 cx,
@@ -661,7 +661,7 @@ impl GridView {
                             grid.reset_scroll();
                         }
                         if refreshed {
-                            grid.show_toast(
+                            grid.show_refresh_toast(
                                 ToastKind::Success,
                                 t!("grid.refreshed").to_string(),
                                 cx,

@@ -1815,7 +1815,7 @@ impl AppView {
     /// Explicit 刷新 of the query list: rescan and confirm the click with a toast.
     pub(super) fn refresh_query_files_feedback(&mut self, cx: &mut Context<'_, Self>) {
         self.refresh_query_files(cx);
-        self.toast(ToastKind::Success, t!("grid.refreshed").to_string(), cx);
+        self.refresh_toast(ToastKind::Success, t!("grid.refreshed").to_string(), cx);
     }
 
     /// Drop selected keys whose file no longer exists (e.g. after a rescan).

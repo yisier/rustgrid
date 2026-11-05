@@ -256,6 +256,19 @@ impl GridView {
         }
     }
 
+    /// Like [`Self::show_toast`], but in the refresh slot: a new refresh replaces the previous
+    /// one instead of stacking a second box.
+    pub(super) fn show_refresh_toast(
+        &self,
+        kind: ToastKind,
+        message: String,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(app) = self.app.upgrade() {
+            app.update(cx, |app, cx| app.refresh_toast(kind, message, cx));
+        }
+    }
+
     /// Execute the confirmed row deletion for this grid, then reload the page.
     pub(super) fn delete_rows(&mut self, rows: Vec<usize>, cx: &mut Context<'_, Self>) {
         let primary_keys: Vec<usize> = self

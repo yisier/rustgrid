@@ -2103,7 +2103,7 @@ impl AppView {
         cx: &mut Context<'_, Self>,
     ) {
         self.refresh_object_feedback = Some((connection_index, database_index));
-        self.toast(ToastKind::Info, t!("grid.refreshing").to_string(), cx);
+        self.refresh_toast(ToastKind::Info, t!("grid.refreshing").to_string(), cx);
         if category == Category::Functions {
             if let (Some(connection), Some(database)) = (
                 self.connection_arc(connection_index),
@@ -2131,7 +2131,7 @@ impl AppView {
             } else {
                 (ToastKind::Error, t!("grid.refresh_failed").to_string())
             };
-            self.toast(kind, message, cx);
+            self.refresh_toast(kind, message, cx);
         }
     }
 

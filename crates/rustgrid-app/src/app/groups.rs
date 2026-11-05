@@ -384,14 +384,14 @@ impl AppView {
             .map(|(index, _)| index)
             .collect();
         if indexes.is_empty() {
-            self.toast(ToastKind::Success, t!("grid.refreshed").to_string(), cx);
+            self.refresh_toast(ToastKind::Success, t!("grid.refreshed").to_string(), cx);
             return;
         }
         // Remember which nodes the click asked for, so the toast that confirms the refresh waits
         // until the last one has actually landed.
         self.refresh_tree_feedback = indexes.clone();
         self.refresh_tree_failed = false;
-        self.toast(ToastKind::Info, t!("grid.refreshing").to_string(), cx);
+        self.refresh_toast(ToastKind::Info, t!("grid.refreshing").to_string(), cx);
         for index in indexes {
             self.load_databases(index, cx);
         }
@@ -421,7 +421,7 @@ impl AppView {
                 (ToastKind::Success, t!("grid.refreshed").to_string())
             };
             self.refresh_tree_failed = false;
-            self.toast(kind, message, cx);
+            self.refresh_toast(kind, message, cx);
         }
     }
 
@@ -433,7 +433,7 @@ impl AppView {
         if !self.refresh_tree_feedback.contains(&index) {
             self.refresh_tree_feedback.push(index);
         }
-        self.toast(ToastKind::Info, t!("grid.refreshing").to_string(), cx);
+        self.refresh_toast(ToastKind::Info, t!("grid.refreshing").to_string(), cx);
         self.load_databases(index, cx);
     }
 

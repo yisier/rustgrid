@@ -2082,6 +2082,10 @@ enum ToastKind {
     Error,
 }
 
+/// Notification id shared by every refresh message, so a new one replaces the previous toast
+/// (clicking 刷新 repeatedly cannot pile "正在刷新..." / "已刷新" boxes on top of each other).
+struct RefreshToast;
+
 /// The action to run once the user confirms discarding unsaved changes.
 #[derive(Clone)]
 enum PendingAction {
@@ -2538,6 +2542,9 @@ pub struct AppView {
     /// Transient notifications queued for the next frame, which has the window needed to hand
     /// them to `Root`.
     pending_toasts: Vec<(ToastKind, String)>,
+    /// Refresh feedback, kept apart so every refresh replaces the previous toast instead of
+    /// stacking "refreshing" and "refreshed" messages on top of each other.
+    refresh_toasts: Vec<(ToastKind, String)>,
     /// An explicit refresh of the object list: the connection/database whose load will confirm it
     /// with a "refreshed" toast once the data lands.
     refresh_object_feedback: Option<(usize, usize)>,
@@ -3418,6 +3425,7 @@ impl AppView {
             error_dialog: None,
             grid_clipboard: Rc::new(RefCell::new(GridClipboard::default())),
             pending_toasts: Vec::new(),
+            refresh_toasts: Vec::new(),
             refresh_object_feedback: None,
             refresh_tree_feedback: Vec::new(),
             refresh_tree_failed: false,
