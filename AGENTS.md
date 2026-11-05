@@ -986,9 +986,18 @@ make more engines cheap later — do not build those features early.
   `stop_propagation` there silently made the group rename editor untypable in every non-IME input
   mode. A claimed character is fine only where the handler itself inserts text.
 
+- **A connection-tree row's action must not re-enter the tree pane.** gpui runs an entity's event
+  listener inside that entity's own update, so a tree row that calls an `AppView` method which
+  updates `TreePane` borrows the tree a second time and aborts the app. `AppView::activate_grid`
+  (reached by `select_table` when the table's grid is already open, e.g. after a session restore)
+  therefore defers its database-row selection one effect cycle with `cx.defer`; the tree's
+  namespace/query/backup rows defer the same way. Keep new row actions deferred, or fix it in the
+  `AppView` method like `activate_grid` does.
+
 - **An empty grid shows gpui-kit's empty state, not a painted empty table.** With no rows to paint,
-  `GridView::render` swaps the `uniform_list` for `gpui_kit::component::empty::Empty` (an icon +
-  `grid.no_rows` title inside the kit's dashed surface). It carries no hitboxes, so nothing in it is
+  `GridView::render` swaps the `uniform_list` for a compact, centered
+  `gpui_kit::component::empty::Empty` card (inbox icon, `grid.no_rows` title and a muted hint) rather
+  than stretching the kit surface across the whole body. It carries no hitboxes, so nothing in it is
   selectable; a click just focuses the grid. Do not bring back a decorative per-column filler: it
   repeated the table header as blank cells and needed a measured `empty_grid_height` that fed back
   into layout.

@@ -2,7 +2,9 @@ use super::grid::{make_page_input, make_page_size_input, row_origin};
 use super::grid_fields::make_field_filter_search_input;
 use super::*;
 use gpui::HitboxBehavior;
-use gpui_kit::component::empty::{Empty, EmptyHeader, EmptyMedia, EmptyMediaVariant, EmptyTitle};
+use gpui_kit::component::empty::{
+    Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyMediaVariant, EmptyTitle,
+};
 use gpui_kit::component::{Icon, IconName};
 
 impl GridView {
@@ -850,8 +852,8 @@ impl Render for GridView {
         }));
 
         // With no rows to paint, show the kit's empty state instead of a blank pane under the
-        // header. It is decorative — no hit-testing — so nothing can be selected; clicking it
-        // just focuses the grid.
+        // header. A compact card is centered in the body rather than stretched across the whole
+        // grid, so an empty table reads as an intentional state rather than an unfinished pane.
         let list_body: AnyElement =
             if empty_page && !self.state.loading && !self.state.columns.is_empty() {
                 div()
@@ -860,7 +862,9 @@ impl Render for GridView {
                     .flex_1()
                     .min_h(px(0.0))
                     .w_full()
-                    .p_4()
+                    .items_center()
+                    .justify_center()
+                    .p_6()
                     .track_focus(&self.focus)
                     .on_mouse_down(
                         MouseButton::Left,
@@ -869,18 +873,18 @@ impl Render for GridView {
                         }),
                     )
                     .child(
-                        Empty::new().header(
+                        Empty::new().flex_none().w(px(420.0)).header(
                             EmptyHeader::new()
                                 .media(
                                     EmptyMedia::new()
                                         .with_variant(EmptyMediaVariant::Icon)
-                                        .child(
-                                            Icon::default()
-                                                .path("icons/table.svg")
-                                                .text_color(rgb(theme.text_muted)),
-                                        ),
+                                        .child(Icon::new(IconName::Inbox)),
                                 )
-                                .title(EmptyTitle::new().child(t!("grid.no_rows").to_string())),
+                                .title(EmptyTitle::new().child(t!("grid.no_rows").to_string()))
+                                .description(
+                                    EmptyDescription::new()
+                                        .child(t!("grid.no_rows_hint").to_string()),
+                                ),
                         ),
                     )
                     .into_any_element()
