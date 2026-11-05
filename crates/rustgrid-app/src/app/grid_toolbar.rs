@@ -1628,7 +1628,7 @@ impl GridView {
             .grid_icon_button(
                 "grid-form",
                 "icons/form.svg",
-                if open { theme.primary } else { theme.text },
+                if open { theme.brand } else { theme.text },
                 has_row,
                 cx.listener(|this, _event, _window, cx| {
                     if let Some(app) = this.app.upgrade() {
@@ -1641,6 +1641,14 @@ impl GridView {
                 }),
             )
             .tooltip(ui::text_tooltip(t!("grid.form_view").to_string()));
+        // The form pane covers the right side of the window, so the footer toggle must stay visibly
+        // "on": the brand tint and its muted fill read at a glance where the primary/black icon
+        // tone did not.
+        let button = if open {
+            button.bg(rgb(theme.brand_muted))
+        } else {
+            button
+        };
         // With no record selected the icon is disabled; fade it well below the page-size gear's
         // muted tint so "not available yet" is obvious at a glance.
         if has_row { button } else { button.opacity(0.4) }
