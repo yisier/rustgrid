@@ -1447,9 +1447,11 @@ enum ContextTarget {
     SyncList,
     /// The Users main tab's list (right-click → 刷新).
     UserList,
-    /// A data/result grid (right-click → 删除记录 / 复制 / 复制为 INSERT / 粘贴 / 刷新).
+    /// A data/result grid (right-click → 筛选 / 删除记录 / 复制 / 复制为 INSERT / 粘贴 / 刷新).
     Grid {
         grid_id: u64,
+        /// The cell under the pointer, when the click landed on one (not the gutter/blank area).
+        cell: Option<(usize, usize)>,
     },
     /// A grid column header (right-click → 冻结列 / 取消冻结 / 隐藏列 / 刷新).
     GridHeader {

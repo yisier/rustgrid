@@ -1081,6 +1081,56 @@ impl GridView {
         self.after_filter_change(cx);
     }
 
+    /// Start a filter from a cell's own value (the cell context menu's 筛选): open the WHERE panel
+    /// with a condition on that column, using the clicked value (or `IS NULL` / `IS EMPTY` for a
+    /// NULL / empty cell), then apply it right away.
+    pub(super) fn filter_cell(&mut self, row: usize, col: usize, cx: &mut Context<'_, Self>) {
+        if self.state.sql.is_some() || self.state.key_status.is_some() {
+            return;
+        }
+        let Some(GridRow::Data(data)) = self.row_at(row) else {
+            return;
+        };
+        let Some(name) = self
+            .state
+            .columns
+            .get(col)
+            .map(|column| column.name.clone())
+        else {
+            return;
+        };
+        let cell = self
+            .state
+            .rows
+            .get(data)
+            .and_then(|values| values.get(self.state.source_col(col)));
+        let mut condition = FilterCondition::new(name);
+        match cell {
+            Some(CellValue::Null) | None => condition.operator = FilterOperator::IsNull,
+            Some(cell) => {
+                let value = cell.as_edit_string();
+                if value.is_empty() {
+                    condition.operator = FilterOperator::IsEmpty;
+                } else {
+                    condition.value = value;
+                }
+            }
+        }
+        if !self.state.filter_open {
+            self.state.filter_open = true;
+            self.state.filter_draft = self.state.filters.clone();
+        }
+        match self.state.filter_draft.last_mut() {
+            Some(FilterNode::Group(group)) => group.children.push(FilterNode::Condition(condition)),
+            _ => self
+                .state
+                .filter_draft
+                .push(FilterNode::Condition(condition)),
+        }
+        self.after_filter_change(cx);
+        self.filter_apply(cx);
+    }
+
     /// Seed an empty draft with one parenthesized group holding a single condition.
     fn filter_draft_start(&mut self) {
         if let Some(group) = self.new_filter_group() {

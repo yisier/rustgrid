@@ -16,6 +16,7 @@ impl GridView {
     pub(super) fn open_grid_menu(
         &mut self,
         position: Point<Pixels>,
+        cell: Option<(usize, usize)>,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
@@ -24,7 +25,7 @@ impl GridView {
         if let Some(app) = self.app.upgrade() {
             app.update(cx, |app, cx| {
                 app.context_menu = Some(ContextMenu {
-                    target: ContextTarget::Grid { grid_id },
+                    target: ContextTarget::Grid { grid_id, cell },
                     position,
                 });
                 cx.notify();
@@ -223,7 +224,11 @@ impl GridView {
                 };
             }
         }
-        self.open_grid_menu(event.position, window, cx);
+        let cell = match self.grid_hit(event.position) {
+            Some(GridHit::Cell(row, col)) => Some((row, col)),
+            _ => None,
+        };
+        self.open_grid_menu(event.position, cell, window, cx);
         cx.notify();
     }
 

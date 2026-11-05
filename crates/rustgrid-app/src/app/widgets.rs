@@ -1378,16 +1378,20 @@ impl AppView {
                         }),
                     ));
             }
-            ContextTarget::Grid { grid_id } => {
+            ContextTarget::Grid { grid_id, cell } => {
                 let grid_id = *grid_id;
+                let cell = *cell;
                 let grid = self
                     .grids
                     .iter()
                     .find(|grid| grid.read(cx).state.id == grid_id)
                     .cloned();
                 if let Some(grid) = grid {
-                    let (has_selection, editable, deletable, key_value) = {
+                    let (has_selection, editable, deletable, key_value, can_filter) = {
                         let g = grid.read(cx);
+                        let cell_is_data = cell.is_some_and(|(row, _)| {
+                            matches!(g.row_at(row), Some(GridRow::Data(_)))
+                        });
                         (
                             g.state.selection.is_some(),
                             g.state.editable,
@@ -1395,8 +1399,10 @@ impl AppView {
                                 && g.state.selection.is_some()
                                 && !g.state.rows.is_empty(),
                             g.state.key_status.is_some(),
+                            g.state.sql.is_none() && g.state.key_status.is_none() && cell_is_data,
                         )
                     };
+                    let for_filter = grid.clone();
                     let for_delete = grid.clone();
                     let for_duplicate = grid.clone();
                     let for_copy = grid.clone();
@@ -1409,6 +1415,20 @@ impl AppView {
                     } else {
                         t!("grid.delete_rows").to_string()
                     };
+                    if can_filter && let Some((row, col)) = cell {
+                        items = items
+                            .child(self.context_item(
+                                "grid-ctx-filter",
+                                t!("grid.filter").to_string(),
+                                cx.listener(move |this, _event, _window, cx| {
+                                    this.context_menu = None;
+                                    for_filter
+                                        .update(cx, |grid, cx| grid.filter_cell(row, col, cx));
+                                    cx.notify();
+                                }),
+                            ))
+                            .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)));
+                    }
                     items = items.child(if deletable {
                         self.context_item(
                             "grid-ctx-delete",
