@@ -870,6 +870,7 @@ info.form.format_json_hint: "Вкл.: форматировать JSON; выкл.
 info.form.json_invalid: "Поле не содержит корректный JSON"
 info.ddl: "DDL"
 info.ddl_unavailable: "DDL недоступен"
+info.ddl_copied: "Скопировано"
 info.connection: "Соединение"
 info.database: "База данных"
 info.sql_length: "Длина SQL"

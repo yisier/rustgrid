@@ -2754,6 +2754,8 @@ pub struct AppView {
     info_table_ddl: Loadable<Option<String>>,
     /// Whether the table info pane shows the details or the DDL script.
     info_table_ddl_view: bool,
+    /// Whether the DDL view's copy button is showing its "copied" confirmation.
+    info_table_ddl_copied: bool,
     /// The selected stored routine `(connection, database, name, kind)` driving the routine info
     /// pane, set by the connection tree and the Functions object list.
     info_routine_selected: Option<(usize, usize, String, RoutineKind)>,
@@ -3535,6 +3537,7 @@ impl AppView {
             info_table_status: Loadable::Idle,
             info_table_ddl: Loadable::Idle,
             info_table_ddl_view: false,
+            info_table_ddl_copied: false,
             info_routine_selected: None,
             info_routine: Loadable::Idle,
             users: Loadable::Idle,

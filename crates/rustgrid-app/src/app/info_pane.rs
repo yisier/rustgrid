@@ -1114,6 +1114,7 @@ impl AppView {
         self.info_table_status = Loadable::Idle;
         self.info_table_ddl = Loadable::Idle;
         self.info_table_ddl_view = false;
+        self.info_table_ddl_copied = false;
         self.info_routine = Loadable::Idle;
         self.info_user = Loadable::Idle;
 
@@ -1638,6 +1639,7 @@ impl AppView {
                     move |_event, _window, cx| {
                         let _ = weak_details.update(cx, |app, cx| {
                             app.info_table_ddl_view = false;
+                            app.info_table_ddl_copied = false;
                             cx.notify();
                         });
                     },
@@ -1647,15 +1649,19 @@ impl AppView {
                 move |_event, _window, cx| {
                     let _ = weak_ddl.update(cx, |app, cx| {
                         app.info_table_ddl_view = true;
+                        app.info_table_ddl_copied = false;
                         cx.notify();
                     });
                 },
             ));
-        // A copy button for the script, only while the DDL view is showing.
+        // A copy button for the script, only while the DDL view is showing. It confirms the copy
+        // by turning into a green check + 已复制 for a moment, then goes back to 复制.
         if let (true, Loadable::Loaded(Some(ddl))) =
             (self.info_table_ddl_view, &self.info_table_ddl)
         {
             let ddl = ddl.clone();
+            let copied = self.info_table_ddl_copied;
+            let weak_copy = app.clone();
             tabs = tabs.child(
                 div()
                     .id("info-ddl-copy")
@@ -1667,12 +1673,50 @@ impl AppView {
                     .rounded_sm()
                     .cursor_pointer()
                     .text_size(px(11.0))
-                    .text_color(rgb(theme.text_muted))
+                    .text_color(rgb(if copied {
+                        theme.icon_connection
+                    } else {
+                        theme.text_muted
+                    }))
                     .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-                    .child(svg().path("icons/queries.svg").w(px(13.0)).h(px(13.0)))
-                    .child(t!("query.copy").to_string())
+                    .child(
+                        svg()
+                            .path(if copied {
+                                "icons/check.svg"
+                            } else {
+                                "icons/queries.svg"
+                            })
+                            .w(px(13.0))
+                            .h(px(13.0))
+                            .text_color(rgb(if copied {
+                                theme.icon_connection
+                            } else {
+                                theme.text_muted
+                            })),
+                    )
+                    .child(if copied {
+                        t!("info.ddl_copied").to_string()
+                    } else {
+                        t!("query.copy").to_string()
+                    })
                     .on_click(move |_event, _window, cx| {
                         cx.write_to_clipboard(ClipboardItem::new_string(ddl.clone()));
+                        let _ = weak_copy.update(cx, |app, cx| {
+                            app.info_table_ddl_copied = true;
+                            cx.notify();
+                            cx.spawn(async move |app, cx| {
+                                cx.background_executor()
+                                    .timer(Duration::from_millis(1500))
+                                    .await;
+                                let _ = app.update(cx, |app, cx| {
+                                    if app.info_table_ddl_copied {
+                                        app.info_table_ddl_copied = false;
+                                        cx.notify();
+                                    }
+                                });
+                            })
+                            .detach();
+                        });
                     }),
             );
         }
