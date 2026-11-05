@@ -1034,23 +1034,20 @@ impl GridView {
     pub(super) fn toggle_filter_panel(&mut self, cx: &mut Context<'_, Self>) {
         if self.state.filter_open {
             self.state.filter_open = false;
-            self.state.filter_draft.clear();
-            self.filter_value_inputs.clear();
-            self.filter_field_combos.clear();
-            self.filter_operator_combos.clear();
+            // Keep the draft and its inputs: toggling the panel must not throw away conditions or
+            // values the user has typed but not applied yet. Reopening shows the same state.
             self.filter_date_picker = None;
         } else {
             if self.state.sql.is_some() {
                 return;
             }
             self.state.filter_open = true;
-            self.filter_value_inputs.clear();
-            self.filter_field_combos.clear();
-            self.filter_operator_combos.clear();
             self.filter_date_picker = None;
-            self.state.filter_draft = self.state.filters.clone();
             if self.state.filter_draft.is_empty() {
-                self.filter_draft_start();
+                self.state.filter_draft = self.state.filters.clone();
+                if self.state.filter_draft.is_empty() {
+                    self.filter_draft_start();
+                }
             }
         }
         cx.notify();
@@ -1073,7 +1070,9 @@ impl GridView {
         };
         if !self.state.filter_open {
             self.state.filter_open = true;
-            self.state.filter_draft = self.state.filters.clone();
+            if self.state.filter_draft.is_empty() {
+                self.state.filter_draft = self.state.filters.clone();
+            }
         }
         let condition = FilterNode::Condition(FilterCondition::new(name));
         match self.state.filter_draft.last_mut() {
@@ -1120,7 +1119,9 @@ impl GridView {
         }
         if !self.state.filter_open {
             self.state.filter_open = true;
-            self.state.filter_draft = self.state.filters.clone();
+            if self.state.filter_draft.is_empty() {
+                self.state.filter_draft = self.state.filters.clone();
+            }
         }
         let node = FilterNode::Condition(condition);
         if self.state.filter_draft.is_empty() {
