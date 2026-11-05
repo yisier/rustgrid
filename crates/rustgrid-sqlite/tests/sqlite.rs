@@ -69,6 +69,19 @@ async fn round_trips_a_sqlite_database() {
     assert_eq!(columns.len(), 3);
     assert!(columns[0].primary_key);
     assert!(!columns[0].nullable);
+    let ddl = connection
+        .object_ddl("main", "users", false)
+        .await
+        .unwrap()
+        .expect("the table's DDL");
+    assert!(ddl.contains("CREATE TABLE"), "{ddl}");
+    assert!(
+        connection
+            .object_ddl("main", "missing", false)
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     let page = connection
         .fetch_page("main", "users", PageRequest::new(0, 10))
@@ -182,6 +195,12 @@ async fn round_trips_a_sqlite_database() {
         .unwrap();
     assert!(details.definition.contains("CREATE VIEW"));
     assert_eq!(details.info.name, "adult_users");
+    let ddl = connection
+        .object_ddl("main", "adult_users", true)
+        .await
+        .unwrap()
+        .expect("the view's DDL");
+    assert!(ddl.contains("CREATE VIEW"), "{ddl}");
 
     connection
         .save_view(

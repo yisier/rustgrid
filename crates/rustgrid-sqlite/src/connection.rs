@@ -44,7 +44,7 @@ impl SqliteConnection {
     }
 
     /// The `CREATE` statement of one object, as SQLite stores it in `sqlite_master`.
-    async fn object_ddl(&self, kind: &str, name: &str) -> Result<String> {
+    async fn object_create_sql(&self, kind: &str, name: &str) -> Result<String> {
         let row = sqlx::query("SELECT sql FROM sqlite_master WHERE type = ? AND name = ?")
             .bind(kind)
             .bind(name)
@@ -57,7 +57,7 @@ impl SqliteConnection {
     }
 
     async fn table_metadata(&self, name: &str) -> Result<ObjectDump> {
-        let ddl = self.object_ddl("table", name).await?;
+        let ddl = self.object_create_sql("table", name).await?;
         let fields: Vec<String> = self
             .columns("main", name)
             .await?
@@ -562,6 +562,19 @@ impl Connection for SqliteConnection {
         Ok(statuses)
     }
 
+    async fn object_ddl(
+        &self,
+        _database: &str,
+        name: &str,
+        is_view: bool,
+    ) -> Result<Option<String>> {
+        // `sqlite_master` keeps the statement exactly as it was entered, which is the closest a
+        // SQLite database gets to `SHOW CREATE`. A view is stored there too, under `type = 'view'`.
+        let kind = if is_view { "view" } else { "table" };
+        let ddl = self.object_create_sql(kind, name).await?;
+        Ok((!ddl.trim().is_empty()).then_some(ddl))
+    }
+
     async fn character_sets(&self) -> Result<Vec<String>> {
         Ok(vec!["UTF-8".to_string()])
     }
@@ -630,7 +643,7 @@ impl Connection for SqliteConnection {
             BackupObjectKind::View => Ok(ObjectDump {
                 name: name.to_string(),
                 kind,
-                ddl: self.object_ddl("view", name).await?,
+                ddl: self.object_create_sql("view", name).await?,
                 fields: Vec::new(),
                 trigger_ddl: Vec::new(),
                 rows: Vec::new(),
@@ -687,7 +700,7 @@ impl Connection for SqliteConnection {
     }
 
     async fn table_schema(&self, _database: &str, table: &str) -> Result<TableSchema> {
-        let create_sql = self.object_ddl("table", table).await?;
+        let create_sql = self.object_create_sql("table", table).await?;
         let has_autoincrement = create_sql.to_ascii_uppercase().contains("AUTOINCREMENT");
 
         let column_rows = sqlx::query(AssertSqlSafe(format!(
