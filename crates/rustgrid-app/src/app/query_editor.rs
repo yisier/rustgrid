@@ -495,20 +495,22 @@ fn info_decorations(
     theme: Theme,
     cx: &App,
 ) -> Vec<(std::ops::Range<usize>, gpui::HighlightStyle)> {
-    let highlight = &gpui_kit::component::Theme::global(cx).highlight_theme;
     let danger: gpui::Hsla = rgb(theme.danger).into();
     let muted: gpui::Hsla = rgb(theme.text_muted).into();
     spans
         .iter()
         .filter_map(|(range, span)| {
             let style = match span {
-                InfoSpan::Sql(kind) => highlight.style(match kind {
-                    sql_lex::TokenKind::Keyword => "keyword",
-                    sql_lex::TokenKind::Function => "function",
-                    sql_lex::TokenKind::String => "string",
-                    sql_lex::TokenKind::Number => "number",
-                    sql_lex::TokenKind::Comment => "comment",
-                })?,
+                InfoSpan::Sql(kind) => ui::syntax_style(
+                    cx,
+                    match kind {
+                        sql_lex::TokenKind::Keyword => "keyword",
+                        sql_lex::TokenKind::Function => "function",
+                        sql_lex::TokenKind::String => "string",
+                        sql_lex::TokenKind::Number => "number",
+                        sql_lex::TokenKind::Comment => "comment",
+                    },
+                )?,
                 InfoSpan::ErrorLocation => gpui::HighlightStyle {
                     underline: Some(gpui::UnderlineStyle {
                         color: Some(danger),

@@ -14,7 +14,7 @@ use std::sync::{Arc, RwLock};
 use gpui::{
     App, AppContext, Context, DispatchPhase, Entity, HitboxBehavior, InteractiveElement,
     IntoElement, ParentElement, Render, ScrollDelta, ScrollEvent, SharedString, Styled,
-    Subscription, Window, canvas, div, px,
+    Subscription, Window, canvas, div, px, rgb,
 };
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::input::{
@@ -612,10 +612,36 @@ fn plain_sql_language() -> SharedString {
     NAME.into()
 }
 
+/// The app's own SQL/Redis syntax style for one token kind (`keyword`, `function`, `string`,
+/// `number`, `comment`).
+///
+/// SQL and Redis are coloured by the app's scanners, not by gpui-kit's tree-sitter theme. The kit
+/// theme now carries VS Code's JSON palette, so the SQL palette is kept here to avoid recolouring
+/// the query editor and the DDL/log views along with JSON. These are the kit's former defaults.
+pub(crate) fn syntax_style(cx: &App, name: &str) -> Option<gpui::HighlightStyle> {
+    let dark = gpui_kit::component::Theme::global(cx).is_dark();
+    let color = match (dark, name) {
+        (true, "keyword") => 0x87B1F6,
+        (true, "function") => 0xB3C5F3,
+        (true, "string") => 0xA3E09F,
+        (true, "number") => 0xCC9E00,
+        (true, "comment") => 0x9D9D9D,
+        (false, "keyword") => 0x0433FF,
+        (false, "function") => 0x0000A2,
+        (false, "string") => 0x036A07,
+        (false, "number") => 0x0433FF,
+        (false, "comment") => 0x007FFF,
+        _ => return None,
+    };
+    Some(gpui::HighlightStyle {
+        color: Some(rgb(color).into()),
+        ..Default::default()
+    })
+}
+
 /// The theme's keyword, function, string, number and comment styles.
 fn highlight_palette(cx: &App) -> [Option<gpui::HighlightStyle>; 5] {
-    let theme = &gpui_kit::component::Theme::global(cx).highlight_theme;
-    ["keyword", "function", "string", "number", "comment"].map(|name| theme.style(name))
+    ["keyword", "function", "string", "number", "comment"].map(|name| syntax_style(cx, name))
 }
 
 /// The SQL editor's right-click menu: the app's 运行已选择的 first, then the standard edit items.

@@ -25,7 +25,7 @@ mod views;
 
 pub(crate) use calendar::compact_calendar;
 pub(crate) use combo::{ComboBox, ComboOption};
-pub(crate) use sql_editor::{SqlEditor, SqlEditorOptions};
+pub(crate) use sql_editor::{SqlEditor, SqlEditorOptions, syntax_style};
 pub(crate) use text_area::{TextArea, TextAreaOptions};
 pub(crate) use text_input::{TextInput, TextInputOptions};
 pub(crate) use titlebar::{action_cluster, bar_title, title_bar, window_options, window_title_bar};

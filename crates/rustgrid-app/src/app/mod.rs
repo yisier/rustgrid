@@ -4724,6 +4724,15 @@ pub(super) fn default_editor_font() -> &'static str {
     }
 }
 
+/// One colour-only syntax style. `ThemeStyle`'s fields are private, so it is built from the same
+/// JSON shape the kit's own theme files use.
+fn vscode_style(color: u32) -> gpui_kit::component::highlighter::ThemeStyle {
+    serde_json::from_value(serde_json::json!({
+        "color": format!("#{color:06X}"),
+    }))
+    .expect("a colour-only ThemeStyle parses")
+}
+
 /// Install the app's editor chrome (background, foreground, gutter, active line) into gpui-kit's
 /// editor highlight theme. The wrapped SQL editor (gpui-kit's `Editor`) takes these from the global
 /// `highlight_theme`. The SQL syntax colors are intentionally left at gpui-kit's default palette so
@@ -4747,11 +4756,30 @@ fn install_editor_highlight_theme(theme: Theme, cx: &mut App) {
     style_set.editor_active_line = Some(Hsla::from(rgb(theme.row_alt_bg)));
     // The gutter (line-number column) background, so it reads as a distinct column.
     style_set.editor_gutter_background = Some(Hsla::from(rgb(theme.header_bg)));
-    // The editor's SQL syntax colors deliberately stay at gpui-kit's default palette: the table
-    // info pane's DDL view renders its script with that same palette, so the query editor and the
-    // DDL view read identically. Overriding the syntax map here (as we once did with `Theme::sql_*`)
-    // gave the editor different keyword/identifier colors than the DDL script. Only the editor
-    // chrome (background, foreground, gutter, active line) is themed below.
+    // JSON is the only language gpui-kit itself highlights here (SQL/Redis are painted by the
+    // app's own scanner with `syntax_style`), so its tree-sitter colours are set to VS Code's
+    // Dark+/Light+ palette. Every JSON surface — the row form's JSON view, the `json` code blocks
+    // of the field editors and the Redis JSON preview — reads this one palette.
+    let (property, string, escape, number, boolean, constant, comment) = if dark {
+        (
+            0x9CDCFE, 0xCE9178, 0xD7BA7D, 0xB5CEA8, 0x569CD6, 0x569CD6, 0x6A9955,
+        )
+    } else {
+        (
+            0x0451A5, 0xA31515, 0xEE0000, 0x098658, 0x0000FF, 0x0000FF, 0x008000,
+        )
+    };
+    let syntax = &mut style_set.syntax;
+    syntax.property = Some(vscode_style(property));
+    syntax.string = Some(vscode_style(string));
+    syntax.string_escape = Some(vscode_style(escape));
+    syntax.number = Some(vscode_style(number));
+    syntax.boolean = Some(vscode_style(boolean));
+    syntax.constant = Some(vscode_style(constant));
+    syntax.comment = Some(vscode_style(comment));
+    // The editor's SQL syntax colours deliberately stay out of this map: the app paints SQL and
+    // Redis itself (see `ui::sql_editor::syntax_style`), so tuning the JSON palette here cannot
+    // recolour them.
 
     gpui_kit::component::Theme::global_mut(cx).highlight_theme = Arc::new(HighlightTheme {
         name: if dark {
