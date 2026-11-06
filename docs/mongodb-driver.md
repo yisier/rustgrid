@@ -48,10 +48,25 @@ TLS, tunnel, connect timeout and read-only come from the standard pages. A wrong
 | double | number |
 | bool | boolean |
 | binary | hex bytes (edits parse back as subtype 0) |
-| document / array | compact Extended JSON (the row form shows it in its JSON editor) |
+| document / array | compact Extended JSON (the row form's JSON view shows the whole document) |
 | null / undefined | NULL |
 
 Editing a `_id` cell is ignored (MongoDB keys are immutable); every other cell becomes a `$set`.
+
+### Row form: 表单 / JSON
+
+The grid's columns are only a sample of the fields a collection holds, so the row form has two
+views (the header switch, right of the ✓ / ✕):
+
+- **JSON** (the default for MongoDB) shows the selected row as one pretty-printed Extended JSON
+  document, loaded by its `_id` (`Connection::row_document`). It is editable: saving parses the
+  document and replaces the row as a whole (`Connection::replace_row_document`), so fields the
+  sample never saw can be added or removed. `_id` must keep its value. Edits are staged per row,
+  survive switching rows, and are saved with ✓ / Ctrl+S; ✕ restores the stored document.
+- **表单** keeps the per-field editors (a fast path for one or two fields).
+
+Switching views is blocked while the current view has unsaved changes, because the two
+representations cannot both be staged without one overwriting the other.
 
 ## Query tab
 

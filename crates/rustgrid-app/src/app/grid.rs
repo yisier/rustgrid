@@ -424,11 +424,17 @@ impl GridView {
 
         self.state.loading = true;
         self.state.error = None;
+        // A reload replaces every row, so the row form's whole-document view must refetch too.
+        self.state.document_json = None;
+        self.state.document_key = None;
+        self.state.document_loading = false;
+        self.state.document_error = None;
         // A reload in place (Refresh / F5, after a write) keeps the selected cells.
         if reset_scroll {
             self.state.selection = None;
         }
         self.state.edits.clear();
+        self.state.document_edits.clear();
         self.inserts.clear();
         self.state.undo.clear();
         self.state.redo.clear();
@@ -579,7 +585,12 @@ impl GridView {
         self.state.loading = true;
         self.state.error = None;
         self.state.selection = None;
+        self.state.document_json = None;
+        self.state.document_key = None;
+        self.state.document_loading = false;
+        self.state.document_error = None;
         self.state.edits.clear();
+        self.state.document_edits.clear();
         self.inserts.clear();
         self.state.undo.clear();
         self.state.redo.clear();

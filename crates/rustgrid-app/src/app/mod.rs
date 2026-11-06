@@ -1781,6 +1781,9 @@ struct GridView {
     key_string_dirty: bool,
     key_string_saving: bool,
     key_string_error: Option<String>,
+    /// The row key whose whole document is being fetched (document stores), so a render does not
+    /// start a second request for the same row and a late response can be dropped.
+    document_request: Option<String>,
 
     /// Pending rows that have not been written to the database yet. A row added with the "+"
     /// button appends after the page; 复制行 (duplicate) anchors its row under the record it was
@@ -2913,6 +2916,7 @@ mod form;
 mod grid;
 mod grid_cell;
 mod grid_commit;
+mod grid_document;
 mod grid_fields;
 mod grid_fill;
 mod grid_input;

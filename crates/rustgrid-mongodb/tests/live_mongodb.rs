@@ -184,6 +184,48 @@ async fn mongodb_round_trip() {
         .unwrap();
     assert_eq!(counted.rows[0][0].as_display(), "2");
 
+    // The row form's JSON view: fetch the whole document, replace it (adding a field), and refuse
+    // a changed `_id`.
+    let keys = vec![("_id".to_string(), Some("4".to_string()))];
+    let document = connection
+        .row_document(&database, "people", &keys)
+        .await
+        .unwrap()
+        .expect("document 4 exists");
+    assert!(document.contains("Margaret"));
+    let mut value: serde_json::Value = serde_json::from_str(&document).unwrap();
+    value["note"] = serde_json::json!("edited");
+    value["age"] = serde_json::json!({ "$numberInt": "90" });
+    connection
+        .replace_row_document(
+            &database,
+            "people",
+            &keys,
+            &serde_json::to_string(&value).unwrap(),
+        )
+        .await
+        .unwrap();
+    let replaced = connection
+        .row_document(&database, "people", &keys)
+        .await
+        .unwrap()
+        .expect("document 4 still exists");
+    assert!(replaced.contains("edited"), "the new field is stored");
+    assert!(replaced.contains("90"), "the edited field is stored");
+    value["_id"] = serde_json::json!({ "$numberInt": "5" });
+    assert!(
+        connection
+            .replace_row_document(
+                &database,
+                "people",
+                &keys,
+                &serde_json::to_string(&value).unwrap(),
+            )
+            .await
+            .is_err(),
+        "changing _id must be rejected"
+    );
+
     let status = connection.table_status(&database, "people").await.unwrap();
     assert_eq!(status.rows, Some(3));
 

@@ -338,7 +338,7 @@ impl GridView {
     }
 
     /// Surface a query error in the app-level error dialog.
-    fn show_error(&self, message: String, cx: &mut Context<'_, Self>) {
+    pub(super) fn show_error(&self, message: String, cx: &mut Context<'_, Self>) {
         if let Some(app) = self.app.upgrade() {
             app.update(cx, |app, cx| {
                 app.error_dialog = Some(message);

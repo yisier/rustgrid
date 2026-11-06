@@ -354,6 +354,15 @@ impl Render for SidebarHost {
 /// The right-hand pane: a drag handle on its left edge, showing either the selected object's
 /// details or — while the grid footer's 编辑表单 button is on — the selected row as an editable
 /// form (the first selected row when several are selected). The two never show together.
+/// How the row form shows the selected row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FormMode {
+    /// One editor per column (every engine).
+    Fields,
+    /// The whole row as one JSON document (document stores only).
+    Json,
+}
+
 pub(super) struct InfoPane {
     app: WeakEntity<AppView>,
     width: f32,
@@ -367,8 +376,24 @@ pub(super) struct InfoPane {
     /// happens inside `GridView` and does not re-render `AppView`, so the observation is what
     /// brings the newly selected row to the pane.
     form_grid: Option<(u64, Subscription)>,
+    /// The observed grid itself, for the form's save/cancel actions (the JSON view has no field
+    /// inputs to read from).
+    form_grid_entity: Option<WeakEntity<GridView>>,
+    /// The page row the form is showing, captured on every form render.
+    form_row_index: Option<usize>,
     /// The row form's editors while a table row is selected.
     form: Option<FormState>,
+    /// Which representation the form shows. A document-store connection starts on JSON because
+    /// that is the row's real shape; the field view stays one click away.
+    form_mode: FormMode,
+    /// The JSON view's editor, created on its first render.
+    form_json_editor: Option<Entity<ui::SqlEditor>>,
+    /// The editor's live text, mirrored on every keystroke so the form can stage it per row.
+    form_json_text: String,
+    /// The page row the editor currently belongs to.
+    form_json_row: Option<usize>,
+    /// The document text the editor was last synchronized with, so typing is never overwritten.
+    form_json_loaded: Option<String>,
     /// The form field whose inline date/time picker is open, if any.
     form_picker: Option<FormPicker>,
     /// The form's multi-line editor being resized: `(col, pointer y at start, height at start)`.
@@ -391,7 +416,14 @@ impl InfoPane {
             _subscription: subscription,
             _tree_subscription: tree_subscription,
             form_grid: None,
+            form_grid_entity: None,
+            form_row_index: None,
             form: None,
+            form_mode: FormMode::Fields,
+            form_json_editor: None,
+            form_json_text: String::new(),
+            form_json_row: None,
+            form_json_loaded: None,
             form_picker: None,
             form_resize: None,
         }
@@ -432,8 +464,10 @@ impl InfoPane {
         };
         if form_open {
             self.sync_form_grid(grid.as_ref(), cx);
+            let row = grid.as_ref().and_then(|grid| form_row(grid, cx));
+            self.form_row_index = row;
             if let Some(grid) = grid.as_ref()
-                && let Some(row) = form_row(grid, cx)
+                && let Some(row) = row
                 && let Some(body) = self.form_body(app_entity, grid, row, window, cx)
             {
                 // The form keeps its header fixed and scrolls only its field list.
@@ -481,10 +515,21 @@ impl InfoPane {
         self.form = None;
         self.form_picker = None;
         self.form_resize = None;
+        self.form_json_loaded = None;
+        if let Some(grid) = grid {
+            // A document-store grid opens on the JSON view (the row is a document); other
+            // engines keep the per-field form.
+            self.form_mode = if grid.entity.read(cx).state.documents {
+                FormMode::Json
+            } else {
+                FormMode::Fields
+            };
+        }
         self.form_grid = grid.map(|grid| {
             let subscription = cx.observe(&grid.entity, |_, _, cx| cx.notify());
             (grid.id, subscription)
         });
+        self.form_grid_entity = grid.map(|grid| grid.entity.downgrade());
     }
 
     /// Build the editable form for the selected row, or `None` when there is nothing to show yet
@@ -501,13 +546,35 @@ impl InfoPane {
             let app = app_entity.read(cx);
             (app.theme, app.grid_show_types, app.grid_show_comments)
         };
+        let (documents, table, dirty) = {
+            let view = grid.entity.read(cx);
+            (
+                view.state.documents,
+                view.state.table.clone(),
+                view.has_pending_changes(),
+            )
+        };
+        if !documents {
+            // Only a document store has a JSON representation of a row.
+            self.form_mode = FormMode::Fields;
+        }
+        if documents && self.form_mode == FormMode::Json {
+            return self.json_form_body(
+                app_entity,
+                grid,
+                row,
+                theme,
+                show_types,
+                show_comments,
+                dirty,
+                cx,
+            );
+        }
         let view = grid.entity.read(cx);
         let state = &view.state;
         if row >= state.rows.len() || state.visible_columns == 0 {
             return None;
         }
-        let dirty = view.has_pending_changes();
-        let table = state.table.clone();
         let values = &state.rows[row];
         let fields: Vec<FormField> = (0..state.visible_columns)
             .filter_map(|col| {
@@ -611,15 +678,167 @@ impl InfoPane {
             show_types,
             show_comments,
             dirty,
+            documents,
+            mode: FormMode::Fields,
         };
         let weak = cx.weak_entity();
         Some(render_row_form(
             &style,
-            &fields,
-            form,
-            self.form_picker.as_ref(),
+            FormBody::Fields {
+                fields: &fields,
+                form,
+                picker: self.form_picker.as_ref(),
+            },
             &weak,
         ))
+    }
+
+    /// The document-store view of the row form: the selected row as one JSON document, loaded by
+    /// its primary key and saved as a whole. Only reached while [`FormMode::Json`] is selected.
+    #[allow(clippy::too_many_arguments)]
+    fn json_form_body(
+        &mut self,
+        app_entity: &Entity<AppView>,
+        grid: &FormGrid,
+        row: usize,
+        theme: Theme,
+        show_types: bool,
+        show_comments: bool,
+        dirty: bool,
+        cx: &mut Context<'_, Self>,
+    ) -> Option<AnyElement> {
+        grid.entity
+            .update(cx, |grid, cx| grid.ensure_row_document(row, cx));
+        let (documents, document, staged, loading, error, table) = {
+            let view = grid.entity.read(cx);
+            (
+                view.state.documents,
+                view.state.document_json.clone(),
+                view.state.document_edits.get(&row).cloned(),
+                view.state.document_loading,
+                view.state.document_error.clone(),
+                view.state.table.clone(),
+            )
+        };
+        if !documents {
+            return None;
+        }
+        let editor = self.form_json_editor(app_entity, cx);
+        // The editor follows the row: a staged edit wins over the stored text, and a refreshed
+        // document replaces the text only while no edit is staged for this row.
+        if let Some(target) = staged.clone().or(document.clone()) {
+            let row_changed = self.form_json_row != Some(row);
+            let document_changed =
+                staged.is_none() && self.form_json_loaded.as_deref() != Some(target.as_str());
+            if row_changed || document_changed {
+                editor.update(cx, |editor, cx| editor.set_text(target.clone(), cx));
+                self.form_json_loaded = Some(target.clone());
+                self.form_json_text = target;
+            }
+        }
+        self.form_json_row = Some(row);
+        let dirty = dirty || self.document_is_dirty(&editor, document.as_deref(), cx);
+        let style = FormStyle {
+            theme,
+            table: &table,
+            width: self.width,
+            show_types,
+            show_comments,
+            dirty,
+            documents: true,
+            mode: FormMode::Json,
+        };
+        let weak = cx.weak_entity();
+        Some(render_row_form(
+            &style,
+            FormBody::Json {
+                editor,
+                loading,
+                error: error.as_deref(),
+            },
+            &weak,
+        ))
+    }
+
+    /// Switch the form between its field editors and the whole-document JSON view. A pending edit
+    /// in the current view blocks the switch: the two representations cannot both be staged
+    /// without one overwriting the other.
+    fn set_form_mode(&mut self, mode: FormMode, cx: &mut Context<'_, Self>) {
+        if mode == self.form_mode {
+            return;
+        }
+        let dirty = self
+            .form_grid_entity
+            .as_ref()
+            .and_then(|grid| grid.upgrade())
+            .is_some_and(|grid| grid.read(cx).has_pending_changes());
+        if dirty {
+            if let Some(app) = self.app.upgrade() {
+                app.update(cx, |app, cx| {
+                    app.toast(ToastKind::Info, t!("info.form.save_first").to_string(), cx)
+                });
+            }
+            return;
+        }
+        self.form_mode = mode;
+        cx.notify();
+    }
+
+    /// The JSON view's editor, created on first use with the app's editor font and the JSON
+    /// grammar (the same read-only previews use).
+    fn form_json_editor(
+        &mut self,
+        app_entity: &Entity<AppView>,
+        cx: &mut Context<'_, Self>,
+    ) -> Entity<ui::SqlEditor> {
+        if let Some(editor) = self.form_json_editor.clone() {
+            return editor;
+        }
+        let (font, size) = {
+            let app = app_entity.read(cx);
+            (app.editor_font(), app.editor_font_size())
+        };
+        let weak = cx.weak_entity();
+        let editor = cx.new(|cx| {
+            ui::SqlEditor::new(cx)
+                .options(ui::SqlEditorOptions {
+                    language: "json".into(),
+                    font_family: font.into(),
+                    font_size: size,
+                    line_number: true,
+                    readonly: false,
+                })
+                .on_change(Rc::new(move |text, cx| {
+                    let _ = weak.update(cx, |pane, cx| pane.on_json_editor_changed(text, cx));
+                }))
+        });
+        self.form_json_editor = Some(editor.clone());
+        editor
+    }
+
+    /// Mirror the JSON editor's text: notify this pane for the dirty state and stage the text on
+    /// the current row so switching rows (or tabs) does not lose it.
+    fn on_json_editor_changed(&mut self, text: &str, cx: &mut Context<'_, Self>) {
+        self.form_json_text = text.to_string();
+        if let Some(row) = self.form_json_row
+            && let Some(grid) = self
+                .form_grid_entity
+                .as_ref()
+                .and_then(|grid| grid.upgrade())
+        {
+            grid.update(cx, |grid, _cx| grid.stage_document_edit(row, text));
+        }
+        cx.notify();
+    }
+
+    /// Whether the JSON editor differs from the stored document.
+    fn document_is_dirty(
+        &self,
+        editor: &Entity<ui::SqlEditor>,
+        stored: Option<&str>,
+        cx: &App,
+    ) -> bool {
+        stored.is_some_and(|stored| editor.read(cx).live_text(cx) != stored)
     }
 
     /// Drop an open form date/time picker. Used when the form is closed while the pane is not in
@@ -634,6 +853,25 @@ impl InfoPane {
     /// change callback is dispatched on the wrapper's next render, so the grid may not have seen
     /// the last keystroke yet), then save through the grid's normal commit path.
     fn save_form(&mut self, cx: &mut Context<'_, Self>) {
+        if self.form_mode == FormMode::Json {
+            let Some(grid) = self
+                .form_grid_entity
+                .as_ref()
+                .and_then(|grid| grid.upgrade())
+            else {
+                return;
+            };
+            let Some(row) = self.form_row_index else {
+                return;
+            };
+            let Some(editor) = self.form_json_editor.clone() else {
+                return;
+            };
+            let text = editor.read(cx).live_text(cx);
+            grid.update(cx, |grid, cx| grid.save_row_document(row, text, cx));
+            cx.notify();
+            return;
+        }
         let Some(form) = self.form.as_ref() else {
             return;
         };
@@ -659,6 +897,26 @@ impl InfoPane {
     /// The form header's 回滚: discard every pending edit (the form and the grid share one staged
     /// edit set) and close the form with the grid's own rollback.
     fn cancel_form(&mut self, cx: &mut Context<'_, Self>) {
+        if self.form_mode == FormMode::Json {
+            let Some(grid) = self
+                .form_grid_entity
+                .as_ref()
+                .and_then(|grid| grid.upgrade())
+            else {
+                return;
+            };
+            let document = grid.read(cx).state.document_json.clone();
+            if let (Some(editor), Some(document)) = (self.form_json_editor.clone(), document) {
+                editor.update(cx, |editor, cx| editor.set_text(document.clone(), cx));
+                self.form_json_text = document.clone();
+                self.form_json_loaded = Some(document);
+            }
+            if let Some(row) = self.form_row_index {
+                grid.update(cx, |grid, cx| grid.cancel_document_edit(row, cx));
+            }
+            cx.notify();
+            return;
+        }
         let Some(form) = self.form.as_ref() else {
             return;
         };
@@ -2081,16 +2339,34 @@ struct FormStyle<'a> {
     /// Whether the grid has something to save or discard; the header's buttons colour up while
     /// it does.
     dirty: bool,
+    /// Whether the row can be shown as one document (document stores).
+    documents: bool,
+    /// Which representation this form is rendering; drives the 表单 / JSON chips.
+    mode: FormMode,
 }
 
-/// The row form: a compact title (table and 表单 badge) over one block per field. The right pane is
-/// narrow, so each field puts `字段 · 类型 · 注释` on one line with its editor underneath instead of
-/// Navicat's three columns.
+/// What the form shows below its header.
+enum FormBody<'a> {
+    /// One editor per column.
+    Fields {
+        fields: &'a [FormField],
+        form: &'a FormState,
+        picker: Option<&'a FormPicker>,
+    },
+    /// The selected row as one JSON document (document stores only).
+    Json {
+        editor: Entity<ui::SqlEditor>,
+        loading: bool,
+        error: Option<&'a str>,
+    },
+}
+
+/// The row form: a compact title (table and a 表单 / JSON switch) over either the per-field editors
+/// or the whole selected document as JSON. The right pane is narrow, so each field puts
+/// `字段 · 类型 · 注释` on one line with its editor underneath instead of Navicat's three columns.
 fn render_row_form(
     style: &FormStyle<'_>,
-    fields: &[FormField],
-    form: &FormState,
-    picker: Option<&FormPicker>,
+    body: FormBody<'_>,
     pane: &WeakEntity<InfoPane>,
 ) -> AnyElement {
     let theme = style.theme;
@@ -2160,34 +2436,145 @@ fn render_row_form(
             )
             .tooltip(ui::text_tooltip(t!("info.form.rollback").to_string())),
         )
-        .child(
-            div()
-                .flex_none()
-                .px_2()
-                .py_0p5()
-                .rounded_sm()
-                .bg(rgb(theme.button_bg))
-                .text_size(px(10.0))
-                .text_color(rgb(theme.text_muted))
-                .child(t!("info.form").to_string()),
-        );
+        .child({
+            // A document store can show the same row as fields or as one JSON document; other
+            // engines keep the single 表单 badge.
+            let mut chips = div().flex().flex_row().items_center().gap_1();
+            if style.documents {
+                for (id, label, mode) in [
+                    (
+                        "info-form-mode-fields",
+                        t!("info.form").to_string(),
+                        FormMode::Fields,
+                    ),
+                    ("info-form-mode-json", "JSON".to_string(), FormMode::Json),
+                ] {
+                    let active = style.mode == mode;
+                    let weak = pane.clone();
+                    chips = chips.child(
+                        div()
+                            .id(id)
+                            .flex_none()
+                            .px_2()
+                            .py_0p5()
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .text_size(px(10.0))
+                            .when(active, move |chip| {
+                                chip.bg(rgb(theme.button_bg))
+                                    .text_color(rgb(theme.text))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                            })
+                            .when(!active, move |chip| {
+                                chip.text_color(rgb(theme.text_muted))
+                                    .hover(move |style| style.text_color(rgb(theme.text)))
+                            })
+                            .on_click(move |_event, _window, cx| {
+                                let _ = weak.update(cx, |pane, cx| pane.set_form_mode(mode, cx));
+                            })
+                            .child(label),
+                    );
+                }
+            } else {
+                chips = chips.child(
+                    div()
+                        .flex_none()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_sm()
+                        .bg(rgb(theme.button_bg))
+                        .text_size(px(10.0))
+                        .text_color(rgb(theme.text_muted))
+                        .child(t!("info.form").to_string()),
+                );
+            }
+            chips
+        });
 
-    let mut list = div().flex().flex_col().w_full();
-    for (index, field) in fields.iter().enumerate() {
-        list = list.child(render_form_field(
-            style,
-            index,
-            field,
-            form.inputs.get(index),
-            form.heights
-                .get(index)
-                .copied()
-                .unwrap_or(FORM_INPUT_HEIGHT),
-            form.json_formatted.get(index).copied().unwrap_or(false),
-            picker.filter(|picker| picker.col == index),
-            pane,
-        ));
-    }
+    let content: AnyElement = match body {
+        FormBody::Fields {
+            fields,
+            form,
+            picker,
+        } => {
+            let mut list = div().flex().flex_col().w_full();
+            for (index, field) in fields.iter().enumerate() {
+                list = list.child(render_form_field(
+                    style,
+                    index,
+                    field,
+                    form.inputs.get(index),
+                    form.heights
+                        .get(index)
+                        .copied()
+                        .unwrap_or(FORM_INPUT_HEIGHT),
+                    form.json_formatted.get(index).copied().unwrap_or(false),
+                    picker.filter(|picker| picker.col == index),
+                    pane,
+                ));
+            }
+            div()
+                .id("info-form-fields")
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h(px(0.0))
+                .w_full()
+                .overflow_y_scroll()
+                .child(div().flex().flex_col().w_full().px_3().child(list))
+                .into_any_element()
+        }
+        FormBody::Json {
+            editor,
+            loading,
+            error,
+        } => {
+            let mut body = div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h(px(0.0))
+                .w_full()
+                .px_3()
+                .py_2()
+                .gap_1();
+            if let Some(error) = error {
+                body = body.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(11.0))
+                        .text_color(rgb(theme.danger))
+                        .child(error.to_string()),
+                );
+            }
+            if loading {
+                body = body.child(
+                    div()
+                        .flex()
+                        .flex_1()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(12.0))
+                        .text_color(rgb(theme.text_muted))
+                        .child(t!("common.loading").to_string()),
+                );
+            } else {
+                body = body.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_h(px(0.0))
+                        .border_1()
+                        .border_color(rgb(theme.border))
+                        .rounded_md()
+                        .overflow_hidden()
+                        .child(editor),
+                );
+            }
+            body.into_any_element()
+        }
+    };
 
     div()
         .key_context(ROW_FORM_CONTEXT)
@@ -2213,17 +2600,7 @@ fn render_row_form(
                 .bg(rgb(theme.editor_bg))
                 .child(title),
         )
-        .child(
-            div()
-                .id("info-form-fields")
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_h(px(0.0))
-                .w_full()
-                .overflow_y_scroll()
-                .child(div().flex().flex_col().w_full().px_3().child(list)),
-        )
+        .child(content)
         .into_any_element()
 }
 

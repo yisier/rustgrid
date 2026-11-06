@@ -746,6 +746,71 @@ impl Connection for MongoConnection {
         Ok(())
     }
 
+    async fn row_document(
+        &self,
+        database: &str,
+        table: &str,
+        keys: &[(String, Option<String>)],
+    ) -> Result<Option<String>> {
+        let columns = self.schema(database, table).await?;
+        let filter = Self::key_document(keys, &columns);
+        if filter.is_empty() {
+            return Err(Error::Query("缺少定位文档的 _id。".into()));
+        }
+        let document = self
+            .collection(database, table)
+            .find_one(filter)
+            .await
+            .map_err(query_error)?;
+        Ok(document.map(|document| value::pretty_json(&Bson::Document(document))))
+    }
+
+    async fn replace_row_document(
+        &self,
+        database: &str,
+        table: &str,
+        keys: &[(String, Option<String>)],
+        document: &str,
+    ) -> Result<()> {
+        self.ensure_writable()?;
+        let columns = self.schema(database, table).await?;
+        let filter = Self::key_document(keys, &columns);
+        if filter.is_empty() {
+            return Err(Error::Query("缺少定位文档的 _id。".into()));
+        }
+        let parsed = value::parse_json(document).map_err(Error::Query)?;
+        let Bson::Document(mut replacement) = parsed else {
+            return Err(Error::Query(
+                "一条 MongoDB 文档必须是一个 JSON 对象。".into(),
+            ));
+        };
+        // The identity is part of the row, not something the JSON editor may rewrite.
+        if let Some(identity) = filter.get("_id") {
+            match replacement.get("_id") {
+                Some(existing) if existing != identity => {
+                    return Err(Error::Query("_id 不可修改：请保持原值。".into()));
+                }
+                Some(_) => {}
+                None => {
+                    replacement.insert("_id", identity.clone());
+                }
+            }
+        }
+        let result = self
+            .collection(database, table)
+            .replace_one(filter, replacement)
+            .await
+            .map_err(query_error)?;
+        if result.matched_count == 0 {
+            return Err(Error::Query(
+                "该文档已不存在（可能已被删除或过滤掉）。".into(),
+            ));
+        }
+        // A replaced document may add or remove fields; rebuild the sampled column set.
+        self.forget(database, table);
+        Ok(())
+    }
+
     async fn execute_query(&self, database: Option<&str>, sql: &str) -> Result<QueryResult> {
         self.run_json(database, sql).await
     }

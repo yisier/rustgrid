@@ -911,6 +911,8 @@ fn field_permutation(current_order: &[usize], next_order: &[usize], count: usize
         .collect()
 }
 
+/// The engine-agnostic state of one grid tab: the loaded page, the pending edits, and the
+/// presentation state (selection, filters, sort, field layout).
 pub struct GridState {
     pub id: u64,
     pub connection: Arc<dyn Connection>,
@@ -927,6 +929,21 @@ pub struct GridState {
     /// The key-value object's overview (type / TTL / memory), when this grid shows a key. `None`
     /// for SQL tables and query results.
     pub key_status: Option<rustgrid_core::TableStatus>,
+    /// Whether this grid's connection is a document store (MongoDB). The row form then offers the
+    /// JSON view, which shows the selected row as one document instead of per-field editors.
+    pub documents: bool,
+    /// The selected row's full document, as pretty JSON (document stores only). Loaded on demand
+    /// by the row form because the grid's columns are only a sample of the document's fields.
+    pub document_json: Option<String>,
+    /// The row key `document_json` was loaded for, so a selection change reloads it.
+    pub document_key: Option<String>,
+    /// Whether a document fetch is in flight.
+    pub document_loading: bool,
+    /// The last document fetch/save error, shown above the JSON editor.
+    pub document_error: Option<String>,
+    /// Unsaved JSON edits per page row (document stores). Like `edits`, they stay staged while the
+    /// user moves around the page and are dropped by a reload.
+    pub document_edits: BTreeMap<usize, String>,
     pub page_index: u64,
     pub page_size: u64,
     pub loading: bool,

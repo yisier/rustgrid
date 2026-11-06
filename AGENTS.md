@@ -98,8 +98,11 @@ not a later refactor.
   sample, and one document is one grid row. `_id` is the primary key, so grid edits become `$set`,
   insert/delete are keyed by it and a `_id` edit is ignored (immutable). Scalars keep their
   `CellValue` shape where possible; ObjectId/decimal/date/binary and embedded documents/arrays are
-  text/Extended JSON and are parsed back through the column's BSON type (`value.rs`), so the
-  existing row form shows embedded documents in its JSON editor. The filter tree is translated to a
+  text/Extended JSON and are parsed back through the column's BSON type (`value.rs`). The row form
+  has a **表单 / JSON switch**: JSON (the MongoDB default) loads the selected row's whole document
+  through `Connection::row_document` and replaces it with `replace_row_document`, so fields outside
+  the sampled columns can be edited; edits are staged per row (`GridState::document_edits`) and the
+  switch is blocked while either view has unsaved changes. The filter tree is translated to a
   query document (`filter.rs`), sorting/paging use `skip`/`limit` with an `_id` tie-breaker. The
   query tab runs **one JSON command** (`find`, `aggregate`, `count`, `distinct`, `listCollections`,
   `listDatabases`, otherwise `runCommand`) instead of JavaScript, and its grids are read-only

@@ -367,6 +367,37 @@ pub trait Connection: Send + Sync {
         keys: &[Vec<(String, Option<String>)>],
     ) -> Result<()>;
 
+    /// The full document behind one row, as text, for a **document-store** engine (MongoDB).
+    ///
+    /// The grid's columns are only a projection of the fields a sample found; this is the
+    /// authoritative row, which the row form shows in its JSON view and lets the user edit as a
+    /// whole (including fields the sample never saw). `keys` uses the same shape as
+    /// [`Connection::delete_rows`]. Engines whose rows are not documents keep the default `None`
+    /// and the form never offers that view.
+    async fn row_document(
+        &self,
+        _database: &str,
+        _table: &str,
+        _keys: &[(String, Option<String>)],
+    ) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    /// Replace the document identified by `keys` with `document` (text in the same shape
+    /// [`Connection::row_document`] returned). The identity columns may not change and a document
+    /// may add or remove other fields. Only document-store engines implement it.
+    async fn replace_row_document(
+        &self,
+        _database: &str,
+        _table: &str,
+        _keys: &[(String, Option<String>)],
+        _document: &str,
+    ) -> Result<()> {
+        Err(Error::Query(
+            "This engine cannot replace a row from a JSON document.".into(),
+        ))
+    }
+
     /// Run an arbitrary SQL statement (or script) in the context of `database`, if given.
     ///
     /// Implementations must use the text protocol so that DDL and other statements that

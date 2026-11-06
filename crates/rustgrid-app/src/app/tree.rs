@@ -1726,6 +1726,7 @@ impl AppView {
             .as_ref()
             .and_then(|status| status.engine.as_deref())
             .is_some_and(|kind| matches!(kind, "stream" | "json"));
+        let documents = self.driver_supports(connection_index, DriverCapability::Documents);
         let id = self.next_grid_id;
         self.next_grid_id += 1;
         // For a key grid whose overview was not loaded yet (e.g. a restored session), fetch it
@@ -1746,6 +1747,12 @@ impl AppView {
             table,
             is_view,
             key_status,
+            documents,
+            document_json: None,
+            document_key: None,
+            document_loading: false,
+            document_error: None,
+            document_edits: BTreeMap::new(),
             page_index: 0,
             page_size: self.page_size,
             loading: false,

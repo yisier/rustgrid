@@ -107,6 +107,7 @@ impl GridView {
             key_string_dirty: false,
             key_string_saving: false,
             key_string_error: None,
+            document_request: None,
             inserts: Vec::new(),
             column_resize: None,
             sort_hover: None,
