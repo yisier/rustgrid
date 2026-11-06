@@ -91,12 +91,20 @@ database and its reply is rendered as one row. Extended JSON (`{"$oid": …}`, `
 
 `DriverCapability::Documents` + `DatabaseManagement`:
 
-- No table designer, no `.rgbak` backup, no users/roles/routines, no Views category (collection
-  views are listed among the collections themselves).
-- `create_database` reports that MongoDB creates a database on the first write; collections are
-  created with `{"create": "name"}` in the query tab until a document-specific designer exists.
+- The UI calls the objects **集合** (collections) everywhere: the ribbon tab, the tree category, the
+  object toolbar and the tab title. The SQL table designer is not used; **新建集合 / 设计集合**
+  open a collection dialog with the name and the validator (`$jsonSchema` or query text) plus
+  MongoDB's validation level (`off`/`strict`/`moderate`) and action (`warn`/`error`). A rename is
+  applied first, then the validator (`collMod`). Creating a collection goes through
+  `Connection::create_collection`; reading/altering one through `collection_definition` /
+  `alter_collection`.
+- No `.rgbak` backup, no users/roles/routines, no Views category (collection views are listed among
+  the collections themselves).
+- `create_database` reports that MongoDB creates a database on the first write; an empty collection
+  can also be created from the query tab with `{"create": "name"}`.
 - Import/export wizards run through the generic `fetch_page`/`insert_rows` path for existing
-  collections; creating a table from the import wizard is not supported (it needs the SQL designer).
+  collections; creating a collection from the import wizard is not supported (it needs the SQL
+  designer).
 
 ## Live test
 

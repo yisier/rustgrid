@@ -622,11 +622,19 @@ impl Render for TabBar {
                     if grid.state.sql.is_some() {
                         return None;
                     }
-                    let kind = t!(if grid.state.is_view {
-                        "common.view"
+                    let kind = if grid.state.documents {
+                        t!(if grid.state.is_view {
+                            "common.view"
+                        } else {
+                            "common.collection"
+                        })
                     } else {
-                        "common.table"
-                    })
+                        t!(if grid.state.is_view {
+                            "common.view"
+                        } else {
+                            "common.table"
+                        })
+                    }
                     .to_string();
                     let is_key = grid.state.key_status.is_some();
                     let title = if is_key {

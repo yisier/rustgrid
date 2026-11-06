@@ -43,6 +43,8 @@ impl AppView {
             Some(DialogKind::Schema)
         } else if self.create_table_dialog.is_some() {
             Some(DialogKind::CreateTable)
+        } else if self.collection_dialog.is_some() {
+            Some(DialogKind::Collection)
         } else if self.password_prompt.is_some() {
             Some(DialogKind::Password)
         } else if self.save_query_dialog.is_some() {
@@ -77,6 +79,7 @@ impl AppView {
             Some(DialogKind::DbDialog) => self.open_db_dialog(window, cx),
             Some(DialogKind::Schema) => self.open_schema_dialog(window, cx),
             Some(DialogKind::CreateTable) => self.open_create_table_modal(window, cx),
+            Some(DialogKind::Collection) => self.open_collection_modal(window, cx),
             Some(DialogKind::Password) => self.open_password_prompt(window, cx),
             Some(DialogKind::SaveQuery) => self.open_save_query_dialog(window, cx),
             Some(DialogKind::Error) => self.open_error_dialog(window, cx),
@@ -1947,15 +1950,30 @@ impl AppView {
                 )
             }
             Some(DeleteConfirm::Table {
-                name, operation, ..
+                connection_index,
+                name,
+                operation,
+                ..
             }) => {
-                let (title_key, message_key, button_key) = match operation {
-                    TableOperation::Empty => (
+                let documents =
+                    self.driver_supports(*connection_index, DriverCapability::Documents);
+                let (title_key, message_key, button_key) = match (operation, documents) {
+                    (TableOperation::Empty, true) => (
+                        "object.empty_collection",
+                        "object.empty_collection_confirm",
+                        "object.empty_collection_button",
+                    ),
+                    (TableOperation::Truncate, true) => (
+                        "object.truncate_collection",
+                        "object.truncate_collection_confirm",
+                        "object.truncate_collection_button",
+                    ),
+                    (TableOperation::Empty, false) => (
                         "object.empty_table",
                         "object.empty_confirm",
                         "object.empty_button",
                     ),
-                    TableOperation::Truncate => (
+                    (TableOperation::Truncate, false) => (
                         "object.truncate_table",
                         "object.truncate_confirm",
                         "object.truncate_button",
@@ -1979,6 +1997,12 @@ impl AppView {
                         t!("redis.key.delete_confirm", count = count).to_string(),
                         t!("redis.key.delete_button", count = count).to_string(),
                     )
+                } else if self.driver_supports(*connection_index, DriverCapability::Documents) {
+                    (
+                        t!("object.delete_tables_title").to_string(),
+                        t!("object.drop_collections_confirm", count = count).to_string(),
+                        t!("object.drop_collections_button", count = count).to_string(),
+                    )
                 } else {
                     (
                         t!("object.delete_tables_title").to_string(),
@@ -1988,16 +2012,31 @@ impl AppView {
                 }
             }
             Some(DeleteConfirm::TablesOperation {
-                names, operation, ..
+                connection_index,
+                names,
+                operation,
+                ..
             }) => {
                 let count = names.len();
-                let (title, message, button) = match operation {
-                    TableOperation::Empty => (
+                let documents =
+                    self.driver_supports(*connection_index, DriverCapability::Documents);
+                let (title, message, button) = match (operation, documents) {
+                    (TableOperation::Empty, true) => (
+                        "object.empty_collection",
+                        "object.empty_collections_confirm",
+                        "object.empty_collections_button",
+                    ),
+                    (TableOperation::Truncate, true) => (
+                        "object.truncate_collection",
+                        "object.truncate_collections_confirm",
+                        "object.truncate_collections_button",
+                    ),
+                    (TableOperation::Empty, false) => (
                         "object.empty_table",
                         "object.empty_tables_confirm",
                         "object.empty_tables_button",
                     ),
-                    TableOperation::Truncate => (
+                    (TableOperation::Truncate, false) => (
                         "object.truncate_table",
                         "object.truncate_tables_confirm",
                         "object.truncate_tables_button",

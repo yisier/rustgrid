@@ -28,13 +28,13 @@ pub use driver::{
 };
 pub use error::{Error, Result};
 pub use model::{
-    BackupObjectKind, CellValue, CheckDef, ColumnDef, ColumnInfo, ConnectionConfig,
-    ConnectionProfile, DatabaseInfo, DatabaseOptions, DriverId, ExcludeDef, FilterCondition,
-    FilterConjunction, FilterGroup, FilterNode, FilterOperator, ForeignKeyDef, IndexColumnDef,
-    IndexDef, ObjectCreate, ObjectDump, ObjectKind, ObjectNamespace, PageRequest, QueryResult,
-    RowInsert, RowUpdate, RuleDef, SavedBackup, SavedBackupSelection, SavedQuery, SavedTransfer,
-    SortColumn, TableInfo, TableOptions, TablePage, TableSchema, TableStatus, TransferMode,
-    TriggerDef, UniqueKeyDef,
+    BackupObjectKind, CellValue, CheckDef, CollectionDefinition, ColumnDef, ColumnInfo,
+    ConnectionConfig, ConnectionProfile, DatabaseInfo, DatabaseOptions, DriverId, ExcludeDef,
+    FilterCondition, FilterConjunction, FilterGroup, FilterNode, FilterOperator, ForeignKeyDef,
+    IndexColumnDef, IndexDef, ObjectCreate, ObjectDump, ObjectKind, ObjectNamespace, PageRequest,
+    QueryResult, RowInsert, RowUpdate, RuleDef, SavedBackup, SavedBackupSelection, SavedQuery,
+    SavedTransfer, SortColumn, TableInfo, TableOptions, TablePage, TableSchema, TableStatus,
+    TransferMode, TriggerDef, UniqueKeyDef,
 };
 pub use options::{ConnectionOptions, TlsMode, TlsOptions, TunnelAuth, TunnelKind, TunnelLayer};
 pub use portable::{LogicalType, map_schema, map_table_name};

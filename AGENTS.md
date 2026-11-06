@@ -107,8 +107,10 @@ not a later refactor.
   query tab runs **one JSON command** (`find`, `aggregate`, `count`, `distinct`, `listCollections`,
   `listDatabases`, otherwise `runCommand`) instead of JavaScript, and its grids are read-only
   because no SQL table can be inferred. TLS, SSH/SOCKS5/HTTP tunnels, SCRAM/None authentication and
-  the auth database come from the standard connection form; there is no table designer, `.rgbak`
-  backup, users/roles or Views category. See `docs/mongodb-driver.md`.
+  the auth database come from the standard connection form. The UI names its objects **集合** and
+  replaces the SQL table designer with a collection dialog (name + validator + validation
+  level/action) wired to `collection_definition`/`create_collection`/`alter_collection`; there is
+  no `.rgbak` backup, users/roles, routines or Views category. See `docs/mongodb-driver.md`.
 - `crates/rustgrid-tunnel` — the shared **SSH / SOCKS5 / HTTP** tunnel (local port forwarding) used
   by the network drivers (`rustgrid-mysql`, `rustgrid-postgresql`, `rustgrid-oracle`,
   `rustgrid-sqlserver`, `rustgrid-redis` in standalone mode, `rustgrid-mongodb`). Migrated out of

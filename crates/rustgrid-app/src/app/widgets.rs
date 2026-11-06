@@ -615,6 +615,7 @@ impl AppView {
                 let export_name = name.clone();
                 let import_target = name.clone();
                 let key_value = self.driver_supports(ci, DriverCapability::KeyValue);
+                let documents = self.driver_supports(ci, DriverCapability::Documents);
 
                 items = items.child(
                     self.context_item(
@@ -623,6 +624,8 @@ impl AppView {
                             "view.open"
                         } else if key_value {
                             "redis.key.open"
+                        } else if documents {
+                            "object.open_collection"
                         } else {
                             "object.open_table"
                         })
@@ -679,6 +682,16 @@ impl AppView {
                                 this.confirm_delete_view(ci, di, view_drop_name.clone(), cx);
                             }),
                         ));
+                } else if documents {
+                    // A document store designs a collection (name + validator), not a SQL table.
+                    items = items.child(self.context_item(
+                        "table-design",
+                        t!("object.design_collection").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.open_design_collection(ci, di, design_name.clone(), cx);
+                        }),
+                    ));
                 } else if self.driver_supports_table_designer(ci) {
                     items = items.child(self.context_item(
                         "table-design",
@@ -773,115 +786,143 @@ impl AppView {
                             }),
                         ))
                         .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
-                        .child(self.context_item(
-                            "table-drop",
-                            t!("object.delete_table").to_string(),
-                            cx.listener(move |this, _event, _window, cx| {
-                                this.context_menu = None;
-                                // Drop every selected table, not just the right-clicked one (when
-                                // the clicked row is part of the multi-selection).
-                                let selected = this.objects_selection.contains(&drop_name);
-                                let mut names = if selected {
-                                    this.objects_selection.items()
+                        .child(
+                            self.context_item(
+                                "table-drop",
+                                t!(if documents {
+                                    "object.delete_collection"
                                 } else {
-                                    Vec::new()
-                                };
-                                if names.is_empty() {
-                                    names.push(drop_name.clone());
-                                }
-                                this.delete_confirm = Some(DeleteConfirm::Tables {
-                                    connection_index: ci,
-                                    database_index: di,
-                                    names,
-                                });
-                                cx.notify();
-                            }),
-                        ))
-                        .child(self.context_item(
-                            "table-empty",
-                            t!("object.empty_table").to_string(),
-                            cx.listener(move |this, _event, _window, cx| {
-                                this.context_menu = None;
-                                let selected = pane == RowPane::Objects
-                                    && this.objects_selection.contains(&empty_name);
-                                let mut names = if selected {
-                                    this.objects_selection.items()
-                                } else {
-                                    Vec::new()
-                                };
-                                if names.is_empty() {
-                                    names.push(empty_name.clone());
-                                }
-                                this.delete_confirm = Some(if names.len() == 1 {
-                                    DeleteConfirm::Table {
-                                        connection_index: ci,
-                                        database_index: di,
-                                        name: names.remove(0),
-                                        operation: TableOperation::Empty,
+                                    "object.delete_table"
+                                })
+                                .to_string(),
+                                cx.listener(move |this, _event, _window, cx| {
+                                    this.context_menu = None;
+                                    // Drop every selected table, not just the right-clicked one (when
+                                    // the clicked row is part of the multi-selection).
+                                    let selected = this.objects_selection.contains(&drop_name);
+                                    let mut names = if selected {
+                                        this.objects_selection.items()
+                                    } else {
+                                        Vec::new()
+                                    };
+                                    if names.is_empty() {
+                                        names.push(drop_name.clone());
                                     }
-                                } else {
-                                    DeleteConfirm::TablesOperation {
+                                    this.delete_confirm = Some(DeleteConfirm::Tables {
                                         connection_index: ci,
                                         database_index: di,
                                         names,
-                                        operation: TableOperation::Empty,
-                                    }
-                                });
-                                cx.notify();
-                            }),
-                        ))
-                        .child(self.context_item(
-                            "table-truncate",
-                            t!("object.truncate_table").to_string(),
-                            cx.listener(move |this, _event, _window, cx| {
-                                this.context_menu = None;
-                                let selected = pane == RowPane::Objects
-                                    && this.objects_selection.contains(&truncate_name);
-                                let mut names = if selected {
-                                    this.objects_selection.items()
+                                    });
+                                    cx.notify();
+                                }),
+                            ),
+                        )
+                        .child(
+                            self.context_item(
+                                "table-empty",
+                                t!(if documents {
+                                    "object.empty_collection"
                                 } else {
-                                    Vec::new()
-                                };
-                                if names.is_empty() {
-                                    names.push(truncate_name.clone());
-                                }
-                                this.delete_confirm = Some(if names.len() == 1 {
-                                    DeleteConfirm::Table {
-                                        connection_index: ci,
-                                        database_index: di,
-                                        name: names.remove(0),
-                                        operation: TableOperation::Truncate,
+                                    "object.empty_table"
+                                })
+                                .to_string(),
+                                cx.listener(move |this, _event, _window, cx| {
+                                    this.context_menu = None;
+                                    let selected = pane == RowPane::Objects
+                                        && this.objects_selection.contains(&empty_name);
+                                    let mut names = if selected {
+                                        this.objects_selection.items()
+                                    } else {
+                                        Vec::new()
+                                    };
+                                    if names.is_empty() {
+                                        names.push(empty_name.clone());
                                     }
+                                    this.delete_confirm = Some(if names.len() == 1 {
+                                        DeleteConfirm::Table {
+                                            connection_index: ci,
+                                            database_index: di,
+                                            name: names.remove(0),
+                                            operation: TableOperation::Empty,
+                                        }
+                                    } else {
+                                        DeleteConfirm::TablesOperation {
+                                            connection_index: ci,
+                                            database_index: di,
+                                            names,
+                                            operation: TableOperation::Empty,
+                                        }
+                                    });
+                                    cx.notify();
+                                }),
+                            ),
+                        )
+                        .child(
+                            self.context_item(
+                                "table-truncate",
+                                t!(if documents {
+                                    "object.truncate_collection"
                                 } else {
-                                    DeleteConfirm::TablesOperation {
-                                        connection_index: ci,
-                                        database_index: di,
-                                        names,
-                                        operation: TableOperation::Truncate,
+                                    "object.truncate_table"
+                                })
+                                .to_string(),
+                                cx.listener(move |this, _event, _window, cx| {
+                                    this.context_menu = None;
+                                    let selected = pane == RowPane::Objects
+                                        && this.objects_selection.contains(&truncate_name);
+                                    let mut names = if selected {
+                                        this.objects_selection.items()
+                                    } else {
+                                        Vec::new()
+                                    };
+                                    if names.is_empty() {
+                                        names.push(truncate_name.clone());
                                     }
-                                });
-                                cx.notify();
-                            }),
-                        ))
+                                    this.delete_confirm = Some(if names.len() == 1 {
+                                        DeleteConfirm::Table {
+                                            connection_index: ci,
+                                            database_index: di,
+                                            name: names.remove(0),
+                                            operation: TableOperation::Truncate,
+                                        }
+                                    } else {
+                                        DeleteConfirm::TablesOperation {
+                                            connection_index: ci,
+                                            database_index: di,
+                                            names,
+                                            operation: TableOperation::Truncate,
+                                        }
+                                    });
+                                    cx.notify();
+                                }),
+                            ),
+                        )
                         .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
-                        .child(self.context_item(
-                            "table-rename",
-                            t!("object.rename_table").to_string(),
-                            cx.listener(move |this, _event, window, cx| {
-                                this.context_menu = None;
-                                this.begin_rename_table(
-                                    pane,
-                                    ci,
-                                    di,
-                                    rename_name.clone(),
-                                    is_view,
-                                    window,
-                                    cx,
-                                );
-                                this.notify_rename_pane(pane, cx);
-                                cx.notify();
-                            }),
-                        ));
+                        .child(
+                            self.context_item(
+                                "table-rename",
+                                t!(if documents {
+                                    "object.rename_collection"
+                                } else {
+                                    "object.rename_table"
+                                })
+                                .to_string(),
+                                cx.listener(move |this, _event, window, cx| {
+                                    this.context_menu = None;
+                                    this.begin_rename_table(
+                                        pane,
+                                        ci,
+                                        di,
+                                        rename_name.clone(),
+                                        is_view,
+                                        window,
+                                        cx,
+                                    );
+                                    this.notify_rename_pane(pane, cx);
+                                    cx.notify();
+                                }),
+                            ),
+                        );
                 }
                 items = items
                     .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
@@ -908,7 +949,19 @@ impl AppView {
                 let di = *database_index;
                 let _ = schema;
                 let new_database = self.database_name(ci, di);
-                if self.driver_supports_table_designer(ci) {
+                let documents = self.driver_supports(ci, DriverCapability::Documents);
+                if documents {
+                    items = items
+                        .child(self.context_item(
+                            "tablecat-new",
+                            t!("object.new_collection").to_string(),
+                            cx.listener(move |this, _event, _window, cx| {
+                                this.context_menu = None;
+                                this.open_new_collection(ci, di, cx);
+                            }),
+                        ))
+                        .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)));
+                } else if self.driver_supports_table_designer(ci) {
                     items = items
                         .child(self.context_item(
                             "tablecat-new",

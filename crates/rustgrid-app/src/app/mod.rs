@@ -21,16 +21,17 @@ use rustgrid_config::{
     LanguageSetting, ThemeSetting,
 };
 use rustgrid_core::{
-    AccountKind, BackupObjectKind, CellValue, ColumnInfo, Connection, ConnectionConfig,
-    ConnectionFieldChoice, ConnectionFieldKind, ConnectionFieldSpec, ConnectionHomePage,
-    ConnectionPage, ConnectionStandardField, DatabaseEditorSpec, DatabaseEditorTab,
-    DatabaseOptions, DefaultObjectType, DefaultPrivilege, DriverCapability, DriverDialect,
-    DriverIconStyle, DriverId, DriverRegistry, Error, FilterCondition, FilterConjunction,
-    FilterGroup, FilterNode, FilterOperator, ObjectGrant, ObjectPrivilegeRow, PageRequest,
-    PrivilegeCatalog, PrivilegeId, PrivilegePreset, PrivilegeScope, QueryResult, RoutineDetails,
-    RoutineEdit, RoutineInfo, RoutineKind, RowInsert, RowUpdate, SavedBackup, SavedQuery,
-    SavedTransfer, ServerSecurableGrant, TableStatus, TlsMode, TunnelAuth, TunnelKind, TunnelLayer,
-    UserAccount, UserDetails, UserEdit, UserEditSection, UserEditorSpec, UserMapping, ViewEdit,
+    AccountKind, BackupObjectKind, CellValue, CollectionDefinition, ColumnInfo, Connection,
+    ConnectionConfig, ConnectionFieldChoice, ConnectionFieldKind, ConnectionFieldSpec,
+    ConnectionHomePage, ConnectionPage, ConnectionStandardField, DatabaseEditorSpec,
+    DatabaseEditorTab, DatabaseOptions, DefaultObjectType, DefaultPrivilege, DriverCapability,
+    DriverDialect, DriverIconStyle, DriverId, DriverRegistry, Error, FilterCondition,
+    FilterConjunction, FilterGroup, FilterNode, FilterOperator, ObjectGrant, ObjectPrivilegeRow,
+    PageRequest, PrivilegeCatalog, PrivilegeId, PrivilegePreset, PrivilegeScope, QueryResult,
+    RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind, RowInsert, RowUpdate, SavedBackup,
+    SavedQuery, SavedTransfer, ServerSecurableGrant, TableStatus, TlsMode, TunnelAuth, TunnelKind,
+    TunnelLayer, UserAccount, UserDetails, UserEdit, UserEditSection, UserEditorSpec, UserMapping,
+    ViewEdit,
 };
 use rustgrid_export::ExportFormat;
 
@@ -421,6 +422,24 @@ struct CreateTableDialog {
     /// `TableDesignView::id` of the designer that requested the name.
     design_id: u64,
     name: String,
+    error: Option<String>,
+}
+
+/// The 新建/设计集合 dialog (document-store engines).
+struct CollectionDialog {
+    connection_index: usize,
+    database_index: usize,
+    /// `None` when creating a collection; the collection's current name when editing.
+    original: Option<String>,
+    name: String,
+    validator: String,
+    validation_level: String,
+    validation_action: String,
+    /// The existing definition is still loading (edit mode).
+    loading: bool,
+    /// The existing definition loaded successfully, so saving cannot overwrite it with blanks.
+    loaded: bool,
+    saving: bool,
     error: Option<String>,
 }
 
@@ -2077,6 +2096,8 @@ enum DialogKind {
     DbDialog,
     Schema,
     CreateTable,
+    /// The 新建/设计集合 dialog (document-store engines).
+    Collection,
     Password,
     SaveQuery,
     Error,
@@ -2371,6 +2392,12 @@ pub struct AppView {
     /// The open "new table" name prompt, if any, and its shared name input.
     create_table_dialog: Option<CreateTableDialog>,
     create_table_input: Option<Entity<TextInput>>,
+    /// The 新建/设计集合 dialog and its fields (document-store engines).
+    collection_dialog: Option<CollectionDialog>,
+    collection_name_input: Option<Entity<TextInput>>,
+    collection_validator_input: Option<Entity<TextInput>>,
+    collection_level_combo: Option<Entity<ComboBox>>,
+    collection_action_combo: Option<Entity<ComboBox>>,
     /// The Redis 新建键 modal and its fields.
     new_key_dialog: Option<NewKeyDialog>,
     new_key_name_input: Option<Entity<TextInput>>,
@@ -2902,6 +2929,7 @@ pub struct AppView {
 
 mod backup;
 mod changelog;
+mod collection;
 mod connection_form;
 mod database;
 mod db_dialog;
@@ -3264,6 +3292,11 @@ impl AppView {
             export_connections_window: None,
             create_table_dialog: None,
             create_table_input: None,
+            collection_dialog: None,
+            collection_name_input: None,
+            collection_validator_input: None,
+            collection_level_combo: None,
+            collection_action_combo: None,
             new_key_dialog: None,
             new_key_name_input: None,
             new_key_ttl_input: None,

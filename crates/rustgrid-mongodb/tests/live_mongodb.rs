@@ -361,3 +361,75 @@ async fn mongodb_copied_insert_command_runs() {
     assert!(document.contains("SKU-1"));
     connection.drop_database(database).await.unwrap();
 }
+
+/// The 新建/设计集合 dialog's driver surface: create, read the definition, set a validator, rename
+/// and clear it again.
+#[tokio::test]
+#[ignore = "requires a live MongoDB server (RUSTGRID_MONGODB_PASSWORD)"]
+async fn mongodb_collection_definition_round_trip() {
+    use rustgrid_core::CollectionDefinition;
+
+    let connection = connect().await;
+    let database = "rustgrid_live_collection";
+    let _ = connection.drop_database(database).await;
+
+    connection
+        .create_collection(
+            database,
+            &CollectionDefinition {
+                name: "widgets".into(),
+                ..CollectionDefinition::default()
+            },
+        )
+        .await
+        .unwrap();
+    let definition = connection
+        .collection_definition(database, "widgets")
+        .await
+        .unwrap()
+        .expect("the new collection has a definition");
+    assert_eq!(definition.name, "widgets");
+
+    let validated = CollectionDefinition {
+        name: "widgets".into(),
+        validator: r#"{"$jsonSchema":{"bsonType":"object","required":["name"]}}"#.into(),
+        validation_level: "strict".into(),
+        validation_action: "error".into(),
+    };
+    connection
+        .alter_collection(database, "widgets", &validated)
+        .await
+        .unwrap();
+    let definition = connection
+        .collection_definition(database, "widgets")
+        .await
+        .unwrap()
+        .expect("the collection still exists");
+    assert!(definition.validator.contains("$jsonSchema"));
+    assert_eq!(definition.validation_level, "strict");
+    // A document that breaks the validator is rejected.
+    assert!(
+        connection
+            .execute_query(
+                Some(database),
+                r#"{ "insert": "widgets", "documents": [ { "_id": 1 } ] }"#,
+            )
+            .await
+            .is_err()
+    );
+
+    // A rename through the definition moves the collection.
+    let renamed = CollectionDefinition {
+        name: "gadgets".into(),
+        ..validated
+    };
+    connection
+        .alter_collection(database, "widgets", &renamed)
+        .await
+        .unwrap();
+    let tables = connection.list_tables(database).await.unwrap();
+    assert!(tables.iter().any(|table| table.name == "gadgets"));
+    assert!(!tables.iter().any(|table| table.name == "widgets"));
+
+    connection.drop_database(database).await.unwrap();
+}

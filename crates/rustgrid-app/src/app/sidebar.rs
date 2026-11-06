@@ -1483,6 +1483,7 @@ impl TreePane {
                                     database,
                                     saved_queries,
                                     backups,
+                                    supports_documents,
                                     cx,
                                 ));
                             }
@@ -1797,6 +1798,7 @@ impl TreePane {
                         database,
                         saved_queries,
                         backups,
+                        false,
                         cx,
                     ));
                 }
@@ -1817,6 +1819,7 @@ impl TreePane {
         database: &TreeDatabase,
         saved_queries: &[TreeSavedQuery],
         backups: &[TreeBackup],
+        documents: bool,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let theme = self.theme;
@@ -1829,7 +1832,11 @@ impl TreePane {
         let selected = self.selected.as_deref() == Some(cat_id.as_str());
         // Under a schema the category sits one level deeper.
         let indent = if schema.is_some() { 54.0 } else { 36.0 };
-        let label = t!(category.label()).to_string();
+        let label = if documents && category == Category::Tables {
+            t!("common.collections").to_string()
+        } else {
+            t!(category.label()).to_string()
+        };
         let icon_color = match category {
             Category::Tables => theme.icon_tables,
             Category::Views => theme.icon_views,
@@ -1911,7 +1918,7 @@ impl TreePane {
             )
             .child(tree_chevron(expanded, theme.chevron))
             .child(tree_icon(category.icon_path(), icon_color))
-            .child(div().child(label));
+            .child(div().child(label.clone()));
         let toggle_app = self.app.clone();
         let toggle_schema = schema.map(str::to_string);
         let row = self.nav_row(
@@ -1921,7 +1928,7 @@ impl TreePane {
                     "cat-{connection_index}-{database_index}-{scope}-{}",
                     category.id()
                 ),
-                t!(category.label()).to_string(),
+                label.clone(),
             )
             .branch(
                 expanded,

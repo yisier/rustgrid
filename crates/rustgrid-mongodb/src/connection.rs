@@ -19,9 +19,9 @@ use mongodb::{
     options::{ClientOptions, Tls, TlsOptions},
 };
 use rustgrid_core::{
-    BackupObjectKind, CellValue, ColumnInfo, Connection, DatabaseInfo, DatabaseOptions, DriverId,
-    Error, ObjectDump, ObjectKind, PageRequest, QueryResult, Result, RowInsert, RowUpdate,
-    TableInfo, TablePage, TableSchema, TableStatus,
+    BackupObjectKind, CellValue, CollectionDefinition, ColumnInfo, Connection, DatabaseInfo,
+    DatabaseOptions, DriverId, Error, ObjectDump, ObjectKind, PageRequest, QueryResult, Result,
+    RowInsert, RowUpdate, TableInfo, TablePage, TableSchema, TableStatus,
 };
 use rustgrid_tunnel::Tunnel;
 
@@ -472,6 +472,17 @@ impl MongoConnection {
             }
             _ => {
                 let reply = db.run_command(command.clone()).await.map_err(query_error)?;
+                // A write command reports per-document failures inside `writeErrors` while the
+                // command itself succeeds (`ok: 1`); surface the first one instead of pretending
+                // the rows were written.
+                if let Ok(errors) = reply.get_array("writeErrors")
+                    && let Some(error) = errors.first().and_then(Bson::as_document)
+                {
+                    let message = error
+                        .get_str("errmsg")
+                        .unwrap_or("A write in the command failed.");
+                    return Err(Error::Query(message.to_string()));
+                }
                 let affected = command_i64(&reply, "n")
                     .or_else(|| command_i64(&reply, "nModified"))
                     .map(|value| value.max(0) as u64)
@@ -1026,6 +1037,121 @@ impl Connection for MongoConnection {
         Vec::new()
     }
 
+    async fn collection_definition(
+        &self,
+        database: &str,
+        collection: &str,
+    ) -> Result<Option<CollectionDefinition>> {
+        let reply = self
+            .database(database)
+            .run_command(doc! {
+                "listCollections": 1,
+                "filter": { "name": collection },
+            })
+            .await
+            .map_err(query_error)?;
+        let first = reply
+            .get_document("cursor")
+            .ok()
+            .and_then(|cursor| cursor.get_array("firstBatch").ok())
+            .and_then(|batch| batch.first())
+            .and_then(Bson::as_document);
+        let Some(specification) = first else {
+            return Ok(None);
+        };
+        let options = specification
+            .get_document("options")
+            .cloned()
+            .unwrap_or_default();
+        let validator = options
+            .get_document("validator")
+            .map(|validator| value::pretty_json(&Bson::Document(validator.clone())))
+            .unwrap_or_default();
+        Ok(Some(CollectionDefinition {
+            name: specification
+                .get_str("name")
+                .unwrap_or(collection)
+                .to_string(),
+            validator,
+            validation_level: options
+                .get_str("validationLevel")
+                .unwrap_or_default()
+                .to_string(),
+            validation_action: options
+                .get_str("validationAction")
+                .unwrap_or_default()
+                .to_string(),
+        }))
+    }
+
+    async fn create_collection(
+        &self,
+        database: &str,
+        definition: &CollectionDefinition,
+    ) -> Result<()> {
+        self.ensure_writable()?;
+        let name = definition.name.trim();
+        if name.is_empty() {
+            return Err(Error::Query("集合名不能为空。".into()));
+        }
+        let mut command = doc! { "create": name };
+        if !definition.validator.trim().is_empty() {
+            command.insert("validator", parse_validator(&definition.validator)?);
+        }
+        if !definition.validation_level.trim().is_empty() {
+            command.insert("validationLevel", definition.validation_level.trim());
+        }
+        if !definition.validation_action.trim().is_empty() {
+            command.insert("validationAction", definition.validation_action.trim());
+        }
+        self.database(database)
+            .run_command(command)
+            .await
+            .map_err(query_error)?;
+        Ok(())
+    }
+
+    async fn alter_collection(
+        &self,
+        database: &str,
+        original: &str,
+        definition: &CollectionDefinition,
+    ) -> Result<()> {
+        self.ensure_writable()?;
+        let new_name = definition.name.trim();
+        if new_name.is_empty() {
+            return Err(Error::Query("集合名不能为空。".into()));
+        }
+        let mut name = original.to_string();
+        if new_name != original {
+            self.client
+                .database("admin")
+                .run_command(doc! {
+                    "renameCollection": format!("{database}.{original}"),
+                    "to": format!("{database}.{new_name}"),
+                    "dropTarget": false,
+                })
+                .await
+                .map_err(query_error)?;
+            name = new_name.to_string();
+            self.forget(database, original);
+        }
+        let validator = parse_validator(&definition.validator)?;
+        let mut command = doc! { "collMod": name.clone(), "validator": validator };
+        if !definition.validation_level.trim().is_empty() {
+            command.insert("validationLevel", definition.validation_level.trim());
+        }
+        if !definition.validation_action.trim().is_empty() {
+            command.insert("validationAction", definition.validation_action.trim());
+        }
+        self.database(database)
+            .run_command(command)
+            .await
+            .map_err(query_error)?;
+        self.forget(database, &name);
+        Ok(())
+    }
+
     async fn table_schema(&self, _database: &str, _table: &str) -> Result<TableSchema> {
         Err(Error::Query(
             "MongoDB 集合没有关系型表结构，请在查询页用 JSON 命令管理集合。".into(),
@@ -1279,6 +1405,18 @@ fn command_i64(document: &Document, key: &str) -> Option<i64> {
         Bson::Int64(value) => Some(*value),
         Bson::Double(value) => Some(*value as i64),
         _ => None,
+    }
+}
+
+/// A collection validator is a query document (`{"$jsonSchema": …}` or field conditions). Empty
+/// text means "no validator", which clears an existing one with `collMod`.
+fn parse_validator(text: &str) -> Result<Document> {
+    if text.trim().is_empty() {
+        return Ok(Document::new());
+    }
+    match value::parse_json(text).map_err(Error::Query)? {
+        Bson::Document(document) => Ok(document),
+        _ => Err(Error::Query("校验器必须是一个 JSON 对象。".into())),
     }
 }
 

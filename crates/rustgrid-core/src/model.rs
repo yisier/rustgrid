@@ -104,6 +104,20 @@ pub struct DatabaseOptions {
     pub compatibility_level: String,
 }
 
+/// The editable shape of a document-store collection (MongoDB), used by the 新建/设计集合 dialog.
+///
+/// A collection has no relational columns: the parts an engine exposes here are its name (rename)
+/// and its document validator. The validator stays text so the dialog shows exactly what the user
+/// typed; `validation_level` (`off`/`strict`/`moderate`) and `validation_action` (`warn`/`error`)
+/// are empty when the engine's default should apply.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CollectionDefinition {
+    pub name: String,
+    pub validator: String,
+    pub validation_level: String,
+    pub validation_action: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ObjectKind {

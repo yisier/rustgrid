@@ -450,21 +450,28 @@ impl AppView {
         }
         let designer_enabled = self.driver_supports_table_designer(connection_index);
         let key_value = self.driver_supports(connection_index, DriverCapability::KeyValue);
+        let documents = self.driver_supports(connection_index, DriverCapability::Documents);
         if key_value {
             return self.render_key_object_toolbar(pane, theme, cx);
         }
         let open_label = if key_value {
             t!("redis.key.open").to_string()
+        } else if documents {
+            t!("object.open_collection").to_string()
         } else {
             t!("object.open_table").to_string()
         };
         let delete_label = if key_value {
             t!("redis.key.delete").to_string()
+        } else if documents {
+            t!("object.delete_collection").to_string()
         } else {
             t!("object.delete_table").to_string()
         };
-        let design_enabled = category == Category::Tables && open_enabled && designer_enabled;
-        let new_enabled = category == Category::Tables && designer_enabled;
+        // A document store creates/designs collections instead of opening the SQL table designer.
+        let design_enabled =
+            category == Category::Tables && open_enabled && (designer_enabled || documents);
+        let new_enabled = category == Category::Tables && (designer_enabled || documents);
         // Deleting works off the multi-selection: enabled when at least one row is selected, even
         // if more than one (`pane.selected` is the single-selection mirror and is `None` for a
         // multi-row selection).
@@ -526,7 +533,11 @@ impl AppView {
                             .child(self.toolbar_item(
                                 "obj-design",
                                 "icons/design_table.svg",
-                                t!("object.design_table").to_string(),
+                                if documents {
+                                    t!("object.design_collection").to_string()
+                                } else {
+                                    t!("object.design_table").to_string()
+                                },
                                 design_enabled,
                                 cx.listener(move |this, _event, _window, cx| {
                                     let Some((connection_index, database_index, name, is_view)) =
@@ -534,6 +545,17 @@ impl AppView {
                                     else {
                                         return;
                                     };
+                                    if documents {
+                                        if !is_view {
+                                            this.open_design_collection(
+                                                connection_index,
+                                                database_index,
+                                                name,
+                                                cx,
+                                            );
+                                        }
+                                        return;
+                                    }
                                     let Some(database) =
                                         this.database_name(connection_index, database_index)
                                     else {
@@ -552,13 +574,25 @@ impl AppView {
                             .child(self.toolbar_item(
                                 "obj-new",
                                 "icons/new_table.svg",
-                                t!("object.new_table").to_string(),
+                                if documents {
+                                    t!("object.new_collection").to_string()
+                                } else {
+                                    t!("object.new_table").to_string()
+                                },
                                 new_enabled,
                                 cx.listener(move |this, _event, _window, cx| {
                                     let (connection_index, database_index) = {
                                         let pane = pane_for_new.read(cx);
                                         (pane.connection_index, pane.database_index)
                                     };
+                                    if documents {
+                                        this.open_new_collection(
+                                            connection_index,
+                                            database_index,
+                                            cx,
+                                        );
+                                        return;
+                                    }
                                     let Some(database) =
                                         this.database_name(connection_index, database_index)
                                     else {
@@ -1222,6 +1256,10 @@ impl AppView {
             && self.driver_supports(connection_index, DriverCapability::KeyValue)
         {
             t!("redis.key.noun").to_string()
+        } else if category == Category::Tables
+            && self.driver_supports(connection_index, DriverCapability::Documents)
+        {
+            t!("common.collections").to_string()
         } else {
             t!(category.label()).to_string()
         };

@@ -5,9 +5,9 @@ use crate::descriptor::{ConnectionFormSpec, DriverDescriptor, DriverIconStyle, T
 use crate::dialect::DriverDialect;
 use crate::error::{Error, Result};
 use crate::model::{
-    BackupObjectKind, ColumnInfo, ConnectionConfig, ConnectionProfile, DatabaseInfo,
-    DatabaseOptions, DriverId, ObjectCreate, ObjectDump, ObjectNamespace, PageRequest, QueryResult,
-    RowInsert, RowUpdate, TableInfo, TablePage, TableSchema, TableStatus,
+    BackupObjectKind, CollectionDefinition, ColumnInfo, ConnectionConfig, ConnectionProfile,
+    DatabaseInfo, DatabaseOptions, DriverId, ObjectCreate, ObjectDump, ObjectNamespace,
+    PageRequest, QueryResult, RowInsert, RowUpdate, TableInfo, TablePage, TableSchema, TableStatus,
 };
 use crate::routine::{RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind};
 use crate::user::{
@@ -631,6 +631,40 @@ pub trait Connection: Send + Sync {
 
     /// The storage engines offered in the table designer's Options tab, in display order.
     fn storage_engines(&self) -> Vec<&'static str>;
+
+    /// The editable definition of a document-store collection, or `None` when the engine has no
+    /// such concept. The UI offers 设计集合 only when this returns `Some`.
+    async fn collection_definition(
+        &self,
+        _database: &str,
+        _collection: &str,
+    ) -> Result<Option<CollectionDefinition>> {
+        Ok(None)
+    }
+
+    /// Create a document-store collection.
+    async fn create_collection(
+        &self,
+        _database: &str,
+        _definition: &CollectionDefinition,
+    ) -> Result<()> {
+        Err(Error::Query(
+            "This engine cannot create a collection.".into(),
+        ))
+    }
+
+    /// Alter a document-store collection. `original` is its current name, so a rename is applied
+    /// before the rest of the definition.
+    async fn alter_collection(
+        &self,
+        _database: &str,
+        _original: &str,
+        _definition: &CollectionDefinition,
+    ) -> Result<()> {
+        Err(Error::Query(
+            "This engine cannot alter a collection.".into(),
+        ))
+    }
 
     /// Introspect the full definition of an existing table (or view).
     async fn table_schema(&self, database: &str, table: &str) -> Result<TableSchema>;

@@ -257,7 +257,12 @@ impl AppView {
             if compact && !matches!(tab, MainTab::Tables | MainTab::Queries) {
                 continue;
             }
-            bar = bar.child(self.render_main_tab(tab, icon, t!(label_key).to_string(), cx));
+            let label = if documents && tab == MainTab::Tables {
+                t!("main.collections").to_string()
+            } else {
+                t!(label_key).to_string()
+            };
+            bar = bar.child(self.render_main_tab(tab, icon, label, cx));
         }
 
         bar

@@ -1594,7 +1594,11 @@ impl AppView {
                 self.database_info(connection, database, theme)
             }
             InfoTarget::Table(connection, database, name) => {
-                self.table_info(connection, database, &name, app, theme)
+                let documents = app.upgrade().is_some_and(|app| {
+                    app.read(cx)
+                        .driver_supports(connection, DriverCapability::Documents)
+                });
+                self.table_info(connection, database, &name, app, theme, documents)
             }
             InfoTarget::Routine(_, _, name, kind) => self.routine_info(&name, kind, theme),
             InfoTarget::User(_, index) => self.user_info(index, theme),
@@ -1757,16 +1761,18 @@ impl AppView {
         name: &str,
         app: &WeakEntity<AppView>,
         theme: Theme,
+        documents: bool,
     ) -> AnyElement {
         // A view reads as a view; a table's status is loaded from the server.
         let is_view = self.table_is_view(connection_index, database_index, name);
         // The DDL view keeps the same 详细信息 / DDL toggle bar above it, so the pane can be
         // switched back from the script. Returning the bare script here used to drop the bar and
-        // strand the user in the DDL view.
-        if self.info_table_ddl_view {
+        // strand the user in the DDL view. A document store has no table DDL, so it always shows
+        // the details.
+        if self.info_table_ddl_view && !documents {
             let body = self.table_ddl_view(name, is_view, theme);
             return self
-                .table_info_view_bar(app, theme)
+                .table_info_view_bar(app, theme, false)
                 .child(body)
                 .into_any_element();
         }
@@ -1831,7 +1837,9 @@ impl AppView {
             field(&t!("info.create_options"), status.create_options.clone()),
             field(&t!("info.comment"), status.comment.clone()),
         ];
-        let kind = if is_view {
+        let kind = if documents {
+            t!("common.collection")
+        } else if is_view {
             t!("common.view")
         } else {
             t!("common.table")
@@ -1847,7 +1855,7 @@ impl AppView {
             theme.icon_table
         };
         let body = info_panel(icon, color, name, &kind, &fields);
-        self.table_info_view_bar(app, theme)
+        self.table_info_view_bar(app, theme, documents)
             .child(body)
             .into_any_element()
     }
@@ -1868,7 +1876,7 @@ impl AppView {
 
     /// The table info pane's two view buttons (详细信息 / DDL), Navicat's icon pair above the
     /// object title. The active one is filled.
-    fn table_info_view_bar(&self, app: &WeakEntity<AppView>, theme: Theme) -> Div {
+    fn table_info_view_bar(&self, app: &WeakEntity<AppView>, theme: Theme, documents: bool) -> Div {
         let details = !self.info_table_ddl_view;
         let ddl = self.info_table_ddl_view;
         let weak_details = app.clone();
@@ -1893,23 +1901,19 @@ impl AppView {
                         .text_color(rgb(if active { theme.text } else { theme.text_muted })),
                 )
         };
-        let mut tabs = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_1()
-            .child(
-                button("info-view-details", "icons/database.svg", details).on_click(
-                    move |_event, _window, cx| {
-                        let _ = weak_details.update(cx, |app, cx| {
-                            app.info_table_ddl_view = false;
-                            app.info_table_ddl_copied = false;
-                            cx.notify();
-                        });
-                    },
-                ),
-            )
-            .child(button("info-view-ddl", "icons/queries.svg", ddl).on_click(
+        let mut tabs = div().flex().flex_row().items_center().gap_1().child(
+            button("info-view-details", "icons/database.svg", details).on_click(
+                move |_event, _window, cx| {
+                    let _ = weak_details.update(cx, |app, cx| {
+                        app.info_table_ddl_view = false;
+                        app.info_table_ddl_copied = false;
+                        cx.notify();
+                    });
+                },
+            ),
+        );
+        if !documents {
+            tabs = tabs.child(button("info-view-ddl", "icons/queries.svg", ddl).on_click(
                 move |_event, _window, cx| {
                     let _ = weak_ddl.update(cx, |app, cx| {
                         app.info_table_ddl_view = true;
@@ -1918,10 +1922,11 @@ impl AppView {
                     });
                 },
             ));
+        }
         // A copy button for the script, only while the DDL view is showing. It confirms the copy
         // by turning into a green check + 已复制 for a moment, then goes back to 复制.
         if let (true, Loadable::Loaded(Some(ddl))) =
-            (self.info_table_ddl_view, &self.info_table_ddl)
+            (self.info_table_ddl_view && !documents, &self.info_table_ddl)
         {
             let ddl = ddl.clone();
             let copied = self.info_table_ddl_copied;
