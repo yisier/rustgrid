@@ -398,6 +398,9 @@ pub(super) struct InfoPane {
     form_picker: Option<FormPicker>,
     /// The form's multi-line editor being resized: `(col, pointer y at start, height at start)`.
     form_resize: Option<(usize, f32, f32)>,
+    /// The field list's scroll state; gpui paints no scrollbar for an overflow container, so the
+    /// form draws its own from this handle.
+    form_scroll: ScrollHandle,
 }
 
 impl InfoPane {
@@ -426,6 +429,7 @@ impl InfoPane {
             form_json_loaded: None,
             form_picker: None,
             form_resize: None,
+            form_scroll: ScrollHandle::new(),
         }
     }
 
@@ -680,6 +684,7 @@ impl InfoPane {
             dirty,
             documents,
             mode: FormMode::Fields,
+            scroll: &self.form_scroll,
         };
         let weak = cx.weak_entity();
         Some(render_row_form(
@@ -747,6 +752,7 @@ impl InfoPane {
             dirty,
             documents: true,
             mode: FormMode::Json,
+            scroll: &self.form_scroll,
         };
         let weak = cx.weak_entity();
         Some(render_row_form(
@@ -2343,6 +2349,8 @@ struct FormStyle<'a> {
     documents: bool,
     /// Which representation this form is rendering; drives the 表单 / JSON chips.
     mode: FormMode,
+    /// The field list's scroll state, for the always-visible scrollbar.
+    scroll: &'a ScrollHandle,
 }
 
 /// What the form shows below its header.
@@ -2515,13 +2523,31 @@ fn render_row_form(
             }
             div()
                 .id("info-form-fields")
+                .relative()
                 .flex()
                 .flex_col()
                 .flex_1()
                 .min_h(px(0.0))
                 .w_full()
-                .overflow_y_scroll()
-                .child(div().flex().flex_col().w_full().px_3().child(list))
+                .overflow_hidden()
+                .child(
+                    div()
+                        .id("info-form-fields-scroll")
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_h(px(0.0))
+                        .w_full()
+                        .overflow_y_scroll()
+                        .track_scroll(style.scroll)
+                        .child(div().flex().flex_col().w_full().px_3().child(list)),
+                )
+                // gpui paints no scrollbar for an overflow container, so the form draws its own.
+                .child(
+                    Scrollbar::vertical(style.scroll)
+                        .mode(ScrollbarMode::Always)
+                        .id("info-form-fields-scrollbar"),
+                )
                 .into_any_element()
         }
         FormBody::Json {
