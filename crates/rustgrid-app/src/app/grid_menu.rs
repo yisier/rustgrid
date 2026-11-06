@@ -9,6 +9,7 @@ use super::grid::row_origin;
 use super::*;
 
 use crate::session::EditAction;
+use base64::Engine as _;
 
 impl GridView {
     /// Open the grid's context menu at `position` (window coordinates). `AppView` renders it, so
@@ -267,6 +268,37 @@ impl GridView {
         cx.notify();
     }
 
+    /// The JSON `insert` command for the selected rows of a document store: each row becomes one
+    /// document, and each cell is re-wrapped as Extended JSON (`$oid`, `$date`, `$numberDecimal`,
+    /// ...) so the command keeps the BSON types it was copied from.
+    fn document_insert_command(
+        &self,
+        selection: &CellSelection,
+        collection: &str,
+    ) -> serde_json::Value {
+        let (start_row, end_row) = selection.rows();
+        let (start_col, end_col) = selection.cols();
+        let mut documents = Vec::new();
+        for row in start_row..=end_row {
+            let mut document = serde_json::Map::new();
+            for col in start_col..=end_col {
+                if !selection.contains(row, col) {
+                    continue;
+                }
+                let Some(column) = self.state.columns.get(col) else {
+                    continue;
+                };
+                let value = self.cell_edit_value(row, col);
+                document.insert(
+                    column.name.clone(),
+                    document_cell_value(value, &column.data_type),
+                );
+            }
+            documents.push(serde_json::Value::Object(document));
+        }
+        serde_json::json!({ "insert": collection, "documents": documents })
+    }
+
     /// Copy the selected rows as `INSERT` statements.
     pub(super) fn copy_selection_as_insert(&mut self, cx: &mut Context<'_, Self>) {
         let Some(selection) = self.state.selection.clone() else {
@@ -283,6 +315,20 @@ impl GridView {
         } else {
             self.state.table.clone()
         };
+        // A document store's rows are documents: a SQL `INSERT` would not run in its query tab.
+        // Emit the equivalent JSON `insert` command (Extended JSON for the typed cells) instead.
+        if self.state.documents {
+            let command = self.document_insert_command(&selection, &table);
+            let text = serde_json::to_string_pretty(&command).unwrap_or_default();
+            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+            {
+                let mut clipboard = self.clipboard.borrow_mut();
+                clipboard.block = None;
+                clipboard.text = Some(text);
+            }
+            cx.notify();
+            return;
+        }
         let columns: Vec<String> = (start_col..=end_col)
             .map(|col| format!("`{}`", self.state.columns[col].name.replace('`', "``")))
             .collect();
@@ -447,6 +493,98 @@ fn sql_literal(value: &Option<String>) -> String {
     }
 }
 
+/// One cell of a document-store row as Extended JSON, so a copied `insert` command keeps the BSON
+/// types the grid showed (ObjectId, date, decimal, ...). `None` is BSON `null`.
+fn document_cell_value(value: Option<String>, data_type: &str) -> serde_json::Value {
+    use serde_json::{Value, json};
+
+    let Some(text) = value else {
+        return Value::Null;
+    };
+    match data_type.trim().to_ascii_lowercase().as_str() {
+        "objectid" | "object id" | "oid" => json!({ "$oid": text }),
+        "date" | "datetime" => json!({ "$date": text }),
+        "decimal" | "decimal128" => json!({ "$numberDecimal": text }),
+        "int" | "int32" | "integer" => json!({ "$numberInt": text }),
+        "long" | "int64" => json!({ "$numberLong": text }),
+        "double" | "float" | "number" => text
+            .parse::<f64>()
+            .map(|number| json!(number))
+            .unwrap_or(Value::String(text)),
+        "bool" | "boolean" => text
+            .parse::<bool>()
+            .map(Value::Bool)
+            .unwrap_or(Value::String(text)),
+        // Embedded documents/arrays already arrive as Extended JSON text.
+        "object" | "document" | "array" | "json" => {
+            serde_json::from_str(&text).unwrap_or(Value::String(text))
+        }
+        "uuid" => json!({ "$uuid": text }),
+        "timestamp" => timestamp_json_value(&text),
+        "regex" | "regularexpression" => regex_json_value(&text),
+        "bindata" | "binary" => binary_json_value(&text),
+        "null" => Value::Null,
+        "minkey" => json!({ "$minKey": 1 }),
+        "maxkey" => json!({ "$maxKey": 1 }),
+        _ => Value::String(text),
+    }
+}
+
+/// `Timestamp(秒, 序号)` → `{"$timestamp":{"t":…,"i":…}}`.
+fn timestamp_json_value(text: &str) -> serde_json::Value {
+    let inner = text
+        .trim()
+        .strip_prefix("Timestamp(")
+        .and_then(|rest| rest.strip_suffix(')'));
+    if let Some(inner) = inner
+        && let Some((time, increment)) = inner.split_once(',')
+        && let (Ok(time), Ok(increment)) =
+            (time.trim().parse::<u64>(), increment.trim().parse::<u64>())
+    {
+        return serde_json::json!({ "$timestamp": { "t": time, "i": increment } });
+    }
+    serde_json::Value::String(text.to_string())
+}
+
+/// `/pattern/flags` → `{"$regularExpression":{"pattern":…,"options":…}}`.
+fn regex_json_value(text: &str) -> serde_json::Value {
+    let trimmed = text.trim();
+    if let Some(inner) = trimmed.strip_prefix('/')
+        && let Some((pattern, options)) = inner.rsplit_once('/')
+    {
+        return serde_json::json!({
+            "$regularExpression": { "pattern": pattern, "options": options }
+        });
+    }
+    serde_json::from_str(trimmed).unwrap_or_else(|_| serde_json::Value::String(text.to_string()))
+}
+
+/// Hex cell bytes → `{"$binary":{"base64":…,"subType":"00"}}`.
+fn binary_json_value(text: &str) -> serde_json::Value {
+    fn decode_hex(text: &str) -> Option<Vec<u8>> {
+        let text = text.trim();
+        if !text.len().is_multiple_of(2) {
+            return None;
+        }
+        let mut bytes = Vec::with_capacity(text.len() / 2);
+        for pair in text.as_bytes().chunks(2) {
+            let pair = std::str::from_utf8(pair).ok()?;
+            bytes.push(u8::from_str_radix(pair, 16).ok()?);
+        }
+        Some(bytes)
+    }
+
+    match decode_hex(text) {
+        Some(bytes) => serde_json::json!({
+            "$binary": {
+                "base64": base64::engine::general_purpose::STANDARD.encode(bytes),
+                "subType": "00",
+            }
+        }),
+        None => serde_json::Value::String(text.to_string()),
+    }
+}
+
 /// Normalize clipboard text for the "is this our own copy?" comparison. Windows and clipboard
 /// managers may hand CRLF (or a trailing line break) back for text written with LF; without this
 /// the own block is skipped and its `NULL` cells are re-read from text as empty strings.
@@ -546,5 +684,51 @@ mod tests {
         assert!(!empty_paste_is_null("nvarchar(max)"));
         assert!(!empty_paste_is_null("longtext"));
         assert!(!empty_paste_is_null("enum('a','b')"));
+    }
+
+    #[test]
+    fn copied_document_cells_keep_their_bson_types() {
+        use serde_json::json;
+
+        assert_eq!(
+            document_cell_value(Some("65f0c0ffee00000000000001".into()), "objectId"),
+            json!({ "$oid": "65f0c0ffee00000000000001" })
+        );
+        assert_eq!(
+            document_cell_value(Some("1943.80".into()), "decimal"),
+            json!({ "$numberDecimal": "1943.80" })
+        );
+        assert_eq!(
+            document_cell_value(Some("42".into()), "int"),
+            json!({ "$numberInt": "42" })
+        );
+        assert_eq!(
+            document_cell_value(Some("2026-04-04T00:00:00.000Z".into()), "date"),
+            json!({ "$date": "2026-04-04T00:00:00.000Z" })
+        );
+        assert_eq!(
+            document_cell_value(Some("[1, 2]".into()), "array"),
+            json!([1, 2])
+        );
+        assert_eq!(document_cell_value(None, "string"), json!(null));
+        // A string column stays a string even when its text looks like a number.
+        assert_eq!(
+            document_cell_value(Some("123".into()), "string"),
+            json!("123")
+        );
+    }
+
+    #[test]
+    fn copied_timestamp_and_regex_cells_use_extended_json() {
+        use serde_json::json;
+
+        assert_eq!(
+            document_cell_value(Some("Timestamp(1768461000, 1)".into()), "timestamp"),
+            json!({ "$timestamp": { "t": 1768461000u64, "i": 1u64 } })
+        );
+        assert_eq!(
+            document_cell_value(Some("/^rg-.*$/i".into()), "regex"),
+            json!({ "$regularExpression": { "pattern": "^rg-.*$", "options": "i" } })
+        );
     }
 }

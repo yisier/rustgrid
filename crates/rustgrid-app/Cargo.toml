@@ -37,6 +37,7 @@ sqlformat.workspace = true
 chrono.workspace = true
 dtparse.workspace = true
 encoding_rs.workspace = true
+base64.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

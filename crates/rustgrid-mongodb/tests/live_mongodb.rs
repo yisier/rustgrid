@@ -303,3 +303,61 @@ async fn mongodb_run_command_returns_a_row() {
     assert!(result.has_result_set);
     assert_eq!(result.rows.len(), 1);
 }
+
+/// The grid's 复制为 INSERT output is a JSON `insert` command whose cells are Extended JSON
+/// (`{"$oid": …}`, `{"$numberDecimal": …}`, `{"$date": …}`), not SQL. Run exactly that shape so
+/// the two sides cannot drift apart.
+#[tokio::test]
+#[ignore = "requires a live MongoDB server (RUSTGRID_MONGODB_PASSWORD)"]
+async fn mongodb_copied_insert_command_runs() {
+    let connection = connect().await;
+    let database = "rustgrid_live_copy";
+    let _ = connection.drop_database(database).await;
+    connection
+        .execute_query(Some(database), r#"{ "create": "orders" }"#)
+        .await
+        .unwrap();
+    connection
+        .execute_query(
+            Some(database),
+            r#"{
+                "insert": "orders",
+                "documents": [
+                    {
+                        "_id": { "$oid": "65f0c0ffee00000000000042" },
+                        "order_no": "ORD-1",
+                        "amount": { "$numberDecimal": "1943.80" },
+                        "item_count": { "$numberInt": "1" },
+                        "items": [
+                            { "sku": "SKU-1", "qty": { "$numberInt": "1" } }
+                        ],
+                        "paid_at": null,
+                        "created_at": { "$date": "2026-04-04T00:00:00.000Z" }
+                    }
+                ]
+            }"#,
+        )
+        .await
+        .unwrap();
+    let result = connection
+        .execute_query(Some(database), r#"{ "find": "orders", "limit": 1 }"#)
+        .await
+        .unwrap();
+    assert_eq!(result.rows.len(), 1);
+    let document = connection
+        .row_document(
+            database,
+            "orders",
+            &[(
+                "_id".to_string(),
+                Some("65f0c0ffee00000000000042".to_string()),
+            )],
+        )
+        .await
+        .unwrap()
+        .expect("the copied document exists");
+    assert!(document.contains("ORD-1"));
+    assert!(document.contains("1943.80"));
+    assert!(document.contains("SKU-1"));
+    connection.drop_database(database).await.unwrap();
+}
