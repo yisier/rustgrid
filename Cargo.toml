@@ -144,3 +144,7 @@ opt-level = "z"
 lto = true
 codegen-units = 1
 strip = true
+# The app has no user-visible panic recovery: GPUI's catch_unwind sites only restore a
+# thread-local before rethrowing, and the release build is stripped, so unwinding tables and
+# landing pads are pure size here. The panic hook still writes crash.log before aborting.
+panic = "abort"

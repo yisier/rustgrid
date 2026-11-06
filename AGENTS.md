@@ -1291,7 +1291,10 @@ make more engines cheap later — do not build those features early.
   --release` to force it to be re-read.
 - **Cross-platform** (Windows/macOS/Linux). Avoid OS-only APIs; gate platform-specific code
   behind `#[cfg(target_os = ...)]`; watch per-OS native deps (e.g. Linux system libraries).
-- **Small install size is a hard requirement.** The release profile already sets `lto`,
-  `strip`, `opt-level = "z"`, `codegen-units = 1`. Prefer small crates; enable only the sqlx
-  features actually used.
+- **Small install size is a hard requirement.** The release profile sets `lto`, `strip`,
+  `opt-level = "z"`, `codegen-units = 1` and `panic = "abort"`. Linux and Windows archives are
+  additionally UPX-compressed (`--best --lzma`, UPX 5.3); macOS ships as built because
+  UPX-packed Mach-O binaries do not run on macOS 13+. The workflow remaps the
+  cargo-registry/workspace path prefixes to keep panic strings short. Prefer small crates;
+  enable only the sqlx features actually used.
 - UI must mirror Navicat's layout: connection tree on the left, content/details pane on the right.

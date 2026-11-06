@@ -29,10 +29,14 @@
 # runs translocated (from a read-only randomized mount), where self_update refuses to swap it and
 # reports that the app must be moved first — that is the crate's `Error::AppTranslocated`.
 #
-# Only the Windows x64 executable is UPX-compressed: UPX would break macOS code signing, has no
-# win64/arm64 support, and Linux binaries are left as shipped. The tag's version must equal the
-# workspace `Cargo.toml` version, otherwise the release job fails — the app reports its own
-# `CARGO_PKG_VERSION` to the updater, so a mismatch would make it miss or mis-install updates.
+# Linux and Windows executables are UPX-compressed with `--best --lzma`. UPX 5.3 supports
+# linux/amd64, linux/arm64 and win64/pe (x64 and arm64). macOS is deliberately left as built:
+# UPX refuses Mach-O without `--force-macos`, and its author states that forced-packed binaries
+# do not run on macOS 13+ (this app targets macOS 12+, but most users are on newer releases).
+# Linux keeps the packed ELF inside the portable tarball; unpack it with `upx -d RustGrid` if a
+# security scanner objects. The tag's version must equal the workspace `Cargo.toml` version,
+# otherwise the release job fails — the app reports its own `CARGO_PKG_VERSION` to the updater,
+# so a mismatch would make it miss or mis-install updates.
 name: Release
 
 on:
@@ -47,7 +51,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  UPX_VERSION: "4.2.4"
+  UPX_VERSION: "5.3.0"
 
 jobs:
   build:
@@ -134,12 +138,30 @@ jobs:
           Write-Host "Using fxc ($arch): $($fxc.FullName)"
           "GPUI_FXC_PATH=$($fxc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      # Panic locations embed the absolute registry/workspace paths. Rewriting them to short
+      # prefixes trims the `.rodata` string table (the Linux binary carries ~200 KB of registry
+      # paths) and makes archives build reproducibly across runner home directories. The registry
+      # hash is the stable sparse-index hash for crates.io.
+      - name: Configure path remapping
+        if: runner.os != 'Windows'
+        run: |
+          echo "RUSTFLAGS=--remap-path-prefix=${HOME}/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f=/cargo --remap-path-prefix=${GITHUB_WORKSPACE}=/rustgrid" >> "$GITHUB_ENV"
+
+      - name: Configure path remapping (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $registry = Join-Path $env:USERPROFILE '.cargo\registry\src\index.crates.io-1949cf8c6b5b557f'
+          "RUSTFLAGS=--remap-path-prefix=$registry=/cargo --remap-path-prefix=$env:GITHUB_WORKSPACE=/rustgrid" |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Build
         run: cargo build --release --target ${{ matrix.target }} -p rustgrid-app
 
-      # UPX only on Windows x64: UPX has no win64/arm64 support, and macOS/Linux ship as built.
-      - name: Compress with UPX (Windows x64)
-        if: runner.os == 'Windows' && matrix.platform == 'windows-x64'
+      # UPX 5.3 compresses every Linux and Windows executable. Windows covers win64/pe for both
+      # x64 and arm64; the win64 packer runs on the arm64 runner through Windows' x64 emulation.
+      - name: Compress with UPX (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -148,6 +170,30 @@ jobs:
           Expand-Archive -Path upx.zip -DestinationPath upx-tool
           $upx = (Get-ChildItem upx-tool -Recurse -Filter upx.exe | Select-Object -First 1).FullName
           & $upx --best --lzma "target/${{ matrix.target }}/release/RustGrid.exe"
+          if ($LASTEXITCODE -ne 0) { throw "UPX compression failed with exit code $LASTEXITCODE" }
+          & $upx -t "target/${{ matrix.target }}/release/RustGrid.exe"
+          if ($LASTEXITCODE -ne 0) { throw "UPX self-test failed with exit code $LASTEXITCODE" }
+
+      # The packer binary must match the runner, not the target: an x64 UPX runs on the x64
+      # runner, an arm64 UPX on the arm64 one, and either can pack the target ELF.
+      - name: Compress with UPX (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -eu
+          case "${{ runner.arch }}" in
+            X64) upx_arch=amd64 ;;
+            ARM64) upx_arch=arm64 ;;
+            *) echo "::error::unsupported runner architecture: ${{ runner.arch }}"; exit 1 ;;
+          esac
+          url="https://github.com/upx/upx/releases/download/v${UPX_VERSION}/upx-${UPX_VERSION}-${upx_arch}_linux.tar.xz"
+          curl -fsSL -o upx.tar.xz "$url"
+          tar -xf upx.tar.xz
+          upx="$(find . -maxdepth 2 -type f -name upx | head -n 1)"
+          test -n "$upx"
+          chmod +x "$upx"
+          "$upx" --best --lzma "target/${{ matrix.target }}/release/RustGrid"
+          "$upx" -t "target/${{ matrix.target }}/release/RustGrid"
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
@@ -176,8 +222,10 @@ jobs:
           test -s "$app/Contents/Resources/AppIcon.icns"
           # Ad-hoc signing keeps the bundle's seal consistent after Contents/ was assembled (arm64
           # binaries must carry a signature to launch at all). No Developer ID exists, so this does
-          # not satisfy Gatekeeper — see the header note.
+          # not satisfy Gatekeeper — see the header note. Verify the seal here, so a signing
+          # problem fails the job instead of shipping a bundle macOS refuses to launch.
           codesign --force --sign - "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
           tar -czf "$name" -C dist RustGrid.app
           ls -lh "$name"
 
