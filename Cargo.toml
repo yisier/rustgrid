@@ -11,6 +11,7 @@ members = [
     "crates/rustgrid-postgresql",
     "crates/rustgrid-oracle",
     "crates/rustgrid-redis",
+    "crates/rustgrid-mongodb",
     "crates/rustgrid-tunnel",
     "crates/rustgrid-odbc",
     "crates/rustgrid-config",
@@ -40,12 +41,15 @@ rustgrid-oracle = { path = "crates/rustgrid-oracle" }
 rustgrid-tunnel = { path = "crates/rustgrid-tunnel" }
 rustgrid-odbc = { path = "crates/rustgrid-odbc" }
 rustgrid-redis = { path = "crates/rustgrid-redis" }
+rustgrid-mongodb = { path = "crates/rustgrid-mongodb" }
 rustgrid-config = { path = "crates/rustgrid-config" }
 
 async-trait = "0.1"
 chrono = "0.4"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `preserve_order` keeps a JSON object's field order, which MongoDB command documents require
+# (the command name must be the first key). Indexmap is already in the lock file.
+serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
 anyhow = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
@@ -59,6 +63,13 @@ oracledb = { version = "=26.0.0-beta.4", default-features = false }
 # Redis: the official redis-rs client. The driver enables only the async, cluster, sentinel and
 # rustls-TLS features it uses, so the tree stays small.
 redis = { version = "0.32", default-features = false }
+# MongoDB: the official Rust driver, rustls TLS and BSON 3. DNS/SRV resolution, compression and
+# the KMS integrations are left off so the tree stays small (TLS reuses rustls, already present).
+mongodb = { version = "3.10", default-features = false, features = [
+    "bson-3",
+    "rustls-tls",
+    "compat-3-3-0",
+] }
 libloading = "0.8"
 bb8 = { version = "0.9", default-features = false }
 tokio-util = { version = "0.7", features = ["compat"] }

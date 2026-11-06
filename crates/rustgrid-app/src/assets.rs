@@ -16,6 +16,7 @@ impl AssetSource for Assets {
             "icons/postgresql.svg" => Some(include_bytes!("../assets/icons/postgresql.svg")),
             "icons/oracle.svg" => Some(include_bytes!("../assets/icons/oracle.svg")),
             "icons/redis.svg" => Some(include_bytes!("../assets/icons/redis.svg")),
+            "icons/mongodb.svg" => Some(include_bytes!("../assets/icons/mongodb.svg")),
             "icons/database.svg" => Some(include_bytes!("../assets/icons/database.svg")),
             "icons/tables.svg" => Some(include_bytes!("../assets/icons/tables.svg")),
             "icons/design_table.svg" => Some(include_bytes!("../assets/icons/design_table.svg")),

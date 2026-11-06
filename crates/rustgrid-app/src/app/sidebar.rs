@@ -30,6 +30,9 @@ struct TreeConnection {
     /// Whether the engine is a key-value store (Redis): objects are keys with namespaces, so the
     /// tree shows namespace folders instead of table/view/function categories.
     supports_key_value: bool,
+    /// Whether the engine is a document store (MongoDB): collections have no SQL views, so the
+    /// Views category is hidden even though the driver lists collection views as tables.
+    supports_documents: bool,
     status: TreeStatus,
     expanded: bool,
     /// The connection's environment colour, tinting this connection's whole subtree (参考 Navicat).
@@ -308,6 +311,7 @@ fn snapshot_connections(app: &AppView, search: Option<&str>) -> Vec<TreeConnecti
                 supports_schemas: app.driver_supports(index, DriverCapability::Schemas),
                 supports_backups: app.driver_supports_backup(index),
                 supports_key_value: key_value,
+                supports_documents: app.driver_supports(index, DriverCapability::Documents),
                 status,
                 expanded: if searching {
                     connection_matches
@@ -1254,6 +1258,7 @@ impl TreePane {
                                 connection.supports_schemas,
                                 connection.supports_backups,
                                 connection.supports_key_value,
+                                connection.supports_documents,
                                 cx,
                             ));
                         }
@@ -1277,6 +1282,7 @@ impl TreePane {
         supports_schemas: bool,
         supports_backups: bool,
         supports_key_value: bool,
+        supports_documents: bool,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let theme = self.theme;
@@ -1461,6 +1467,9 @@ impl TreePane {
                                     continue;
                                 }
                                 if category == Category::Functions && !supports_routines {
+                                    continue;
+                                }
+                                if category == Category::Views && supports_documents {
                                     continue;
                                 }
                                 if category == Category::Backups && !supports_backups {

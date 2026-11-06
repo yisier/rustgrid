@@ -2,11 +2,12 @@ English | [简体中文](README_zh.md)
 
 # RustGrid
 
-> A Navicat-style SQL and Redis GUI built in Rust — native, lightweight, zero learning curve.
+> A Navicat-style SQL, Redis and MongoDB GUI built in Rust — native, lightweight, zero learning curve.
 
-RustGrid is a cross-platform (Windows / macOS / Linux) database management tool for SQL and Redis,
-built with **Rust + GPUI**. Its layout and interactions follow Navicat, so switching costs nothing:
-the connection tree, object lists, toolbars and dialogs all behave the way you already expect.
+RustGrid is a cross-platform (Windows / macOS / Linux) database management tool for SQL, Redis and
+MongoDB, built with **Rust + GPUI**. Its layout and interactions follow Navicat, so switching costs
+nothing: the connection tree, object lists, toolbars and dialogs all behave the way you already
+expect.
 
 ## Screenshots
 
@@ -50,6 +51,7 @@ the connection tree, object lists, toolbars and dialogs all behave the way you a
 | PostgreSQL             | Supported                                   |
 | Oracle                 | Supported                                   |
 | Redis                  | Supported (standalone / Sentinel / Cluster) |
+| MongoDB                | Supported (collections, documents, JSON commands) |
 | StarRocks              | via MySQL compatibility mode                |
 | DB2, Dameng, ...       | via generic ODBC                            |
 
@@ -87,6 +89,9 @@ the connection tree, object lists, toolbars and dialogs all behave the way you a
 - **Redis** — browse standalone, Sentinel and Cluster servers by namespace; every key opens on its
   own page (RAW / JSON for strings, editable tables for collections), the key list offers New Key,
   Set TTL, Rename and Delete, and the query editor completes Redis commands and keys.
+- **MongoDB** — browse databases and collections, page and edit documents in the normal grid and
+  row form (embedded documents open as JSON), and run JSON commands (`find`, `aggregate`, `count`,
+  any `runCommand`) in query tabs.
 - **Options & updates** — light / dark / system themes, English / 简体中文 / Русский, rebindable
   shortcuts, editor font / line numbers / word wrap / Ctrl + wheel zoom, session restore,
   single-click mode, grid display options and a built-in self-updater.
@@ -124,6 +129,8 @@ cargo run -p rustgrid-app
   Client).
 - `crates/rustgrid-redis` — Redis driver (standalone / Sentinel / Cluster); see
   `docs/redis-driver.md`.
+- `crates/rustgrid-mongodb` — MongoDB driver (collections as tables, documents as rows, JSON
+  commands in the query tab); see `docs/mongodb-driver.md`.
 - `crates/rustgrid-tunnel` — shared SSH / SOCKS5 / HTTP tunnel used by the network drivers.
 - `crates/rustgrid-odbc` — generic ODBC driver (DB2, Dameng, ...).
 - `crates/rustgrid-backup` — the `.rgbak` backup container.

@@ -91,9 +91,24 @@ not a later refactor.
   PTTL around the write). The query editor runs one command per line through the shared editor, and
   refuses what would break a shared connection (`SELECT`/`AUTH`, `MULTI`, `CLIENT REPLY`, blocking
   commands, `SHUTDOWN`). See `docs/redis-driver.md`.
+- `crates/rustgrid-mongodb` — the **MongoDB** driver, built on the official **`mongodb` 3.10** Rust
+  driver (`bson-3`, rustls TLS; DNS/SRV, compression and the KMS integrations are off). A
+  connection is a **document store** (`DriverCapability::Documents`): databases hold collections, a
+  collection is shown as a table whose columns are the union of the top-level fields of a 50-document
+  sample, and one document is one grid row. `_id` is the primary key, so grid edits become `$set`,
+  insert/delete are keyed by it and a `_id` edit is ignored (immutable). Scalars keep their
+  `CellValue` shape where possible; ObjectId/decimal/date/binary and embedded documents/arrays are
+  text/Extended JSON and are parsed back through the column's BSON type (`value.rs`), so the
+  existing row form shows embedded documents in its JSON editor. The filter tree is translated to a
+  query document (`filter.rs`), sorting/paging use `skip`/`limit` with an `_id` tie-breaker. The
+  query tab runs **one JSON command** (`find`, `aggregate`, `count`, `distinct`, `listCollections`,
+  `listDatabases`, otherwise `runCommand`) instead of JavaScript, and its grids are read-only
+  because no SQL table can be inferred. TLS, SSH/SOCKS5/HTTP tunnels, SCRAM/None authentication and
+  the auth database come from the standard connection form; there is no table designer, `.rgbak`
+  backup, users/roles or Views category. See `docs/mongodb-driver.md`.
 - `crates/rustgrid-tunnel` — the shared **SSH / SOCKS5 / HTTP** tunnel (local port forwarding) used
   by the network drivers (`rustgrid-mysql`, `rustgrid-postgresql`, `rustgrid-oracle`,
-  `rustgrid-sqlserver`, `rustgrid-redis` in standalone mode). Migrated out of
+  `rustgrid-sqlserver`, `rustgrid-redis` in standalone mode, `rustgrid-mongodb`). Migrated out of
   `rustgrid-mysql` so PostgreSQL reuses it; `rustgrid-mysql` re-exports `Tunnel`.
 - `crates/rustgrid-odbc` — the **generic ODBC driver** (app feature `driver-odbc`, on by default).
   It connects through a user-installed ODBC driver or a raw connection string and speaks the engine's

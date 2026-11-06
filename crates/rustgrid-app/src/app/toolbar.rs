@@ -244,14 +244,17 @@ impl AppView {
             ))
             .child(main_separator(theme));
 
-        // A key-value engine has keys and a query console, not views/routines/accounts/backups.
-        // Hide the tabs it cannot use instead of greying out five of them (the prototype's ribbon
-        // is just 表 / 查询).
+        // A document store (MongoDB) has collections and a query console, not views/routines/
+        // accounts/backups; it uses the same 表 / 查询 ribbon as a key-value engine.
+        let documents = self
+            .active_connection_index(cx)
+            .is_some_and(|index| self.driver_supports(index, DriverCapability::Documents));
         let key_value = self
             .active_connection_index(cx)
             .is_some_and(|index| self.driver_supports(index, DriverCapability::KeyValue));
+        let compact = key_value || documents;
         for (tab, icon, label_key) in MAIN_TABS {
-            if key_value && !matches!(tab, MainTab::Tables | MainTab::Queries) {
+            if compact && !matches!(tab, MainTab::Tables | MainTab::Queries) {
                 continue;
             }
             bar = bar.child(self.render_main_tab(tab, icon, t!(label_key).to_string(), cx));

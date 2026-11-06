@@ -194,10 +194,17 @@ impl SqlEditor {
         supports_schemas: bool,
         dialect: DriverDialect,
         key_value: bool,
+        documents: bool,
         cx: &mut Context<Self>,
     ) {
         let mysql = dialect == DriverDialect::Mysql;
-        let language = if key_value { "redis" } else { "sql" };
+        let language = if key_value {
+            "redis"
+        } else if documents {
+            "json"
+        } else {
+            "sql"
+        };
         let language_changed = self.options.language.as_ref() != language;
         if language_changed {
             self.options.language = language.into();

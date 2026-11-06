@@ -31,6 +31,11 @@ impl AppView {
             .get(query_index)
             .and_then(|query| query.connection_index)
             .is_some_and(|index| self.driver_supports(index, DriverCapability::KeyValue));
+        let documents = self
+            .queries
+            .get(query_index)
+            .and_then(|query| query.connection_index)
+            .is_some_and(|index| self.driver_supports(index, DriverCapability::Documents));
 
         let mut toolbar = div()
             .flex()
@@ -52,8 +57,9 @@ impl AppView {
                 true,
                 cx.listener(|this, _event, window, cx| this.begin_save_query(window, cx)),
             ));
-        // Redis commands are not SQL: there is nothing for 美化SQL to format.
-        if !key_value {
+        // Redis commands and MongoDB JSON commands are not SQL: there is nothing for 美化SQL to
+        // format.
+        if !key_value && !documents {
             toolbar = toolbar
                 .child(toolbar_separator(theme))
                 .child(self.query_tool_button(

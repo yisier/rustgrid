@@ -2,10 +2,10 @@
 
 # RustGrid
 
-> 用 Rust 打造的 Navicat 风格 SQL 与 Redis 管理工具 —— 原生、轻量、零学习成本。
+> 用 Rust 打造的 Navicat 风格 SQL、Redis 与 MongoDB 管理工具 —— 原生、轻量、零学习成本。
 
-RustGrid 是一款使用 **Rust + GPUI** 构建的跨平台（Windows / macOS / Linux）SQL 与 Redis
-数据库管理工具。它的界面布局和交互习惯对齐 Navicat，连接树、对象列表、工具栏和弹窗都与你
+RustGrid 是一款使用 **Rust + GPUI** 构建的跨平台（Windows / macOS / Linux）SQL、Redis 与
+MongoDB 数据库管理工具。它的界面布局和交互习惯对齐 Navicat，连接树、对象列表、工具栏和弹窗都与你
 熟悉的操作一致，迁移毫无成本。
 
 ## 界面预览
@@ -50,6 +50,7 @@ RustGrid 是一款使用 **Rust + GPUI** 构建的跨平台（Windows / macOS / 
 | PostgreSQL                 | 已支持                            |
 | Oracle                     | 已支持                            |
 | Redis                      | 已支持（单机 / Sentinel / 集群）  |
+| MongoDB                    | 已支持（集合 / 文档 / JSON 命令） |
 | StarRocks                  | 通过 MySQL 兼容模式               |
 | DB2、达梦 等               | 通过通用 ODBC                     |
 
@@ -82,6 +83,8 @@ RustGrid 是一款使用 **Rust + GPUI** 构建的跨平台（Windows / macOS / 
 - **Redis** —— 按命名空间浏览单机、Sentinel 和集群服务器；每个键有独立页面（字符串提供
   RAW / JSON，集合提供可编辑表格），键列表支持新建键、设置 TTL、重命名和删除；查询编辑器支持
   Redis 命令与键名补全。
+- **MongoDB** —— 浏览数据库与集合，用现有网格和行表单分页、编辑文档（嵌套文档以 JSON 打开），
+  查询页直接运行 JSON 命令（`find`、`aggregate`、`count` 以及任意 `runCommand`）。
 - **选项与更新** —— 浅色 / 深色 / 跟随系统主题，英文 / 简体中文 / Русский，可自定义快捷键，
   编辑器字体 / 行号 / 自动换行 / Ctrl + 滚轮缩放，启动时恢复会话，单击打开模式，网格显示选项，
   以及内置自动更新。
@@ -117,6 +120,8 @@ cargo run -p rustgrid-app
 - `crates/rustgrid-postgresql` —— PostgreSQL 驱动。
 - `crates/rustgrid-oracle` —— Oracle 驱动（Oracle 官方纯 Rust `oracledb` thin 驱动，无需 Instant Client）。
 - `crates/rustgrid-redis` —— Redis 驱动（单机 / Sentinel / 集群），详见 `docs/redis-driver.md`。
+- `crates/rustgrid-mongodb` —— MongoDB 驱动（集合即表、文档即行，查询页跑 JSON 命令），详见
+  `docs/mongodb-driver.md`。
 - `crates/rustgrid-tunnel` —— 共享的 SSH / SOCKS5 / HTTP 隧道，供网络驱动复用。
 - `crates/rustgrid-odbc` —— 通用 ODBC 驱动（DB2、达梦 等）。
 - `crates/rustgrid-backup` —— `.rgbak` 备份容器。

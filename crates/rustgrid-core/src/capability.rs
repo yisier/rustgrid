@@ -23,6 +23,10 @@ pub enum DriverCapability {
     /// A key-value engine: objects are keys, not tables (Redis). The UI uses it to offer keys,
     /// TTL, namespaces and the Redis tools instead of table-only actions.
     KeyValue,
+    /// A document-store engine: objects are collections of BSON documents (MongoDB). The UI uses
+    /// it to hide the SQL-only categories (views/routines/backups) and to switch the query editor
+    /// to the document language, while the data grid, filter and row form stay the table ones.
+    Documents,
 }
 
 /// The set of capabilities an engine supports.

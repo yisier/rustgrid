@@ -26,6 +26,8 @@ impl AppView {
             .is_some_and(|index| self.driver_supports(index, DriverCapability::Schemas));
         let key_value = connection_index
             .is_some_and(|index| self.driver_supports(index, DriverCapability::KeyValue));
+        let documents = connection_index
+            .is_some_and(|index| self.driver_supports(index, DriverCapability::Documents));
         let dialect = connection_index
             .and_then(|index| self.connections.get(index))
             .and_then(|node| self.registry.get(&node.profile.driver))
@@ -45,6 +47,7 @@ impl AppView {
                     supports_schemas,
                     dialect,
                     key_value,
+                    documents,
                     cx,
                 )
             });
@@ -70,19 +73,31 @@ impl AppView {
         let provider: Rc<dyn gpui_kit::component::input::CompletionProvider> =
             Rc::new(sql_completion::SqlCompletionProvider::new(source));
         let options = ui::SqlEditorOptions {
-            language: if key_value { "redis" } else { "sql" }.into(),
+            language: if documents {
+                "json"
+            } else if key_value {
+                "redis"
+            } else {
+                "sql"
+            }
+            .into(),
             font_family: self.editor_font().into(),
             font_size: self.editor_font_size(),
             line_number: self.editor_line_numbers,
             readonly: false,
         };
+        // A document command is JSON, not SQL: attaching the SQL completion provider there would
+        // offer keywords that cannot appear in the document.
+        let completion = (!documents).then_some((provider, scope_handle));
         let weak = cx.weak_entity();
         let zoom_weak = weak.clone();
         let editor = cx.new(|cx| {
-            ui::SqlEditor::new(cx)
-                .options(options)
-                .provider(provider)
-                .scope(scope_handle)
+            let editor = ui::SqlEditor::new(cx).options(options);
+            let editor = match completion {
+                Some((provider, scope)) => editor.provider(provider).scope(scope),
+                None => editor,
+            };
+            editor
                 .on_change(Rc::new(move |text, cx| {
                     let _ = weak.update(cx, |app, cx| app.on_query_editor_changed(index, text, cx));
                 }))
@@ -110,6 +125,7 @@ impl AppView {
         // `alias.`/`table.` completion has types and comments ready.
         if let Some(connection_index) = connection_index {
             let key_value = self.driver_supports(connection_index, DriverCapability::KeyValue);
+            let documents = self.driver_supports(connection_index, DriverCapability::Documents);
             let scope = sql_completion::CompletionScope {
                 connection_index: Some(connection_index),
                 database,
@@ -124,8 +140,8 @@ impl AppView {
                 key_value,
             };
             // Every statement's tables, not only the last one's: the caret may be in any. Redis
-            // commands are not SQL, so there are no tables to warm there.
-            if !key_value {
+            // commands and MongoDB JSON documents are not SQL, so there are no tables to warm.
+            if !key_value && !documents {
                 let referenced = sql::referenced_tables(text);
                 for table in referenced {
                     if let Some((database, table)) = sql_completion::catalog_target(&scope, &table)

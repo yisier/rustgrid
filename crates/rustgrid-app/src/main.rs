@@ -237,7 +237,8 @@ fn builtin_registry() -> DriverRegistry {
         .with(Arc::new(rustgrid_sqlserver::SqlServerDriver::new()))
         .with(Arc::new(rustgrid_postgresql::PostgresDriver::new()))
         .with(Arc::new(rustgrid_oracle::OracleDriver::new()))
-        .with(Arc::new(rustgrid_redis::RedisDriver::new()));
+        .with(Arc::new(rustgrid_redis::RedisDriver::new()))
+        .with(Arc::new(rustgrid_mongodb::MongoDriver::new()));
     #[cfg(feature = "driver-odbc")]
     let drivers = drivers.with(Arc::new(rustgrid_odbc::OdbcDriver::new()));
     registry.register_source(&drivers);
@@ -387,5 +388,46 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// MongoDB is a document store: the registration must advertise that capability and keep the
+    /// SQL-only surfaces (designer, `.rgbak` backup) off.
+    #[test]
+    fn mongodb_is_registered_as_a_document_store() {
+        use rustgrid_core::{ConnectionProfile, DriverCapability, DriverId};
+
+        let registry = builtin_registry();
+        let driver = registry
+            .get(&DriverId::new("mongodb"))
+            .expect("MongoDB driver is registered");
+        let descriptor = driver.descriptor();
+        assert_eq!(descriptor.default_port, 27017);
+        assert!(
+            descriptor.capabilities.has(DriverCapability::Documents),
+            "MongoDB must advertise the document-store capability"
+        );
+        for absent in [
+            DriverCapability::Users,
+            DriverCapability::Routines,
+            DriverCapability::Schemas,
+        ] {
+            assert!(
+                !descriptor.capabilities.has(absent),
+                "MongoDB must not advertise {absent:?}"
+            );
+        }
+        let profile = ConnectionProfile {
+            id: "test".into(),
+            name: "test".into(),
+            driver: DriverId::new("mongodb"),
+            host: String::new(),
+            port: 27017,
+            username: String::new(),
+            database: None,
+            options: Default::default(),
+            settings: Default::default(),
+        };
+        assert!(!driver.supports_table_designer(&profile));
+        assert!(!driver.supports_backup(&profile));
     }
 }
