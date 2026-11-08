@@ -186,6 +186,9 @@ impl AppView {
                 )
             });
             let content_app = app.clone();
+            let theme = app.read(cx).theme;
+            let footer_cancel = app.downgrade();
+            let footer_ok = app.downgrade();
             let ok_app = app.downgrade();
             let cancel_app = app.downgrade();
             let close_app = app.downgrade();
@@ -206,6 +209,35 @@ impl AppView {
                     }
                     content.child(body)
                 })
+                // A plain `Dialog` renders no buttons from `button_props`; the actions live in this
+                // footer (the props still install the Enter/Escape handlers).
+                .footer(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .justify_end()
+                        .gap_2()
+                        .w_full()
+                        .child(ui::button(
+                            "collection-cancel",
+                            t!("form.cancel").to_string(),
+                            ButtonKind::Normal,
+                            theme,
+                            move |_event, _window, cx| {
+                                let _ =
+                                    footer_cancel.update(cx, |app, cx| app.cancel_collection(cx));
+                            },
+                        ))
+                        .child(ui::button(
+                            "collection-ok",
+                            ok_text.clone(),
+                            ButtonKind::Default,
+                            theme,
+                            move |_event, _window, cx| {
+                                let _ = footer_ok.update(cx, |app, cx| app.submit_collection(cx));
+                            },
+                        )),
+                )
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text(ok_text)
@@ -256,7 +288,7 @@ impl AppView {
             t!("common.name").to_string(),
             input(self.collection_name_input.clone()),
         ));
-        if dialog.loading {
+        if dialog.loading || dialog.saving {
             body = body.child(
                 div()
                     .text_size(px(11.5))
