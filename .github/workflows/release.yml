@@ -54,22 +54,32 @@ env:
   UPX_VERSION: "5.3.0"
 
 jobs:
-  # GitHub's ARM runners get a 504 from github.com's release CDN for the UPX download (the x64
-  # runners do not), so it is fetched once on an x64 runner and shared as an artifact. The packer
-  # must match the runner's architecture: an amd64 UPX runs on an x64 runner, an arm64 UPX on the
-  # arm64 one, and either can pack the target ELF. Windows' win64 packer runs on the arm64 runner
-  # through Windows' x64 emulation.
+  # GitHub's release download URL only answers a redirect and that CDN target times out (504) from
+  # the runners, while the asset API serves the same file directly, so the binaries are fetched
+  # through `api.github.com/.../releases/assets/{id}`. One x64 job does it for every platform: the
+  # packer must match the runner's architecture (an amd64 UPX on an x64 runner, an arm64 UPX on the
+  # arm64 one), and Windows' win64 packer runs on the arm64 runner through x64 emulation.
   fetch-upx:
     name: Fetch UPX
     runs-on: ubuntu-22.04
     steps:
       - name: Download UPX
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          base="https://github.com/upx/upx/releases/download/v${UPX_VERSION}"
-          curl -fsSL --retry 8 --retry-delay 3 --retry-all-errors -o amd64.tar.xz "$base/upx-${UPX_VERSION}-amd64_linux.tar.xz"
-          curl -fsSL --retry 8 --retry-delay 3 --retry-all-errors -o arm64.tar.xz "$base/upx-${UPX_VERSION}-arm64_linux.tar.xz"
-          curl -fsSL --retry 8 --retry-delay 3 --retry-all-errors -o win64.zip "$base/upx-${UPX_VERSION}-win64.zip"
+          api="https://api.github.com/repos/upx/upx/releases/tags/v${UPX_VERSION}"
+          fetch() {
+            id=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" "$api" \
+              | jq -r --arg name "$1" '.assets[] | select(.name == $name) | .id')
+            test -n "$id" && test "$id" != "null"
+            curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors \
+              -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/octet-stream" \
+              -o "$2" "https://api.github.com/repos/upx/upx/releases/assets/$id"
+          }
+          fetch "upx-${UPX_VERSION}-amd64_linux.tar.xz" amd64.tar.xz
+          fetch "upx-${UPX_VERSION}-arm64_linux.tar.xz" arm64.tar.xz
+          fetch "upx-${UPX_VERSION}-win64.zip" win64.zip
           tar -xJf amd64.tar.xz
           tar -xJf arm64.tar.xz
           unzip -q win64.zip -d win64
@@ -188,7 +198,7 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }} -p rustgrid-app
 
       # UPX 5.3 compresses every Linux and Windows executable. The binaries come from the
-      # `fetch-upx` job (see above); `--retry` there covers the flaky CDN.
+      # `fetch-upx` job (see above).
       - name: Download UPX
         if: runner.os != 'macOS'
         uses: actions/download-artifact@v4
