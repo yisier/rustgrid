@@ -2182,6 +2182,11 @@ impl AppView {
                 t!("database.schema_delete_confirm", name = schema.clone()).to_string(),
                 t!("database.schema_delete_button").to_string(),
             ),
+            Some(DeleteConfirm::Database { name, .. }) => (
+                t!("database.delete").to_string(),
+                t!("database.delete_message", name = name.clone()).to_string(),
+                t!("database.delete").to_string(),
+            ),
             None => (String::new(), String::new(), t!("form.ok").to_string()),
         }
     }

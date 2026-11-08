@@ -177,7 +177,6 @@ impl AppView {
                 t!("database.new").to_string()
             }
             Some(DbDialog::Edit(_)) => t!("database.edit").to_string(),
-            Some(DbDialog::Delete { .. }) => t!("database.delete").to_string(),
             None => String::new(),
         }
     }
@@ -185,42 +184,7 @@ impl AppView {
     fn db_dialog_footer(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let allow_ok = match self.db_dialog.as_ref() {
             Some(DbDialog::Edit(form)) => !form.loading,
-            Some(_) => true,
             None => false,
-        };
-        let deleting = matches!(self.db_dialog, Some(DbDialog::Delete { .. }));
-        let ok_label = if deleting {
-            t!("database.delete").to_string()
-        } else {
-            t!("form.ok").to_string()
-        };
-        let theme = self.theme;
-        let ok_button: AnyElement = if deleting {
-            // Destructive action: use the danger variant, matching every other confirm dialog.
-            ui::button(
-                "db-ok",
-                ok_label,
-                ButtonKind::Danger,
-                theme,
-                cx.listener(move |this, _event, _window, cx| {
-                    if allow_ok {
-                        this.db_submit(cx);
-                    }
-                }),
-            )
-            .into_any_element()
-        } else {
-            self.dialog_button(
-                "db-ok",
-                ok_label,
-                true,
-                cx.listener(move |this, _event, _window, cx| {
-                    if allow_ok {
-                        this.db_submit(cx);
-                    }
-                }),
-            )
-            .into_any_element()
         };
         div()
             .flex()
@@ -236,7 +200,16 @@ impl AppView {
                 false,
                 cx.listener(|this, _event, _window, cx| this.db_cancel(cx)),
             ))
-            .child(ok_button)
+            .child(self.dialog_button(
+                "db-ok",
+                t!("form.ok").to_string(),
+                allow_ok,
+                cx.listener(move |this, _event, _window, cx| {
+                    if allow_ok {
+                        this.db_submit(cx);
+                    }
+                }),
+            ))
     }
 
     fn db_dialog_body(&self, cx: &mut Context<'_, Self>) -> AnyElement {
@@ -460,40 +433,6 @@ impl AppView {
                             .child(page),
                     )
                     .into_any_element()
-            }
-            Some(DbDialog::Delete {
-                name,
-                submitting,
-                error,
-                ..
-            }) => {
-                let body = div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(div().text_size(px(12.0)).child(format!(
-                        "{}: {}",
-                        t!("database.name"),
-                        name
-                    )))
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(rgb(theme.danger))
-                            .child(t!("database.delete_confirm").to_string()),
-                    )
-                    // The footer is built once, so the busy state can only reach the screen
-                    // from here (rebuilt every frame).
-                    .when(*submitting, |this| {
-                        this.child(
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(rgb(theme.text_muted))
-                                .child(t!("common.loading").to_string()),
-                        )
-                    })
-                    .child(self.render_db_error(error));
-                div().p_4().child(body).into_any_element()
             }
             None => div().into_any_element(),
         }

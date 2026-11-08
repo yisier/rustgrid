@@ -1599,13 +1599,6 @@ impl DatabaseForm {
 
 enum DbDialog {
     Edit(Box<DatabaseForm>),
-    Delete {
-        connection_index: usize,
-        name: String,
-        /// True while the drop request is in flight, so a second OK click is ignored.
-        submitting: bool,
-        error: Option<String>,
-    },
 }
 
 /// The "New Schema" dialog (SQL Server): a name field over one (connection, database) scope.
@@ -1994,6 +1987,11 @@ enum DeleteConfirm {
     Connection { index: usize },
     /// Delete a connection-tree group (its connections are kept, only ungrouped).
     Group { id: u64 },
+    /// Drop a database (its tabs, panes and tree row are cleaned up after it is gone).
+    Database {
+        connection_index: usize,
+        name: String,
+    },
     /// Delete the connection tree's multi-selection: the named connections plus the named groups
     /// (each group is removed with everything left inside it).
     TreeSelection {

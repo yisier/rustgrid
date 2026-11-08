@@ -5,7 +5,6 @@ use super::*;
 enum DbOp {
     Create,
     Alter,
-    Drop,
 }
 
 impl AppView {
@@ -266,11 +265,11 @@ impl AppView {
         let Some(name) = self.database_name(connection_index, database_index) else {
             return;
         };
-        self.db_dialog = Some(DbDialog::Delete {
+        // Dropping a database is a destructive action like dropping a table or a schema, so it
+        // goes through the shared confirmation instead of the (much wider) database edit form.
+        self.delete_confirm = Some(DeleteConfirm::Database {
             connection_index,
             name,
-            submitting: false,
-            error: None,
         });
         cx.notify();
     }
@@ -287,13 +286,11 @@ impl AppView {
         let op = match self.db_dialog.as_ref() {
             Some(DbDialog::Edit(form)) if form.database_index.is_none() => DbOp::Create,
             Some(DbDialog::Edit(_)) => DbOp::Alter,
-            Some(DbDialog::Delete { .. }) => DbOp::Drop,
             None => return,
         };
         match op {
             DbOp::Create => self.db_create(cx),
             DbOp::Alter => self.db_alter(cx),
-            DbOp::Drop => self.db_drop(cx),
         }
     }
 
@@ -426,37 +423,20 @@ impl AppView {
         .detach();
     }
 
-    /// Drop the database named in the confirm page.
-    fn db_drop(&mut self, cx: &mut Context<'_, Self>) {
-        let (connection_index, name, submitting) = {
-            let Some(DbDialog::Delete {
-                connection_index,
-                name,
-                submitting,
-                ..
-            }) = self.db_dialog.as_ref()
-            else {
-                return;
-            };
-            (*connection_index, name.clone(), *submitting)
-        };
-        if submitting {
-            return;
-        }
+    /// Drop a database after the shared confirmation, then clean up whatever showed it: its tabs,
+    /// the object/info panes scoped to it, its tree row, and finally the connection's database list.
+    pub(super) fn delete_database(
+        &mut self,
+        connection_index: usize,
+        name: String,
+        cx: &mut Context<'_, Self>,
+    ) {
         let Some(connection) = self.connection_arc(connection_index) else {
             return;
         };
-        {
-            let Some(DbDialog::Delete {
-                submitting, error, ..
-            }) = self.db_dialog.as_mut()
-            else {
-                return;
-            };
-            *submitting = true;
-            *error = None;
-        }
         let runtime = self.runtime.clone();
+        let close_connection = connection.clone();
+        let close_database = name.clone();
         cx.spawn(async move |this, cx| {
             let result = match runtime
                 .spawn(async move { connection.drop_database(&name).await })
@@ -469,25 +449,66 @@ impl AppView {
             let _ = this.update(cx, |view, cx| {
                 match result {
                     Ok(()) => {
-                        view.db_dialog = None;
+                        if let Some(database_index) =
+                            view.database_index_by_name(connection_index, &close_database)
+                        {
+                            view.reconcile_after_database_dropped(
+                                connection_index,
+                                database_index,
+                                &close_connection,
+                                &close_database,
+                                cx,
+                            );
+                        }
                         view.load_databases(connection_index, cx);
                     }
+                    // The confirmation is already gone, so a failed drop reports through the
+                    // shared error dialog like every other destructive action.
                     Err(error) => {
-                        if let Some(DbDialog::Delete {
-                            submitting,
-                            error: slot,
-                            ..
-                        }) = view.db_dialog.as_mut()
-                        {
-                            *submitting = false;
-                            *slot = Some(error.to_string());
-                        }
+                        view.error_dialog = Some(error.to_string());
                     }
                 }
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    /// After a database was dropped, its tree row falls back to its parent (the connection), and
+    /// the object pane, info pane and tabs scoped to it are closed before the list reloads. The
+    /// list's indices shift once the database is gone, so leaving them pointing at the old index
+    /// would silently retarget another database.
+    fn reconcile_after_database_dropped(
+        &mut self,
+        connection_index: usize,
+        database_index: usize,
+        connection: &Arc<dyn Connection>,
+        database: &str,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.tree_selection_fell_back_from(&format!("db-{connection_index}-{database_index}"), cx);
+        let showing = self.object_pane.as_ref().is_some_and(|pane| {
+            let pane = pane.read(cx);
+            pane.connection_index == connection_index && pane.database_index == database_index
+        });
+        if showing {
+            self.object_pane = None;
+            self.objects_selection.clear();
+        }
+        let info_in_database = self
+            .info_table_selected
+            .as_ref()
+            .is_some_and(|(ci, di, _)| *ci == connection_index && *di == database_index)
+            || self
+                .info_routine_selected
+                .as_ref()
+                .is_some_and(|(ci, di, _, _)| *ci == connection_index && *di == database_index);
+        if info_in_database {
+            self.clear_info_selection();
+        }
+        self.close_database_grids(connection, database, cx);
+        self.close_database_designs(connection, database, cx);
+        self.settle_after_tab_closed(cx);
     }
 
     /// Create (once) the two editable drop-downs of the edit-database dialog. Their options and
@@ -520,10 +541,7 @@ impl AppView {
         let spec = self
             .db_dialog
             .as_ref()
-            .and_then(|dialog| match dialog {
-                DbDialog::Edit(form) => Some(form.spec.clone()),
-                _ => None,
-            })
+            .map(|DbDialog::Edit(form)| form.spec.clone())
             .unwrap_or_default();
         if spec.owner && self.db_owner_combo.is_none() {
             let weak = cx.weak_entity();

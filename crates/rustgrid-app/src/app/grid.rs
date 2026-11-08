@@ -185,6 +185,10 @@ impl AppView {
             }
             DeleteConfirm::Connection { index } => self.delete_connection(index, cx),
             DeleteConfirm::Group { id } => self.delete_group(id, cx),
+            DeleteConfirm::Database {
+                connection_index,
+                name,
+            } => self.delete_database(connection_index, name, cx),
             DeleteConfirm::TreeSelection {
                 connections,
                 groups,
