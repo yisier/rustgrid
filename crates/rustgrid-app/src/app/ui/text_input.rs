@@ -388,20 +388,26 @@ impl TextInput {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The element's listener runs inside this entity's own update, so a callback that reads or
+        // rewrites the field (the pager's Escape restores the page number, its Up/Down steps the
+        // page size) would be a re-entrant borrow and panic. Dispatch after the update instead,
+        // exactly like `flush` does for submit.
         match event.keystroke.key.as_str() {
             "escape" => {
                 if let Some(callback) = self.on_cancel.clone() {
-                    callback(window, cx);
+                    window.defer(cx, move |window, cx| callback(window, cx));
                 }
             }
             "tab" => {
                 if let Some(callback) = self.on_tab.clone() {
-                    callback(event.keystroke.modifiers.shift, window, cx);
+                    let shift = event.keystroke.modifiers.shift;
+                    window.defer(cx, move |window, cx| callback(shift, window, cx));
                 }
             }
             "up" | "down" => {
                 if let Some(callback) = self.on_arrow.clone() {
-                    callback(event.keystroke.key == "down", window, cx);
+                    let down = event.keystroke.key == "down";
+                    window.defer(cx, move |window, cx| callback(down, window, cx));
                 }
             }
             _ => {}
@@ -584,6 +590,69 @@ mod tests {
             recorded.borrow().as_deref(),
             Some("abc"),
             "the submit callback should read the field without a re-entrant borrow"
+        );
+    }
+
+    /// Escape may rewrite the field from its own `on_cancel` (the pager restores the current page
+    /// number that way). The key listener runs inside the wrapper's own update, so the callback
+    /// must be deferred or the nested update panics.
+    #[gpui_kit::test]
+    fn cancel_can_rewrite_its_own_field(cx: &mut TestAppContext) {
+        use std::cell::RefCell;
+
+        cx.update(gpui_kit::init);
+        let slot: Rc<RefCell<Option<Entity<TextInput>>>> = Rc::new(RefCell::new(None));
+        let slot_for_callback = slot.clone();
+        let (handle, view) = cx.update(|cx| {
+            let field = cx.new(|cx| {
+                TextInput::new(Theme::light(), "typed", TextInputOptions::default(), cx).on_cancel(
+                    Rc::new(move |_window, cx| {
+                        let field = slot_for_callback.borrow().clone().expect("field exists");
+                        field.update(cx, |field, cx| field.set_text("reset", cx));
+                    }),
+                )
+            });
+            *slot.borrow_mut() = Some(field.clone());
+            let view = cx.new(|_cx| ArrowHarness {
+                field: field.clone(),
+            });
+            let (handle, _window) = gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: Point::default(),
+                        size: size(px(400.), px(200.)),
+                    })),
+                    ..Default::default()
+                },
+                cx,
+                |_, _| view.clone(),
+            )
+            .expect("open test window");
+            (handle, view)
+        });
+        let mut cx = VisualTestContext::from_window(handle, cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.update(|window, cx| {
+            let field = view.read(cx).field.clone();
+            field.update(cx, |field, cx| field.focus_state(window, cx));
+            let _ = window.draw(cx);
+        });
+        cx.simulate_keystrokes("escape");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let text = cx.update(|_window, cx| {
+            view.read(cx)
+                .field
+                .read(cx)
+                .current_text(cx)
+                .unwrap_or_default()
+        });
+        assert_eq!(
+            text, "reset",
+            "the cancel callback should rewrite the field"
         );
     }
 
