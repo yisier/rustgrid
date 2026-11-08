@@ -1064,16 +1064,27 @@ make more engines cheap later — do not build those features early.
   laid-out `StyledText`, paints the selected range with a `HighlightStyle`, and exposes copy /
   select-all through its own `"GridStatus"` key context (`CopyStatusSql` / `SelectAllStatusSql`) — the
   `Root` context's `ctrl-c`/`ctrl-a` would otherwise swallow the keystroke before it reached the line.
+  The statement always occupies the line, even while cells are selected (a page opens with its first
+  record selected); the selection summary and the numeric sum moved up into the record toolbar's
+  left end (`render_grid_controls`, after the row action buttons), so a selection never hides the
+  SQL. A document store speaks no SQL, so its line stays empty. The statement is usually wider than
+  the bar, so it pans: the wheel (or a horizontal trackpad swipe) moves `status_sql_scroll`, and a
+  selection drag held in the line's edge zone (`STATUS_SQL_EDGE_ZONE`) starts the edge auto-scroll
+  (`status_sql_maybe_autoscroll`), whose tick keeps panning and extending the selection while the
+  pointer stays there. The drag's window-level move/up listeners come from a root canvas painted
+  while `status_sql_selecting`, like the fill handle's.
 
 - **The filter builder's value fields are ordinary `ui::TextInput`s** (caret, mouse selection,
   clipboard and IME from gpui-kit), one entity per `(node path, slot)` in
   `GridView::filter_value_inputs` and dropped on any structural change (like the field/operator
-  combos). The pager's 页码 / 每页记录数 boxes are `ui::TextInput`s too (`grid.rs::make_page_input` /
-  `make_page_size_input`): the shared field owns caret, selection, clipboard and IME, `accepts`
-  keeps them digits-only, `on_submit` commits (Enter), `on_cancel` restores the current value
-  (Escape) and the page-size box's `on_arrow` steps by 100. `GridView` no longer implements
-  `EntityInputHandler`; a new single-line field should be a `ui::TextInput` rather than a bespoke
-  append-only editor.
+  combos). The pager's 页码 box is a `ui::TextInput` too (`grid.rs::make_page_input`): the shared
+  field owns caret, selection, clipboard and IME, `accepts` keeps it digits-only, `on_submit`
+  commits (Enter) and `on_cancel` restores the current value (Escape). The 限制记录 panel's
+  page-size control is the project's compact `ui::ComboBox` (`GridView::page_size_combo`, options
+  `PAGE_SIZE_OPTIONS` = 500/1000/2000/5000/10000, default 1000) rather than a typed box, its
+  限制记录 checkbox applies the chosen size (or the no-limit cap) at once, and the panel sits at
+  the right edge above the pager. `GridView` no longer implements `EntityInputHandler`; a new
+  single-line field should be a `ui::TextInput` rather than a bespoke append-only editor.
 
 - **SQL Server (tiberius) is not sqlx.** `tiberius::Client` drives one request at a time and is
   `Send` but **not `Sync`**, so `SqlServerConnection` holds a `bb8::Pool` and checks a client out per

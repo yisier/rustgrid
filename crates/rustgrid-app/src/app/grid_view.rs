@@ -1,4 +1,4 @@
-use super::grid::{make_page_input, make_page_size_input, row_origin};
+use super::grid::{make_page_input, row_origin};
 use super::grid_fields::make_field_filter_search_input;
 use super::*;
 use gpui::HitboxBehavior;
@@ -73,11 +73,9 @@ impl GridView {
         cx: &mut Context<'_, Self>,
     ) -> Self {
         let page_input = (state.page_index + 1).to_string();
-        let page_size_input = state.page_size.to_string();
         let weak = cx.weak_entity();
         let field_filter_search_input = make_field_filter_search_input(theme, weak.clone(), cx);
-        let page_input_view = make_page_input(theme, page_input.clone(), weak.clone(), cx);
-        let page_size_view = make_page_size_input(theme, page_size_input.clone(), weak, cx);
+        let page_input_view = make_page_input(theme, page_input.clone(), weak, cx);
         Self {
             state,
             app,
@@ -126,9 +124,7 @@ impl GridView {
             page_input,
             page_input_view,
             page_size_menu_open: false,
-            page_size_input,
-            page_size_view,
-            page_size_focus_pending: false,
+            page_size_combo: None,
             field_filter_open: false,
             field_filter_focus_pending: false,
             field_filter_search: String::new(),
@@ -143,6 +139,10 @@ impl GridView {
             status_sql_anchor: 0,
             status_sql_cursor: 0,
             status_sql_selecting: false,
+            status_sql_scroll: 0.0,
+            status_sql_view: Rc::new(RefCell::new(Bounds::default())),
+            status_sql_pointer: None,
+            status_sql_autoscrolling: false,
             self_weak: cx.weak_entity(),
             sum_cache: RefCell::new(None),
         }
@@ -176,11 +176,6 @@ impl GridView {
                 window.focus(&focus, cx);
             }
             self.cell_editor_focus_pending = false;
-        }
-        if self.page_size_focus_pending {
-            self.page_size_view
-                .update(cx, |input, cx| input.focus_state(window, cx));
-            self.page_size_focus_pending = false;
         }
         if self.field_filter_focus_pending {
             self.field_filter_search_input
@@ -1061,6 +1056,40 @@ impl Render for GridView {
                 .inset_0(),
             );
         }
+        // The status bar's SQL selection drag gets the same treatment: the pointer may leave the
+        // line (it can even sit past the window edge) while the text is selected, and the release
+        // must still end the drag. The zero-height status strip is outside the grid's row list, so
+        // this is the only place that sees those moves.
+        if self.status_sql_selecting {
+            let sql_weak = self.self_weak.clone();
+            root = root.child(
+                canvas(
+                    |_bounds, _window, _cx| {},
+                    move |_bounds, _hitbox, window, _cx| {
+                        let move_weak = sql_weak.clone();
+                        window.on_mouse_event(move |event: &MouseMoveEvent, phase, _window, cx| {
+                            if phase != DispatchPhase::Capture {
+                                return;
+                            }
+                            let pressed = event.pressed_button == Some(MouseButton::Left);
+                            let position = event.position;
+                            let _ = move_weak.update(cx, |grid, cx| {
+                                grid.status_sql_pointer_moved(position, pressed, cx);
+                            });
+                        });
+                        let up_weak = sql_weak.clone();
+                        window.on_mouse_event(move |_event: &MouseUpEvent, phase, _window, cx| {
+                            if phase != DispatchPhase::Capture {
+                                return;
+                            }
+                            let _ = up_weak.update(cx, |grid, cx| grid.status_sql_end_drag(cx));
+                        });
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            );
+        }
         // Surface a failed fetch above the table. A running one is a spinner inside the toolbar
         // (or the status bar when there is none) — never a row of its own, which would push the
         // rows down and back up on every refresh.
@@ -1186,7 +1215,7 @@ impl Render for GridView {
         );
 
         if self.state.show_toolbar && self.page_size_menu_open {
-            root = root.child(self.render_record_limit_panel(window, cx));
+            root = root.child(self.render_record_limit_panel(cx));
         }
 
         // F2's value editor sits under the rows, above the footer (as in Navicat).

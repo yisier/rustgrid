@@ -1856,9 +1856,8 @@ struct GridView {
     page_input: String,
     page_input_view: Entity<TextInput>,
     page_size_menu_open: bool,
-    page_size_input: String,
-    page_size_view: Entity<TextInput>,
-    page_size_focus_pending: bool,
+    /// The 限制记录 panel's page-size dropdown, created on its first render.
+    page_size_combo: Option<Entity<ComboBox>>,
 
     /// Whether the 字段筛选 popup is open.
     field_filter_open: bool,
@@ -1886,6 +1885,18 @@ struct GridView {
     status_sql_anchor: usize,
     status_sql_cursor: usize,
     status_sql_selecting: bool,
+    /// Horizontal pan (px) of the status bar's SQL line. The statement is usually wider than the
+    /// bar; the text strip is shifted by this, so the whole statement can be read, selected and
+    /// copied instead of being clipped at the bar's edge.
+    status_sql_scroll: f32,
+    /// The SQL line's viewport bounds (window space, recorded on every paint), so the drag's edge
+    /// auto-scroll knows where the visible strip starts and ends.
+    status_sql_view: Rc<RefCell<Bounds<Pixels>>>,
+    /// The pointer's last position during a drag, and whether the edge auto-scroll loop runs:
+    /// holding the pointer past the edge keeps panning (and extending the selection) even though
+    /// no new mouse-move events arrive.
+    status_sql_pointer: Option<Point<Pixels>>,
+    status_sql_autoscrolling: bool,
 
     /// A weak handle to this view, used for the pager's field callbacks and the toolbar's
     /// deferred work without forming an `Entity` reference cycle.
@@ -2162,7 +2173,8 @@ enum GridNav {
     },
     Filter,
     Refresh,
-    PageSize,
+    /// The page size to apply once the user confirms discarding pending edits.
+    PageSize(u64),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -2248,6 +2260,10 @@ const GRID_SCROLLBAR_THICKNESS: f32 = 14.0;
 /// fetch, so a huge table cannot exhaust memory in one query; the status bar reports the loaded
 /// count so the user can tell when the cap is hit.
 const NO_LIMIT_PAGE_SIZE: u64 = 200_000;
+/// The page sizes the 限制记录 dropdown offers, and the one it falls back to when the grid's
+/// current size is not among them.
+const PAGE_SIZE_OPTIONS: [u64; 5] = [500, 1_000, 2_000, 5_000, 10_000];
+const DEFAULT_PAGE_SIZE: u64 = 1_000;
 
 /// The Options window's left-nav pages.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -3385,7 +3401,7 @@ impl AppView {
             rename_edit: None,
             rename_blur: None,
             rename_focus_pending: false,
-            page_size: 1000,
+            page_size: DEFAULT_PAGE_SIZE,
             limit_records: true,
             grid_show_comments: settings.grid_show_comments,
             grid_show_types: settings.grid_show_types,

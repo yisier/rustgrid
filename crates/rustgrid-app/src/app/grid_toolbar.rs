@@ -2,6 +2,12 @@ use super::grid::filter_node;
 use super::*;
 use gpui_kit::component::spinner::Spinner;
 
+/// The status bar's SQL line: how close (px) the pointer gets to an edge before a selection drag
+/// starts panning, how far each tick pans, and how often it ticks.
+const STATUS_SQL_EDGE_ZONE: f32 = 24.0;
+const STATUS_SQL_SCROLL_STEP: f32 = 12.0;
+const STATUS_SQL_SCROLL_TICK: Duration = Duration::from_millis(16);
+
 /// The per-row actions of the filter builder.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FilterAction {
@@ -1483,6 +1489,10 @@ impl GridView {
         };
         let active = theme.text;
         let muted = theme.text_muted;
+        // The selection summary sits at the left end of this record toolbar, right after the
+        // actions, clear of the pager on the right. The Excel-style numeric sum follows it.
+        let selection_info = self.selection_info_text();
+        let sum = self.selection_sum();
 
         let mut controls = div()
             .flex()
@@ -1560,7 +1570,28 @@ impl GridView {
                         active,
                         true,
                         cx.listener(|this, _event, _window, cx| this.refresh(cx)),
-                    )),
+                    ))
+                    .when_some(selection_info, |row, text| {
+                        row.child(
+                            div()
+                                .flex_none()
+                                .ml_2()
+                                .text_size(px(11.0))
+                                .text_color(rgb(muted))
+                                .whitespace_nowrap()
+                                .child(text),
+                        )
+                    })
+                    .when_some(sum, |row, sum| {
+                        row.child(
+                            div()
+                                .flex_none()
+                                .text_size(px(11.0))
+                                .text_color(rgb(theme.danger))
+                                .whitespace_nowrap()
+                                .child(t!("grid.selection_sum", sum = sum).to_string()),
+                        )
+                    }),
             );
 
         let pager = self.state.sql.is_none().then(|| {
@@ -1733,20 +1764,20 @@ impl GridView {
             .child(self.page_input_view.clone())
     }
 
-    /// The collapsible "Limit Records [n] records per page" bar, revealed by the gear button.
-    pub(super) fn render_record_limit_panel(
-        &self,
-        window: &Window,
-        cx: &mut Context<'_, Self>,
-    ) -> AnyElement {
+    /// The collapsible "Limit Records [size] records per page" bar, revealed by the gear button.
+    /// Its controls sit at the right edge, directly above the pager they drive; the size itself is
+    /// a fixed-choice dropdown, so it can never hold a value the grid cannot page by.
+    pub(super) fn render_record_limit_panel(&mut self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
-        let focused = self.page_size_view.read(cx).is_focused(window, cx);
         let limit_records = self.limit_records(cx);
+        let combo = self.page_size_combo(cx);
+        combo.update(cx, |combo, cx| combo.set_enabled(limit_records, cx));
 
         div()
             .flex()
             .flex_row()
             .items_center()
+            .justify_end()
             .gap_2()
             .px_2()
             .h(px(28.0))
@@ -1776,28 +1807,7 @@ impl GridView {
                             .child(t!("grid.limit_records").to_string()),
                     ),
             )
-            .child(
-                div()
-                    .id("page-size-input")
-                    .relative()
-                    .flex()
-                    .items_center()
-                    .justify_start()
-                    .w(px(64.0))
-                    .h(px(20.0))
-                    .pl(px(2.0))
-                    .pr(px(2.0))
-                    .bg(rgb(if limit_records {
-                        theme.input_bg
-                    } else {
-                        theme.dialog_face
-                    }))
-                    .border_1()
-                    .border_color(rgb(if focused { theme.primary } else { theme.border }))
-                    .text_size(px(12.0))
-                    .cursor_text()
-                    .child(self.page_size_view.clone()),
-            )
+            .child(combo)
             .child(
                 div()
                     .text_size(px(12.0))
@@ -1933,34 +1943,24 @@ impl GridView {
             )
             .to_string(),
         };
-        let message: AnyElement = match self.state.selection.as_ref() {
-            Some(selection) => {
-                let (start_row, end_row) = selection.rows();
-                let (start_col, end_col) = selection.cols();
-                let text = if selection.ranges.len() > 1 {
-                    t!(
-                        "grid.selection_info",
-                        rows = selection.row_indices().len(),
-                        cols = selection.col_indices().len()
-                    )
-                    .to_string()
-                } else {
-                    t!(
-                        "grid.selection_info",
-                        rows = end_row - start_row + 1,
-                        cols = end_col - start_col + 1
-                    )
-                    .to_string()
-                };
-                div().child(text).into_any_element()
-            }
-            // The SQL the grid ran: a hand-selectable line (drag, double-click to select all,
-            // Ctrl+C) so the user can copy the exact statement from the status bar.
-            None => self.render_status_sql(flatten_status_sql(&self.state.sql()), cx),
+        // The SQL the grid ran: a hand-selectable line (drag, double-click to select all, Ctrl+C)
+        // so the user can copy the exact statement from the status bar. It stays visible while
+        // cells are selected — a freshly loaded page selects its first record, which used to hide
+        // the statement for the whole life of the page. A document store speaks no SQL, so its
+        // line stays empty.
+        let sql = if self.state.documents {
+            String::new()
+        } else {
+            flatten_status_sql(&self.state.sql())
         };
-        // Excel-style aggregate: a multi-cell selection that holds numbers also reports their
-        // sum, right after the selection text.
-        let sum = self.selection_sum();
+        let message: AnyElement = if sql.is_empty() {
+            div().into_any_element()
+        } else {
+            self.render_status_sql(sql, cx)
+        };
+        // The line's viewport bounds are needed by the drag auto-scroll; the wrapper's only child
+        // is the line itself.
+        let view = self.status_sql_view.clone();
 
         div()
             .flex()
@@ -1985,15 +1985,12 @@ impl GridView {
                     .gap_3()
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .child(message)
-                    .when_some(sum, |row, sum| {
-                        row.child(
-                            div()
-                                .flex_none()
-                                .text_color(rgb(theme.danger))
-                                .child(t!("grid.selection_sum", sum = sum).to_string()),
-                        )
-                    }),
+                    .on_children_prepainted(move |children, _window, _cx| {
+                        if let Some(bounds) = children.first() {
+                            *view.borrow_mut() = *bounds;
+                        }
+                    })
+                    .child(message),
             )
             .child(
                 div()
@@ -2010,17 +2007,48 @@ impl GridView {
             )
     }
 
+    /// The `已选 N 行, M 列` annotation for the current selection, if any. It lives in the record
+    /// toolbar above the status line, so the line below is free for the whole SQL statement.
+    fn selection_info_text(&self) -> Option<String> {
+        let selection = self.state.selection.as_ref()?;
+        let (start_row, end_row) = selection.rows();
+        let (start_col, end_col) = selection.cols();
+        Some(if selection.ranges.len() > 1 {
+            t!(
+                "grid.selection_info",
+                rows = selection.row_indices().len(),
+                cols = selection.col_indices().len()
+            )
+            .to_string()
+        } else {
+            t!(
+                "grid.selection_info",
+                rows = end_row - start_row + 1,
+                cols = end_col - start_col + 1
+            )
+            .to_string()
+        })
+    }
+
     /// The status bar's SQL line, hand-selectable: drag to select, double-click to select the whole
     /// statement, Ctrl+A / Ctrl+C as usual. The layout is cached so a pointer position maps back to
-    /// a byte offset in the flattened text.
+    /// a byte offset in the flattened text. The statement is usually wider than the bar, so the
+    /// strip pans with the wheel (or a trackpad swipe) and a selection drag held past an edge keeps
+    /// panning until the pointer comes back.
     fn render_status_sql(&mut self, sql: String, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
-        // A different statement (a reload) invalidates any previous selection.
+        // A different statement (a reload) invalidates any previous selection and pan.
         if self.status_sql_text != sql {
             self.status_sql_text = sql.clone();
             self.status_sql_anchor = 0;
             self.status_sql_cursor = 0;
             self.status_sql_selecting = false;
+            self.status_sql_pointer = None;
+            self.status_sql_scroll = 0.0;
+        } else {
+            // The window may have grown or the statement shrunk: never stay panned past the end.
+            let max = self.status_sql_max_scroll();
+            self.status_sql_scroll = self.status_sql_scroll.clamp(0.0, max);
         }
         let (start, end) = self.status_sql_range();
         let mut styled = StyledText::new(sql);
@@ -2034,10 +2062,16 @@ impl GridView {
             )]);
         }
         self.status_sql_layout = styled.layout().clone();
+        let scroll = self.status_sql_scroll;
         div()
             .id("grid-status-sql")
+            .relative()
+            .flex()
+            .flex_row()
+            .items_center()
             .flex_1()
             .min_w(px(0.0))
+            .h(px(20.0))
             .overflow_hidden()
             .whitespace_nowrap()
             .track_focus(&self.status_sql_focus)
@@ -2050,45 +2084,205 @@ impl GridView {
                         this.status_sql_anchor = 0;
                         this.status_sql_cursor = this.status_sql_text.len();
                         this.status_sql_selecting = false;
+                        this.status_sql_pointer = None;
                     } else {
                         let index = this.status_sql_index_for_position(event.position);
                         this.status_sql_anchor = index;
                         this.status_sql_cursor = index;
                         this.status_sql_selecting = true;
+                        this.status_sql_pointer = Some(event.position);
                     }
                     cx.notify();
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
-                if !this.status_sql_selecting {
-                    return;
-                }
-                let index = this.status_sql_index_for_position(event.position);
-                if index != this.status_sql_cursor {
-                    this.status_sql_cursor = index;
-                    cx.notify();
-                }
+                let pressed = event.pressed_button == Some(MouseButton::Left);
+                this.status_sql_pointer_moved(event.position, pressed, cx);
             }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
-                    if this.status_sql_selecting {
-                        this.status_sql_selecting = false;
-                        cx.notify();
-                    }
+                    this.status_sql_end_drag(cx);
                 }),
             )
+            // A wheel (or a horizontal trackpad swipe) pans the statement. Without this the
+            // clipped tail of a long statement could only be reached by drag-selecting it.
+            .on_scroll(cx.listener(|this, event: &ScrollEvent, _window, cx| {
+                // Positive x / negative y scroll toward the end of the line, so the wheel reveals
+                // the clipped tail; the opposite gesture reveals the beginning.
+                let delta = match event.delta {
+                    ScrollDelta::Lines(delta) => (delta.x - delta.y) * 24.0,
+                    ScrollDelta::Pixels(delta) => f32::from(delta.x) - f32::from(delta.y),
+                };
+                if this.status_sql_scroll_by(delta) {
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
             .key_context(GRID_STATUS_CONTEXT)
             .on_action(cx.listener(|this, _: &CopyStatusSql, _window, cx| this.status_sql_copy(cx)))
             .on_action(cx.listener(|this, _: &SelectAllStatusSql, _window, cx| {
                 this.status_sql_select_all(cx);
             }))
-            .child(styled)
+            .child(
+                // The statement strip, shifted left by the pan; the viewport clips it.
+                div()
+                    .absolute()
+                    .top_0()
+                    .left(px(-scroll))
+                    .h_full()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .child(styled),
+            )
             .into_any_element()
     }
 
+    /// The pointer moved during a possible SQL-line selection drag: extend the selection, end the
+    /// drag on a released button, and start the edge auto-scroll when it is held past an edge.
+    pub(super) fn status_sql_pointer_moved(
+        &mut self,
+        position: Point<Pixels>,
+        pressed: bool,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if !self.status_sql_selecting {
+            return;
+        }
+        if !pressed {
+            self.status_sql_end_drag(cx);
+            return;
+        }
+        self.status_sql_pointer = Some(position);
+        let index = self.status_sql_index_for_position(position);
+        if index != self.status_sql_cursor {
+            self.status_sql_cursor = index;
+            cx.notify();
+        }
+        self.status_sql_maybe_autoscroll(cx);
+    }
+
+    pub(super) fn status_sql_end_drag(&mut self, cx: &mut Context<'_, Self>) {
+        if !self.status_sql_selecting {
+            return;
+        }
+        self.status_sql_selecting = false;
+        self.status_sql_pointer = None;
+        cx.notify();
+    }
+
+    /// How far the statement can pan: its laid-out width minus the visible strip.
+    fn status_sql_max_scroll(&self) -> f32 {
+        let text_width = self
+            .status_sql_layout
+            .line_layouts()
+            .first()
+            .map(|line| f32::from(line.width()))
+            .unwrap_or(0.0);
+        let view_width = f32::from(self.status_sql_view.borrow().size.width);
+        (text_width - view_width).max(0.0)
+    }
+
+    fn status_sql_scroll_by(&mut self, delta: f32) -> bool {
+        if delta == 0.0 {
+            return false;
+        }
+        let max = self.status_sql_max_scroll();
+        let next = (self.status_sql_scroll + delta).clamp(0.0, max);
+        if (next - self.status_sql_scroll).abs() < 0.5 {
+            return false;
+        }
+        self.status_sql_scroll = next;
+        true
+    }
+
+    /// `-1`/`1` while the pointer sits in the left/right edge zone of the strip, `0` inside.
+    fn status_sql_edge_direction(&self, pointer: Point<Pixels>) -> f32 {
+        let view = *self.status_sql_view.borrow();
+        let width = f32::from(view.size.width);
+        if width <= 0.0 {
+            return 0.0;
+        }
+        let zone = STATUS_SQL_EDGE_ZONE.min(width / 2.0);
+        let x = f32::from(pointer.x - view.origin.x);
+        if x >= width - zone {
+            1.0
+        } else if x <= zone {
+            -1.0
+        } else {
+            0.0
+        }
+    }
+
+    /// Start the edge auto-scroll loop when a drag holds the pointer past an edge and it is not
+    /// already running. The loop pans — and so keeps extending the selection under the pointer —
+    /// until the pointer leaves the zone, the pan reaches its limit, or the drag ends.
+    fn status_sql_maybe_autoscroll(&mut self, cx: &mut Context<'_, Self>) {
+        if self.status_sql_autoscrolling || !self.status_sql_selecting {
+            return;
+        }
+        let Some(pointer) = self.status_sql_pointer else {
+            return;
+        };
+        if self.status_sql_edge_direction(pointer) == 0.0 {
+            return;
+        }
+        self.status_sql_autoscrolling = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(STATUS_SQL_SCROLL_TICK).await;
+                let keep = this
+                    .update(cx, |grid, cx| grid.status_sql_autoscroll_tick(cx))
+                    .unwrap_or(false);
+                if !keep {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn status_sql_autoscroll_tick(&mut self, cx: &mut Context<'_, Self>) -> bool {
+        let keep = if self.status_sql_selecting {
+            if let Some(pointer) = self.status_sql_pointer {
+                let direction = self.status_sql_edge_direction(pointer);
+                direction != 0.0 && self.status_sql_scroll_by(direction * STATUS_SQL_SCROLL_STEP)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if !keep {
+            self.status_sql_autoscrolling = false;
+            return false;
+        }
+        // The strip moved, so the text under the stationary pointer changed: extend the
+        // selection to it. The layout updates on the repaint this tick schedules.
+        if let Some(pointer) = self.status_sql_pointer {
+            let index = self.status_sql_index_for_position(pointer);
+            if index != self.status_sql_cursor {
+                self.status_sql_cursor = index;
+            }
+        }
+        cx.notify();
+        true
+    }
+
     fn status_sql_index_for_position(&self, position: Point<Pixels>) -> usize {
-        match self.status_sql_layout.index_for_position(position) {
+        // The line's hitbox is taller than its text, so a click in the bar's small padding above
+        // or below the glyphs still maps onto the statement instead of snapping to the first/last
+        // byte.
+        let bounds = self.status_sql_layout.bounds();
+        let y = f32::from(position.y).clamp(
+            f32::from(bounds.top()),
+            (f32::from(bounds.bottom()) - 0.5).max(f32::from(bounds.top())),
+        );
+        match self
+            .status_sql_layout
+            .index_for_position(Point::new(position.x, px(y)))
+        {
             Ok(index) | Err(index) => index,
         }
     }

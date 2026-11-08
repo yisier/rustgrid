@@ -32,41 +32,15 @@ pub(super) fn make_page_input(
     })
 }
 
-/// The page-size box of the 限制记录 panel. Same digits-only field as the page box, with Up/Down
-/// stepping the value by 100 (the compact stepper Navicat's record limit has).
-pub(super) fn make_page_size_input(
-    theme: Theme,
-    text: String,
-    weak: WeakEntity<GridView>,
-    cx: &mut Context<'_, GridView>,
-) -> Entity<TextInput> {
-    let options = TextInputOptions {
-        accepts: Some(Rc::new(|character: char| character.is_ascii_digit())),
-        text_size: Some(12.0),
-        bare: true,
-        ..Default::default()
-    };
-    let change = weak.clone();
-    let submit = weak.clone();
-    let cancel = weak.clone();
-    let arrow = weak;
-    cx.new(move |cx| {
-        TextInput::new(theme, text, options, cx)
-            .on_change(Rc::new(move |text, _window, cx| {
-                let _ = change.update(cx, |grid, _cx| grid.page_size_input = text.to_string());
-            }))
-            .on_submit(Rc::new(move |_window, cx| {
-                let _ = submit.update(cx, |grid, cx| grid.page_size_apply(cx));
-            }))
-            .on_cancel(Rc::new(move |_window, cx| {
-                let _ = cancel.update(cx, |grid, cx| {
-                    grid.set_page_size_text(grid.state.page_size.to_string(), cx);
-                });
-            }))
-            .on_arrow(Rc::new(move |down, _window, cx| {
-                let _ = arrow.update(cx, |grid, cx| grid.step_page_size(down, cx));
-            }))
-    })
+/// The 限制记录 dropdown's selected value for a grid's current page size: the size itself when it
+/// is one of [`PAGE_SIZE_OPTIONS`], otherwise the default the panel offers. It keeps the trigger on
+/// a valid option even for a grid loaded from an older free-text size.
+fn page_size_option(size: u64) -> String {
+    if PAGE_SIZE_OPTIONS.contains(&size) {
+        size.to_string()
+    } else {
+        DEFAULT_PAGE_SIZE.to_string()
+    }
 }
 
 /// The filter node at `path`, where each element indexes into the previous group's children.
@@ -762,13 +736,6 @@ impl GridView {
             .update(cx, |input, cx| input.set_text(text, cx));
     }
 
-    /// Replace the page-size box's text and keep its field in step.
-    pub(super) fn set_page_size_text(&mut self, text: String, cx: &mut Context<'_, Self>) {
-        self.page_size_input = text.clone();
-        self.page_size_view
-            .update(cx, |input, cx| input.set_text(text, cx));
-    }
-
     /// The text the page box holds right now, including a keystroke the shared field has not
     /// flushed back to [`Self::page_input`] yet (Enter can arrive before the next render).
     fn page_text_now(&self, cx: &App) -> String {
@@ -776,14 +743,6 @@ impl GridView {
             .read(cx)
             .current_text(cx)
             .unwrap_or_else(|| self.page_input.clone())
-    }
-
-    /// The text the page-size box holds right now, for the same reason as [`Self::page_text_now`].
-    fn page_size_text_now(&self, cx: &App) -> String {
-        self.page_size_view
-            .read(cx)
-            .current_text(cx)
-            .unwrap_or_else(|| self.page_size_input.clone())
     }
 
     pub(super) fn commit_page_input(&mut self, cx: &mut Context<'_, Self>) {
@@ -1763,51 +1722,86 @@ impl GridView {
         if self.state.sql.is_some() {
             return;
         }
-        self.set_page_size_text(self.state.page_size.to_string(), cx);
         self.page_size_menu_open = true;
-        self.page_size_focus_pending = true;
         cx.notify();
     }
 
+    /// Toggle 限制记录 and apply it at once: the panel's dropdown only chooses a limited size, so
+    /// without the toggle an unchecked box would never reach the grid. The panel stays open so
+    /// the user can see the checkbox and the (now disabled or enabled) size dropdown.
     pub(super) fn toggle_limit_records(&mut self, cx: &mut Context<'_, Self>) {
-        if let Some(app) = self.app.upgrade() {
-            app.update(cx, |app, cx| {
-                app.limit_records = !app.limit_records;
-                cx.notify();
-            });
-            // The grid is cached and reads `limit_records` from `AppView`; push the change.
-            cx.notify();
-        }
-    }
-
-    /// The page-size box's Up/Down step: 100 records up, 100 down, never below one.
-    pub(super) fn step_page_size(&mut self, down: bool, cx: &mut Context<'_, Self>) {
-        let current = self
-            .page_size_text_now(cx)
-            .trim()
-            .parse::<u64>()
-            .unwrap_or(1000);
-        let next = if down {
-            current.saturating_sub(100).max(1)
-        } else {
-            current.saturating_add(100)
+        let Some(app) = self.app.upgrade() else {
+            return;
         };
-        self.set_page_size_text(next.to_string(), cx);
+        let enabled = !app.read(cx).limit_records;
+        app.update(cx, |app, cx| {
+            app.limit_records = enabled;
+            cx.notify();
+        });
+        // Re-checking the box returns to the size the dropdown shows (its last pick), else the
+        // grid's current size; unchecking asks for the no-limit cap.
+        let size = if enabled {
+            self.page_size_combo
+                .as_ref()
+                .and_then(|combo| combo.read(cx).active_value(cx))
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(self.state.page_size)
+        } else {
+            NO_LIMIT_PAGE_SIZE
+        };
+        if self.guard_pending(GridNav::PageSize(size), cx) {
+            return;
+        }
+        self.page_size_apply_now(size, cx);
+        // The toggle is not a commit of the panel, so keep it on screen.
+        self.page_size_menu_open = true;
     }
 
-    pub(super) fn page_size_apply(&mut self, cx: &mut Context<'_, Self>) {
+    /// The 限制记录 panel's page-size dropdown, created on its first render. Its five fixed sizes
+    /// replace the old free-text box, so the panel can never hold a size the grid cannot use.
+    pub(super) fn page_size_combo(&mut self, cx: &mut Context<'_, Self>) -> Entity<ComboBox> {
+        if let Some(combo) = &self.page_size_combo {
+            return combo.clone();
+        }
+        let theme = self.theme;
+        let weak = self.self_weak.clone();
+        let selected = page_size_option(self.state.page_size);
+        let options: Vec<ComboOption> = PAGE_SIZE_OPTIONS
+            .iter()
+            .map(|size| ComboOption::plain(size.to_string()))
+            .collect();
+        let combo = cx.new(move |cx| {
+            ComboBox::new(theme, options, selected, 120.0, cx)
+                .field_width(76.0)
+                .on_select(Rc::new(move |value, _window, cx| {
+                    let Ok(size) = value.parse::<u64>() else {
+                        return;
+                    };
+                    let _ = weak.update(cx, |grid, cx| grid.page_size_choose(size, cx));
+                }))
+        });
+        self.page_size_combo = Some(combo.clone());
+        combo
+    }
+
+    /// Commit a page size picked from the 限制记录 dropdown. The panel closes with the pick, and
+    /// applying it refetches the first page, so pending edits go through the usual confirm first.
+    pub(super) fn page_size_choose(&mut self, size: u64, cx: &mut Context<'_, Self>) {
         if self.state.sql.is_some() {
             return;
         }
-        if self.guard_pending(GridNav::PageSize, cx) {
+        if self.state.page_size == size {
+            self.page_size_menu_open = false;
+            cx.notify();
             return;
         }
-        self.page_size_apply_now(cx);
+        if self.guard_pending(GridNav::PageSize(size), cx) {
+            return;
+        }
+        self.page_size_apply_now(size, cx);
     }
 
-    pub(super) fn page_size_apply_now(&mut self, cx: &mut Context<'_, Self>) {
-        self.page_size_input = self.page_size_text_now(cx);
-        let requested = self.page_size_input.trim().parse::<u64>().unwrap_or(1000);
+    pub(super) fn page_size_apply_now(&mut self, requested: u64, cx: &mut Context<'_, Self>) {
         let size = if self.limit_records(cx) {
             requested.clamp(1, NO_LIMIT_PAGE_SIZE)
         } else {
@@ -1822,7 +1816,6 @@ impl GridView {
             });
         }
         self.page_size_menu_open = false;
-        self.set_page_size_text(size.to_string(), cx);
         self.sync_page_input(cx);
         self.load_page(cx);
     }
@@ -1874,7 +1867,7 @@ impl GridView {
             }
             GridNav::Filter => self.filter_apply_now(cx),
             GridNav::Refresh => self.refresh_now(cx),
-            GridNav::PageSize => self.page_size_apply_now(cx),
+            GridNav::PageSize(size) => self.page_size_apply_now(size, cx),
         }
     }
 }
