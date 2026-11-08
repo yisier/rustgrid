@@ -40,7 +40,8 @@ not a later refactor.
   are managed through the 对象权限管理器. Statements use the
   text/batch path for DDL and `CREATE PROCEDURE`, and the parameterized RPC path for `SELECT`/DML so
   row counts are available. Its connection form declares SQL Server's own fields (验证 →
-  `sqlserver.authentication` = SQL Server / Windows, `sqlserver.application_name`) through the shared
+  `sqlserver.authentication` = SQL Server / Windows, `sqlserver.application_name`, and 加密 →
+  `sqlserver.encryption` = 仅登录时加密 / 不加密) through the shared
   engine-field mechanism; Windows authentication is
   compiled in on Windows only (`winauth` under `[target.'cfg(windows)'.dependencies]`; tiberius' Unix
   `sspi-rs` backend is **not** enabled because it conflicts with the workspace's `russh`/`crypto-bigint`,
