@@ -944,6 +944,7 @@ impl AppView {
             // Targets that actually received rows, so their open grids can reload when the run ends.
             let mut imported_targets: Vec<String> = Vec::new();
             let mut added = 0usize;
+            let mut updated = 0usize;
             let mut errors = 0usize;
             let mut logged_errors = 0usize;
             let cancel_flag = cancel.clone();
@@ -1002,29 +1003,30 @@ impl AppView {
                     if inserts.is_empty() {
                         continue;
                     }
-                    let count = inserts.len();
                     let batch_connection = connection.clone();
                     let batch_database = database.clone();
                     let target = plan.target.clone();
                     let result = runtime
                         .spawn(async move {
                             batch_connection
-                                .insert_rows(&batch_database, &target, &inserts)
+                                .import_rows(&batch_database, &target, &inserts)
                                 .await
                         })
                         .await;
-                    let error = match result {
-                        Ok(Ok(())) => None,
-                        Ok(Err(error)) => Some(error.to_string()),
-                        Err(error) => Some(error.to_string()),
+                    let outcome = match result {
+                        Ok(Ok(counts)) => Ok(counts),
+                        Ok(Err(error)) => Err(error.to_string()),
+                        Err(error) => Err(error.to_string()),
                     };
-                    if error.is_none() {
-                        sheet_rows += count;
-                        added += count;
+                    if let Ok((batch_added, batch_updated)) = outcome {
+                        sheet_rows += batch_added + batch_updated;
+                        added += batch_added;
+                        updated += batch_updated;
                         let _ = this.update(cx, move |app, cx| {
                             if let Some(wizard) = app.import_wizard.as_mut() {
-                                wizard.rows_done += count;
+                                wizard.rows_done += batch_added + batch_updated;
                                 wizard.added = added;
+                                wizard.updated = updated;
                                 wizard.errors = errors;
                                 wizard.log_scroll.scroll_to_bottom();
                             }
@@ -1033,12 +1035,12 @@ impl AppView {
                         continue;
                     }
 
-                    // `insert_rows` is one transaction per call, so a single bad row (a duplicate
-                    // key, a value the column rejects, ...) rolled the whole batch back. Retry the
-                    // batch one row at a time to isolate the failures: every good row still lands
-                    // and the run carries on to the next row/table, instead of stopping here.
+                    // A failed batch is retried one row at a time so a single bad row (a unique
+                    // index collision, a value the column rejects, ...) does not discard the rows
+                    // that would have landed; the run carries on instead of stopping here.
                     let mut processed = 0usize;
                     let mut chunk_added = 0usize;
+                    let mut chunk_updated = 0usize;
                     let mut messages: Vec<String> = Vec::new();
                     for (offset, row) in chunk.iter().enumerate() {
                         if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
@@ -1052,22 +1054,23 @@ impl AppView {
                         let result = runtime
                             .spawn(async move {
                                 connection
-                                    .insert_rows(&database, &target, std::slice::from_ref(&insert))
+                                    .import_rows(&database, &target, std::slice::from_ref(&insert))
                                     .await
                             })
                             .await;
-                        let error = match result {
-                            Ok(Ok(())) => None,
-                            Ok(Err(error)) => Some(error.to_string()),
-                            Err(error) => Some(error.to_string()),
+                        let outcome = match result {
+                            Ok(Ok(counts)) => Ok(counts),
+                            Ok(Err(error)) => Err(error.to_string()),
+                            Err(error) => Err(error.to_string()),
                         };
                         processed += 1;
-                        match error {
-                            None => {
-                                sheet_rows += 1;
-                                chunk_added += 1;
+                        match outcome {
+                            Ok((row_added, row_updated)) => {
+                                sheet_rows += row_added + row_updated;
+                                chunk_added += row_added;
+                                chunk_updated += row_updated;
                             }
-                            Some(error) => {
+                            Err(error) => {
                                 sheet_errors += 1;
                                 errors += 1;
                                 if logged_errors < IMPORT_ERROR_LOG_LIMIT {
@@ -1087,10 +1090,12 @@ impl AppView {
                         }
                     }
                     added += chunk_added;
+                    updated += chunk_updated;
                     let _ = this.update(cx, move |app, cx| {
                         if let Some(wizard) = app.import_wizard.as_mut() {
                             wizard.rows_done += processed;
                             wizard.added = added;
+                            wizard.updated = updated;
                             wizard.errors = errors;
                             wizard.log.extend(messages);
                             wizard.log_scroll.scroll_to_bottom();

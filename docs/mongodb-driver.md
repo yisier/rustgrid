@@ -110,7 +110,9 @@ database and its reply is rendered as one row. Extended JSON (`{"$oid": …}`, `
   relational 新建/编辑数据库 items.
 - Import/export wizards run through the generic `fetch_page`/`insert_rows` path for existing
   collections; creating a collection from the import wizard is not supported (it needs the SQL
-  designer).
+  designer). An import whose rows carry `_id` updates the matching documents (`$set` of the mapped
+  fields, so fields the file does not map survive) instead of failing every row with E11000, so a
+  collection's own export can be imported back into it; the wizard reports those rows as 已更新.
 
 ## Live test
 

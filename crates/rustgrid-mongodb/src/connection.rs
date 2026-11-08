@@ -284,6 +284,24 @@ impl MongoConnection {
         document
     }
 
+    /// The BSON document for one inserted/imported row: an untouched `_id` cell arrives as an
+    /// empty string and is left out so the server generates the key; every other cell parses
+    /// through the column type.
+    fn insert_document(columns: &[ColumnInfo], row: &RowInsert) -> Document {
+        let mut document = Document::new();
+        for (field, text) in &row.values {
+            if field == "_id" && text.as_deref().unwrap_or("").trim().is_empty() {
+                continue;
+            }
+            let bson = match text {
+                Some(text) => Self::parse_for(columns, field, text),
+                None => Bson::Null,
+            };
+            document.insert(field.clone(), bson);
+        }
+        document
+    }
+
     /// Run one JSON command from the query tab.
     async fn run_json(&self, database: Option<&str>, text: &str) -> Result<QueryResult> {
         let trimmed = text.trim();
@@ -718,24 +736,62 @@ impl Connection for MongoConnection {
         let columns = self.schema(database, table).await?;
         let collection = self.collection(database, table);
         for row in rows {
-            let mut document = Document::new();
-            for (field, text) in &row.values {
-                // An untouched `_id` cell arrives as an empty string; leave it out so the server
-                // generates the key.
-                if field == "_id" && text.as_deref().unwrap_or("").trim().is_empty() {
-                    continue;
-                }
-                let bson = match text {
-                    Some(text) => Self::parse_for(&columns, field, text),
-                    None => Bson::Null,
-                };
-                document.insert(field.clone(), bson);
-            }
-            collection.insert_one(document).await.map_err(query_error)?;
+            collection
+                .insert_one(Self::insert_document(&columns, row))
+                .await
+                .map_err(query_error)?;
         }
         // A new document may add fields; drop the sampled field set so the next reload shows them.
         self.forget(database, table);
         Ok(())
+    }
+
+    /// Importing a collection's own export back into it would trip the unique `_id` index on every
+    /// row. Update the document with that `_id` instead (a `$set` of the mapped fields, so fields
+    /// the file does not map survive); insert when no document has it.
+    async fn import_rows(
+        &self,
+        database: &str,
+        table: &str,
+        rows: &[RowInsert],
+    ) -> Result<(usize, usize)> {
+        self.ensure_writable()?;
+        let columns = self.schema(database, table).await?;
+        let collection = self.collection(database, table);
+        let mut inserted = 0usize;
+        let mut updated = 0usize;
+        for row in rows {
+            let document = Self::insert_document(&columns, row);
+            let Some(id) = document.get("_id").cloned() else {
+                collection.insert_one(document).await.map_err(query_error)?;
+                inserted += 1;
+                continue;
+            };
+            let mut fields = document.clone();
+            fields.remove("_id");
+            let exists = if fields.is_empty() {
+                collection
+                    .find_one(doc! { "_id": id.clone() })
+                    .await
+                    .map_err(query_error)?
+                    .is_some()
+            } else {
+                collection
+                    .update_one(doc! { "_id": id.clone() }, doc! { "$set": fields })
+                    .await
+                    .map_err(query_error)?
+                    .matched_count
+                    > 0
+            };
+            if exists {
+                updated += 1;
+            } else {
+                collection.insert_one(document).await.map_err(query_error)?;
+                inserted += 1;
+            }
+        }
+        self.forget(database, table);
+        Ok((inserted, updated))
     }
 
     async fn delete_rows(

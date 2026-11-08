@@ -279,6 +279,73 @@ async fn mongodb_create_database_with_first_collection() {
     connection.drop_database(database).await.unwrap();
 }
 
+/// Importing a collection's own export back into it must update the matching documents by `_id`
+/// instead of failing every row with E11000, and must keep fields the file does not map.
+#[tokio::test]
+#[ignore = "requires a live MongoDB server (RUSTGRID_MONGODB_PASSWORD)"]
+async fn mongodb_import_updates_existing_documents() {
+    let connection = connect().await;
+    let database = "rustgrid_live_import";
+    let _ = connection.drop_database(database).await;
+    connection
+        .execute_query(Some(database), r#"{ "create": "people" }"#)
+        .await
+        .unwrap();
+
+    let id = "65f0c0ffee00000000000011".to_string();
+    let first = RowInsert {
+        values: vec![
+            ("_id".into(), Some(id.clone())),
+            ("name".into(), Some("Ada".into())),
+            ("age".into(), Some("36".into())),
+            ("city".into(), Some("London".into())),
+        ],
+    };
+    assert_eq!(
+        connection
+            .import_rows(database, "people", std::slice::from_ref(&first))
+            .await
+            .unwrap(),
+        (1, 0)
+    );
+
+    let second = RowInsert {
+        values: vec![
+            ("_id".into(), Some(id.clone())),
+            ("name".into(), Some("Ada Lovelace".into())),
+        ],
+    };
+    assert_eq!(
+        connection
+            .import_rows(database, "people", std::slice::from_ref(&second))
+            .await
+            .unwrap(),
+        (0, 1)
+    );
+
+    let document = connection
+        .row_document(database, "people", &[("_id".into(), Some(id))])
+        .await
+        .unwrap()
+        .expect("the imported document exists");
+    assert!(
+        document.contains("Ada Lovelace"),
+        "the mapped field was updated"
+    );
+    assert!(document.contains("36"), "unmapped fields survive");
+    assert!(document.contains("London"), "unmapped fields survive");
+    assert_eq!(
+        connection
+            .table_status(database, "people")
+            .await
+            .unwrap()
+            .rows,
+        Some(1),
+        "the update did not add a second document"
+    );
+    connection.drop_database(database).await.unwrap();
+}
+
 /// The decoded BSON types must survive the grid round-trip (ObjectId, date, decimal, embedded
 /// document), which is what the row form's JSON editor relies on.
 #[tokio::test]

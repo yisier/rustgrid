@@ -360,6 +360,22 @@ pub trait Connection: Send + Sync {
     /// `NULL`. Implementations should insert atomically.
     async fn insert_rows(&self, database: &str, table: &str, rows: &[RowInsert]) -> Result<()>;
 
+    /// Insert rows for the Import Wizard, returning `(inserted, updated)`.
+    ///
+    /// A document store keys rows by a user-visible `_id`, so re-importing a collection's own export
+    /// would fail every row with a duplicate-key error. MongoDB updates a document whose `_id`
+    /// already exists (setting the mapped fields, so unmapped fields survive) and counts it as
+    /// updated. Every other engine inserts, and the default reports all rows as inserted.
+    async fn import_rows(
+        &self,
+        database: &str,
+        table: &str,
+        rows: &[RowInsert],
+    ) -> Result<(usize, usize)> {
+        self.insert_rows(database, table, rows).await?;
+        Ok((rows.len(), 0))
+    }
+
     /// Delete the rows identified by `keys`: each entry is one row's key columns
     /// (`(column, value)` pairs, `None` meaning SQL `NULL`). Implementations should delete
     /// atomically.
