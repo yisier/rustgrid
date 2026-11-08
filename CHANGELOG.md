@@ -14,11 +14,9 @@ Russian ones.
 
 ### Added
 
-- MongoDB support: browse databases and collections, edit documents, filter and sort, and run
-  JSON commands.
-- A collection's row opens as a whole JSON document, and copying rows gives a JSON insert
-  command.
-- New Collection / Design Collection; New Database creates the database with its first collection.
+- MongoDB support: browse collections as grids, edit a row as a whole JSON document, filter, sort,
+  run JSON commands, copy rows as an insert command, and create or design a collection (New Database
+  creates the database with its first collection).
 - JSON values use VS Code's colours in the grid, the row form and the JSON view.
 - Limit Records picks the page size from a dropdown (500 to 10000).
 
@@ -35,13 +33,15 @@ Russian ones.
   ([#40](https://github.com/yisier/rustgrid/issues/40)).
 - SQL Server reaches servers that only offer TLS 1.0/1.1 with the new No encryption option
   ([#31](https://github.com/yisier/rustgrid/issues/31)).
-- MySQL works through proxies that reject server-side prepares (UDAL/TeleDB DBProxy).
+- MySQL works through proxies that reject server-side prepares (UDAL/TeleDB DBProxy)
+  ([#42](https://github.com/yisier/rustgrid/issues/42)).
 - Importing a collection's own export updates matching documents instead of failing with a
   duplicate key.
 - The collection dialog shows its Cancel and Create buttons.
 - Escape in the page box no longer closes the app.
 - Deleting a table, view or routine selects the parent row.
-- Right-clicking a table in the tree keeps it selected.
+- Right-clicking a table in the tree keeps it selected
+  ([#43](https://github.com/yisier/rustgrid/issues/43)).
 - The row form scrolls.
 - The backup window keeps its table list when routines or events cannot be read.
 
