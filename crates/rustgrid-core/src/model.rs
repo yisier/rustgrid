@@ -102,6 +102,10 @@ pub struct DatabaseOptions {
     pub recovery_model: String,
     /// SQL Server compatibility level, e.g. `160`.
     pub compatibility_level: String,
+    /// The document store's first collection (MongoDB). A document database exists only once a
+    /// collection does, so the New Database dialog asks for both names and the driver creates the
+    /// collection with the database. Relational engines leave it empty.
+    pub first_collection: String,
 }
 
 /// The editable shape of a document-store collection (MongoDB), used by the 新建/设计集合 dialog.

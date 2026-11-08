@@ -176,7 +176,8 @@ impl AppView {
 
                 // Creating a database and refreshing the list both need a live connection, but stay
                 // visible (greyed out) when disconnected. Engines without database management
-                // (SQLite) do not show the create item at all.
+                // (SQLite) do not show the create item at all; a document store's dialog asks for
+                // the first collection it is created with.
                 if self.driver_supports(index, DriverCapability::DatabaseManagement) {
                     items = if connected {
                         items.child(self.context_item(
@@ -383,6 +384,7 @@ impl AppView {
                 let ci = *connection_index;
                 let di = *database_index;
                 let key_value = self.driver_supports(ci, DriverCapability::KeyValue);
+                let documents = self.driver_supports(ci, DriverCapability::Documents);
                 let opened = self
                     .connections
                     .get(ci)
@@ -413,32 +415,49 @@ impl AppView {
                     ));
                 }
 
+                if documents {
+                    // A document store's database level creates collections, not tables:
+                    // 新建集合 is the action that applies here (the connection-level 新建数据库
+                    // asks for the database and its first collection together), and 删除数据库
+                    // stays available (MongoDB drops one).
+                    items = items.child(self.context_item(
+                        "db-new-collection",
+                        t!("object.new_collection").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.open_new_collection(ci, di, cx);
+                        }),
+                    ));
+                }
+
                 if self.driver_supports(ci, DriverCapability::DatabaseManagement) {
-                    items = items
-                        .child(self.context_item(
-                            "db-edit",
-                            t!("database.edit").to_string(),
-                            cx.listener(move |this, _event, window, cx| {
-                                this.context_menu = None;
-                                this.open_edit_database(ci, di, window, cx);
-                            }),
-                        ))
-                        .child(self.context_item(
-                            "db-new",
-                            t!("database.new").to_string(),
-                            cx.listener(move |this, _event, window, cx| {
-                                this.context_menu = None;
-                                this.open_new_database(ci, window, cx);
-                            }),
-                        ))
-                        .child(self.context_item(
-                            "db-delete",
-                            t!("database.delete").to_string(),
-                            cx.listener(move |this, _event, _window, cx| {
-                                this.context_menu = None;
-                                this.open_delete_database(ci, di, cx);
-                            }),
-                        ));
+                    if !documents {
+                        items = items
+                            .child(self.context_item(
+                                "db-edit",
+                                t!("database.edit").to_string(),
+                                cx.listener(move |this, _event, window, cx| {
+                                    this.context_menu = None;
+                                    this.open_edit_database(ci, di, window, cx);
+                                }),
+                            ))
+                            .child(self.context_item(
+                                "db-new",
+                                t!("database.new").to_string(),
+                                cx.listener(move |this, _event, window, cx| {
+                                    this.context_menu = None;
+                                    this.open_new_database(ci, window, cx);
+                                }),
+                            ));
+                    }
+                    items = items.child(self.context_item(
+                        "db-delete",
+                        t!("database.delete").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.open_delete_database(ci, di, cx);
+                        }),
+                    ));
                 }
                 items = items
                     .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
@@ -469,25 +488,27 @@ impl AppView {
                             }),
                         ));
                 } else {
-                    items = items
-                        .child(self.context_item(
-                            "db-run-sql",
-                            t!("database.run_sql_file").to_string(),
-                            cx.listener(move |this, _event, _window, cx| {
-                                this.context_menu = None;
-                                this.dump_submenu = None;
-                                this.open_run_sql_file(ci, di, cx);
-                            }),
-                        ))
-                        .child(self.dump_sql_submenu_item(ci, di, cx))
-                        .child(self.context_item(
-                            "db-refresh",
-                            t!("database.refresh").to_string(),
-                            cx.listener(move |this, _event, _window, cx| {
-                                this.context_menu = None;
-                                this.refresh_databases(ci, cx);
-                            }),
-                        ));
+                    if !documents {
+                        items = items
+                            .child(self.context_item(
+                                "db-run-sql",
+                                t!("database.run_sql_file").to_string(),
+                                cx.listener(move |this, _event, _window, cx| {
+                                    this.context_menu = None;
+                                    this.dump_submenu = None;
+                                    this.open_run_sql_file(ci, di, cx);
+                                }),
+                            ))
+                            .child(self.dump_sql_submenu_item(ci, di, cx));
+                    }
+                    items = items.child(self.context_item(
+                        "db-refresh",
+                        t!("database.refresh").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.refresh_databases(ci, cx);
+                        }),
+                    ));
                 }
                 if self.driver_supports(ci, DriverCapability::Schemas) {
                     items = items

@@ -60,6 +60,11 @@ impl AppView {
         let focus = input.read(cx).focus_handle();
         self.db_name_input = Some(input);
         let spec = self.database_editor_spec(connection_index);
+        self.db_collection_input = if spec.first_collection {
+            Some(make_db_collection_input(self.theme, &weak, cx))
+        } else {
+            None
+        };
         let recovery_model = if spec.recovery_model {
             "SIMPLE".to_string()
         } else {
@@ -84,6 +89,7 @@ impl AppView {
             owner: String::new(),
             recovery_model,
             compatibility_level,
+            first_collection: String::new(),
             charsets: Vec::new(),
             collations: Vec::new(),
             owners: Vec::new(),
@@ -109,6 +115,7 @@ impl AppView {
             return;
         };
         let spec = self.database_editor_spec(connection_index);
+        self.db_collection_input = None;
         self.db_dialog = Some(DbDialog::Edit(Box::new(DatabaseForm {
             connection_index,
             database_index: Some(database_index),
@@ -123,6 +130,7 @@ impl AppView {
             owner: String::new(),
             recovery_model: String::new(),
             compatibility_level: String::new(),
+            first_collection: String::new(),
             charsets: Vec::new(),
             collations: Vec::new(),
             owners: Vec::new(),
@@ -298,7 +306,7 @@ impl AppView {
     fn db_create(&mut self, cx: &mut Context<'_, Self>) {
         // Read what the request needs first, so the borrow of `db_dialog` ends before
         // `connection_arc` borrows `self` again.
-        let (name, connection_index, options, loading) = {
+        let (name, connection_index, mut options, loading, needs_collection) = {
             let Some(DbDialog::Edit(form)) = self.db_dialog.as_ref() else {
                 return;
             };
@@ -307,6 +315,7 @@ impl AppView {
                 form.connection_index,
                 form.options(),
                 form.loading,
+                form.spec.first_collection,
             )
         };
         if loading {
@@ -321,6 +330,15 @@ impl AppView {
             cx.notify();
             return;
         }
+        if needs_collection && options.first_collection.trim().is_empty() {
+            let Some(DbDialog::Edit(form)) = self.db_dialog.as_mut() else {
+                return;
+            };
+            form.error = Some(t!("database.first_collection_required").to_string());
+            cx.notify();
+            return;
+        }
+        options.first_collection = options.first_collection.trim().to_string();
         let Some(connection) = self.connection_arc(connection_index) else {
             return;
         };
@@ -345,6 +363,7 @@ impl AppView {
                 match result {
                     Ok(()) => {
                         view.db_name_input = None;
+                        view.db_collection_input = None;
                         view.db_dialog = None;
                         view.load_databases(connection_index, cx);
                     }
@@ -753,7 +772,18 @@ impl AppView {
         let label = match tab {
             DbTab::General => t!("database.tab.general").to_string(),
             DbTab::Extra(kind) => t!(database_editor_tab_key(kind)).to_string(),
-            DbTab::Sql => t!("database.tab.sql").to_string(),
+            DbTab::Sql => {
+                // A document store previews a JSON command, not SQL.
+                let command = matches!(
+                    self.db_dialog,
+                    Some(DbDialog::Edit(ref form)) if form.spec.first_collection
+                );
+                if command {
+                    t!("database.tab.command").to_string()
+                } else {
+                    t!("database.tab.sql").to_string()
+                }
+            }
         };
         let id = match tab {
             DbTab::General => "db-tab-general",
@@ -829,6 +859,9 @@ impl AppView {
                 sql.push_str(&format!(
                     "ALTER AUTHORIZATION ON DATABASE::[{name}] TO [{owner}];"
                 ));
+            }
+            if sql.is_empty() {
+                return None;
             }
             return Some(sql);
         }

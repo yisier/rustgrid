@@ -1299,11 +1299,46 @@ fn make_db_name_input(
             .on_cancel(Rc::new({
                 let cancel = app.clone();
                 move |_window, cx| {
-                    let _ = cancel.update(cx, |app, cx| {
-                        app.db_dialog = None;
-                        app.db_name_input = None;
-                        cx.notify();
-                    });
+                    let _ = cancel.update(cx, |app, cx| app.db_cancel(cx));
+                }
+            }))
+    })
+}
+
+/// Build the first-collection field of the "new database" dialog (document stores: MongoDB creates
+/// the database together with its first collection).
+fn make_db_collection_input(
+    theme: Theme,
+    app: &WeakEntity<AppView>,
+    cx: &mut Context<'_, AppView>,
+) -> Entity<TextInput> {
+    let change = app.clone();
+    let submit = app.clone();
+    let options = TextInputOptions {
+        placeholder: t!("database.first_collection_placeholder")
+            .to_string()
+            .into(),
+        ..TextInputOptions::default()
+    };
+    cx.new(move |cx| {
+        TextInput::new(theme, "", options, cx)
+            .on_change(Rc::new(move |text, _window, cx| {
+                let _ = change.update(cx, |app, cx| {
+                    if let Some(DbDialog::Edit(form)) = app.db_dialog.as_mut()
+                        && form.database_index.is_none()
+                    {
+                        form.first_collection = text.to_string();
+                    }
+                    cx.notify();
+                });
+            }))
+            .on_submit(Rc::new(move |_window, cx| {
+                let _ = submit.update(cx, |app, cx| app.db_submit(cx));
+            }))
+            .on_cancel(Rc::new({
+                let cancel = app.clone();
+                move |_window, cx| {
+                    let _ = cancel.update(cx, |app, cx| app.db_cancel(cx));
                 }
             }))
     })
@@ -1563,6 +1598,9 @@ struct DatabaseForm {
     owner: String,
     recovery_model: String,
     compatibility_level: String,
+    /// The first collection a document store creates with the database (MongoDB). Only used while
+    /// creating; relational engines leave it empty.
+    first_collection: String,
     charsets: Vec<String>,
     collations: Vec<String>,
     owners: Vec<String>,
@@ -1582,6 +1620,7 @@ impl DatabaseForm {
             owner: self.owner.clone(),
             recovery_model: self.recovery_model.clone(),
             compatibility_level: self.compatibility_level.clone(),
+            first_collection: self.first_collection.clone(),
         }
     }
 
@@ -1593,6 +1632,7 @@ impl DatabaseForm {
             owner: self.original_owner.clone(),
             recovery_model: self.original_recovery_model.clone(),
             compatibility_level: self.original_compatibility_level.clone(),
+            ..Default::default()
         }
     }
 }
@@ -2503,6 +2543,8 @@ pub struct AppView {
     /// SQL Server compatibility-level dropdown in the database dialog.
     db_compat_combo: Option<Entity<ComboBox>>,
     db_name_input: Option<Entity<TextInput>>,
+    /// The first-collection field of the New Database dialog (document stores).
+    db_collection_input: Option<Entity<TextInput>>,
     /// The schema name typed in the "New Schema" dialog.
     schema_name_input: Option<Entity<TextInput>>,
     /// The pending "New Schema" dialog; `None` when it is closed.
@@ -3368,6 +3410,7 @@ impl AppView {
             db_recovery_combo: None,
             db_compat_combo: None,
             db_name_input: None,
+            db_collection_input: None,
             schema_name_input: None,
             schema_dialog: None,
             schema_focus_pending: false,
@@ -4471,6 +4514,9 @@ impl AppView {
         self.routine_find_input
             .update(cx, |input, cx| input.set_theme(theme, cx));
         if let Some(input) = self.db_name_input.as_ref() {
+            input.update(cx, |input, cx| input.set_theme(theme, cx));
+        }
+        if let Some(input) = self.db_collection_input.as_ref() {
             input.update(cx, |input, cx| input.set_theme(theme, cx));
         }
         if let Some(input) = self.schema_name_input.as_ref() {

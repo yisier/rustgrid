@@ -13,8 +13,8 @@ use std::collections::BTreeMap;
 
 use mongodb::bson::{Bson, doc};
 use rustgrid_core::{
-    Connection, ConnectionConfig, ConnectionOptions, Driver, FilterCondition, FilterConjunction,
-    FilterNode, FilterOperator, PageRequest, RowInsert, RowUpdate, SortColumn,
+    Connection, ConnectionConfig, ConnectionOptions, DatabaseOptions, Driver, FilterCondition,
+    FilterConjunction, FilterNode, FilterOperator, PageRequest, RowInsert, RowUpdate, SortColumn,
 };
 use rustgrid_mongodb::MongoDriver;
 
@@ -243,6 +243,40 @@ async fn mongodb_round_trip() {
 
     connection.drop_database(&database).await.unwrap();
     connection.close().await.unwrap();
+}
+
+/// The New Database dialog's driver surface: MongoDB has no empty databases, so creating one
+/// creates its first collection together with it.
+#[tokio::test]
+#[ignore = "requires a live MongoDB server (RUSTGRID_MONGODB_PASSWORD)"]
+async fn mongodb_create_database_with_first_collection() {
+    let connection = connect().await;
+    let database = "rustgrid_live_create";
+    let _ = connection.drop_database(database).await;
+
+    // Without a collection there is nothing to create.
+    assert!(
+        connection
+            .create_database(database, &DatabaseOptions::default())
+            .await
+            .is_err(),
+        "an empty database name must be rejected"
+    );
+
+    connection
+        .create_database(
+            database,
+            &DatabaseOptions {
+                first_collection: "widgets".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let tables = connection.list_tables(database).await.unwrap();
+    assert!(tables.iter().any(|table| table.name == "widgets"));
+
+    connection.drop_database(database).await.unwrap();
 }
 
 /// The decoded BSON types must survive the grid round-trip (ObjectId, date, decimal, embedded

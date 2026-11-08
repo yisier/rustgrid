@@ -837,15 +837,32 @@ impl Connection for MongoConnection {
         }
     }
 
-    async fn create_database(&self, _name: &str, _options: &DatabaseOptions) -> Result<()> {
-        Err(Error::Query(
-            "MongoDB 不单独创建空数据库：它在第一个集合写入时出现，请用 {\"create\": \"集合名\"} 新建集合。"
-                .into(),
-        ))
+    /// MongoDB has no empty databases: a database exists only once a collection does, so the New
+    /// Database dialog collects the first collection's name and this creates the database with it.
+    async fn create_database(&self, name: &str, options: &DatabaseOptions) -> Result<()> {
+        self.ensure_writable()?;
+        let collection = options.first_collection.trim();
+        if collection.is_empty() {
+            return Err(Error::Query(
+                "MongoDB 数据库必须随第一个集合一起创建，请填写集合名。".into(),
+            ));
+        }
+        self.database(name)
+            .run_command(doc! { "create": collection })
+            .await
+            .map_err(query_error)?;
+        Ok(())
     }
 
-    fn create_database_sql(&self, _name: &str, _options: &DatabaseOptions) -> String {
-        String::new()
+    fn create_database_sql(&self, _name: &str, options: &DatabaseOptions) -> String {
+        let collection = options.first_collection.trim();
+        if collection.is_empty() {
+            return String::new();
+        }
+        format!(
+            "{{ \"create\": \"{}\" }}",
+            collection.replace('\\', "\\\\").replace('"', "\\\"")
+        )
     }
 
     async fn drop_database(&self, name: &str) -> Result<()> {

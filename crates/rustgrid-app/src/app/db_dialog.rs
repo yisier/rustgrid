@@ -168,6 +168,7 @@ impl AppView {
     pub(super) fn db_cancel(&mut self, cx: &mut Context<'_, Self>) {
         self.db_dialog = None;
         self.db_name_input = None;
+        self.db_collection_input = None;
         cx.notify();
     }
 
@@ -263,6 +264,44 @@ impl AppView {
                                 )
                                 .child(name_field),
                         );
+                        // A document store creates its database together with the first
+                        // collection (MongoDB has no empty databases).
+                        if form.database_index.is_none() && form.spec.first_collection {
+                            let collection_field: AnyElement =
+                                match self.db_collection_input.as_ref() {
+                                    Some(input) => div()
+                                        .w(px(300.0))
+                                        .h(px(24.0))
+                                        .child(input.clone())
+                                        .into_any_element(),
+                                    None => div().into_any_element(),
+                                };
+                            body = body
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .w(px(150.0))
+                                                .flex_none()
+                                                .text_size(px(12.0))
+                                                .child(format!(
+                                                    "{}:",
+                                                    t!("database.first_collection")
+                                                )),
+                                        )
+                                        .child(collection_field),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .text_color(rgb(theme.text_muted))
+                                        .child(t!("database.first_collection_hint").to_string()),
+                                );
+                        }
                         if form.loading {
                             body = body.child(
                                 div()

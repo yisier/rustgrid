@@ -3,8 +3,9 @@
 use async_trait::async_trait;
 use rustgrid_core::{
     Connection, ConnectionConfig, ConnectionFieldKind, ConnectionFieldLabel, ConnectionFieldSpec,
-    ConnectionFormSpec, ConnectionHomePage, ConnectionPage, ConnectionStandardField, Driver,
-    DriverCapabilities, DriverCapability, DriverDescriptor, DriverIconStyle, DriverId, Result,
+    ConnectionFormSpec, ConnectionHomePage, ConnectionPage, ConnectionStandardField,
+    DatabaseEditorSpec, Driver, DriverCapabilities, DriverCapability, DriverDescriptor,
+    DriverIconStyle, DriverId, Result,
 };
 
 use crate::connection::MongoConnection;
@@ -54,7 +55,7 @@ impl Driver for MongoDriver {
             capabilities: DriverCapabilities::none()
                 .with(DriverCapability::DatabaseManagement)
                 .with(DriverCapability::Documents),
-            database_editor: Default::default(),
+            database_editor: self.database_editor(),
             connection_form: ConnectionFormSpec {
                 home: ConnectionHomePage::Network,
                 tabs: vec![
@@ -155,6 +156,16 @@ impl Driver for MongoDriver {
     /// `.rgbak` stores SQL DDL and value tuples, which a document store cannot replay.
     fn supports_backup(&self, _profile: &rustgrid_core::ConnectionProfile) -> bool {
         false
+    }
+
+    /// A document store has no database charset/collation, owner or recovery model to edit, and a
+    /// database only appears together with its first collection, so the New Database dialog asks
+    /// for both names (the tree's menus hide 编辑数据库 for it).
+    fn database_editor(&self) -> DatabaseEditorSpec {
+        DatabaseEditorSpec {
+            first_collection: true,
+            ..Default::default()
+        }
     }
 
     async fn connect(&self, config: &ConnectionConfig) -> Result<Box<dyn Connection>> {

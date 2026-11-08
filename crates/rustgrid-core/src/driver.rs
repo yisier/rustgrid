@@ -168,6 +168,9 @@ pub struct DatabaseEditorSpec {
     pub recovery_model: bool,
     /// Whether the compatibility-level dropdown is shown (SQL Server).
     pub compatibility_level: bool,
+    /// Whether the New Database dialog also asks for the first collection (document stores:
+    /// MongoDB creates a database together with its first collection). Only shown while creating.
+    pub first_collection: bool,
     /// Extra informational tabs shown in order after 常规.
     pub extra_tabs: Vec<DatabaseEditorTab>,
 }

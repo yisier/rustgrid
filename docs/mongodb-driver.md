@@ -100,8 +100,14 @@ database and its reply is rendered as one row. Extended JSON (`{"$oid": …}`, `
   `alter_collection`.
 - No `.rgbak` backup, no users/roles/routines, no Views category (collection views are listed among
   the collections themselves).
-- `create_database` reports that MongoDB creates a database on the first write; an empty collection
+- `create_database` creates a database together with its first collection (MongoDB has no empty
+  databases), so the connection's **新建数据库** dialog asks for the database name and the first
+  collection's name and runs `{ "create": "<collection>" }` against it. **编辑数据库** is not
+  offered (there are no database-level options to edit), and a document store also hides the
+  database menu's 运行 SQL 文件 / 转储 SQL 文件 items (a query is one JSON command). A collection
   can also be created from the query tab with `{"create": "name"}`.
+- The database node's own context menu offers **新建集合** and **删除数据库** rather than the
+  relational 新建/编辑数据库 items.
 - Import/export wizards run through the generic `fetch_page`/`insert_rows` path for existing
   collections; creating a collection from the import wizard is not supported (it needs the SQL
   designer).

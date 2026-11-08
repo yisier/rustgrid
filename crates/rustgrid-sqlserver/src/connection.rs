@@ -807,6 +807,7 @@ impl Connection for SqlServerConnection {
             owner: row.map(|row| text_cell(row, 1)).unwrap_or_default(),
             recovery_model: row.map(|row| text_cell(row, 2)).unwrap_or_default(),
             compatibility_level: row.map(|row| text_cell(row, 3)).unwrap_or_default(),
+            ..Default::default()
         })
     }
 
