@@ -53,18 +53,71 @@ impl ManageConnection for ConnectionManager {
 }
 
 /// Map the shared TLS options onto tiberius's encryption level.
-pub(crate) fn encryption_level(mode: rustgrid_core::TlsMode) -> EncryptionLevel {
+///
+/// SQL Server TLS-handshakes the login packet even with TLS "off" unless the client advertises
+/// `ENCRYPT_NOT_SUP`. `skip_login_encryption` (the `sqlserver.encryption = none` option) asks for
+/// exactly that, so a server whose TLS stack is too old for the bundled client — or a network path
+/// that cuts the handshake — can still be reached. It only applies while TLS/SSL is off, and sends
+/// the login in clear text.
+pub(crate) fn encryption_level(
+    mode: rustgrid_core::TlsMode,
+    skip_login_encryption: bool,
+) -> EncryptionLevel {
     use rustgrid_core::TlsMode;
     match mode {
-        // SQL Server always TLS-handshakes the login unless "not supported" is
-        // advertised; encrypt the login only (then continue in the clear), which is
-        // what ADO.NET's `Encrypt=false` does and works against default installs.
+        // No login handshake at all: the login (password included) is sent in clear text.
+        TlsMode::Disabled if skip_login_encryption => EncryptionLevel::NotSupported,
+        // Encrypt the login only (then continue in the clear), which is what ADO.NET's
+        // `Encrypt=false` does and works against default installs.
         TlsMode::Disabled => EncryptionLevel::Off,
-        // Encrypt the login only, then continue in the clear.
+        // Encrypt the whole session when the server supports it (it must, or the login fails).
         TlsMode::Preferred => EncryptionLevel::On,
         // Full encryption. Certificate trust is configured on the `Config`.
         TlsMode::Required | TlsMode::VerifyCa | TlsMode::VerifyIdentity => {
             EncryptionLevel::Required
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustgrid_core::TlsMode;
+
+    #[test]
+    fn encryption_level_follows_the_tls_mode() {
+        assert_eq!(
+            encryption_level(TlsMode::Disabled, false),
+            EncryptionLevel::Off
+        );
+        assert_eq!(
+            encryption_level(TlsMode::Preferred, false),
+            EncryptionLevel::On
+        );
+        for mode in [
+            TlsMode::Required,
+            TlsMode::VerifyCa,
+            TlsMode::VerifyIdentity,
+        ] {
+            assert_eq!(encryption_level(mode, false), EncryptionLevel::Required);
+        }
+    }
+
+    #[test]
+    fn plaintext_login_only_applies_with_tls_off() {
+        // The SQL Server escape hatch skips the login handshake entirely.
+        assert_eq!(
+            encryption_level(TlsMode::Disabled, true),
+            EncryptionLevel::NotSupported
+        );
+        // With TLS/SSL on the option is ignored: the connection stays encrypted.
+        for mode in [
+            TlsMode::Preferred,
+            TlsMode::Required,
+            TlsMode::VerifyCa,
+            TlsMode::VerifyIdentity,
+        ] {
+            assert_eq!(encryption_level(mode, true), encryption_level(mode, false));
         }
     }
 }

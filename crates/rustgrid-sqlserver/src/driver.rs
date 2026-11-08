@@ -77,6 +77,7 @@ impl Driver for SqlServerDriver {
                 DatabaseEditorTab::Advanced,
                 DatabaseEditorTab::Comment,
             ],
+            ..Default::default()
         }
     }
 
@@ -280,6 +281,27 @@ impl Driver for SqlServerDriver {
                         page: ConnectionPage::General,
                         visible_when: None,
                     },
+                    // SQL Server handshakes TLS for the login packet even with TLS/SSL off. Some
+                    // servers (old builds, or a network path that cuts the handshake) close it,
+                    // which surfaces as `tls handshake eof`; this lets the profile skip the
+                    // handshake entirely. Ignored while TLS/SSL is on.
+                    ConnectionFieldSpec {
+                        key: "sqlserver.encryption",
+                        label_key: "form.sqlserver.encryption",
+                        hint_key: Some("form.sqlserver.encryption_hint"),
+                        kind: ConnectionFieldKind::Select(vec![
+                            ConnectionFieldChoice {
+                                value: "login",
+                                label_key: "form.sqlserver.encryption.login",
+                            },
+                            ConnectionFieldChoice {
+                                value: "none",
+                                label_key: "form.sqlserver.encryption.none",
+                            },
+                        ]),
+                        page: ConnectionPage::Advanced,
+                        visible_when: None,
+                    },
                     ConnectionFieldSpec {
                         key: "sqlserver.application_name",
                         label_key: "form.sqlserver.application_name",
@@ -343,7 +365,11 @@ impl Driver for SqlServerDriver {
                 AuthMethod::sql_server(user, password)
             },
         );
-        server.encryption(encryption_level(settings.tls.mode));
+        // SQL Server encrypts the login packet with TLS unless `ENCRYPT_NOT_SUP` is advertised;
+        // the profile may opt out of that handshake while TLS/SSL itself is off.
+        let skip_login_encryption = settings.tls.mode == TlsMode::Disabled
+            && option(config, "sqlserver.encryption").as_deref() == Some("none");
+        server.encryption(encryption_level(settings.tls.mode, skip_login_encryption));
         server.readonly(settings.read_only);
 
         // Certificate trust.
@@ -449,6 +475,12 @@ fn windows_authentication(user: &str, password: &str) -> AuthMethod {
 pub(crate) fn map_connect_error(error: tiberius::error::Error) -> Error {
     if is_authentication_error(&error) {
         Error::Authentication(error.to_string())
+    } else if is_tls_handshake_error(&error) {
+        Error::Connection(format!(
+            "{error}. The server's TLS is older than 1.2 (or the connection cut the handshake). \
+             Enable TLS 1.2 on the server, or set Encryption (Advanced) to No encryption — the \
+             login is then sent in clear text."
+        ))
     } else {
         Error::Connection(error.to_string())
     }
@@ -470,6 +502,19 @@ fn is_authentication_error(error: &tiberius::error::Error) -> bool {
     matches!(error.code(), Some(18456 | 18452 | 18470 | 4060 | 916))
 }
 
+/// The server cut the TLS handshake that wraps the login packet. rustls reports this as an
+/// unexpected EOF ("tls handshake eof"); it is almost always a server whose TLS version is older
+/// than the client supports (rustls requires TLS 1.2+).
+fn is_tls_handshake_error(error: &tiberius::error::Error) -> bool {
+    matches!(
+        error,
+        tiberius::error::Error::Io {
+            kind: std::io::ErrorKind::UnexpectedEof,
+            message,
+        } if message.contains("tls handshake")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -483,7 +528,11 @@ mod tests {
         let keys: Vec<_> = form.options.iter().map(|field| field.key).collect();
         assert_eq!(
             keys,
-            vec!["sqlserver.authentication", "sqlserver.application_name",]
+            vec![
+                "sqlserver.authentication",
+                "sqlserver.encryption",
+                "sqlserver.application_name",
+            ]
         );
 
         let ConnectionFieldKind::Select(choices) = &form.options[0].kind else {
@@ -498,13 +547,39 @@ mod tests {
             choices.iter().any(|choice| choice.value == "windows"),
             cfg!(windows)
         );
-        // 验证 is on 常规; the application name is on 高级.
+        // Encryption chooses between the login-only handshake (default) and no encryption at all.
+        let ConnectionFieldKind::Select(encryption) = &form.options[1].kind else {
+            panic!("encryption must be a select");
+        };
+        assert_eq!(
+            encryption
+                .iter()
+                .map(|choice| choice.value)
+                .collect::<Vec<_>>(),
+            vec!["login", "none"]
+        );
+        // 验证 and the application name's page placement; the encryption option joins 高级.
         assert_eq!(form.options[0].page, ConnectionPage::General);
         assert_eq!(form.options[1].page, ConnectionPage::Advanced);
+        assert_eq!(form.options[2].page, ConnectionPage::Advanced);
         assert_eq!(
             form.labels.first().map(|label| label.field),
             Some(ConnectionStandardField::Database)
         );
+    }
+
+    #[test]
+    fn tls_handshake_eof_gets_an_actionable_message() {
+        let error = tiberius::error::Error::Io {
+            kind: std::io::ErrorKind::UnexpectedEof,
+            message: "tls handshake eof".to_string(),
+        };
+        let Error::Connection(message) = map_connect_error(error) else {
+            panic!("a handshake failure is a connection error");
+        };
+        assert!(message.contains("tls handshake eof"), "{message}");
+        assert!(message.contains("Encryption"), "{message}");
+        assert!(message.contains("TLS 1.2"), "{message}");
     }
 
     #[test]

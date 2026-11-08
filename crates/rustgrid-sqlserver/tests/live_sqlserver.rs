@@ -58,6 +58,27 @@ async fn scratch_database() -> (Box<dyn Connection>, String) {
     (connection, database)
 }
 
+/// The 高级 page's `加密 → 不加密` option advertises `ENCRYPT_NOT_SUP`, so no TLS handshake happens
+/// at all (the default `仅登录时加密` is covered by every other test).
+#[tokio::test]
+#[ignore = "requires a live SQL Server (RUSTGRID_SQLSERVER_*)"]
+async fn connects_with_the_login_handshake_disabled() {
+    let mut config = config("master");
+    config
+        .options
+        .insert("sqlserver.encryption".to_string(), "none".to_string());
+    let connection = SqlServerDriver::new()
+        .connect(&config)
+        .await
+        .expect("connect with login encryption off");
+    let result = connection
+        .execute_query(None, "SELECT @@VERSION AS version")
+        .await
+        .expect("run a query on the unencrypted session");
+    assert!(result.has_result_set);
+    assert_eq!(result.rows.len(), 1);
+}
+
 #[tokio::test]
 #[ignore = "requires a live SQL Server (RUSTGRID_SQLSERVER_*)"]
 async fn round_trips_a_live_sql_server() {
