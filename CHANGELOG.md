@@ -10,6 +10,41 @@ UI labels are quoted as the app shows them, so this file quotes the English stri
 [`CHANGELOG_zh.md`](CHANGELOG_zh.md) and [`CHANGELOG_ru.md`](CHANGELOG_ru.md) quote the 简体中文 and
 Russian ones.
 
+## [0.1.9] - 2026-11-08
+
+### Added
+
+- MongoDB support: browse databases and collections, edit documents, filter and sort, and run
+  JSON commands.
+- A collection's row opens as a whole JSON document, and copying rows gives a JSON insert
+  command.
+- New Collection / Design Collection; New Database creates the database with its first collection.
+- JSON values use VS Code's colours in the grid, the row form and the JSON view.
+- Limit Records picks the page size from a dropdown (500 to 10000).
+
+### Changed
+
+- The status bar keeps the whole SQL statement, the wheel pans it, and the selection summary
+  moved to the record toolbar.
+- Dropping a database asks in the shared confirm dialog.
+- Downloads and the installed program are smaller.
+
+### Fixed
+
+- Enter in a filter value closed the app
+  ([#40](https://github.com/yisier/rustgrid/issues/40)).
+- SQL Server reaches servers that only offer TLS 1.0/1.1 with the new No encryption option
+  ([#31](https://github.com/yisier/rustgrid/issues/31)).
+- MySQL works through proxies that reject server-side prepares (UDAL/TeleDB DBProxy).
+- Importing a collection's own export updates matching documents instead of failing with a
+  duplicate key.
+- The collection dialog shows its Cancel and Create buttons.
+- Escape in the page box no longer closes the app.
+- Deleting a table, view or routine selects the parent row.
+- Right-clicking a table in the tree keeps it selected.
+- The row form scrolls.
+- The backup window keeps its table list when routines or events cannot be read.
+
 ## [0.1.8] - 2026-11-05
 
 ### Added
