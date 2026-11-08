@@ -666,6 +666,29 @@ impl TreePane {
         self.nav_rows.iter().position(|row| &row.id == selected)
     }
 
+    /// Select the nearest ancestor of `id` in the last drawn rows, e.g. after the object that row
+    /// stood for was dropped. Returns the selected row's id and whether it is a connection/group
+    /// row, which the caller must mirror into `AppView::tree_selection` (this must not update the
+    /// app from inside its own update).
+    pub(super) fn select_parent_of(
+        &mut self,
+        id: &str,
+        cx: &mut Context<'_, Self>,
+    ) -> Option<(String, bool)> {
+        let index = self.nav_rows.iter().position(|row| row.id == id)?;
+        let depths: Vec<usize> = self.nav_rows.iter().map(|row| row.depth).collect();
+        let parent = nav_parent(&depths, index)?;
+        let row = self.nav_rows.get(parent)?;
+        let parent_id = row.id.clone();
+        let selectable = list_ops::is_tree_selectable(&parent_id);
+        self.selected = Some(parent_id.clone());
+        self.selected_table = row.table.clone();
+        self.reveal(&parent_id);
+        self.nav_generation += 1;
+        cx.notify();
+        Some((parent_id, selectable))
+    }
+
     /// Select row `index` from the keyboard: highlight it, keep the multi-selection in step and
     /// scroll it into view.
     fn nav_select(&mut self, index: usize, cx: &mut Context<'_, Self>) {

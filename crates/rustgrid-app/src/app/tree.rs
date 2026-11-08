@@ -2021,13 +2021,15 @@ impl AppView {
         cx.spawn(async move |this, cx| {
             let result = match runtime
                 .spawn(async move {
+                    let mut dropped = Vec::new();
                     let mut failures = Vec::new();
                     for name in &drop_names {
-                        if let Err(error) = connection.drop_table(&database, name).await {
-                            failures.push(format!("{name}: {error}"));
+                        match connection.drop_table(&database, name).await {
+                            Ok(()) => dropped.push(name.clone()),
+                            Err(error) => failures.push(format!("{name}: {error}")),
                         }
                     }
-                    Ok::<Vec<String>, Error>(failures)
+                    Ok::<(Vec<String>, Vec<String>), Error>((dropped, failures))
                 })
                 .await
             {
@@ -2037,13 +2039,19 @@ impl AppView {
 
             let _ = this.update(cx, |view, cx| {
                 match result {
-                    Ok(failures) => {
-                        for name in &names {
+                    Ok((dropped, failures)) => {
+                        for name in &dropped {
                             view.close_table_views(&close_connection, &close_database, name, cx);
                         }
                         if !failures.is_empty() {
                             view.error_dialog = Some(failures.join("\n"));
                         }
+                        view.reconcile_after_objects_dropped(
+                            connection_index,
+                            database_index,
+                            &dropped,
+                            cx,
+                        );
                         view.reload_tables(connection_index, database_index, cx);
                     }
                     Err(error) => view.error_dialog = Some(error.to_string()),
@@ -2052,6 +2060,146 @@ impl AppView {
             });
         })
         .detach();
+    }
+
+    /// Move the tree's selection off a row whose object was just dropped, up to its parent row.
+    /// Does nothing unless the tree is currently selecting exactly that row.
+    pub(super) fn tree_selection_fell_back_from(
+        &mut self,
+        row_id: &str,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.tree_pane.read(cx).selected.as_deref() != Some(row_id) {
+            return;
+        }
+        let parent = self
+            .tree_pane
+            .update(cx, |tree, cx| tree.select_parent_of(row_id, cx));
+        match parent {
+            Some((parent_id, selectable)) => {
+                if selectable {
+                    self.tree_selection.select_one(parent_id);
+                } else {
+                    self.tree_selection.clear();
+                }
+            }
+            None => {
+                // The row (or a drawn parent) is gone: do not leave an id that a later object
+                // with the same name could silently match.
+                self.tree_selection.clear();
+                self.tree_pane.update(cx, |tree, cx| {
+                    tree.selected = None;
+                    tree.selected_table = None;
+                    cx.notify();
+                });
+            }
+        }
+    }
+
+    /// Reconcile the selections after `names` objects (tables, views or keys) were dropped: a tree
+    /// row that stood for one of them falls back to its parent, and the object list and info pane
+    /// forget the removed names. Objects that failed to drop are not in `names`, so their rows keep
+    /// their selection.
+    pub(super) fn reconcile_after_objects_dropped(
+        &mut self,
+        connection_index: usize,
+        database_index: usize,
+        names: &[String],
+        cx: &mut Context<'_, Self>,
+    ) {
+        for name in names {
+            self.tree_selection_fell_back_from(
+                &format!("tbl-{connection_index}-{database_index}-{name}"),
+                cx,
+            );
+        }
+        let info_shows_dropped = self.info_table_selected.as_ref().is_some_and(
+            |(info_connection, info_database, name)| {
+                *info_connection == connection_index
+                    && *info_database == database_index
+                    && names.contains(name)
+            },
+        );
+        if info_shows_dropped {
+            self.clear_info_selection();
+        }
+        let Some(pane) = self.object_pane.as_ref().cloned() else {
+            return;
+        };
+        let (same_database, category) = {
+            let pane = pane.read(cx);
+            (
+                pane.connection_index == connection_index && pane.database_index == database_index,
+                pane.category,
+            )
+        };
+        if !same_database || !matches!(category, Category::Tables | Category::Views) {
+            return;
+        }
+        self.objects_selection
+            .retain(|item| !names.iter().any(|name| name.as_str() == item));
+        let selected = self.objects_selection.single().map(str::to_string);
+        pane.update(cx, |pane, cx| {
+            pane.selected = selected.clone();
+            pane.selected_routine = None;
+            cx.notify();
+        });
+        if let Some(name) = selected {
+            self.set_info_table(connection_index, database_index, name);
+        }
+    }
+
+    /// Reconcile the selections after a routine was dropped: its tree row falls back to its
+    /// parent and the Functions list forgets the removed name.
+    pub(super) fn reconcile_after_routine_dropped(
+        &mut self,
+        connection_index: usize,
+        database_index: usize,
+        name: &str,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.tree_selection_fell_back_from(
+            &format!("rtn-{connection_index}-{database_index}-{name}"),
+            cx,
+        );
+        let Some(pane) = self.object_pane.as_ref().cloned() else {
+            return;
+        };
+        let (same_database, functions) = {
+            let pane = pane.read(cx);
+            (
+                pane.connection_index == connection_index && pane.database_index == database_index,
+                pane.category == Category::Functions,
+            )
+        };
+        if !same_database || !functions {
+            return;
+        }
+        self.objects_selection.retain(|item| item != name);
+        let selected = self.objects_selection.single().map(str::to_string);
+        let selected_kind = selected.as_deref().and_then(|selected| {
+            self.connections
+                .get(connection_index)
+                .and_then(|node| match &node.databases {
+                    Loadable::Loaded(databases) => databases.get(database_index),
+                    _ => None,
+                })
+                .and_then(|database| match &database.routines {
+                    Loadable::Loaded(routines) => routines
+                        .iter()
+                        .find(|routine| routine.name == selected)
+                        .map(|routine| routine.kind),
+                    _ => None,
+                })
+        });
+        pane.update(cx, |pane, cx| {
+            pane.selected = selected.clone();
+            pane.selected_routine = selected_kind;
+            cx.notify();
+        });
+        if let (Some(name), Some(kind)) = (selected, selected_kind) {
+            self.set_info_routine(connection_index, database_index, name, kind);
+        }
     }
 
     /// Rename a table (or view) and refresh the object list.

@@ -595,6 +595,12 @@ impl AppView {
                     }) {
                         app.close_query(index, cx);
                     }
+                    app.reconcile_after_objects_dropped(
+                        connection_index,
+                        database_index,
+                        std::slice::from_ref(&close_name),
+                        cx,
+                    );
                     app.reload_tables(connection_index, database_index, cx);
                     cx.notify();
                 }

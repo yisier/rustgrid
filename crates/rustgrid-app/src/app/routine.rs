@@ -567,6 +567,12 @@ impl AppView {
                     ) {
                         app.clear_info_selection();
                     }
+                    app.reconcile_after_routine_dropped(
+                        connection_index,
+                        database_index,
+                        &tab_name,
+                        cx,
+                    );
                     app.reload_routines(&list_connection, &list_database, cx);
                     cx.notify();
                 }
