@@ -26,6 +26,11 @@ pub struct MysqlConnection {
     /// 10.2+). Older servers reject the whole column query with `1054`, so the first failure flips
     /// this off and later schema loads leave the column out instead of failing again.
     generation_expression: AtomicBool,
+    /// `true` once a catalog query was rejected with `1047 ER_UNKNOWN_COM_ERROR`. MySQL-protocol
+    /// middlewares (UDAL/TeleDB DBProxy, MyCAT, ...) run their own SQL parser and can refuse
+    /// server-side prepares altogether, so this session then runs every generated statement
+    /// through the text protocol (and reads the catalog with the classic `SHOW` statements).
+    text_protocol: AtomicBool,
     /// The tunnel forwarding this connection, kept alive for as long as the connection is.
     _tunnel: Option<rustgrid_tunnel::Tunnel>,
 }
@@ -36,8 +41,19 @@ impl MysqlConnection {
             pool,
             engine,
             generation_expression: AtomicBool::new(true),
+            text_protocol: AtomicBool::new(false),
             _tunnel: tunnel,
         }
+    }
+
+    /// Whether this session already met a server that rejects server-side prepares (a
+    /// MySQL-protocol proxy): every generated statement is rendered for the text protocol instead.
+    fn text_protocol(&self) -> bool {
+        self.text_protocol.load(Ordering::Relaxed)
+    }
+
+    fn mark_text_protocol(&self) {
+        self.text_protocol.store(true, Ordering::Relaxed);
     }
 
     /// The `INFORMATION_SCHEMA.COLUMNS` rows of one table, ordered by position. `with_generation`
@@ -69,11 +85,22 @@ impl MysqlConnection {
     }
 
     async fn scalar_u64(&self, sql: String, binds: &[String]) -> Result<u64> {
-        let mut query = sqlx::query(sqlx::AssertSqlSafe(sql));
-        for bind in binds {
-            query = query.bind(bind);
-        }
-        let row = query.fetch_one(&self.pool).await.map_err(map_query_error)?;
+        let row = if self.text_protocol() {
+            // A proxy that rejected the catalog's prepared statements rejects every
+            // COM_STMT_PREPARE, so the count runs as one text statement.
+            let values: Vec<BoundValue> = binds.iter().map(|bind| BoundValue::Text(bind)).collect();
+            let sql = text_statement(&sql, &values);
+            sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+                .fetch_one(&self.pool)
+                .await
+                .map_err(map_query_error)?
+        } else {
+            let mut query = sqlx::query(sqlx::AssertSqlSafe(sql));
+            for bind in binds {
+                query = query.bind(bind);
+            }
+            query.fetch_one(&self.pool).await.map_err(map_query_error)?
+        };
 
         if let Ok(value) = row.try_get::<i64, _>(0) {
             return Ok(value.max(0) as u64);
@@ -158,6 +185,175 @@ impl MysqlConnection {
             rows: Vec::new(),
         })
     }
+
+    /// The table list through `SHOW FULL TABLES`, which MySQL-protocol proxies translate without
+    /// touching `INFORMATION_SCHEMA`. A view's updatability only exists in
+    /// `INFORMATION_SCHEMA.VIEWS` (rejected by those proxies), so it stays `false` here.
+    async fn list_tables_via_show(&self, database: &str) -> Result<Vec<TableInfo>> {
+        let sql = format!("SHOW FULL TABLES FROM {}", quote_identifier(database));
+        let rows = sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_query_error)?;
+
+        let mut tables = Vec::with_capacity(rows.len());
+        for row in rows {
+            let name: String = row.try_get(0).map_err(map_query_error)?;
+            let table_type: String = row.try_get(1).map_err(map_query_error)?;
+            let kind = if table_type.eq_ignore_ascii_case("VIEW") {
+                ObjectKind::View
+            } else {
+                ObjectKind::Table
+            };
+            tables.push(TableInfo {
+                name,
+                kind,
+                updatable: false,
+            });
+        }
+        tables.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(tables)
+    }
+
+    /// The columns through `SHOW FULL COLUMNS`, the form proxies translate themselves. Its `Type`
+    /// is `column_type` (length/unsigned included), and `Extra` carries the auto-increment and
+    /// generated markers the catalog query reads from `EXTRA`.
+    async fn columns_via_show(&self, database: &str, table: &str) -> Result<Vec<ColumnInfo>> {
+        let sql = format!(
+            "SHOW FULL COLUMNS FROM {}.{}",
+            quote_identifier(database),
+            quote_identifier(table)
+        );
+        let rows = sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_query_error)?;
+
+        let mut columns = Vec::with_capacity(rows.len());
+        for row in rows {
+            let cell = |name: &str| -> Option<String> {
+                row.columns()
+                    .iter()
+                    .position(|column| column.name().eq_ignore_ascii_case(name))
+                    .and_then(|index| row.try_get::<Option<String>, _>(index).ok().flatten())
+            };
+            let extra = cell("Extra").unwrap_or_default().to_ascii_lowercase();
+            let tokens: Vec<&str> = extra.split_whitespace().collect();
+            columns.push(ColumnInfo {
+                name: cell("Field").unwrap_or_default(),
+                data_type: cell("Type").unwrap_or_default(),
+                nullable: cell("Null").is_some_and(|value| value.eq_ignore_ascii_case("YES")),
+                primary_key: cell("Key").is_some_and(|value| value.eq_ignore_ascii_case("PRI")),
+                auto_increment: tokens.contains(&"auto_increment"),
+                generated: tokens
+                    .iter()
+                    .any(|token| matches!(*token, "virtual" | "stored" | "persistent")),
+                comment: cell("Comment").unwrap_or_default(),
+            });
+        }
+        Ok(columns)
+    }
+
+    /// The `INFORMATION_SCHEMA.TABLES` overview used when the server answers that catalog.
+    async fn table_statuses_from_catalog(
+        &self,
+        database: &str,
+    ) -> std::result::Result<Vec<(String, TableStatus)>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT table_name, engine, table_rows, auto_increment, update_time, data_length, \
+                    table_comment \
+             FROM information_schema.tables \
+             WHERE table_schema = ? AND table_type <> 'VIEW' \
+             ORDER BY table_name",
+        )
+        .bind(database)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut statuses = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let name: String = row.try_get(0)?;
+            let engine: Option<String> = row.try_get(1).unwrap_or(None);
+            let updated = row
+                .try_get::<Option<DateTime<Utc>>, _>(4)
+                .ok()
+                .flatten()
+                .map(|value| value.naive_utc().format("%Y-%m-%d %H:%M:%S").to_string());
+            statuses.push((
+                name,
+                TableStatus {
+                    engine,
+                    // `information_schema.tables.table_rows` is an InnoDB estimate and MySQL 8
+                    // caches it for `information_schema_stats_expiry` seconds. It is routinely 0
+                    // for a table with thousands of rows (and a refresh returns the same cached
+                    // value), so the exact count is filled in by the caller.
+                    rows: optional_u64(row, 2),
+                    auto_increment: optional_u64(row, 3),
+                    updated,
+                    data_length: optional_u64(row, 5),
+                    comment: row.try_get(6).unwrap_or(None),
+                    ..TableStatus::default()
+                },
+            ));
+        }
+        Ok(statuses)
+    }
+
+    /// The same overview through `SHOW TABLE STATUS`, which proxies translate themselves. A proxy
+    /// may route it to one shard, so the names are matched against the object list by name.
+    async fn table_statuses_via_show(&self, database: &str) -> Result<Vec<(String, TableStatus)>> {
+        let sql = format!("SHOW TABLE STATUS FROM {}", quote_identifier(database));
+        let result = self.execute_query(None, &sql).await?;
+        let mut statuses = Vec::with_capacity(result.rows.len());
+        for row in &result.rows {
+            let Some(name) = result
+                .columns
+                .iter()
+                .position(|column| column.name.eq_ignore_ascii_case("Name"))
+                .and_then(|index| row.get(index))
+                .and_then(text_value)
+            else {
+                continue;
+            };
+            statuses.push((name, table_status_from(&result.columns, row)));
+        }
+        Ok(statuses)
+    }
+
+    /// One single-column name catalog (`information_schema.routines` / `.events`). A server that
+    /// rejected prepares gets a plain text query without `ORDER BY` — some proxies reject sorting
+    /// `INFORMATION_SCHEMA` — and the names are ordered here instead.
+    async fn catalog_names(
+        &self,
+        sql: &str,
+        order_by: &str,
+        database: &str,
+    ) -> Result<Vec<String>> {
+        let mut names: Vec<String> = if self.text_protocol() {
+            let sql = text_statement(sql, &[BoundValue::Text(database)]);
+            let rows = sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+                .fetch_all(&self.pool)
+                .await
+                .map_err(map_query_error)?;
+            rows.iter()
+                .map(|row| row.try_get(0).map_err(map_query_error))
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            let sql = format!("{sql} ORDER BY {order_by}");
+            let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
+                .bind(database)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(map_query_error)?;
+            rows.iter()
+                .map(|row| row.try_get(0).map_err(map_query_error))
+                .collect::<Result<Vec<_>>>()?
+        };
+        if self.text_protocol() {
+            names.sort_by_key(|name| name.to_lowercase());
+        }
+        Ok(names)
+    }
 }
 
 /// A pinned MySQL session for running a script statement by statement (see
@@ -219,6 +415,10 @@ impl Connection for MysqlConnection {
     }
 
     async fn list_tables(&self, database: &str) -> Result<Vec<TableInfo>> {
+        if self.text_protocol() {
+            return self.list_tables_via_show(database).await;
+        }
+
         let rows = sqlx::query(
             "SELECT t.table_name, t.table_type, v.is_updatable \
              FROM information_schema.tables AS t \
@@ -229,8 +429,15 @@ impl Connection for MysqlConnection {
         )
         .bind(database)
         .fetch_all(&self.pool)
-        .await
-        .map_err(map_query_error)?;
+        .await;
+        let rows = match rows {
+            Ok(rows) => rows,
+            Err(error) if is_unknown_command_error(&error) => {
+                self.mark_text_protocol();
+                return self.list_tables_via_show(database).await;
+            }
+            Err(error) => return Err(map_query_error(error)),
+        };
 
         let mut tables = Vec::with_capacity(rows.len());
         for row in rows {
@@ -252,6 +459,10 @@ impl Connection for MysqlConnection {
     }
 
     async fn columns(&self, database: &str, table: &str) -> Result<Vec<ColumnInfo>> {
+        if self.text_protocol() {
+            return self.columns_via_show(database, table).await;
+        }
+
         // `EXTRA` is a MySQL/MariaDB column. StarRocks' information_schema is only a subset, so it
         // keeps the plain catalog query (it has no auto-increment/generated columns to report).
         let starrocks = self.engine == Engine::StarRocks;
@@ -270,8 +481,15 @@ impl Connection for MysqlConnection {
             .bind(database)
             .bind(table)
             .fetch_all(&self.pool)
-            .await
-            .map_err(map_query_error)?;
+            .await;
+        let rows = match rows {
+            Ok(rows) => rows,
+            Err(error) if is_unknown_command_error(&error) => {
+                self.mark_text_protocol();
+                return self.columns_via_show(database, table).await;
+            }
+            Err(error) => return Err(map_query_error(error)),
+        };
 
         let mut columns = Vec::with_capacity(rows.len());
         for row in rows {
@@ -345,14 +563,30 @@ impl Connection for MysqlConnection {
                 order_clause(&page)
             )
         };
-        let mut query = sqlx::query(sqlx::AssertSqlSafe(page_sql));
-        for bind in &binds {
-            query = query.bind(bind);
-        }
-        if !starrocks {
-            query = query.bind(page.page_size as i64).bind(page.offset() as i64);
-        }
-        let rows = query.fetch_all(&self.pool).await.map_err(map_query_error)?;
+        let rows = if self.text_protocol() {
+            // The same proxy restriction: every bound statement becomes one text statement with
+            // the page's filter values and LIMIT/OFFSET inlined.
+            let mut values: Vec<BoundValue> =
+                binds.iter().map(|bind| BoundValue::Text(bind)).collect();
+            if !starrocks {
+                values.push(BoundValue::Number(page.page_size as i64));
+                values.push(BoundValue::Number(page.offset() as i64));
+            }
+            let sql = text_statement(&page_sql, &values);
+            sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+                .fetch_all(&self.pool)
+                .await
+                .map_err(map_query_error)?
+        } else {
+            let mut query = sqlx::query(sqlx::AssertSqlSafe(page_sql));
+            for bind in &binds {
+                query = query.bind(bind);
+            }
+            if !starrocks {
+                query = query.bind(page.page_size as i64).bind(page.offset() as i64);
+            }
+            query.fetch_all(&self.pool).await.map_err(map_query_error)?
+        };
 
         let mut decoded = Vec::with_capacity(rows.len());
         for row in &rows {
@@ -380,10 +614,10 @@ impl Connection for MysqlConnection {
         let qualified = format!("{}.{}", quote_identifier(database), quote_identifier(table));
 
         // StarRocks rejects prepared INSERT/UPDATE/DELETE (`1295 ... not supported in the
-        // prepared statement protocol yet`) and does not report transactions the way sqlx's
-        // `begin()` expects. Run each row as a plain text statement instead: the values are
+        // prepared statement protocol yet`), and a MySQL-protocol proxy can refuse server-side
+        // prepares altogether. Run each row as a plain text statement for both: the values are
         // already decoded cell strings, so quoting them is safe and keeps the same semantics.
-        if self.engine == Engine::StarRocks {
+        if self.engine == Engine::StarRocks || self.text_protocol() {
             for update in updates {
                 if update.set.is_empty() {
                     continue;
@@ -474,9 +708,9 @@ impl Connection for MysqlConnection {
 
         let qualified = format!("{}.{}", quote_identifier(database), quote_identifier(table));
 
-        // See `update_rows`: StarRocks does not accept prepared DML, so insert each row through
-        // the text protocol with quoted literals.
-        if self.engine == Engine::StarRocks {
+        // See `update_rows`: both StarRocks and a proxy that rejects prepares need the text
+        // protocol with quoted literals.
+        if self.engine == Engine::StarRocks || self.text_protocol() {
             for row in rows {
                 if row.values.is_empty() {
                     let sql = format!("INSERT INTO {qualified} () VALUES ()");
@@ -555,8 +789,9 @@ impl Connection for MysqlConnection {
 
         let qualified = format!("{}.{}", quote_identifier(database), quote_identifier(table));
 
-        // See `update_rows`: use the text protocol for StarRocks.
-        if self.engine == Engine::StarRocks {
+        // See `update_rows`: use the text protocol for StarRocks and for a proxy that rejects
+        // prepares.
+        if self.engine == Engine::StarRocks || self.text_protocol() {
             for row_keys in keys {
                 if row_keys.is_empty() {
                     return Err(Error::Query("delete requires key columns".to_string()));
@@ -572,7 +807,11 @@ impl Connection for MysqlConnection {
                     .collect::<Vec<_>>()
                     .join(" AND ");
                 // StarRocks rejects `DELETE ... LIMIT`; the key columns already identify the row.
-                let sql = format!("DELETE FROM {qualified} WHERE {where_clause}");
+                let sql = if self.engine == Engine::StarRocks {
+                    format!("DELETE FROM {qualified} WHERE {where_clause}")
+                } else {
+                    format!("DELETE FROM {qualified} WHERE {where_clause} LIMIT 1")
+                };
                 sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
                     .execute(&self.pool)
                     .await
@@ -706,15 +945,28 @@ impl Connection for MysqlConnection {
     }
 
     async fn database_options(&self, name: &str) -> Result<DatabaseOptions> {
-        let row = sqlx::query(
-            "SELECT default_character_set_name, default_collation_name \
-             FROM information_schema.schemata \
-             WHERE schema_name = ?",
-        )
-        .bind(name)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(map_query_error)?;
+        let row = if self.text_protocol() {
+            let sql = text_statement(
+                "SELECT default_character_set_name, default_collation_name \
+                 FROM information_schema.schemata \
+                 WHERE schema_name = ?",
+                &[BoundValue::Text(name)],
+            );
+            sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+                .fetch_one(&self.pool)
+                .await
+                .map_err(map_query_error)?
+        } else {
+            sqlx::query(
+                "SELECT default_character_set_name, default_collation_name \
+                 FROM information_schema.schemata \
+                 WHERE schema_name = ?",
+            )
+            .bind(name)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(map_query_error)?
+        };
 
         let charset: String = row.try_get(0).map_err(map_query_error)?;
         let collation: String = row.try_get(1).map_err(map_query_error)?;
@@ -726,7 +978,8 @@ impl Connection for MysqlConnection {
     }
 
     async fn server_version(&self) -> Result<String> {
-        let row = sqlx::query("SELECT VERSION()")
+        // No parameters: the text protocol works on servers and on proxies that reject prepares.
+        let row = sqlx::raw_sql("SELECT VERSION()")
             .fetch_one(&self.pool)
             .await
             .map_err(map_query_error)?;
@@ -751,72 +1004,22 @@ impl Connection for MysqlConnection {
         let Some(row) = result.rows.into_iter().next() else {
             return Ok(TableStatus::default());
         };
-        let value = |name: &str| -> Option<&CellValue> {
-            result
-                .columns
-                .iter()
-                .position(|column| column.name.eq_ignore_ascii_case(name))
-                .and_then(|index| row.get(index))
-        };
-        Ok(TableStatus {
-            engine: value("Engine").and_then(text_value),
-            rows: value("Rows").and_then(u64_value),
-            auto_increment: value("Auto_increment").and_then(u64_value),
-            row_format: value("Row_format").and_then(text_value),
-            created: value("Create_time").and_then(text_value),
-            updated: value("Update_time").and_then(text_value),
-            checked: value("Check_time").and_then(text_value),
-            index_length: value("Index_length").and_then(u64_value),
-            data_length: value("Data_length").and_then(u64_value),
-            max_data_length: value("Max_data_length").and_then(u64_value),
-            data_free: value("Data_free").and_then(u64_value),
-            collation: value("Collation").and_then(text_value),
-            create_options: value("Create_options").and_then(text_value),
-            comment: value("Comment").and_then(text_value),
-            ttl: None,
-            preview: None,
-        })
+        Ok(table_status_from(&result.columns, &row))
     }
 
     async fn table_statuses(&self, database: &str) -> Result<Vec<(String, TableStatus)>> {
-        let rows = sqlx::query(
-            "SELECT table_name, engine, table_rows, auto_increment, update_time, data_length, \
-                    table_comment \
-             FROM information_schema.tables \
-             WHERE table_schema = ? AND table_type <> 'VIEW' \
-             ORDER BY table_name",
-        )
-        .bind(database)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(map_query_error)?;
-
-        let mut statuses = Vec::with_capacity(rows.len());
-        for row in &rows {
-            let name: String = row.try_get(0).map_err(map_query_error)?;
-            let engine: Option<String> = row.try_get(1).unwrap_or(None);
-            let updated = row
-                .try_get::<Option<DateTime<Utc>>, _>(4)
-                .ok()
-                .flatten()
-                .map(|value| value.naive_utc().format("%Y-%m-%d %H:%M:%S").to_string());
-            statuses.push((
-                name,
-                TableStatus {
-                    engine,
-                    // `information_schema.tables.table_rows` is an InnoDB estimate and MySQL 8
-                    // caches it for `information_schema_stats_expiry` seconds. It is routinely 0
-                    // for a table with thousands of rows (and a refresh returns the same cached
-                    // value), so the exact count is filled in below.
-                    rows: optional_u64(row, 2),
-                    auto_increment: optional_u64(row, 3),
-                    updated,
-                    data_length: optional_u64(row, 5),
-                    comment: row.try_get(6).unwrap_or(None),
-                    ..TableStatus::default()
-                },
-            ));
-        }
+        let mut statuses = if self.text_protocol() {
+            self.table_statuses_via_show(database).await?
+        } else {
+            match self.table_statuses_from_catalog(database).await {
+                Ok(statuses) => statuses,
+                Err(error) if is_unknown_command_error(&error) => {
+                    self.mark_text_protocol();
+                    self.table_statuses_via_show(database).await?
+                }
+                Err(error) => return Err(map_query_error(error)),
+            }
+        };
 
         // One `COUNT(*)` per table, batched into a single UNION ALL statement. The object list
         // shows the real row count instead of the optimizer's estimate; a database with many
@@ -836,8 +1039,9 @@ impl Connection for MysqlConnection {
             }
             // Best-effort: if a table disappears between the catalog read and the count (or the
             // user's database forbids reading one), keep the catalog estimate instead of failing
-            // the whole object list.
-            let count_rows = sqlx::query(sqlx::AssertSqlSafe(sql))
+            // the whole object list. The statement has no parameters, so the text protocol (which
+            // a MySQL-protocol proxy also understands) is enough.
+            let count_rows = sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
                 .fetch_all(&self.pool)
                 .await
                 .unwrap_or_default();
@@ -932,33 +1136,21 @@ impl Connection for MysqlConnection {
     }
 
     async fn list_routines(&self, database: &str) -> Result<Vec<String>> {
-        let rows = sqlx::query(
-            "SELECT routine_name FROM information_schema.routines \
-             WHERE routine_schema = ? ORDER BY routine_name",
+        self.catalog_names(
+            "SELECT routine_name FROM information_schema.routines WHERE routine_schema = ?",
+            "routine_name",
+            database,
         )
-        .bind(database)
-        .fetch_all(&self.pool)
         .await
-        .map_err(map_query_error)?;
-
-        rows.iter()
-            .map(|row| row.try_get(0).map_err(map_query_error))
-            .collect()
     }
 
     async fn list_events(&self, database: &str) -> Result<Vec<String>> {
-        let rows = sqlx::query(
-            "SELECT event_name FROM information_schema.events \
-             WHERE event_schema = ? ORDER BY event_name",
+        self.catalog_names(
+            "SELECT event_name FROM information_schema.events WHERE event_schema = ?",
+            "event_name",
+            database,
         )
-        .bind(database)
-        .fetch_all(&self.pool)
         .await
-        .map_err(map_query_error)?;
-
-        rows.iter()
-            .map(|row| row.try_get(0).map_err(map_query_error))
-            .collect()
     }
 
     async fn backup_object_metadata(
@@ -1022,8 +1214,9 @@ impl Connection for MysqlConnection {
         );
         // `fetch` yields a boxed stream, so rows are decoded and handed to `on_row` one at a
         // time instead of materialising the whole table. `poll_fn` drives it without pulling in
-        // the whole `futures-util` surface.
-        let mut stream = sqlx::query(sqlx::AssertSqlSafe(sql)).fetch(&self.pool);
+        // the whole `futures-util` surface. No parameters: the text protocol keeps the backup
+        // working on a MySQL-protocol proxy too.
+        let mut stream = sqlx::raw_sql(sqlx::AssertSqlSafe(sql)).fetch(&self.pool);
         let mut count = 0u64;
         while let Some(item) = std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await {
             let row = item.map_err(map_query_error)?;
@@ -2367,6 +2560,36 @@ fn text_value(cell: &CellValue) -> Option<String> {
     }
 }
 
+/// A `SHOW TABLE STATUS` row as the object list's overview. The column names are the server's own
+/// (`Name`, `Engine`, `Rows`, ...), so both the single-table info pane and the bulk listing parse
+/// them the same way.
+fn table_status_from(columns: &[ColumnInfo], row: &[CellValue]) -> TableStatus {
+    let value = |name: &str| -> Option<&CellValue> {
+        columns
+            .iter()
+            .position(|column| column.name.eq_ignore_ascii_case(name))
+            .and_then(|index| row.get(index))
+    };
+    TableStatus {
+        engine: value("Engine").and_then(text_value),
+        rows: value("Rows").and_then(u64_value),
+        auto_increment: value("Auto_increment").and_then(u64_value),
+        row_format: value("Row_format").and_then(text_value),
+        created: value("Create_time").and_then(text_value),
+        updated: value("Update_time").and_then(text_value),
+        checked: value("Check_time").and_then(text_value),
+        index_length: value("Index_length").and_then(u64_value),
+        data_length: value("Data_length").and_then(u64_value),
+        max_data_length: value("Max_data_length").and_then(u64_value),
+        data_free: value("Data_free").and_then(u64_value),
+        collation: value("Collation").and_then(text_value),
+        create_options: value("Create_options").and_then(text_value),
+        comment: value("Comment").and_then(text_value),
+        ttl: None,
+        preview: None,
+    }
+}
+
 /// The numeric value of a cell, or `None` when it is not a number.
 fn u64_value(cell: &CellValue) -> Option<u64> {
     match cell {
@@ -2574,6 +2797,70 @@ fn quote_mysql_string(value: &str) -> String {
     out
 }
 
+/// One value in a statement generated by this module. The binary protocol binds it as a typed
+/// parameter; the text protocol (used for MySQL-protocol proxies that reject `COM_STMT_PREPARE`)
+/// renders it as a literal.
+enum BoundValue<'a> {
+    Text(&'a str),
+    Number(i64),
+}
+
+impl BoundValue<'_> {
+    fn literal(&self) -> String {
+        match self {
+            Self::Text(value) => bound_text_literal(value),
+            Self::Number(value) => value.to_string(),
+        }
+    }
+}
+
+/// A bound string as a text-protocol literal. A UTF-8 hex literal with a charset introducer is
+/// valid whatever the server's `sql_mode` says about quotes and backslashes, and behaves like the
+/// bound string it replaces (a non-binary string in the connection's utf8mb4 charset).
+fn bound_text_literal(value: &str) -> String {
+    use std::fmt::Write as _;
+
+    if value.is_empty() {
+        return "''".to_string();
+    }
+    let mut out = String::with_capacity(value.len() * 2 + 10);
+    out.push_str("_utf8mb4 0x");
+    for byte in value.as_bytes() {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+/// Replace every `?` of a generated statement with the next bound value, leaving `?` inside
+/// backtick-quoted identifiers or single-quoted literals alone. Only statements built by this
+/// module are rendered here, so the placeholders are always the binds given alongside them.
+fn text_statement(sql: &str, binds: &[BoundValue<'_>]) -> String {
+    let mut out = String::with_capacity(sql.len() + 16);
+    let mut binds = binds.iter();
+    let mut quote: Option<char> = None;
+    for character in sql.chars() {
+        if let Some(delimiter) = quote {
+            out.push(character);
+            if character == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        match character {
+            '\'' | '`' => {
+                quote = Some(character);
+                out.push(character);
+            }
+            '?' => match binds.next() {
+                Some(bind) => out.push_str(&bind.literal()),
+                None => out.push(character),
+            },
+            _ => out.push(character),
+        }
+    }
+    out
+}
+
 /// Build the ` ORDER BY ...` fragment for a page request, or an empty string when unsorted.
 fn order_clause(page: &PageRequest) -> String {
     if page.order_by.is_empty() {
@@ -2763,6 +3050,19 @@ fn is_unknown_column_error(error: &sqlx::Error) -> bool {
     database_error
         .try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
         .is_some_and(|mysql_error| mysql_error.number() == 1054)
+}
+
+/// Whether a MySQL-protocol middleware rejected the statement with
+/// `1047 ER_UNKNOWN_COM_ERROR` ("Unknown command"). Proxies such as UDAL/TeleDB's DBProxy answer
+/// statements their own parser cannot route with this generic error, which `map_query_error`
+/// renders as `<code> - <message>`.
+fn is_unknown_command_error(error: &sqlx::Error) -> bool {
+    let sqlx::Error::Database(database_error) = error else {
+        return false;
+    };
+    database_error
+        .try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
+        .is_some_and(|mysql_error| mysql_error.number() == 1047)
 }
 
 fn columns_from_row(row: &MySqlRow) -> Vec<ColumnInfo> {

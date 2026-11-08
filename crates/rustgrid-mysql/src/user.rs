@@ -104,7 +104,8 @@ impl CatalogShape {
 
 /// Probe the `mysql` catalog for the account columns and role table this server has.
 async fn catalog_shape(pool: &MySqlPool) -> CatalogShape {
-    let rows = match sqlx::query(
+    // No parameters: the text protocol also works on a MySQL-protocol proxy that rejects prepares.
+    let rows = match sqlx::raw_sql(
         "SELECT TABLE_NAME, COLUMN_NAME FROM information_schema.COLUMNS \
          WHERE TABLE_SCHEMA = 'mysql' AND TABLE_NAME IN ('user', 'role_edges', 'roles_mapping')",
     )
@@ -159,7 +160,7 @@ pub(crate) async fn list_users(pool: &MySqlPool) -> Result<Vec<UserAccount>> {
         "SELECT {} FROM mysql.user ORDER BY User, Host",
         shape.account_projection()
     );
-    let rows = sqlx::query(AssertSqlSafe(sql))
+    let rows = sqlx::raw_sql(AssertSqlSafe(sql))
         .fetch_all(pool)
         .await
         .map_err(map_query_error)?;
@@ -184,7 +185,7 @@ async fn inferred_roles(pool: &MySqlPool, shape: &CatalogShape) -> BTreeSet<(Str
         return BTreeSet::new();
     }
     let pairs: Vec<(String, String)> = if shape.role_edges {
-        match sqlx::query("SELECT FROM_USER, FROM_HOST FROM mysql.role_edges")
+        match sqlx::raw_sql("SELECT FROM_USER, FROM_HOST FROM mysql.role_edges")
             .fetch_all(pool)
             .await
         {
@@ -196,7 +197,7 @@ async fn inferred_roles(pool: &MySqlPool, shape: &CatalogShape) -> BTreeSet<(Str
         }
     } else if shape.roles_mapping {
         // MariaDB records no role host; an unqualified role resolves to `%`.
-        match sqlx::query("SELECT Role FROM mysql.roles_mapping")
+        match sqlx::raw_sql("SELECT Role FROM mysql.roles_mapping")
             .fetch_all(pool)
             .await
         {
@@ -219,12 +220,12 @@ async fn inferred_roles(pool: &MySqlPool, shape: &CatalogShape) -> BTreeSet<(Str
 pub(crate) async fn user_details(pool: &MySqlPool, user: &str, host: &str) -> Result<UserDetails> {
     let shape = catalog_shape(pool).await;
     let sql = format!(
-        "SELECT {} FROM mysql.user WHERE User = ? AND Host = ?",
-        shape.account_projection()
+        "SELECT {} FROM mysql.user WHERE User = {} AND Host = {}",
+        shape.account_projection(),
+        quote_string(user),
+        quote_string(host)
     );
-    let row = sqlx::query(AssertSqlSafe(sql))
-        .bind(user)
-        .bind(host)
+    let row = sqlx::raw_sql(AssertSqlSafe(sql))
         .fetch_optional(pool)
         .await
         .map_err(map_query_error)?;
@@ -275,11 +276,13 @@ pub(crate) async fn drop_user(pool: &MySqlPool, user: &str, host: &str) -> Resul
 async fn account_is_role(pool: &MySqlPool, user: &str, host: &str) -> bool {
     let shape = catalog_shape(pool).await;
     if shape.is_role_column
-        && let Ok(rows) = sqlx::query("SELECT is_role FROM mysql.user WHERE User = ? AND Host = ?")
-            .bind(user)
-            .bind(host)
-            .fetch_all(pool)
-            .await
+        && let Ok(rows) = sqlx::raw_sql(AssertSqlSafe(format!(
+            "SELECT is_role FROM mysql.user WHERE User = {} AND Host = {}",
+            quote_string(user),
+            quote_string(host)
+        )))
+        .fetch_all(pool)
+        .await
     {
         return rows
             .first()
@@ -624,13 +627,11 @@ fn read_account(row: &MySqlRow) -> UserAccount {
 async fn fetch_server_privileges(pool: &MySqlPool, grantee: &str) -> Result<BTreeSet<PrivilegeId>> {
     // The view can be unavailable on some servers; report no granted privileges rather than
     // failing the account load.
-    let rows = match sqlx::query(
-        "SELECT PRIVILEGE_TYPE FROM information_schema.USER_PRIVILEGES WHERE GRANTEE = ?",
-    )
-    .bind(grantee)
-    .fetch_all(pool)
-    .await
-    {
+    let sql = format!(
+        "SELECT PRIVILEGE_TYPE FROM information_schema.USER_PRIVILEGES WHERE GRANTEE = {}",
+        quote_string(grantee)
+    );
+    let rows = match sqlx::raw_sql(AssertSqlSafe(sql)).fetch_all(pool).await {
         Ok(rows) => rows,
         Err(_) => return Ok(BTreeSet::new()),
     };
@@ -645,16 +646,17 @@ async fn fetch_object_grants(pool: &MySqlPool, grantee: &str) -> Result<Vec<Obje
     let mut merged: BTreeMap<(String, String), BTreeSet<PrivilegeId>> = BTreeMap::new();
     for sql in [
         "SELECT TABLE_SCHEMA, '' AS object_name, PRIVILEGE_TYPE, IS_GRANTABLE \
-         FROM information_schema.SCHEMA_PRIVILEGES WHERE GRANTEE = ?",
+         FROM information_schema.SCHEMA_PRIVILEGES WHERE GRANTEE = ",
         "SELECT TABLE_SCHEMA, TABLE_NAME AS object_name, PRIVILEGE_TYPE, IS_GRANTABLE \
-         FROM information_schema.TABLE_PRIVILEGES WHERE GRANTEE = ?",
+         FROM information_schema.TABLE_PRIVILEGES WHERE GRANTEE = ",
         "SELECT ROUTINE_SCHEMA AS TABLE_SCHEMA, ROUTINE_NAME AS object_name, PRIVILEGE_TYPE, \
          IS_GRANTABLE \
-         FROM information_schema.ROUTINE_PRIVILEGES WHERE GRANTEE = ?",
+         FROM information_schema.ROUTINE_PRIVILEGES WHERE GRANTEE = ",
     ] {
         // A view may be missing on some servers (e.g. `ROUTINE_PRIVILEGES` on MariaDB builds);
         // a missing scope simply contributes no grants rather than failing the whole load.
-        let rows = match sqlx::query(sql).bind(grantee).fetch_all(pool).await {
+        let sql = format!("{sql}{}", quote_string(grantee));
+        let rows = match sqlx::raw_sql(AssertSqlSafe(sql)).fetch_all(pool).await {
             Ok(rows) => rows,
             Err(_) => continue,
         };
@@ -717,7 +719,7 @@ async fn fetch_role_edges(
 
 /// `mysql.role_edges` (MySQL 8): `FROM_*` is the role, `TO_*` the member it is granted to.
 async fn role_edges_from_mysql(pool: &MySqlPool) -> Vec<RoleMembership> {
-    let rows = match sqlx::query(
+    let rows = match sqlx::raw_sql(
         "SELECT FROM_USER, FROM_HOST, TO_USER, TO_HOST, WITH_ADMIN_OPTION FROM mysql.role_edges",
     )
     .fetch_all(pool)
@@ -742,7 +744,7 @@ async fn role_edges_from_mysql(pool: &MySqlPool) -> Vec<RoleMembership> {
 /// MariaDB records neither an admin option nor the role's own host, so the edge carries `%` - the
 /// host an unqualified role resolves to in `GRANT <role> TO <member>`.
 async fn role_edges_from_mariadb(pool: &MySqlPool) -> Vec<RoleMembership> {
-    let rows = match sqlx::query("SELECT Host, User, Role FROM mysql.roles_mapping")
+    let rows = match sqlx::raw_sql("SELECT Host, User, Role FROM mysql.roles_mapping")
         .fetch_all(pool)
         .await
     {
@@ -1269,24 +1271,26 @@ pub(crate) async fn object_privilege_matrix(
     name: &str,
 ) -> Result<Vec<ObjectPrivilegeRow>> {
     let rows = if name.is_empty() {
-        sqlx::query(
+        let sql = format!(
             "SELECT GRANTEE, PRIVILEGE_TYPE, IS_GRANTABLE FROM information_schema.SCHEMA_PRIVILEGES \
-             WHERE TABLE_SCHEMA = ?",
-        )
-        .bind(database)
-        .fetch_all(pool)
-        .await
-        .map_err(map_query_error)?
+             WHERE TABLE_SCHEMA = {}",
+            quote_string(database)
+        );
+        sqlx::raw_sql(AssertSqlSafe(sql))
+            .fetch_all(pool)
+            .await
+            .map_err(map_query_error)?
     } else {
-        sqlx::query(
+        let sql = format!(
             "SELECT GRANTEE, PRIVILEGE_TYPE, IS_GRANTABLE FROM information_schema.TABLE_PRIVILEGES \
-             WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
-        )
-        .bind(database)
-        .bind(name)
-        .fetch_all(pool)
-        .await
-        .map_err(map_query_error)?
+             WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {}",
+            quote_string(database),
+            quote_string(name)
+        );
+        sqlx::raw_sql(AssertSqlSafe(sql))
+            .fetch_all(pool)
+            .await
+            .map_err(map_query_error)?
     };
 
     let mut merged: BTreeMap<(String, String), BTreeSet<PrivilegeId>> = BTreeMap::new();

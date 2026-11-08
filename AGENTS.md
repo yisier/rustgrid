@@ -1149,6 +1149,16 @@ make more engines cheap later — do not build those features early.
 - sqlx 0.9's `sqlx::query` only accepts `&'static str` (the `SqlSafeStr` bound). A
   dynamically built query must be wrapped: `sqlx::query(sqlx::AssertSqlSafe(sql))`. Keep
   identifiers escaped (`quote_identifier`) and use bind parameters for all values.
+- **A MySQL-protocol proxy may reject server-side prepares.** UDAL/TeleDB's DBProxy answers
+  `1047 ER_UNKNOWN_COM_ERROR` ("UDAL - Unknown command") to `COM_STMT_PREPARE` while the text
+  protocol keeps working — Navicat, which uses it, opens the same database fine. sqlx prepares
+  whenever a query carries bound arguments, so `MysqlConnection` turns the first catalog 1047
+  into `text_protocol`: the catalog then reads `SHOW FULL TABLES` / `SHOW FULL COLUMNS` /
+  `SHOW TABLE STATUS`, page queries and DML are rendered with `text_statement` (string values
+  become `_utf8mb4 0x…` hex literals, which neither quotes nor `sql_mode` can break), and
+  statements without parameters should use `raw_sql` so they never prepare either.
+  `crates/rustgrid-mysql/tests/mysql_compatibility.rs` reproduces the failure on a wire-protocol
+  fixture.
 - Grid writes identify a row by its primary key, falling back to **every column** when the table
   has no primary key (`GridState` column `primary_key` flags). Key values are
   `Option<String>` (`CellValue::as_edit_value`): `None` is SQL `NULL` and must render `IS NULL`,

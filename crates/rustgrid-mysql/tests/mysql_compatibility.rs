@@ -1,12 +1,16 @@
-//! Exercise SQLx's real login path against a small MySQL wire-protocol fixture.
-//! This verifies commands sent before after_connect; it is not a StarRocks emulator.
+//! Exercise SQLx's real login path against a small MySQL wire-protocol fixture. This verifies the
+//! commands sent before `after_connect` (it is not a StarRocks emulator) and the text-protocol
+//! fallback for MySQL-protocol proxies that reject server-side prepares.
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 use std::time::Duration;
 
-use rustgrid_core::{ConnectionConfig, Driver, DriverId, TlsMode};
+use rustgrid_core::{
+    ConnectionConfig, Driver, DriverId, FilterCondition, FilterNode, FilterOperator, ObjectKind,
+    PageRequest, RowInsert, RowUpdate, TlsMode,
+};
 use rustgrid_mysql::{MariaDbDriver, MysqlDriver};
 
 fn read_packet(stream: &mut TcpStream) -> Vec<u8> {
@@ -140,5 +144,582 @@ async fn mariadb_ignores_mysql_compatibility_option() {
             .connection_form
             .options
             .is_empty()
+    );
+}
+
+// ----- Fallback for a proxy that rejects server-side prepares -------------------------------
+//
+// UDAL/TeleDB's DBProxy answers `1047 ER_UNKNOWN_COM_ERROR` to `COM_STMT_PREPARE` (the issue
+// reported "1047 - UDAL - Unknown command" when a database was opened), while the text protocol
+// works — which is how Navicat talks to it. The fixture below rejects every prepare that way and
+// serves the classic `SHOW` statements plus the generated text statements, so the connection has
+// to fall back for its table list, columns, overview, pages and writes.
+
+const FULL_COLUMNS: &[&str] = &[
+    "Field",
+    "Type",
+    "Collation",
+    "Null",
+    "Key",
+    "Default",
+    "Extra",
+    "Privileges",
+    "Comment",
+];
+
+fn error_packet(code: u16, state: &str, message: &str) -> Vec<u8> {
+    let mut payload = vec![0xff];
+    payload.extend_from_slice(&code.to_le_bytes());
+    payload.push(b'#');
+    payload.extend_from_slice(state.as_bytes());
+    payload.extend_from_slice(message.as_bytes());
+    payload
+}
+
+fn push_lenenc(payload: &mut Vec<u8>, value: &[u8]) {
+    assert!(
+        value.len() < 251,
+        "fixture values stay one-byte length-encoded"
+    );
+    payload.push(value.len() as u8);
+    payload.extend_from_slice(value);
+}
+
+fn text_row(values: &[Option<&str>]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    for value in values {
+        match value {
+            Some(text) => push_lenenc(&mut payload, text.as_bytes()),
+            None => payload.push(0xfb),
+        }
+    }
+    payload
+}
+
+fn column_packet(name: &str) -> Vec<u8> {
+    let mut payload = Vec::new();
+    push_lenenc(&mut payload, b"def");
+    push_lenenc(&mut payload, b"");
+    push_lenenc(&mut payload, b"");
+    push_lenenc(&mut payload, b"");
+    push_lenenc(&mut payload, name.as_bytes());
+    push_lenenc(&mut payload, b"");
+    payload.push(0x0c);
+    payload.extend_from_slice(&45u16.to_le_bytes()); // utf8mb4_general_ci
+    payload.extend_from_slice(&1024u32.to_le_bytes());
+    payload.push(0xfd); // VAR_STRING
+    payload.extend_from_slice(&0u16.to_le_bytes());
+    payload.push(0);
+    payload.extend_from_slice(&[0, 0]);
+    payload
+}
+
+fn write_result_set(stream: &mut TcpStream, columns: &[&str], rows: &[Vec<Option<&str>>]) {
+    let mut sequence = 1;
+    write_packet(stream, sequence, &[columns.len() as u8]);
+    sequence += 1;
+    for name in columns {
+        write_packet(stream, sequence, &column_packet(name));
+        sequence += 1;
+    }
+    write_packet(stream, sequence, EOF);
+    sequence += 1;
+    for row in rows {
+        write_packet(stream, sequence, &text_row(row));
+        sequence += 1;
+    }
+    write_packet(stream, sequence, EOF);
+}
+
+fn respond(stream: &mut TcpStream, sql: &str) {
+    if sql.starts_with("SHOW FULL TABLES FROM") {
+        write_result_set(
+            stream,
+            &["Tables_in_shop", "Table_type"],
+            &[
+                vec![Some("users"), Some("BASE TABLE")],
+                vec![Some("v"), Some("VIEW")],
+            ],
+        );
+    } else if sql.starts_with("SHOW FULL COLUMNS FROM") {
+        write_result_set(
+            stream,
+            FULL_COLUMNS,
+            &[
+                vec![
+                    Some("id"),
+                    Some("int(11)"),
+                    None,
+                    Some("NO"),
+                    Some("PRI"),
+                    None,
+                    Some("auto_increment"),
+                    Some("select,insert,update,references"),
+                    Some(""),
+                ],
+                vec![
+                    Some("name"),
+                    Some("varchar(64)"),
+                    Some("utf8mb4_general_ci"),
+                    Some("YES"),
+                    Some(""),
+                    None,
+                    Some(""),
+                    Some("select,insert,update,references"),
+                    Some("display name"),
+                ],
+            ],
+        );
+    } else if sql.starts_with("SHOW TABLE STATUS FROM") {
+        write_result_set(
+            stream,
+            &[
+                "Name",
+                "Engine",
+                "Rows",
+                "Auto_increment",
+                "Update_time",
+                "Data_length",
+                "Comment",
+            ],
+            &[vec![
+                Some("users"),
+                Some("InnoDB"),
+                Some("42"),
+                Some("7"),
+                None,
+                Some("16384"),
+                Some("account table"),
+            ]],
+        );
+    } else if sql.starts_with("SELECT routine_name FROM information_schema.routines") {
+        write_result_set(stream, &["routine_name"], &[vec![Some("calc_total")]]);
+    } else if sql.starts_with("SELECT event_name FROM information_schema.events") {
+        write_result_set(stream, &["event_name"], &[vec![Some("nightly_cleanup")]]);
+    } else if sql.starts_with("SELECT default_character_set_name, default_collation_name") {
+        write_result_set(
+            stream,
+            &["default_character_set_name", "default_collation_name"],
+            &[vec![Some("utf8mb4"), Some("utf8mb4_0900_ai_ci")]],
+        );
+    } else if sql.starts_with("SET ")
+        || sql.starts_with("SELECT ")
+        || sql.starts_with("UPDATE ")
+        || sql.starts_with("INSERT ")
+        || sql.starts_with("DELETE ")
+    {
+        // Session setup, the best-effort exact row count (an empty result is fine), or one of the
+        // text-protocol writes.
+        write_packet(stream, 1, OK);
+    } else {
+        panic!("unexpected command: {sql}");
+    }
+}
+
+fn read_packet_opt(stream: &mut TcpStream) -> Option<Vec<u8>> {
+    let mut header = [0; 4];
+    stream.read_exact(&mut header).ok()?;
+    let len = u32::from_le_bytes([header[0], header[1], header[2], 0]) as usize;
+    let mut payload = vec![0; len];
+    stream.read_exact(&mut payload).ok()?;
+    Some(payload)
+}
+
+fn serve_connection(mut stream: TcpStream, queries: std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    // Windows may hand an accepted socket the listener's non-blocking mode down to it.
+    stream.set_nonblocking(false).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let capabilities: u32 = 1 | 0x200 | 0x8000 | 0x20000 | 0x40000 | 0x80000;
+    let mut greeting = b"\x0a8.0.33-UDAL-DBPROXY\0\x01\0\0\0abcdefgh\0".to_vec();
+    greeting.extend_from_slice(&(capabilities as u16).to_le_bytes());
+    greeting.push(45);
+    greeting.extend_from_slice(&[2, 0]);
+    greeting.extend_from_slice(&((capabilities >> 16) as u16).to_le_bytes());
+    greeting.push(21);
+    greeting.extend_from_slice(&[0; 10]);
+    greeting.extend_from_slice(b"ijklmnopqrst\0mysql_native_password\0");
+    write_packet(&mut stream, 0, &greeting);
+    let Some(_login) = read_packet_opt(&mut stream) else {
+        return;
+    };
+    write_packet(&mut stream, 2, OK);
+
+    while let Some(packet) = read_packet_opt(&mut stream) {
+        match packet[0] {
+            1 => break,                             // COM_QUIT
+            14 => write_packet(&mut stream, 1, OK), // COM_PING
+            3 => {
+                let sql = String::from_utf8(packet[1..].to_vec()).unwrap();
+                respond(&mut stream, &sql);
+                queries.lock().unwrap().push(sql);
+            }
+            0x16 => {
+                let sql = String::from_utf8(packet[1..].to_vec()).unwrap();
+                write_packet(
+                    &mut stream,
+                    1,
+                    &error_packet(1047, "08S01", "UDAL - Unknown command"),
+                );
+                queries.lock().unwrap().push(format!("PREPARE {sql}"));
+            }
+            command => panic!("unexpected protocol command {command}"),
+        }
+    }
+}
+
+/// A proxy fixture that rejects every prepared statement with `1047 ER_UNKNOWN_COM_ERROR` and
+/// serves the text protocol. The pool may open a second connection while the first one is still
+/// being returned, so every accepted stream gets its own thread.
+struct Proxy {
+    port: u16,
+    queries: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl Proxy {
+    fn start() -> Self {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let queries = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let accept_queries = Arc::clone(&queries);
+        let accept_stop = Arc::clone(&stop);
+        let handle = thread::spawn(move || {
+            let mut workers = Vec::new();
+            loop {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let queries = Arc::clone(&accept_queries);
+                        workers.push(thread::spawn(move || serve_connection(stream, queries)));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        let stopped = accept_stop.load(Ordering::Relaxed);
+                        if stopped && workers.iter().all(thread::JoinHandle::is_finished) {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept: {error}"),
+                }
+            }
+            for worker in workers {
+                worker.join().unwrap();
+            }
+        });
+        Self {
+            port,
+            queries,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    fn stop(mut self) -> Vec<String> {
+        use std::sync::atomic::Ordering;
+
+        self.stop.store(true, Ordering::Relaxed);
+        self.handle.take().unwrap().join().unwrap();
+        self.queries.lock().unwrap().clone()
+    }
+}
+
+async fn proxy_connection(port: u16) -> Box<dyn rustgrid_core::Connection> {
+    let mut config = ConnectionConfig {
+        driver: DriverId::new("mysql"),
+        host: "127.0.0.1".to_string(),
+        port,
+        username: "root".to_string(),
+        password: None,
+        database: None,
+        options: BTreeMap::new(),
+        settings: Default::default(),
+    };
+    config.settings.tls.mode = TlsMode::Disabled;
+    config.settings.connect_timeout = Some(2);
+    MysqlDriver::new()
+        .connect(&config)
+        .await
+        .expect("connect to the proxy fixture")
+}
+
+#[tokio::test]
+async fn catalog_falls_back_to_show_statements_after_unknown_command() {
+    let proxy = Proxy::start();
+    let connection = proxy_connection(proxy.port).await;
+
+    let tables = connection.list_tables("shop").await.expect("list tables");
+    assert_eq!(tables.len(), 2);
+    assert_eq!(tables[0].name, "users");
+    assert_eq!(tables[0].kind, ObjectKind::Table);
+    assert_eq!(tables[1].name, "v");
+    assert_eq!(tables[1].kind, ObjectKind::View);
+
+    // The session remembered the proxy, so these do not try to prepare again.
+    let columns = connection.columns("shop", "users").await.expect("columns");
+    assert_eq!(columns.len(), 2);
+    assert_eq!(columns[0].name, "id");
+    assert_eq!(columns[0].data_type, "int(11)");
+    assert!(!columns[0].nullable);
+    assert!(columns[0].primary_key);
+    assert!(columns[0].auto_increment);
+    assert_eq!(columns[1].comment, "display name");
+    assert!(columns[1].nullable);
+
+    let statuses = connection
+        .table_statuses("shop")
+        .await
+        .expect("table statuses");
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].0, "users");
+    assert_eq!(statuses[0].1.engine.as_deref(), Some("InnoDB"));
+    assert_eq!(statuses[0].1.rows, Some(42));
+    assert_eq!(statuses[0].1.comment.as_deref(), Some("account table"));
+
+    connection.close().await.unwrap();
+    let queries = proxy.stop();
+    let prepared = queries
+        .iter()
+        .position(|sql| sql.starts_with("PREPARE SELECT t.table_name, t.table_type"))
+        .expect("the information_schema query is tried first");
+    let shown = queries
+        .iter()
+        .position(|sql| sql == "SHOW FULL TABLES FROM `shop`")
+        .expect("SHOW FULL TABLES is the fallback");
+    assert!(prepared < shown);
+    assert!(
+        queries
+            .iter()
+            .any(|sql| sql == "SHOW FULL COLUMNS FROM `shop`.`users`")
+    );
+    assert!(
+        queries
+            .iter()
+            .any(|sql| sql == "SHOW TABLE STATUS FROM `shop`")
+    );
+    assert_eq!(
+        queries
+            .iter()
+            .filter(|sql| sql.starts_with("PREPARE"))
+            .count(),
+        1,
+        "only the first catalog query pays for the rejected prepared statement: {queries:#?}"
+    );
+}
+
+#[tokio::test]
+async fn page_runs_as_one_text_statement_after_the_proxy_fallback() {
+    let proxy = Proxy::start();
+    let connection = proxy_connection(proxy.port).await;
+
+    // The catalog fallback marks the session, so the page must not try to prepare either.
+    connection.list_tables("shop").await.expect("list tables");
+    let mut condition = FilterCondition::new("name");
+    condition.operator = FilterOperator::Equal;
+    condition.value = "o'ne".to_string();
+    let page = PageRequest::new(0, 10);
+    let page = PageRequest {
+        filter: vec![FilterNode::Condition(condition)],
+        ..page
+    };
+    let page = connection
+        .fetch_page("shop", "users", page)
+        .await
+        .expect("page through the text protocol");
+    assert!(page.rows.is_empty());
+    connection.close().await.unwrap();
+
+    let queries = proxy.stop();
+    let statement = queries
+        .iter()
+        .find(|sql| sql.starts_with("SELECT * FROM `shop`.`users`"))
+        .expect("the page is a text statement");
+    assert!(
+        !statement.contains('?'),
+        "bound values are inlined: {statement}"
+    );
+    assert!(
+        statement.contains("`name` = _utf8mb4 0x6f276e65"),
+        "{statement}"
+    );
+    assert!(statement.contains("LIMIT 10 OFFSET 0"), "{statement}");
+    assert_eq!(
+        queries
+            .iter()
+            .filter(|sql| sql.starts_with("PREPARE"))
+            .count(),
+        1,
+        "only the catalog probe is prepared: {queries:#?}"
+    );
+}
+
+#[tokio::test]
+async fn backup_object_lists_use_the_text_protocol() {
+    let proxy = Proxy::start();
+    let connection = proxy_connection(proxy.port).await;
+
+    connection.list_tables("shop").await.expect("list tables");
+    let routines = connection.list_routines("shop").await.expect("routines");
+    let events = connection.list_events("shop").await.expect("events");
+    let options = connection
+        .database_options("shop")
+        .await
+        .expect("database options");
+    assert_eq!(routines, ["calc_total"]);
+    assert_eq!(events, ["nightly_cleanup"]);
+    assert_eq!(options.charset, "utf8mb4");
+    assert_eq!(options.collation, "utf8mb4_0900_ai_ci");
+    connection.close().await.unwrap();
+
+    let queries = proxy.stop();
+    assert!(
+        queries.iter().any(|sql| sql
+            == "SELECT routine_name FROM information_schema.routines \
+                WHERE routine_schema = _utf8mb4 0x73686f70"),
+        "{queries:#?}"
+    );
+    assert!(
+        queries.iter().any(|sql| sql
+            == "SELECT event_name FROM information_schema.events \
+                WHERE event_schema = _utf8mb4 0x73686f70"),
+        "{queries:#?}"
+    );
+    assert_eq!(
+        queries
+            .iter()
+            .filter(|sql| sql.starts_with("PREPARE"))
+            .count(),
+        1,
+        "only the catalog probe is prepared: {queries:#?}"
+    );
+}
+
+#[tokio::test]
+async fn writes_use_the_text_protocol_after_the_proxy_fallback() {
+    let proxy = Proxy::start();
+    let connection = proxy_connection(proxy.port).await;
+
+    connection.list_tables("shop").await.expect("list tables");
+    connection
+        .update_rows(
+            "shop",
+            "users",
+            &[RowUpdate {
+                set: vec![("name".to_string(), Some("a'b".to_string()))],
+                keys: vec![("id".to_string(), Some("1".to_string()))],
+            }],
+        )
+        .await
+        .expect("update");
+    connection
+        .insert_rows(
+            "shop",
+            "users",
+            &[RowInsert {
+                values: vec![
+                    ("id".to_string(), Some("2".to_string())),
+                    ("name".to_string(), None),
+                ],
+            }],
+        )
+        .await
+        .expect("insert");
+    connection
+        .delete_rows(
+            "shop",
+            "users",
+            &[vec![("id".to_string(), Some("1".to_string()))]],
+        )
+        .await
+        .expect("delete");
+    connection.close().await.unwrap();
+
+    let queries = proxy.stop();
+    let update = queries
+        .iter()
+        .find(|sql| sql.starts_with("UPDATE "))
+        .expect("the update is a text statement");
+    assert_eq!(
+        update, "UPDATE `shop`.`users` SET `name` = 'a\\'b' WHERE `id` = '1'",
+        "{queries:#?}"
+    );
+    assert!(
+        queries
+            .iter()
+            .any(|sql| sql == "INSERT INTO `shop`.`users` (`id`, `name`) VALUES ('2', NULL)"),
+        "{queries:#?}"
+    );
+    assert!(
+        queries
+            .iter()
+            .any(|sql| sql == "DELETE FROM `shop`.`users` WHERE `id` = '1' LIMIT 1"),
+        "{queries:#?}"
+    );
+    assert_eq!(
+        queries
+            .iter()
+            .filter(|sql| sql.starts_with("PREPARE"))
+            .count(),
+        1,
+        "only the catalog probe is prepared: {queries:#?}"
+    );
+}
+
+#[tokio::test]
+async fn columns_fall_back_on_their_own() {
+    let proxy = Proxy::start();
+    let connection = proxy_connection(proxy.port).await;
+
+    let columns = connection
+        .columns("shop", "users")
+        .await
+        .expect("columns through SHOW FULL COLUMNS");
+    assert_eq!(columns[0].name, "id");
+    connection.close().await.unwrap();
+
+    let queries = proxy.stop();
+    assert!(
+        queries
+            .iter()
+            .any(|sql| sql.starts_with("PREPARE SELECT column_name"))
+    );
+    assert!(
+        queries
+            .iter()
+            .any(|sql| sql == "SHOW FULL COLUMNS FROM `shop`.`users`")
+    );
+}
+
+#[tokio::test]
+async fn table_statuses_fall_back_on_their_own() {
+    let proxy = Proxy::start();
+    let connection = proxy_connection(proxy.port).await;
+
+    let statuses = connection
+        .table_statuses("shop")
+        .await
+        .expect("statuses through SHOW TABLE STATUS");
+    assert_eq!(statuses[0].1.rows, Some(42));
+    connection.close().await.unwrap();
+
+    let queries = proxy.stop();
+    assert!(
+        queries
+            .iter()
+            .any(|sql| sql.starts_with("PREPARE SELECT table_name, engine"))
+    );
+    assert!(
+        queries
+            .iter()
+            .any(|sql| sql == "SHOW TABLE STATUS FROM `shop`")
     );
 }

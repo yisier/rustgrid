@@ -1993,50 +1993,56 @@ impl AppView {
                 Ok(Err(failure)) => error = Some(failure.to_string()),
                 Err(failure) => error = Some(failure.to_string()),
             }
-            if error.is_none() {
-                match routines {
-                    Ok(Ok(names)) => {
-                        for name in names {
-                            objects.push(BackupObjectEntry {
-                                kind: BackupObjectKind::Function,
-                                name,
-                                selected: true,
-                            });
-                        }
+            // Routines and events are optional categories: a server (or a MySQL-protocol proxy)
+            // that cannot list them must not hide the tables and views that loaded fine. Keep the
+            // first failure as the banner while the object list still fills in.
+            match routines {
+                Ok(Ok(names)) => {
+                    for name in names {
+                        objects.push(BackupObjectEntry {
+                            kind: BackupObjectKind::Function,
+                            name,
+                            selected: true,
+                        });
                     }
-                    Ok(Err(failure)) => error = Some(failure.to_string()),
-                    Err(failure) => error = Some(failure.to_string()),
+                }
+                Ok(Err(failure)) => {
+                    error.get_or_insert(failure.to_string());
+                }
+                Err(failure) => {
+                    error.get_or_insert(failure.to_string());
                 }
             }
-            if error.is_none() {
-                match events {
-                    Ok(Ok(names)) => {
-                        for name in names {
-                            objects.push(BackupObjectEntry {
-                                kind: BackupObjectKind::Event,
-                                name,
-                                selected: true,
-                            });
-                        }
+            match events {
+                Ok(Ok(names)) => {
+                    for name in names {
+                        objects.push(BackupObjectEntry {
+                            kind: BackupObjectKind::Event,
+                            name,
+                            selected: true,
+                        });
                     }
-                    Ok(Err(failure)) => error = Some(failure.to_string()),
-                    Err(failure) => error = Some(failure.to_string()),
+                }
+                Ok(Err(failure)) => {
+                    error.get_or_insert(failure.to_string());
+                }
+                Err(failure) => {
+                    error.get_or_insert(failure.to_string());
                 }
             }
 
             let _ = this.update(cx, |app, cx| {
                 if let Some(dialog) = app.new_backup_dialog.as_mut() {
                     dialog.loading = false;
+                    dialog.objects = objects;
+                    if let Some(saved) = dialog.apply.take() {
+                        apply_saved_selection(dialog, &saved);
+                    }
+                    // The freshly-loaded (and, for a saved configuration, applied) state is
+                    // what 保存 compares against.
+                    capture_backup_baseline(dialog);
                     if let Some(error) = error {
                         dialog.error = Some(error);
-                    } else {
-                        dialog.objects = objects;
-                        if let Some(saved) = dialog.apply.take() {
-                            apply_saved_selection(dialog, &saved);
-                        }
-                        // The freshly-loaded (and, for a saved configuration, applied) state is
-                        // what 保存 compares against.
-                        capture_backup_baseline(dialog);
                     }
                 }
                 cx.notify();
