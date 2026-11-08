@@ -54,8 +54,37 @@ env:
   UPX_VERSION: "5.3.0"
 
 jobs:
+  # GitHub's ARM runners get a 504 from github.com's release CDN for the UPX download (the x64
+  # runners do not), so it is fetched once on an x64 runner and shared as an artifact. The packer
+  # must match the runner's architecture: an amd64 UPX runs on an x64 runner, an arm64 UPX on the
+  # arm64 one, and either can pack the target ELF. Windows' win64 packer runs on the arm64 runner
+  # through Windows' x64 emulation.
+  fetch-upx:
+    name: Fetch UPX
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download UPX
+        run: |
+          set -eu
+          base="https://github.com/upx/upx/releases/download/v${UPX_VERSION}"
+          curl -fsSL --retry 8 --retry-delay 3 --retry-all-errors -o amd64.tar.xz "$base/upx-${UPX_VERSION}-amd64_linux.tar.xz"
+          curl -fsSL --retry 8 --retry-delay 3 --retry-all-errors -o arm64.tar.xz "$base/upx-${UPX_VERSION}-arm64_linux.tar.xz"
+          curl -fsSL --retry 8 --retry-delay 3 --retry-all-errors -o win64.zip "$base/upx-${UPX_VERSION}-win64.zip"
+          tar -xJf amd64.tar.xz
+          tar -xJf arm64.tar.xz
+          unzip -q win64.zip -d win64
+          mkdir -p upx-tool
+          cp "$(find . -type f -path '*amd64*' -name upx | head -n 1)" upx-tool/upx-linux-amd64
+          cp "$(find . -type f -path '*arm64*' -name upx | head -n 1)" upx-tool/upx-linux-arm64
+          cp "$(find win64 -type f -name upx.exe | head -n 1)" upx-tool/upx.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: upx-tools
+          path: upx-tool
+
   build:
     name: Build ${{ matrix.target }}
+    needs: fetch-upx
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -158,20 +187,21 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }} -p rustgrid-app
 
-      # UPX 5.3 compresses every Linux and Windows executable. Windows covers win64/pe for both
-      # x64 and arm64; the win64 packer runs on the arm64 runner through Windows' x64 emulation.
-      # github.com sometimes answers the release download with a 502/504, so both downloads retry
-      # instead of failing a whole release job.
+      # UPX 5.3 compresses every Linux and Windows executable. The binaries come from the
+      # `fetch-upx` job (see above); `--retry` there covers the flaky CDN.
+      - name: Download UPX
+        if: runner.os != 'macOS'
+        uses: actions/download-artifact@v4
+        with:
+          name: upx-tools
+          path: upx-tool
+
       - name: Compress with UPX (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $url = "https://github.com/upx/upx/releases/download/v$env:UPX_VERSION/upx-$env:UPX_VERSION-win64.zip"
-          curl.exe -fsSL --retry 8 --retry-delay 3 --retry-all-errors -o upx.zip $url
-          if ($LASTEXITCODE -ne 0) { throw "UPX download failed with exit code $LASTEXITCODE" }
-          Expand-Archive -Path upx.zip -DestinationPath upx-tool
-          $upx = (Get-ChildItem upx-tool -Recurse -Filter upx.exe | Select-Object -First 1).FullName
+          $upx = (Resolve-Path "upx-tool/upx.exe").Path
           & $upx --best --lzma "target/${{ matrix.target }}/release/RustGrid.exe"
           if ($LASTEXITCODE -ne 0) { throw "UPX compression failed with exit code $LASTEXITCODE" }
           & $upx -t "target/${{ matrix.target }}/release/RustGrid.exe"
@@ -189,12 +219,8 @@ jobs:
             ARM64) upx_arch=arm64 ;;
             *) echo "::error::unsupported runner architecture: ${{ runner.arch }}"; exit 1 ;;
           esac
-          url="https://github.com/upx/upx/releases/download/v${UPX_VERSION}/upx-${UPX_VERSION}-${upx_arch}_linux.tar.xz"
-          curl -fsSL --retry 8 --retry-delay 3 --retry-all-errors -o upx.tar.xz "$url"
-          tar -xf upx.tar.xz
-          upx="$(find . -maxdepth 2 -type f -name upx | head -n 1)"
-          test -n "$upx"
-          chmod +x "$upx"
+          upx="upx-tool/upx-linux-${upx_arch}"
+          test -x "$upx" || chmod +x "$upx"
           "$upx" --best --lzma "target/${{ matrix.target }}/release/RustGrid"
           "$upx" -t "target/${{ matrix.target }}/release/RustGrid"
 
@@ -271,6 +297,7 @@ jobs:
       - name: Download archives
         uses: actions/download-artifact@v4
         with:
+          pattern: RustGrid-*
           path: dist
           merge-multiple: true
 
