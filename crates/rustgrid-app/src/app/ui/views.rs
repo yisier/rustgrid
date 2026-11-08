@@ -1006,13 +1006,38 @@ pub(crate) fn grid_item_sized(
         .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
 }
 
+/// Whether `character` occupies a full-width (East Asian) cell. Latin, Cyrillic, Greek and the
+/// other alphabetic scripts are narrow; CJK ideographs, kana, Hangul and the full-width forms are
+/// wide. Treating every non-ASCII glyph as wide (the old rule) made Russian labels measure almost
+/// twice their real width.
+fn is_wide_character(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x1100..=0x115F // Hangul Jamo
+            | 0x2E80..=0x303E // CJK radicals, punctuation and symbols
+            | 0x3041..=0x33FF // Hiragana, Katakana, CJK compatibility
+            | 0x3400..=0x4DBF // CJK unified ideographs extension A
+            | 0x4E00..=0x9FFF // CJK unified ideographs
+            | 0xA000..=0xA4CF // Yi
+            | 0xAC00..=0xD7A3 // Hangul syllables
+            | 0xF900..=0xFAFF // CJK compatibility ideographs
+            | 0xFE10..=0xFE19 // Vertical forms
+            | 0xFE30..=0xFE6F // CJK compatibility forms
+            | 0xFF00..=0xFF60 // Full-width forms
+            | 0xFFE0..=0xFFE6 // Full-width signs
+            | 0x1F300..=0x1F64F // Emoji
+            | 0x1F900..=0x1F9FF // Supplemental emoji
+            | 0x20000..=0x3FFFD // CJK extensions B and beyond
+    )
+}
+
 /// An approximate rendered width of `text` at the 12.5px UI font. The metrics deliberately
-/// over-estimate a little (13px per CJK glyph, 7.5px per ASCII character): an under-estimate made
-/// a fitted 平铺网格 tile a few pixels too narrow, clipping the last glyph of a long name.
+/// over-estimate a little (13px per wide CJK glyph, 7.5px per other character): an under-estimate
+/// made a fitted 平铺网格 tile a few pixels too narrow, clipping the last glyph of a long name.
 pub(crate) fn approx_text_width(text: &str) -> f32 {
     text.chars()
         .map(|character| {
-            if (character as u32) >= 0x1100 {
+            if is_wide_character(character) {
                 13.0
             } else {
                 7.5
@@ -1345,7 +1370,15 @@ pub(crate) fn marquee_rect(
 
 #[cfg(test)]
 mod tests {
-    use super::{ColumnGrid, DetailSort, SortKey};
+    use super::{ColumnGrid, DetailSort, SortKey, approx_text_width};
+
+    #[test]
+    fn text_width_counts_cyrillic_as_narrow_and_cjk_as_wide() {
+        assert_eq!(approx_text_width("abc"), 3.0 * 7.5);
+        // Cyrillic is a narrow alphabetic script, not a full-width CJK cell.
+        assert_eq!(approx_text_width("Поиск"), 5.0 * 7.5);
+        assert_eq!(approx_text_width("搜索"), 2.0 * 13.0);
+    }
 
     #[test]
     fn a_seeded_grid_wraps_its_columns_before_its_own_scroller_is_measured() {

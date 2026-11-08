@@ -1343,6 +1343,17 @@ impl GridView {
         (longest + 56.0).clamp(FILTER_FIELD_WIDTH, 420.0)
     }
 
+    /// The operator dropdown's menu width: the longest localized label plus the row's check mark
+    /// and padding, clamped so a wordy translation never makes the popup span the whole pane.
+    /// The trigger itself stays at [`FILTER_OPERATOR_WIDTH`], exactly like the field dropdown.
+    fn operator_menu_width(&self) -> f32 {
+        let longest = FilterOperator::ALL
+            .iter()
+            .map(|operator| ui::approx_text_width(&t!(operator.label_key())))
+            .fold(FILTER_OPERATOR_WIDTH, f32::max);
+        (longest + 56.0).clamp(FILTER_OPERATOR_WIDTH, FILTER_OPERATOR_MAX_WIDTH)
+    }
+
     /// The shared drop-down for a condition's comparison operator, keyed by node path.
     pub(super) fn filter_operator_combo(
         &mut self,
@@ -1371,8 +1382,12 @@ impl GridView {
                 .to_string(),
             _ => "0".to_string(),
         };
+        // The labels are translated, and a language's wording can be much longer than the English
+        // one. Widening only the popup (like the field dropdown) keeps every operator readable
+        // without stretching the condition row's trigger past its compact share of the width.
+        let menu_width = self.operator_menu_width();
         let entity = cx.new(move |cx| {
-            ComboBox::new(theme, options, selected, FILTER_OPERATOR_WIDTH, cx)
+            ComboBox::new(theme, options, selected, menu_width, cx)
                 .field_width(FILTER_OPERATOR_WIDTH)
                 .height(FILTER_CONTROL_HEIGHT)
                 .text_size(FILTER_CONTROL_TEXT_SIZE)

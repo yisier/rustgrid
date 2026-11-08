@@ -2213,6 +2213,9 @@ const FILTER_CONTROL_RADIUS: f32 = 6.0;
 const FILTER_RAIL_WIDTH: f32 = 66.0;
 const FILTER_FIELD_WIDTH: f32 = 112.0;
 const FILTER_OPERATOR_WIDTH: f32 = 84.0;
+/// The operator dropdown's menu grows to fit the longest localized label ("Не заканчивается на"
+/// is much wider than the English text and the symbols), capped so it never spans the pane.
+const FILTER_OPERATOR_MAX_WIDTH: f32 = 240.0;
 /// Minimum and maximum width of the value field. It grows with the row but stops at a compact
 /// width, so a wide filter panel leaves the row actions beside the value instead of flinging them
 /// to the far edge (a `datetime` string plus the "…" picker button still fits).

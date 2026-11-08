@@ -365,7 +365,12 @@ impl TextInput {
         if self.pending_submit {
             self.pending_submit = false;
             if let Some(callback) = self.on_submit.clone() {
-                callback(window, cx);
+                // Run after this render pass. A submit handler may read this very field back from
+                // its model (the grid filter's Apply reads every value field, the pager's Enter
+                // reads its page box), and an entity cannot be read while its own `render` borrow
+                // is held. Deferring also lets a host that rewrites the field (the pager syncing
+                // its page number) update it safely.
+                window.defer(cx, move |window, cx| callback(window, cx));
             }
         }
 
@@ -519,6 +524,67 @@ mod tests {
         });
         assert_eq!(after_typing, "xhello");
         assert_eq!(after_undo, "hello");
+    }
+
+    /// A submit handler may read its own field. The grid's filter value boxes do exactly that when
+    /// Enter applies the filter, and reading the entity while its `render` held the mutable borrow
+    /// panicked and closed the app (issue #40). Submit is dispatched after the render pass, so the
+    /// read is safe.
+    #[gpui_kit::test]
+    fn submit_can_read_its_own_field(cx: &mut TestAppContext) {
+        use std::cell::RefCell;
+
+        cx.update(gpui_kit::init);
+        let recorded: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+        let sink = recorded.clone();
+        let slot: Rc<RefCell<Option<Entity<TextInput>>>> = Rc::new(RefCell::new(None));
+        let slot_for_callback = slot.clone();
+        let (handle, view) = cx.update(|cx| {
+            let field = cx.new(|cx| {
+                TextInput::new(Theme::light(), "abc", TextInputOptions::default(), cx).on_submit(
+                    Rc::new(move |_window, cx| {
+                        let field = slot_for_callback.borrow().clone().expect("field exists");
+                        *sink.borrow_mut() = field.read(cx).current_text(cx);
+                    }),
+                )
+            });
+            *slot.borrow_mut() = Some(field.clone());
+            let view = cx.new(|_cx| ArrowHarness {
+                field: field.clone(),
+            });
+            let (handle, _window) = gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: Point::default(),
+                        size: size(px(400.), px(200.)),
+                    })),
+                    ..Default::default()
+                },
+                cx,
+                |_, _| view.clone(),
+            )
+            .expect("open test window");
+            (handle, view)
+        });
+        let mut cx = VisualTestContext::from_window(handle, cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.update(|window, cx| {
+            let field = view.read(cx).field.clone();
+            field.update(cx, |field, cx| field.focus_state(window, cx));
+            let _ = window.draw(cx);
+        });
+        cx.simulate_keystrokes("enter");
+        // The submit callback runs as a deferred effect, then may read the field again.
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(
+            recorded.borrow().as_deref(),
+            Some("abc"),
+            "the submit callback should read the field without a re-entrant borrow"
+        );
     }
 
     /// Up/Down must reach the wrapper's `on_arrow`: the kit's single-line input handles the arrows

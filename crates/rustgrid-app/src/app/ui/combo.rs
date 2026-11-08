@@ -439,10 +439,14 @@ impl Render for ComboBox {
             container = container.w(px(width));
         }
 
+        // gpui-kit defaults the popup's search field to an untranslated "Search...". Every
+        // dropdown in the app gets the current language's placeholder instead.
+        let search_placeholder = SharedString::from(t!("common.search_placeholder").to_string());
         let control = match &state {
             ComboBacking::Single(state) => {
                 let mut select = Select::new(state)
                     .placeholder(self.placeholder.clone())
+                    .search_placeholder(search_placeholder.clone())
                     .menu_width(px(self.width))
                     .cleanable(false)
                     .disabled(!self.enabled)
@@ -465,6 +469,7 @@ impl Render for ComboBox {
             ComboBacking::Multiple(state) => {
                 let mut combo = Combobox::new(state)
                     .placeholder(self.placeholder.clone())
+                    .search_placeholder(search_placeholder.clone())
                     .menu_width(px(self.width))
                     .cleanable(false)
                     .disabled(!self.enabled)
