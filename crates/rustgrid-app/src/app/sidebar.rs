@@ -2252,6 +2252,7 @@ impl TreePane {
         let table_name = table.name.clone();
         let database_name = database_name.to_string();
         let click_id = table_id.clone();
+        let menu_id = table_id.clone();
         let app = self.app.clone();
         let menu_app = self.app.clone();
         let menu_name = table.name.clone();
@@ -2337,9 +2338,7 @@ impl TreePane {
                     }
                     this.commit_pending_rename(cx);
                     window.focus(&this.focus, cx);
-                    this.selected = Some(format!(
-                        "tbl-{connection_index}-{database_index}-{table_index}"
-                    ));
+                    this.selected = Some(menu_id.clone());
                     this.selected_table =
                         Some((connection_index, database_index, menu_name.clone(), is_view));
                     let _ = menu_app.update(cx, |app, cx| {
