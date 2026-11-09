@@ -29,9 +29,7 @@ impl AppView {
         let documents = connection_index
             .is_some_and(|index| self.driver_supports(index, DriverCapability::Documents));
         let dialect = connection_index
-            .and_then(|index| self.connections.get(index))
-            .and_then(|node| self.registry.get(&node.profile.driver))
-            .map(|driver| driver.dialect())
+            .map(|index| self.driver_dialect(index))
             .unwrap_or_default();
 
         if self.query_editors.len() <= index {
@@ -131,12 +129,7 @@ impl AppView {
                 database,
                 schema,
                 supports_schemas: self.driver_supports(connection_index, DriverCapability::Schemas),
-                dialect: self
-                    .connections
-                    .get(connection_index)
-                    .and_then(|node| self.registry.get(&node.profile.driver))
-                    .map(|driver| driver.dialect())
-                    .unwrap_or_default(),
+                dialect: self.driver_dialect(connection_index),
                 key_value,
             };
             // Every statement's tables, not only the last one's: the caret may be in any. Redis

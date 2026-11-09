@@ -137,6 +137,7 @@ raw-window-handle = "0.6"
 embed-resource = "3"
 windows = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Globalization",
     "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_System_Threading",
@@ -149,6 +150,16 @@ windows = { version = "0.61", features = [
 # older than 5.5 accept the login. Drop this once an upstream sqlx release carries them.
 [patch.crates-io]
 sqlx-mysql = { path = "vendor/sqlx-mysql" }
+
+[profile.dev]
+# Debug artifacts used to dwarf the sources: `target/debug` passed 40 GB, almost all of it DWARF
+# (the 1.7 GB `RustGrid.exe` carried 1.38 GB of `.debug_*` sections, 899 MB in `.debug_str` alone,
+# because full `debug = 2` info is duplicated by inlining). Line tables keep file:line in
+# backtraces and let a debugger step through workspace code, while types, variables and inlined
+# DIEs — the bulk of the size — are dropped. Do not raise this back to `2` without checking the
+# `target/` size, and delete `target/debug/incremental` whenever it gets large (it is a cache only,
+# Cargo recreates it): both are pure build cache, never shipped.
+debug = "line-tables-only"
 
 [profile.release]
 opt-level = "z"

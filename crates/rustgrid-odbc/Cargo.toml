@@ -12,5 +12,10 @@ rustgrid-core.workspace = true
 async-trait.workspace = true
 libloading.workspace = true
 
+# `GetACP`, so an ANSI MySQL driver is told the character set its driver manager will use to
+# convert text.
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

@@ -93,6 +93,13 @@ pub trait Driver: Send + Sync {
         DriverDialect::Generic
     }
 
+    /// The dialect of one saved connection. A driver whose single descriptor covers several engines
+    /// (the generic ODBC driver) overrides this so completion, the dump writer and the paging hints
+    /// follow the engine the connection actually reaches. The default is the static dialect.
+    fn dialect_for(&self, _profile: &ConnectionProfile) -> DriverDialect {
+        self.dialect()
+    }
+
     /// The system drivers offered by the connection form's driver dropdown (ODBC). Engines without
     /// such a list return an empty one, and the form falls back to a free-text field.
     fn connection_drivers(&self) -> Vec<String> {

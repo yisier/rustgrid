@@ -121,9 +121,29 @@ not a later refactor.
   SQL, as the fallback for engines without a native Rust driver (DB2, 达梦, ...). The ODBC
   driver manager (`odbc32.dll` / `libodbc.so`) is loaded **at runtime** via `libloading` (`api.rs`),
   so the build carries no link-time dependency and a machine without ODBC still runs normally;
-  `driver.rs`/`connection.rs` implement the trait on top of that. It is synchronous and implements
-  catalog listing, `execute_query` and paging; other `Connection` methods report "not supported yet".
-  See `docs/odbc-driver.md`.
+  `driver.rs`/`connection.rs` implement the trait on top of that. It is synchronous, so every
+  operation runs under the connection's `Mutex` (a connection handle is not thread-safe). It reads
+  the engine from `odbc.engine`, then the driver name and the DBMS name, and uses it for quoting,
+  paging (`LIMIT`/`OFFSET`, with an `OFFSET … FETCH` retry for the generic dialect), dialect data
+  (`Driver::dialect_for`) and literal rendering. An unknown engine's identifier quote and catalog
+  separator come from `SQLGetInfo`; a known engine keeps its dialect's quote. Implemented: catalog
+  listing (Oracle's schemas as databases), tables/views, primary keys from `SQLPrimaryKeys` plus
+  `SQLSpecialColumns` for a table without a declared key (pseudo columns are skipped), paging with
+  the filter tree and `ORDER BY`, insert/update/delete, `execute_query_many`,
+  `object_ddl` (`SHOW CREATE` on MySQL, `OBJECT_DEFINITION` for SQL Server views,
+  `pg_get_viewdef`/`sqlite_master`/`DBMS_METADATA` for the other views, otherwise a
+  `SQLColumns`-based `CREATE TABLE`), the dump/backup primitives (`backup_object_metadata`,
+  `stream_table_rows`, `restore_object`, including MySQL triggers and an Oracle
+  `DROP … EXCEPTION` block), MySQL's `SHOW TABLE STATUS` overview, per-engine
+  identity/generated/comment flags (MySQL, SQL Server, PostgreSQL, Oracle, SQLite), the view
+  designer for MySQL plus the other engines' `CREATE VIEW`, and the Import Wizard's
+  `CREATE TABLE` (`table_schema_sql`). The table designer stays unavailable
+  (`supports_table_designer` is `false`): a generic driver cannot reproduce a table's indexes and
+  engine options well enough to edit it. MySQL/MariaDB connections get a `CHARSET` when the
+  connection string does not set one: `utf8mb4` for a Unicode driver, and the system ANSI code
+  page's MySQL name (`gbk` on Chinese Windows, …) for an ANSI driver, whose bytes the driver
+  manager converts with that code page. Older Connector/ODBC releases otherwise default to
+  `latin1` and the server returns `?` for non-Latin text.
 - `crates/rustgrid-config` — versioned settings/profiles plus encrypted secret storage in the
   OS config dir (`connections.json`, `settings.json`, `secrets.json`). Its `transfer` module owns
   connection import/export: the RustGrid `.rgc` bundle, the Navicat `.ncx` reader (XML plus the
@@ -204,7 +224,7 @@ not a later refactor.
   iterating; finish with `cargo build`. Debug builds do not need the shader toolchain below.
 - `cargo check --workspace` / `cargo build`
 - `cargo run -p rustgrid-app` (produced binary is `RustGrid`)
-- The generic ODBC driver is a **default feature** (see `docs/odbc-driver.md`); disable it with
+- The generic ODBC driver is a **default feature** (see the `rustgrid-odbc` crate bullet); disable it with
   `--no-default-features`. Either way there is no build dependency: the ODBC driver manager is loaded
   at runtime and is only needed if a user actually connects through ODBC.
 - Release build (`cargo build --release -p rustgrid-app`) needs an HLSL compiler on Windows: on
@@ -1331,6 +1351,16 @@ make more engines cheap later — do not build those features early.
   unaffected. The build script reads `GPUI_FXC_PATH` only at compile time and declares no
   `cargo:rerun-if-env-changed`, so after editing the entry run `cargo clean -p gpui-pre-windows
   --release` to force it to be re-read.
+- **`target/debug` stays small because dev builds carry no full DWARF.** The root `Cargo.toml` sets
+  `[profile.dev] debug = "line-tables-only"`: with the default `debug = 2` the directory passed
+  43 GB, almost all of it debug sections (the 1.7 GB `RustGrid.exe` was 1.38 GB DWARF, 899 MB in
+  `.debug_str`). Line tables keep `file:line` in backtraces and let a debugger step through the
+  workspace, so do not raise it back to `2` without checking the size — the same profile builds
+  `target/debug` at ~6 GB. Cargo never prunes what a fingerprint change leaves behind, so a rebuild
+  under a new profile/dependency set can strand whole old binaries in `target/debug/deps`
+  (`RustGrid-<hash>.exe`, ~1.7 GB each; only the newest is hardlinked to
+  `target/debug/RustGrid.exe`). Those, and `target/debug/incremental`, are pure cache: delete them
+  freely (or `cargo clean -p rustgrid-app`), Cargo recreates whatever it needs.
 - **Cross-platform** (Windows/macOS/Linux). Avoid OS-only APIs; gate platform-specific code
   behind `#[cfg(target_os = ...)]`; watch per-OS native deps (e.g. Linux system libraries).
 - **Small install size is a hard requirement.** The release profile sets `lto`, `strip`,

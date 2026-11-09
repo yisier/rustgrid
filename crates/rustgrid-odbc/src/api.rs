@@ -26,17 +26,33 @@ pub(crate) const SQL_HANDLE_ENV: i16 = 1;
 pub(crate) const SQL_HANDLE_DBC: i16 = 2;
 pub(crate) const SQL_HANDLE_STMT: i16 = 3;
 const SQL_ATTR_ODBC_VERSION: i32 = 200;
+const SQL_ATTR_LOGIN_TIMEOUT: i32 = 103;
 const SQL_OV_ODBC3: usize = 3;
+const SQL_LOGIN_TIMEOUT_SECONDS: usize = 15;
 const SQL_DRIVER_NOPROMPT: u16 = 0;
 const SQL_FETCH_NEXT: i16 = 1;
 const SQL_FETCH_FIRST: i16 = 2;
 const SQL_DBMS_NAME: u16 = 17;
+const SQL_DBMS_VER: u16 = 18;
+const SQL_DATABASE_NAME: u16 = 16;
+const SQL_IDENTIFIER_CASE: u16 = 28;
+const SQL_IDENTIFIER_QUOTE_CHAR: u16 = 29;
+const SQL_CATALOG_NAME_SEPARATOR: u16 = 41;
 const SQL_NTS: i16 = -3;
 pub(crate) const SQL_NULL_DATA: isize = -1;
 const SQL_NO_TOTAL: isize = -4;
+const SQL_C_BINARY: i16 = -2;
 const SQL_C_WCHAR: i16 = -8;
 const SQL_PARAM_INPUT: i16 = 1;
 const SQL_WVARCHAR: i16 = -9;
+const SQL_BEST_ROWID: u16 = 1;
+const SQL_SCOPE_SESSION: u16 = 2;
+const SQL_NO_NULLS: u16 = 0;
+const SQL_PC_PSEUDO: i16 = 2;
+// SQL data type codes whose values are raw bytes, not text.
+const SQL_BINARY: i16 = -2;
+const SQL_VARBINARY: i16 = -3;
+const SQL_LONGVARBINARY: i16 = -4;
 
 fn is_success(ret: SqlReturn) -> bool {
     ret == SQL_SUCCESS || ret == SQL_SUCCESS_WITH_INFO
@@ -65,6 +81,12 @@ type SqlDriverConnectWFn = unsafe extern "system" fn(
     completion: u16,
 ) -> SqlReturn;
 type SqlDisconnectFn = unsafe extern "system" fn(dbc: Hdbc) -> SqlReturn;
+type SqlSetConnectAttrFn = unsafe extern "system" fn(
+    dbc: Hdbc,
+    attribute: i32,
+    value: *mut c_void,
+    length: i32,
+) -> SqlReturn;
 type SqlExecDirectWFn =
     unsafe extern "system" fn(stmt: Hstmt, sql: *const u16, sql_length: i32) -> SqlReturn;
 type SqlNumResultColsFn = unsafe extern "system" fn(stmt: Hstmt, count: *mut i16) -> SqlReturn;
@@ -149,6 +171,40 @@ type SqlBindParameterFn = unsafe extern "system" fn(
     indicator: *mut isize,
 ) -> SqlReturn;
 type SqlExecuteFn = unsafe extern "system" fn(stmt: Hstmt) -> SqlReturn;
+type SqlPrimaryKeysWFn = unsafe extern "system" fn(
+    stmt: Hstmt,
+    catalog: *const u16,
+    catalog_length: i16,
+    schema: *const u16,
+    schema_length: i16,
+    table: *const u16,
+    table_length: i16,
+) -> SqlReturn;
+#[allow(clippy::type_complexity)]
+type SqlSpecialColumnsWFn = unsafe extern "system" fn(
+    stmt: Hstmt,
+    identifier_type: u16,
+    catalog: *const u16,
+    catalog_length: i16,
+    schema: *const u16,
+    schema_length: i16,
+    table: *const u16,
+    table_length: i16,
+    scope: u16,
+    nullable: u16,
+) -> SqlReturn;
+#[allow(clippy::type_complexity)]
+type SqlColumnsWFn = unsafe extern "system" fn(
+    stmt: Hstmt,
+    catalog: *const u16,
+    catalog_length: i16,
+    schema: *const u16,
+    schema_length: i16,
+    table: *const u16,
+    table_length: i16,
+    column: *const u16,
+    column_length: i16,
+) -> SqlReturn;
 
 /// The loaded ODBC driver manager and its resolved entry points.
 pub(crate) struct OdbcApi {
@@ -158,6 +214,7 @@ pub(crate) struct OdbcApi {
     free_handle: SqlFreeHandleFn,
     driver_connect: SqlDriverConnectWFn,
     disconnect: SqlDisconnectFn,
+    set_connect_attr: SqlSetConnectAttrFn,
     exec_direct: SqlExecDirectWFn,
     num_result_cols: SqlNumResultColsFn,
     describe_col: SqlDescribeColWFn,
@@ -171,6 +228,9 @@ pub(crate) struct OdbcApi {
     prepare: SqlPrepareWFn,
     bind_parameter: SqlBindParameterFn,
     execute_statement: SqlExecuteFn,
+    primary_keys: SqlPrimaryKeysWFn,
+    special_columns: SqlSpecialColumnsWFn,
+    columns: SqlColumnsWFn,
 }
 
 // The handles are only ever used behind a mutex, and the function pointers are plain addresses.
@@ -252,6 +312,7 @@ fn load() -> Result<OdbcApi, String> {
         let set_env_attr: SqlSetEnvAttrFn = resolve(&library, b"SQLSetEnvAttr\0")?;
         let driver_connect: SqlDriverConnectWFn = resolve(&library, b"SQLDriverConnectW\0")?;
         let disconnect: SqlDisconnectFn = resolve(&library, b"SQLDisconnect\0")?;
+        let set_connect_attr: SqlSetConnectAttrFn = resolve(&library, b"SQLSetConnectAttr\0")?;
         let exec_direct: SqlExecDirectWFn = resolve(&library, b"SQLExecDirectW\0")?;
         let num_result_cols: SqlNumResultColsFn = resolve(&library, b"SQLNumResultCols\0")?;
         let describe_col: SqlDescribeColWFn = resolve(&library, b"SQLDescribeColW\0")?;
@@ -265,6 +326,9 @@ fn load() -> Result<OdbcApi, String> {
         let prepare: SqlPrepareWFn = resolve(&library, b"SQLPrepareW\0")?;
         let bind_parameter: SqlBindParameterFn = resolve(&library, b"SQLBindParameter\0")?;
         let execute_statement: SqlExecuteFn = resolve(&library, b"SQLExecute\0")?;
+        let primary_keys: SqlPrimaryKeysWFn = resolve(&library, b"SQLPrimaryKeysW\0")?;
+        let special_columns: SqlSpecialColumnsWFn = resolve(&library, b"SQLSpecialColumnsW\0")?;
+        let columns: SqlColumnsWFn = resolve(&library, b"SQLColumnsW\0")?;
 
         let mut environment: HEnv = null_mut();
         if !is_success(alloc_handle(SQL_HANDLE_ENV, null_mut(), &mut environment)) {
@@ -283,6 +347,7 @@ fn load() -> Result<OdbcApi, String> {
             free_handle,
             driver_connect,
             disconnect,
+            set_connect_attr,
             exec_direct,
             num_result_cols,
             describe_col,
@@ -296,6 +361,9 @@ fn load() -> Result<OdbcApi, String> {
             prepare,
             bind_parameter,
             execute_statement,
+            primary_keys,
+            special_columns,
+            columns,
         })
     }
 }
@@ -316,7 +384,9 @@ fn symbol_name(name: &[u8]) -> String {
 }
 
 impl OdbcApi {
-    /// The most recent diagnostic message on `handle`, or a generic fallback.
+    /// The most recent diagnostic message on `handle`, or a generic fallback. The SQLSTATE is
+    /// included, because callers classify login failures by it and the drivers do not always repeat
+    /// the state in the message text.
     pub(crate) fn error_message(&self, handle_type: i16, handle: Handle) -> String {
         let mut message = String::new();
         let mut record = 1;
@@ -340,11 +410,23 @@ impl OdbcApi {
             if !is_success(ret) {
                 break;
             }
+            let state = from_wide(&state);
+            let text = from_wide(&text);
             if !message.is_empty() {
                 message.push_str("; ");
             }
-            message.push_str(&from_wide(&text));
+            if state.is_empty() {
+                message.push_str(&text);
+            } else if text.is_empty() {
+                message.push_str(&state);
+            } else {
+                message.push_str(&format!("[{state}] {text}"));
+            }
             record += 1;
+            // A driver that ignores the record argument (some do) would otherwise loop forever.
+            if record > 64 {
+                break;
+            }
         }
         if message.is_empty() {
             "ODBC call failed".to_string()
@@ -399,6 +481,18 @@ impl OdbcApi {
         if !is_success(unsafe { (self.alloc_handle)(SQL_HANDLE_DBC, self.environment, &mut dbc) }) {
             return Err("failed to allocate the ODBC connection".to_string());
         }
+
+        // A dead host or a server that never finishes the handshake would otherwise block the
+        // caller forever; ODBC's login timeout bounds it. Drivers that do not honour the attribute
+        // simply return an error, which is safe to ignore.
+        let _ = unsafe {
+            (self.set_connect_attr)(
+                dbc,
+                SQL_ATTR_LOGIN_TIMEOUT,
+                SQL_LOGIN_TIMEOUT_SECONDS as *mut c_void,
+                0,
+            )
+        };
 
         let input = to_wide(connection_string);
         let mut output = vec![0u16; 1024];
@@ -502,6 +596,8 @@ impl OdbcApi {
 
         for (index, buffer) in buffers.iter_mut().enumerate() {
             let buffer_length = (buffer.len() * 2) as isize;
+            // `ColumnSize` is in characters and excludes the terminating NUL.
+            let column_size = buffer.len().saturating_sub(1).max(1);
             let indicator = &mut indicators[index] as *mut isize;
             // SAFETY: `stmt` is live; the buffer and indicator outlive the execute call below.
             let ret = unsafe {
@@ -511,7 +607,7 @@ impl OdbcApi {
                     SQL_PARAM_INPUT,
                     SQL_C_WCHAR,
                     SQL_WVARCHAR,
-                    buffer.len(),
+                    column_size,
                     0,
                     buffer.as_mut_ptr() as *mut c_void,
                     buffer_length,
@@ -533,13 +629,43 @@ impl OdbcApi {
 
     /// The DBMS name reported by the driver, if any.
     pub(crate) fn dbms_name(&self, dbc: Hdbc) -> Option<String> {
+        self.info_string(dbc, SQL_DBMS_NAME)
+    }
+
+    /// The DBMS version string reported by the driver (e.g. `8.0.36`), if any.
+    pub(crate) fn dbms_version(&self, dbc: Hdbc) -> Option<String> {
+        self.info_string(dbc, SQL_DBMS_VER)
+    }
+
+    /// The connection's current catalog/database name, if the driver reports one.
+    pub(crate) fn database_name(&self, dbc: Hdbc) -> Option<String> {
+        self.info_string(dbc, SQL_DATABASE_NAME)
+    }
+
+    /// The driver's identifier quote character (`"`, `` ` `` or `[`), if it reports one.
+    pub(crate) fn identifier_quote_char(&self, dbc: Hdbc) -> Option<String> {
+        self.info_string(dbc, SQL_IDENTIFIER_QUOTE_CHAR)
+    }
+
+    /// The separator the driver puts between the catalog and the schema/table name.
+    pub(crate) fn catalog_separator(&self, dbc: Hdbc) -> Option<char> {
+        self.info_string(dbc, SQL_CATALOG_NAME_SEPARATOR)
+            .and_then(|value| value.chars().next())
+    }
+
+    /// `SQL_IC_UPPER`/`SQL_IC_LOWER`/`SQL_IC_SENSITIVE`/`SQL_IC_MIXED`.
+    pub(crate) fn identifier_case(&self, dbc: Hdbc) -> Option<u16> {
+        self.info_int(dbc, SQL_IDENTIFIER_CASE)
+    }
+
+    pub(crate) fn info_string(&self, dbc: Hdbc, info_type: u16) -> Option<String> {
         let mut buffer = vec![0u16; 256];
         let mut length: i16 = 0;
         // SAFETY: `dbc` is live and the buffer is valid for its length.
         let ret = unsafe {
             (self.get_info)(
                 dbc,
-                SQL_DBMS_NAME,
+                info_type,
                 buffer.as_mut_ptr() as *mut c_void,
                 buffer.len() as i16,
                 &mut length,
@@ -552,11 +678,44 @@ impl OdbcApi {
         None
     }
 
-    /// Read the metadata and text values of the result set over `stmt`.
+    /// A numeric `SQLGetInfo` attribute (ODBC writes a 16-bit value; a 32-bit buffer is safe).
+    pub(crate) fn info_int(&self, dbc: Hdbc, info_type: u16) -> Option<u16> {
+        let mut value: u32 = 0;
+        let mut length: i16 = 0;
+        // SAFETY: `dbc` is live and the buffer is valid for its length.
+        let ret = unsafe {
+            (self.get_info)(
+                dbc,
+                info_type,
+                &mut value as *mut u32 as *mut c_void,
+                std::mem::size_of::<u32>() as i16,
+                &mut length,
+            )
+        };
+        is_success(ret).then_some(value as u16)
+    }
+
+    /// Read the metadata and values of the result set over `stmt`, buffering every row.
     pub(crate) fn read_result(
         &self,
         stmt: Hstmt,
     ) -> Result<(Vec<ColumnInfo>, Vec<Vec<CellValue>>), String> {
+        let (columns, types) = self.describe_columns(stmt)?;
+        let mut rows = Vec::new();
+        if !columns.is_empty() {
+            self.stream_rows(stmt, &types, &mut |values| {
+                rows.push(values);
+                Ok(())
+            })?;
+        }
+        Ok((columns, rows))
+    }
+
+    /// Describe the result set's columns and their ODBC SQL type codes.
+    pub(crate) fn describe_columns(
+        &self,
+        stmt: Hstmt,
+    ) -> Result<(Vec<ColumnInfo>, Vec<i16>), String> {
         let mut count: i16 = 0;
         // SAFETY: `stmt` is live.
         if !is_success(unsafe { (self.num_result_cols)(stmt, &mut count) }) {
@@ -567,6 +726,7 @@ impl OdbcApi {
         }
 
         let mut columns = Vec::with_capacity(count as usize);
+        let mut types = Vec::with_capacity(count as usize);
         for index in 1..=count as u16 {
             let mut name = vec![0u16; 256];
             let mut name_length: i16 = 0;
@@ -593,6 +753,7 @@ impl OdbcApi {
             } else {
                 String::new()
             };
+            types.push(data_type);
             columns.push(ColumnInfo {
                 name,
                 data_type: type_name(data_type).to_string(),
@@ -605,8 +766,17 @@ impl OdbcApi {
                 comment: String::new(),
             });
         }
+        Ok((columns, types))
+    }
 
-        let mut rows = Vec::new();
+    /// Fetch every row of the described result set, calling `on_row` for each one as it is decoded.
+    pub(crate) fn stream_rows(
+        &self,
+        stmt: Hstmt,
+        types: &[i16],
+        on_row: &mut dyn FnMut(Vec<CellValue>) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let count = types.len();
         loop {
             // SAFETY: `stmt` is live.
             let fetch = unsafe { (self.fetch)(stmt) };
@@ -616,16 +786,28 @@ impl OdbcApi {
             if !is_success(fetch) {
                 return Err(self.error_message(SQL_HANDLE_STMT, stmt));
             }
-            let mut values = Vec::with_capacity(count as usize);
+            let mut values = Vec::with_capacity(count);
             for index in 1..=count as u16 {
-                values.push(self.read_column(stmt, index)?);
+                let data_type = types.get(index as usize - 1).copied().unwrap_or(0);
+                values.push(self.read_column(stmt, index, data_type)?);
             }
-            rows.push(values);
+            on_row(values)?;
         }
-        Ok((columns, rows))
+        Ok(())
     }
 
-    fn read_column(&self, stmt: Hstmt, index: u16) -> Result<CellValue, String> {
+    fn read_column(&self, stmt: Hstmt, index: u16, data_type: i16) -> Result<CellValue, String> {
+        if is_binary_type(data_type) {
+            self.read_binary_column(stmt, index)
+        } else {
+            self.read_text_column(stmt, index)
+        }
+    }
+
+    /// Read a character/other column as text. The driver NUL-terminates every chunk, so the chunk
+    /// is truncated at its NUL instead of trusting the indicator: some drivers report the *total*
+    /// length on every partial call, which used to append stale bytes from the previous chunk.
+    fn read_text_column(&self, stmt: Hstmt, index: u16) -> Result<CellValue, String> {
         let mut units: Vec<u16> = Vec::new();
         let mut chunk = vec![0u16; 1024];
         loop {
@@ -650,20 +832,56 @@ impl OdbcApi {
             if indicator == SQL_NULL_DATA {
                 return Ok(CellValue::Null);
             }
-            let taken = if indicator == SQL_NO_TOTAL {
-                chunk
-                    .iter()
-                    .position(|unit| *unit == 0)
-                    .unwrap_or(chunk.len())
-            } else {
-                ((indicator as usize) / 2).min(chunk.len().saturating_sub(1))
-            };
+            let taken = chunk
+                .iter()
+                .position(|unit| *unit == 0)
+                .unwrap_or(chunk.len());
             units.extend_from_slice(&chunk[..taken]);
             if ret == SQL_SUCCESS {
                 break;
             }
         }
         Ok(CellValue::Text(String::from_utf16_lossy(&units)))
+    }
+
+    /// Read a binary column as raw bytes. Fetching a `BLOB`/`IMAGE`/`BYTEA` value as text used to
+    /// run every byte through a UTF-16 conversion, losing (or corrupting) the data.
+    fn read_binary_column(&self, stmt: Hstmt, index: u16) -> Result<CellValue, String> {
+        let mut bytes: Vec<u8> = Vec::new();
+        let mut chunk = vec![0u8; 4096];
+        loop {
+            let mut indicator: isize = 0;
+            // SAFETY: `stmt` is live and the chunk is valid for its byte length.
+            let ret = unsafe {
+                (self.get_data)(
+                    stmt,
+                    index,
+                    SQL_C_BINARY,
+                    chunk.as_mut_ptr() as *mut c_void,
+                    chunk.len() as isize,
+                    &mut indicator,
+                )
+            };
+            if ret == SQL_NO_DATA {
+                break;
+            }
+            if !is_success(ret) {
+                return Err(self.error_message(SQL_HANDLE_STMT, stmt));
+            }
+            if indicator == SQL_NULL_DATA {
+                return Ok(CellValue::Null);
+            }
+            let taken = if indicator == SQL_NO_TOTAL {
+                chunk.len()
+            } else {
+                (indicator as usize).min(chunk.len())
+            };
+            bytes.extend_from_slice(&chunk[..taken]);
+            if ret == SQL_SUCCESS {
+                break;
+            }
+        }
+        Ok(CellValue::Bytes(bytes))
     }
 
     /// The rows affected by the last statement, if the driver reports them.
@@ -716,6 +934,173 @@ impl OdbcApi {
         self.free_statement(stmt);
         result
     }
+
+    /// The primary key columns of a table, from the driver's `SQLPrimaryKeys` catalog.
+    pub(crate) fn primary_keys(
+        &self,
+        dbc: Hdbc,
+        catalog: &str,
+        schema: &str,
+        table: &str,
+    ) -> Result<Vec<String>, String> {
+        let stmt = self.alloc_statement(dbc)?;
+        let catalog = optional_wide(catalog);
+        let schema = optional_wide(schema);
+        let table = optional_wide(table);
+        let length = |value: &Option<Vec<u16>>| if value.is_some() { SQL_NTS } else { 0 };
+        // SAFETY: `stmt` is live; each filter is either a NUL-terminated buffer or a NULL pointer.
+        let ret = unsafe {
+            (self.primary_keys)(
+                stmt,
+                catalog.as_ref().map_or(null(), |value| value.as_ptr()),
+                length(&catalog),
+                schema.as_ref().map_or(null(), |value| value.as_ptr()),
+                length(&schema),
+                table.as_ref().map_or(null(), |value| value.as_ptr()),
+                length(&table),
+            )
+        };
+        if !is_success(ret) {
+            let message = self.error_message(SQL_HANDLE_STMT, stmt);
+            self.free_statement(stmt);
+            return Err(message);
+        }
+        let result = self.read_result(stmt);
+        self.free_statement(stmt);
+        let (columns, rows) = result?;
+        let Some(index) = columns
+            .iter()
+            .position(|column| column.name.eq_ignore_ascii_case("COLUMN_NAME"))
+        else {
+            return Ok(Vec::new());
+        };
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| row.get(index).and_then(cell_text).map(str::to_string))
+            .collect())
+    }
+
+    /// The best row identifier columns from `SQLSpecialColumns`, excluding pseudo columns (an
+    /// Oracle `ROWID` cannot be selected through `SELECT *`, so using it as a grid key would fail).
+    pub(crate) fn best_rowid(
+        &self,
+        dbc: Hdbc,
+        catalog: &str,
+        schema: &str,
+        table: &str,
+    ) -> Result<Vec<String>, String> {
+        let stmt = self.alloc_statement(dbc)?;
+        let catalog = optional_wide(catalog);
+        let schema = optional_wide(schema);
+        let table = optional_wide(table);
+        let length = |value: &Option<Vec<u16>>| if value.is_some() { SQL_NTS } else { 0 };
+        // SAFETY: `stmt` is live; each filter is either a NUL-terminated buffer or a NULL pointer.
+        let ret = unsafe {
+            (self.special_columns)(
+                stmt,
+                SQL_BEST_ROWID,
+                catalog.as_ref().map_or(null(), |value| value.as_ptr()),
+                length(&catalog),
+                schema.as_ref().map_or(null(), |value| value.as_ptr()),
+                length(&schema),
+                table.as_ref().map_or(null(), |value| value.as_ptr()),
+                length(&table),
+                SQL_SCOPE_SESSION,
+                SQL_NO_NULLS,
+            )
+        };
+        if !is_success(ret) {
+            let message = self.error_message(SQL_HANDLE_STMT, stmt);
+            self.free_statement(stmt);
+            return Err(message);
+        }
+        let result = self.read_result(stmt);
+        self.free_statement(stmt);
+        let (columns, rows) = result?;
+        let Some(name_index) = columns
+            .iter()
+            .position(|column| column.name.eq_ignore_ascii_case("COLUMN_NAME"))
+        else {
+            return Ok(Vec::new());
+        };
+        let pseudo_index = columns
+            .iter()
+            .position(|column| column.name.eq_ignore_ascii_case("PSEUDO_COLUMN"));
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                if pseudo_index
+                    .and_then(|index| row.get(index))
+                    .and_then(cell_i64)
+                    == Some(SQL_PC_PSEUDO as i64)
+                {
+                    return None;
+                }
+                row.get(name_index).and_then(cell_text).map(str::to_string)
+            })
+            .collect())
+    }
+
+    /// The driver's `SQLColumns` metadata for one table (or view).
+    pub(crate) fn columns(
+        &self,
+        dbc: Hdbc,
+        catalog: &str,
+        schema: &str,
+        table: &str,
+    ) -> Result<(Vec<ColumnInfo>, Vec<Vec<CellValue>>), String> {
+        let stmt = self.alloc_statement(dbc)?;
+        let catalog = optional_wide(catalog);
+        let schema = optional_wide(schema);
+        let table = optional_wide(table);
+        let length = |value: &Option<Vec<u16>>| if value.is_some() { SQL_NTS } else { 0 };
+        // SAFETY: `stmt` is live; each filter is either a NUL-terminated buffer or a NULL pointer.
+        let ret = unsafe {
+            (self.columns)(
+                stmt,
+                catalog.as_ref().map_or(null(), |value| value.as_ptr()),
+                length(&catalog),
+                schema.as_ref().map_or(null(), |value| value.as_ptr()),
+                length(&schema),
+                table.as_ref().map_or(null(), |value| value.as_ptr()),
+                length(&table),
+                null(),
+                0,
+            )
+        };
+        if !is_success(ret) {
+            let message = self.error_message(SQL_HANDLE_STMT, stmt);
+            self.free_statement(stmt);
+            return Err(message);
+        }
+        let result = self.read_result(stmt);
+        self.free_statement(stmt);
+        result
+    }
+}
+
+/// Whether an ODBC SQL type holds raw bytes rather than text.
+fn is_binary_type(code: i16) -> bool {
+    matches!(code, SQL_BINARY | SQL_VARBINARY | SQL_LONGVARBINARY)
+}
+
+/// A `CellValue` as `&str`, for the catalog rows.
+fn cell_text(value: &CellValue) -> Option<&str> {
+    match value {
+        CellValue::Text(text) => Some(text),
+        _ => None,
+    }
+}
+
+/// A `CellValue` as an integer, for the catalog's numeric flags.
+fn cell_i64(value: &CellValue) -> Option<i64> {
+    match value {
+        CellValue::Int(value) => Some(*value),
+        CellValue::Uint(value) => i64::try_from(*value).ok(),
+        CellValue::Float(value) => Some(*value as i64),
+        CellValue::Text(value) => value.trim().parse().ok(),
+        _ => None,
+    }
 }
 
 /// Encode `value` as NUL-terminated UTF-16.
@@ -740,7 +1125,7 @@ fn from_wide(buffer: &[u16]) -> String {
 }
 
 /// A readable name for the ODBC SQL data type code.
-fn type_name(code: i16) -> &'static str {
+pub(crate) fn type_name(code: i16) -> &'static str {
     match code {
         -7 => "bit",
         -6 => "tinyint",

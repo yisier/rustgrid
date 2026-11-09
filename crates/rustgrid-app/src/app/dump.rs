@@ -657,7 +657,18 @@ fn quote_object_name(
     schema_qualified: bool,
     name: &str,
 ) -> String {
-    if schema_qualified {
+    // A schema-qualified engine reports `schema.name` even when the driver does not expose a
+    // separate schema level (the generic ODBC driver), so split the dotted name whenever the
+    // dialect itself has schema-qualified objects.
+    let split = schema_qualified
+        || (name.contains('.')
+            && matches!(
+                dialect,
+                rustgrid_core::DriverDialect::SqlServer
+                    | rustgrid_core::DriverDialect::Postgres
+                    | rustgrid_core::DriverDialect::Oracle
+            ));
+    if split {
         name.split('.')
             .map(|part| dialect.quote_identifier(part))
             .collect::<Vec<_>>()
@@ -713,8 +724,23 @@ impl InsertWriter {
 
 #[cfg(test)]
 mod tests {
-    use super::{DUMP_BATCH_ROWS, InsertWriter};
+    use super::{DUMP_BATCH_ROWS, InsertWriter, quote_object_name};
     use std::sync::Mutex;
+
+    /// The generic ODBC driver reports `schema.name` even though it has no separate schema level,
+    /// so the dump writer must still quote each dotted segment (it used to quote the whole
+    /// `[dbo.users]`, which SQL Server cannot resolve).
+    #[test]
+    fn schema_qualified_names_are_quoted_per_segment() {
+        assert_eq!(
+            quote_object_name(rustgrid_core::DriverDialect::SqlServer, false, "dbo.users"),
+            "[dbo].[users]"
+        );
+        assert_eq!(
+            quote_object_name(rustgrid_core::DriverDialect::Mysql, false, "users"),
+            "`users`"
+        );
+    }
 
     /// Every batch of a multi-row `INSERT` must repeat the `INSERT INTO …` header; only the first
     /// one used to get it, so tables larger than one batch dumped invalid SQL for the rest.

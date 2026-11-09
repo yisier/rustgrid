@@ -4213,8 +4213,11 @@ impl AppView {
     fn driver_dialect(&self, connection_index: usize) -> rustgrid_core::DriverDialect {
         self.connections
             .get(connection_index)
-            .and_then(|node| self.registry.get(&node.profile.driver))
-            .map(|driver| driver.dialect())
+            .and_then(|node| {
+                self.registry
+                    .get(&node.profile.driver)
+                    .map(|driver| driver.dialect_for(&node.profile))
+            })
             .unwrap_or_default()
     }
 

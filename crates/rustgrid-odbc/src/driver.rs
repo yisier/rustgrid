@@ -1,12 +1,12 @@
 use async_trait::async_trait;
 use rustgrid_core::{
     AdvancedFields, Connection, ConnectionConfig, ConnectionFormSpec, ConnectionHomePage,
-    DatabaseEditorSpec, Driver, DriverCapabilities, DriverDescriptor, DriverDialect,
-    DriverIconStyle, DriverId, Error, Result, TableDesignerSpec,
+    ConnectionProfile, DatabaseEditorSpec, Driver, DriverCapabilities, DriverDescriptor,
+    DriverDialect, DriverIconStyle, DriverId, Error, Result, TableDesignerSpec,
 };
 
 use crate::api;
-use crate::connection::OdbcConnection;
+use crate::connection::{OdbcConnection, detect_engine, dialect_for_engine};
 
 /// The generic ODBC driver. It connects through a user-installed ODBC driver (or a raw connection
 /// string) and speaks the engine's SQL, so it is the fallback for engines RustGrid has no native
@@ -91,6 +91,18 @@ impl Driver for OdbcDriver {
         DriverDialect::Generic
     }
 
+    fn dialect_for(&self, profile: &ConnectionProfile) -> DriverDialect {
+        dialect_for_engine(&engine_hint(profile))
+    }
+
+    fn supports_table_designer(&self, _profile: &ConnectionProfile) -> bool {
+        // The generic driver cannot reproduce a table's full definition (indexes, keys, engine
+        // options) well enough to edit it, so the designer and 新建表 stay unavailable instead of
+        // opening a page whose save would produce the wrong DDL. `object_ddl` still shows the
+        // server's own DDL in the object info pane.
+        false
+    }
+
     fn connection_drivers(&self) -> Vec<String> {
         api::api()
             .ok()
@@ -111,15 +123,33 @@ impl Driver for OdbcDriver {
 /// Build the ODBC connection string from a profile. A full connection string wins; otherwise a DSN
 /// plus credentials, or a driver name plus the profile's server/credentials.
 fn connection_string(config: &ConnectionConfig) -> Result<String> {
+    let engine = config
+        .options
+        .get("odbc.engine")
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+
     if let Some(value) = config
         .options
         .get("odbc.connection_string")
         .filter(|value| !value.trim().is_empty())
     {
-        return Ok(value.clone());
+        // A user-supplied string may come from Navicat/DBX without a character set. MySQL's older
+        // Connector/ODBC releases default to `latin1`, which makes the *server* replace every
+        // non-Latin character with `?`; the charset below keeps Chinese/Japanese text intact.
+        return Ok(with_mysql_charset(
+            value.clone(),
+            is_mysql(value, &engine),
+            value,
+        ));
     }
 
     let password = escape_attribute_value(config.password.as_deref().unwrap_or(""));
+    let driver_hint = config
+        .options
+        .get("odbc.driver")
+        .map(|value| value.trim())
+        .unwrap_or_default();
 
     if let Some(dsn) = config
         .options
@@ -127,9 +157,15 @@ fn connection_string(config: &ConnectionConfig) -> Result<String> {
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
     {
-        return Ok(format!(
-            "DSN={dsn};UID={};PWD={password};",
-            config.username.trim()
+        let string = format!(
+            "DSN={};UID={};PWD={password};",
+            escape_attribute_value(dsn),
+            escape_attribute_value(config.username.trim())
+        );
+        return Ok(with_mysql_charset(
+            string,
+            is_mysql(driver_hint, &engine),
+            driver_hint,
         ));
     }
 
@@ -145,13 +181,8 @@ fn connection_string(config: &ConnectionConfig) -> Result<String> {
     };
 
     // The engine hint the user set is free text ("sqlserver"), so every match below is loose.
-    let engine = config
-        .options
-        .get("odbc.engine")
-        .map(|value| value.trim().to_ascii_lowercase())
-        .unwrap_or_default();
-
-    let mut parts = vec![format!("Driver={{{driver}}}")];
+    let mysql = is_mysql(driver, &engine);
+    let mut parts = vec![format!("Driver={{{}}}", driver.replace('}', "}}"))];
     let host = config.host.trim();
     if !host.is_empty() {
         // Where the port goes depends on the driver. SQL Server's ODBC drivers want it inside the
@@ -170,12 +201,15 @@ fn connection_string(config: &ConnectionConfig) -> Result<String> {
             parts.push(format!("Port={}", config.port));
         }
         // A hand-typed multi-host list is what MySQL's driver needs to be told about explicitly.
-        if !port_in_server && host.contains(',') && is_mysql(driver, &engine) {
+        if !port_in_server && host.contains(',') && mysql {
             parts.push("MULTI_HOST=1".to_string());
         }
     }
     if !config.username.trim().is_empty() {
-        parts.push(format!("UID={}", config.username.trim()));
+        parts.push(format!(
+            "UID={}",
+            escape_attribute_value(config.username.trim())
+        ));
     }
     parts.push(format!("PWD={password}"));
     if let Some(database) = config
@@ -183,14 +217,109 @@ fn connection_string(config: &ConnectionConfig) -> Result<String> {
         .as_deref()
         .filter(|value| !value.trim().is_empty())
     {
-        parts.push(format!("Database={}", database.trim()));
+        parts.push(format!(
+            "Database={}",
+            escape_attribute_value(database.trim())
+        ));
+    }
+    if mysql {
+        parts.push(format!("CHARSET={}", mysql_charset(driver)));
     }
     Ok(parts.join(";") + ";")
 }
 
-/// Escape an ODBC connection-string attribute value (a `}` inside a `{...}` value is doubled).
+/// Add MySQL's client character set when the connection string does not set one. Older
+/// Connector/ODBC releases default to `latin1`; the server then converts a `utf8mb4` column to
+/// Latin-1 and every non-Latin character arrives as `?`.
+///
+/// A **Unicode** driver converts to UTF-16 itself, so it gets full `utf8mb4`. An **ANSI** driver
+/// returns bytes that the Windows driver manager converts with the system ANSI code page, so it
+/// must ask the server for exactly that code page (`gbk` on a Chinese system); asking for UTF-8
+/// bytes there would turn every Chinese character into mojibake.
+fn with_mysql_charset(connection_string: String, mysql: bool, driver: &str) -> String {
+    if !mysql || connection_string.to_ascii_lowercase().contains("charset") {
+        return connection_string;
+    }
+    let mut string = connection_string.trim_end().to_string();
+    if !string.ends_with(';') {
+        string.push(';');
+    }
+    string.push_str(&format!("CHARSET={};", mysql_charset(driver)));
+    string
+}
+
+/// The MySQL character set matching an ODBC driver's text encoding.
+fn mysql_charset(driver: &str) -> &'static str {
+    if driver.to_ascii_lowercase().contains("ansi") {
+        ansi_charset()
+    } else {
+        "utf8mb4"
+    }
+}
+
+/// The MySQL character set name for the system ANSI code page (the encoding a Windows ANSI ODBC
+/// driver and the driver manager exchange text in).
+#[cfg(target_os = "windows")]
+fn ansi_charset() -> &'static str {
+    // SAFETY: `GetACP` takes no arguments and has no preconditions.
+    let code_page = unsafe { windows::Win32::Globalization::GetACP() };
+    match code_page {
+        936 => "gbk",
+        54936 => "gb18030",
+        950 => "big5",
+        932 => "sjis",
+        949 => "euckr",
+        874 => "tis620",
+        1250 => "latin2",
+        1251 => "cp1251",
+        1252 => "latin1",
+        1253 => "greek",
+        1254 => "latin5",
+        1255 => "hebrew",
+        1256 => "cp1256",
+        1257 => "latin7",
+        1258 => "cp1258",
+        65001 => "utf8mb4",
+        _ => "utf8mb4",
+    }
+}
+
+/// Non-Windows driver managers pass bytes through unchanged and the locale is normally UTF-8.
+#[cfg(not(target_os = "windows"))]
+fn ansi_charset() -> &'static str {
+    "utf8mb4"
+}
+
+/// The engine a saved ODBC profile reaches, inferred from the hint, the driver name or the
+/// connection string. Used for the dialect and capability checks before a connection exists.
+fn engine_hint(profile: &ConnectionProfile) -> String {
+    if let Some(hint) = profile
+        .options
+        .get("odbc.engine")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        return detect_engine(hint);
+    }
+    for key in ["odbc.driver", "odbc.dsn", "odbc.connection_string"] {
+        if let Some(value) = profile.options.get(key) {
+            let detected = detect_engine(value);
+            if !detected.is_empty() {
+                return detected;
+            }
+        }
+    }
+    String::new()
+}
+
+/// Escape an ODBC connection-string attribute value. A value containing the `;` separator (or
+/// leading/trailing whitespace) must be wrapped in `{...}`, with any `}` doubled.
 fn escape_attribute_value(value: &str) -> String {
-    value.replace('}', "}}")
+    if value.contains(';') || value.contains('}') || value != value.trim() {
+        format!("{{{}}}", value.replace('}', "}}"))
+    } else {
+        value.to_string()
+    }
 }
 
 /// Whether the driver reads the port from the server attribute (`Server=host,port`), which is the
@@ -216,9 +345,16 @@ fn is_mysql(driver: &str, engine: &str) -> bool {
 fn classify_connect_error(message: String) -> Error {
     let lower = message.to_lowercase();
     if message.contains("28000")
+        || message.contains("08S01")
         || lower.contains("login failed")
         || lower.contains("authentication")
         || lower.contains("access denied")
+        || lower.contains("invalid username/password")
+        || lower.contains("invalid authorization")
+        || lower.contains("password authentication failed")
+        || lower.contains("ora-01017")
+        || lower.contains("not authorized")
+        || lower.contains("logon denied")
     {
         Error::Authentication(message)
     } else {
@@ -264,7 +400,7 @@ mod tests {
         .expect("build the connection string");
         assert_eq!(
             string,
-            "Driver={MySQL ODBC 8.0 Unicode Driver};Server=127.0.0.1;Port=3306;UID=root;PWD=secret;Database=app;"
+            "Driver={MySQL ODBC 8.0 Unicode Driver};Server=127.0.0.1;Port=3306;UID=root;PWD=secret;Database=app;CHARSET=utf8mb4;"
         );
     }
 
@@ -320,10 +456,56 @@ mod tests {
         let mut profile = config("MySQL ODBC 8.0 Unicode Driver", "127.0.0.1", 3306, "");
         profile.options.insert(
             "odbc.connection_string".to_string(),
-            "Driver={MySQL ODBC 8.0 ANSI Driver};Server=other;".to_string(),
+            "Driver={MySQL ODBC 8.0 Unicode Driver};Server=other;".to_string(),
         );
         let string = connection_string(&profile).expect("build the connection string");
-        assert_eq!(string, "Driver={MySQL ODBC 8.0 ANSI Driver};Server=other;");
+        // The fields never override a typed string, but a MySQL string still gains the character
+        // set that keeps non-Latin text from arriving as `?`.
+        assert_eq!(
+            string,
+            "Driver={MySQL ODBC 8.0 Unicode Driver};Server=other;CHARSET=utf8mb4;"
+        );
+    }
+
+    #[test]
+    fn an_ansi_driver_asks_for_the_system_code_page() {
+        let string =
+            connection_string(&config("MySQL ODBC 8.0 ANSI Driver", "127.0.0.1", 3306, ""))
+                .expect("build the connection string");
+        let charset = mysql_charset("MySQL ODBC 8.0 ANSI Driver");
+        assert!(string.contains(&format!("CHARSET={charset};")), "{string}");
+    }
+
+    #[test]
+    fn an_explicit_character_set_is_kept() {
+        let mut profile = config("MySQL ODBC 8.0 Unicode Driver", "127.0.0.1", 3306, "");
+        profile.options.insert(
+            "odbc.connection_string".to_string(),
+            "Driver={MySQL ODBC 8.0 ANSI Driver};Server=other;CHARSET=gbk;".to_string(),
+        );
+        let string = connection_string(&profile).expect("build the connection string");
+        assert_eq!(
+            string,
+            "Driver={MySQL ODBC 8.0 ANSI Driver};Server=other;CHARSET=gbk;"
+        );
+    }
+
+    #[test]
+    fn a_password_with_a_semicolon_is_braced() {
+        let mut profile = config("MySQL ODBC 8.0 Unicode Driver", "127.0.0.1", 3306, "");
+        profile.password = Some("p;a}ss".to_string());
+        let string = connection_string(&profile).expect("build the connection string");
+        assert!(string.contains("PWD={p;a}}ss};"), "{string}");
+    }
+
+    #[test]
+    fn a_brace_inside_a_password_is_doubled_once() {
+        let mut profile = config("MySQL ODBC 8.0 Unicode Driver", "127.0.0.1", 3306, "");
+        profile.password = Some("p}a".to_string());
+        let string = connection_string(&profile).expect("build the connection string");
+        // The value is braced, so its `}` is doubled once; doubling it without braces would
+        // change the password the driver reads.
+        assert!(string.contains("PWD={p}}a};"), "{string}");
     }
 
     #[test]
@@ -333,7 +515,7 @@ mod tests {
             .options
             .insert("odbc.dsn".to_string(), "erp".to_string());
         let string = connection_string(&profile).expect("build the connection string");
-        assert_eq!(string, "DSN=erp;UID=root;PWD=secret;");
+        assert_eq!(string, "DSN=erp;UID=root;PWD=secret;CHARSET=utf8mb4;");
     }
 
     #[test]
