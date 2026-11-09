@@ -16,13 +16,13 @@ Click a screenshot to view it full size.
 <table>
   <tr>
     <td width="50%">
-      <a href="docs/img/img1_en.png?raw=true">
+      <a href="https://github.com/yisier/rustgrid/raw/main/docs/img/img1_en.png">
         <img src="docs/img/img1_en.png" width="400" alt="Connection tree and object list">
       </a>
       <p align="center"><b>1.</b> Connection tree &amp; object list</p>
     </td>
     <td width="50%">
-      <a href="docs/img/img2_en.png?raw=true">
+      <a href="https://github.com/yisier/rustgrid/raw/main/docs/img/img2_en.png">
         <img src="docs/img/img2_en.png" width="400" alt="Table data grid and row form">
       </a>
       <p align="center"><b>2.</b> Table data grid &amp; row form — in-place editing, JSON preview</p>
@@ -30,13 +30,13 @@ Click a screenshot to view it full size.
   </tr>
   <tr>
     <td width="50%">
-      <a href="docs/img/img3_en.png?raw=true">
+      <a href="https://github.com/yisier/rustgrid/raw/main/docs/img/img3_en.png">
         <img src="docs/img/img3_en.png" width="400" alt="Backup and restore">
       </a>
       <p align="center"><b>3.</b> Backup &amp; restore — object selection and a live log</p>
     </td>
     <td width="50%">
-      <a href="docs/img/img4_en.png?raw=true">
+      <a href="https://github.com/yisier/rustgrid/raw/main/docs/img/img4_en.png">
         <img src="docs/img/img4_en.png" width="400" alt="Database sync">
       </a>
       <p align="center"><b>4.</b> Sync — compare databases and apply structure or data</p>
