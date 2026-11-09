@@ -10,6 +10,29 @@ UI labels are quoted as the app shows them, so this file quotes the English stri
 [`CHANGELOG_zh.md`](CHANGELOG_zh.md) and [`CHANGELOG_ru.md`](CHANGELOG_ru.md) quote the 简体中文 and
 Russian ones.
 
+## [0.1.10] - 2026-11-09
+
+### Added
+
+- ODBC connections show object DDL, dump/back up and restore tables, create tables from the Import
+  Wizard, and design views for SQL Server, PostgreSQL, SQLite and Oracle.
+
+### Changed
+
+- The navigation-pane toggle moved to the left end of the status bar.
+- With a cell range selected the wheel scrolls the grid, and dragging past an edge auto-scrolls the
+  selection.
+
+### Fixed
+
+- ODBC connections no longer hang on login, and their operations no longer overlap.
+- ODBC: MySQL text in Chinese and other non-Latin scripts no longer turns into `?`, and filtering,
+  sorting, paging and keyed edits work.
+- SQLite tables show their data length and next auto-increment in the object list.
+- SQL Server scripts treat `GO` and `GO n` as client-side batch separators.
+- Connection-tree search no longer finds tables in schemas that were never opened
+  ([#44](https://github.com/yisier/rustgrid/issues/44)).
+
 ## [0.1.9] - 2026-11-08
 
 ### Added

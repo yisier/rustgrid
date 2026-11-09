@@ -6,6 +6,25 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.1.10] - 2026-11-09
+
+### 新增
+
+- ODBC 连接可查看对象 DDL、转储/备份与还原表、通过导入向导建表，并为 SQL Server、PostgreSQL、SQLite 和 Oracle 设计视图。
+
+### 变更
+
+- 左侧导航栏开关移到状态栏最左端。
+- 选中单元格区域后滚轮滚动表格；拖动选区超出边缘时自动滚动。
+
+### 修复
+
+- ODBC 登录不再长时间无响应，操作也不会相互干扰。
+- ODBC 连接 MySQL 时，中文等非拉丁文字不再变成 `?`，筛选、排序、分页和按主键编辑均正常。
+- SQLite 表在对象列表中显示数据长度和下一个自增值。
+- SQL Server 脚本把 `GO` 与 `GO n` 当作客户端批处理分隔符。
+- 连接树搜索不再搜到从未打开的模式中的表（[#44](https://github.com/yisier/rustgrid/issues/44)）。
+
 ## [0.1.9] - 2026-11-08
 
 ### 新增

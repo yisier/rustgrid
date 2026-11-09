@@ -10,25 +10,35 @@ MongoDB 数据库管理工具。它的界面布局和交互习惯对齐 Navicat�
 
 ## 界面预览
 
+点击截图可查看原图。
+
 <table>
   <tr>
     <td width="50%">
-      <img src="docs/img/img1_cn.png" width="400" alt="连接树与对象列表">
+      <a href="docs/img/img1_cn.png?raw=true">
+        <img src="docs/img/img1_cn.png" width="400" alt="连接树与对象列表">
+      </a>
       <p align="center"><b>1.</b> 连接树与对象列表</p>
     </td>
     <td width="50%">
-      <img src="docs/img/img2_cn.png" width="400" alt="表数据网格">
-      <p align="center"><b>2.</b> 表数据网格 —— 分页浏览，支持就地编辑</p>
+      <a href="docs/img/img2_cn.png?raw=true">
+        <img src="docs/img/img2_cn.png" width="400" alt="表数据网格与行表单">
+      </a>
+      <p align="center"><b>2.</b> 表数据网格与行表单 —— 就地编辑、JSON 预览</p>
     </td>
   </tr>
   <tr>
     <td width="50%">
-      <img src="docs/img/img3_cn.png" width="400" alt="备份与还原">
-      <p align="center"><b>3.</b> 备份与还原 —— <code>.rgbak</code> 容器</p>
+      <a href="docs/img/img3_cn.png?raw=true">
+        <img src="docs/img/img3_cn.png" width="400" alt="备份与还原">
+      </a>
+      <p align="center"><b>3.</b> 备份与还原 —— 对象选择与实时日志</p>
     </td>
     <td width="50%">
-      <img src="docs/img/img4_cn.png" width="400" alt="SQL 编辑器">
-      <p align="center"><b>4.</b> SQL 编辑器 —— 语法高亮、补全与结果</p>
+      <a href="docs/img/img4_cn.png?raw=true">
+        <img src="docs/img/img4_cn.png" width="400" alt="数据库同步">
+      </a>
+      <p align="center"><b>4.</b> 同步 —— 比较数据库并应用结构或数据</p>
     </td>
   </tr>
 </table>
