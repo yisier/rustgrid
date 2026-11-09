@@ -18,13 +18,13 @@ MongoDB 数据库管理工具。它的界面布局和交互习惯对齐 Navicat�
       <a href="https://github.com/yisier/rustgrid/raw/main/docs/img/img1_cn.png">
         <img src="docs/img/img1_cn.png" width="400" alt="连接树与对象列表">
       </a>
-      <p align="center"><b>1.</b> 连接树与对象列表</p>
+      <p align="center"><b>1.</b> 连接树与对象列表<br>—— 分组、搜索与环境色</p>
     </td>
     <td width="50%">
       <a href="https://github.com/yisier/rustgrid/raw/main/docs/img/img2_cn.png">
         <img src="docs/img/img2_cn.png" width="400" alt="表数据网格与行表单">
       </a>
-      <p align="center"><b>2.</b> 表数据网格与行表单 —— 就地编辑、JSON 预览</p>
+      <p align="center"><b>2.</b> 表数据网格与行表单<br>—— 就地编辑、JSON 预览</p>
     </td>
   </tr>
   <tr>
@@ -32,13 +32,13 @@ MongoDB 数据库管理工具。它的界面布局和交互习惯对齐 Navicat�
       <a href="https://github.com/yisier/rustgrid/raw/main/docs/img/img3_cn.png">
         <img src="docs/img/img3_cn.png" width="400" alt="备份与还原">
       </a>
-      <p align="center"><b>3.</b> 备份与还原 —— 对象选择与实时日志</p>
+      <p align="center"><b>3.</b> 备份与还原<br>—— 对象选择与实时日志</p>
     </td>
     <td width="50%">
       <a href="https://github.com/yisier/rustgrid/raw/main/docs/img/img4_cn.png">
         <img src="docs/img/img4_cn.png" width="400" alt="数据库同步">
       </a>
-      <p align="center"><b>4.</b> 同步 —— 比较数据库并应用结构或数据</p>
+      <p align="center"><b>4.</b> 同步<br>—— 比较数据库并应用结构或数据</p>
     </td>
   </tr>
 </table>
