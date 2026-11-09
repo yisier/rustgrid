@@ -1806,6 +1806,14 @@ struct GridView {
     vscroll_grab: Option<f32>,
     focus: FocusHandle,
     selecting_cells: bool,
+    /// The pointer position of the current selection drag. Kept while the button is held so the
+    /// auto-scroll tick can extend the selection to the row at the viewport edge.
+    select_pointer: Option<Point<Pixels>>,
+    /// Whether the drag began on the row gutter, in which case it extends whole rows rather than
+    /// a rectangle of cells.
+    select_rows: bool,
+    /// Timer-based edge auto-scroll for a selection drag held past the top/bottom of the rows.
+    select_autoscroll: gpui_kit::base::AutoScroll,
     /// The cell pressed on mouse-down; if the button is released without dragging to another
     /// cell, a single click opens its editor.
     cell_press: Option<(usize, usize)>,
@@ -4689,6 +4697,18 @@ impl AppView {
             .border_t_1()
             .border_color(rgb(theme.border))
             .text_size(px(12.0))
+            // The navigation-pane toggle sits at the far left (it controls the pane that starts
+            // there); the info-pane toggle stays in the far-right group, so the two remain
+            // mirror images on opposite ends of the bar.
+            .child(self.pane_toggle(
+                self.sidebar_open,
+                "icons/panel-left.svg",
+                "pane-toggle-sidebar",
+                cx.listener(|this, _event, _window, cx| {
+                    this.sidebar_open = !this.sidebar_open;
+                    cx.notify();
+                }),
+            ))
             .child(center)
             .child(
                 div()
@@ -4697,15 +4717,6 @@ impl AppView {
                     .items_center()
                     .gap_1()
                     .flex_none()
-                    .child(self.pane_toggle(
-                        self.sidebar_open,
-                        "icons/panel-left.svg",
-                        "pane-toggle-sidebar",
-                        cx.listener(|this, _event, _window, cx| {
-                            this.sidebar_open = !this.sidebar_open;
-                            cx.notify();
-                        }),
-                    ))
                     .child(self.pane_toggle(
                         self.info_open,
                         "icons/panel-right.svg",

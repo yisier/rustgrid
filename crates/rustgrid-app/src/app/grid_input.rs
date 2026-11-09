@@ -22,11 +22,15 @@ impl GridView {
             if editing_here {
                 self.cell_press = None;
                 self.selecting_cells = false;
+                self.select_autoscroll.stop();
+                self.select_pointer = None;
                 return;
             }
             self.finish_cell_editor(cx);
         }
         self.date_picker = None;
+        self.select_autoscroll.stop();
+        self.select_pointer = None;
 
         let Some(hit) = self.grid_hit(event.position) else {
             self.cell_press = None;
@@ -38,6 +42,7 @@ impl GridView {
         match hit {
             GridHit::Gutter(row) => {
                 self.cell_press = None;
+                self.select_rows = true;
                 if self.display_row_count() == 0 {
                     self.selecting_cells = false;
                     cx.notify();
@@ -58,6 +63,7 @@ impl GridView {
                 }
             }
             GridHit::Cell(row, col) => {
+                self.select_rows = false;
                 if event.modifiers.shift {
                     self.cell_press = None;
                     if let Some(selection) = self.state.selection.as_mut() {
@@ -86,6 +92,7 @@ impl GridView {
         // A Ctrl+click toggles a range and must not start a drag: the smallest pointer jitter
         // would otherwise extend the active range again and undo the cell just removed.
         self.selecting_cells = !ctrl || event.modifiers.shift;
+        self.select_pointer = self.selecting_cells.then_some(event.position);
         window.focus(&self.focus, cx);
         cx.notify();
     }
@@ -129,46 +136,165 @@ impl GridView {
         if !self.selecting_cells || event.pressed_button != Some(MouseButton::Left) {
             return;
         }
-        let Some(hit) = self.grid_hit(event.position) else {
+        self.grid_select_pointer_moved(event.position, cx);
+    }
+
+    /// The pointer moved during a selection drag. A window-level listener calls this while the
+    /// button is held, so the selection also follows the pointer when it leaves the row strip
+    /// (which is what lets a drag held past the bottom edge scroll the grid).
+    pub(super) fn grid_select_pointer_moved(
+        &mut self,
+        position: Point<Pixels>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if !self.selecting_cells {
             return;
+        }
+        self.select_pointer = Some(position);
+        self.grid_select_move(position, cx);
+        // Edge auto-scroll: `compute_delta` returns 0 while the pointer is inside the rows and
+        // ramps up a downward/upward delta once it enters (or passes) the top/bottom zone. The
+        // shared timer ticks `grid_select_autoscroll_tick` until the pointer comes back inside
+        // or the button is released.
+        let handle = self.list_scroll.0.borrow().base_handle.clone();
+        let delta = gpui_kit::base::AutoScroll::compute_delta(position.y, handle.bounds());
+        self.select_autoscroll.last_drag_position = Some(position);
+        self.select_autoscroll.set(delta, cx, |delta, grid, cx| {
+            grid.grid_select_autoscroll_tick(delta, cx);
+        });
+    }
+
+    /// Extend the active selection to the pointer, clamped to the rows that are on screen.
+    /// `None` while the grid has no rows. A pointer beyond the top/bottom edge targets the first
+    /// or last visible row: the auto-scroll tick then moves the viewport and calls this again, so
+    /// the selection walks into the newly revealed rows instead of jumping to the page's end.
+    fn grid_select_move(&mut self, position: Point<Pixels>, cx: &mut Context<'_, Self>) -> bool {
+        let Some(row) = self.grid_drag_row(position) else {
+            return false;
         };
+        let last_col = self.state.visible_columns.saturating_sub(1);
+        let col = self.grid_drag_col(position).min(last_col);
         let mut changed = false;
-        if let GridHit::Cell(row, col) = hit
-            && self.cell_press != Some((row, col))
-            && !self.cell_dragged
-        {
+        if self.select_rows {
+            // Keep the row the drag started on (the range's anchor) as the fixed end, so dragging
+            // upward past the anchor keeps extending the block instead of moving it.
+            let anchor = self
+                .state
+                .selection
+                .as_ref()
+                .map(|selection| selection.active().anchor.0)
+                .unwrap_or(row);
+            let next = CellSelection::single((anchor, 0), (row, last_col));
+            if self.state.selection.as_ref() != Some(&next) {
+                self.state.selection = Some(next);
+                changed = true;
+            }
+        } else if let Some(selection) = self.state.selection.as_mut() {
+            let active = &mut selection.ranges[selection.active];
+            if active.cursor != (row, col) {
+                active.cursor = (row, col);
+                changed = true;
+            }
+        }
+        if self.cell_press.is_some_and(|press| press != (row, col)) && !self.cell_dragged {
             self.cell_dragged = true;
             changed = true;
-        }
-        let column_count = self.state.visible_columns;
-        match hit {
-            GridHit::Gutter(row) => {
-                let first = self
-                    .state
-                    .selection
-                    .as_ref()
-                    .map(|selection| selection.rows().0)
-                    .unwrap_or(row);
-                let last = column_count.saturating_sub(1);
-                let next = CellSelection::single((first, 0), (row, last));
-                if self.state.selection.as_ref() != Some(&next) {
-                    self.state.selection = Some(next);
-                    changed = true;
-                }
-            }
-            GridHit::Cell(row, col) => {
-                if let Some(selection) = self.state.selection.as_mut() {
-                    let active = &mut selection.ranges[selection.active];
-                    if active.cursor != (row, col) {
-                        active.cursor = (row, col);
-                        changed = true;
-                    }
-                }
-            }
         }
         // A pointer move within the same cell changes nothing on screen; only notify on a real
         // change so a drag does not re-render the whole window for every pixel.
         if changed {
+            cx.notify();
+        }
+        changed
+    }
+
+    /// The row a drag targets. Inside the viewport this is the row under the pointer; above or
+    /// below it, it is the first/last row currently visible, which is where the selection stops
+    /// until the auto-scroll reveals the next one.
+    fn grid_drag_row(&self, position: Point<Pixels>) -> Option<usize> {
+        let rows = self.display_row_count();
+        if rows == 0 {
+            return None;
+        }
+        let handle = self.list_scroll.0.borrow().base_handle.clone();
+        let bounds = handle.bounds();
+        let viewport = f32::from(bounds.size.height);
+        if viewport <= 0.0 {
+            return None;
+        }
+        let scroll = -f32::from(handle.offset().y);
+        let first = (scroll / GRID_ROW_HEIGHT)
+            .floor()
+            .clamp(0.0, (rows - 1) as f32) as usize;
+        let visible = (viewport / GRID_ROW_HEIGHT).ceil().max(1.0) as usize;
+        let last = (first + visible - 1).min(rows - 1);
+        let y = f32::from(position.y - bounds.top());
+        Some(if y < 0.0 {
+            first
+        } else if y >= viewport {
+            last
+        } else {
+            ((y + scroll) / GRID_ROW_HEIGHT)
+                .floor()
+                .clamp(0.0, last as f32) as usize
+        })
+    }
+
+    /// The column a drag targets, clamped to the visible table width. A pointer past the gutter
+    /// lands on column zero and one past the last column on the rightmost field, so a diagonal
+    /// drag keeps extending instead of stopping at the pane edge.
+    fn grid_drag_col(&self, position: Point<Pixels>) -> usize {
+        let last_col = self.state.visible_columns.saturating_sub(1);
+        if last_col == 0 {
+            return 0;
+        }
+        let handle = self.list_scroll.0.borrow().base_handle.clone();
+        let list = handle.bounds();
+        if list.size.width <= px(0.0) || list.size.height <= px(0.0) {
+            return last_col;
+        }
+        let viewport = self.hscroll.bounds();
+        let (left, width) = if viewport.size.width > px(0.0) {
+            (viewport.left(), viewport.size.width)
+        } else {
+            (list.left(), list.size.width)
+        };
+        let right = (left + width - px(1.0)).max(left + px(1.0));
+        let x = position.x.clamp(left + px(1.0), right);
+        // A y inside the first visible row, so only x decides the column (`grid_hit` maps the
+        // frozen block and the horizontal pan itself).
+        let y = list.top() + px(1.0);
+        match self.grid_hit(Point::new(x, y)) {
+            Some(GridHit::Cell(_, col)) => col.min(last_col),
+            Some(GridHit::Gutter(_)) => 0,
+            None => last_col,
+        }
+    }
+
+    /// One auto-scroll tick while a selection drag is held past an edge: move the rows by `delta`
+    /// and extend the selection to the row that just came into view.
+    fn grid_select_autoscroll_tick(&mut self, delta: Pixels, cx: &mut Context<'_, Self>) {
+        if !self.selecting_cells {
+            return;
+        }
+        let Some(pointer) = self.select_pointer else {
+            return;
+        };
+        // `AutoScroll` is positive toward the bottom; `scroll_grid_view` uses the wheel's
+        // positive-toward-the-first-row convention.
+        if self.scroll_grid_view(-f32::from(delta), cx) {
+            self.grid_select_move(pointer, cx);
+        }
+    }
+
+    /// End a selection drag (mouse released, possibly outside the grid): stop the edge
+    /// auto-scroll and drop the remembered pointer. The press/drag flags stay untouched so a
+    /// release over the grid's own handler can still decide whether it was a click or a drag.
+    pub(super) fn grid_select_end_drag(&mut self, cx: &mut Context<'_, Self>) {
+        self.select_autoscroll.stop();
+        self.select_pointer = None;
+        if self.selecting_cells {
+            self.selecting_cells = false;
             cx.notify();
         }
     }
@@ -193,12 +319,7 @@ impl GridView {
         if rows == 0 || delta == 0.0 {
             return false;
         }
-        let Some((row, col)) = self
-            .state
-            .selection
-            .as_ref()
-            .map(|selection| selection.active_cursor())
-        else {
+        let Some(selection) = self.state.selection.as_ref() else {
             // Nothing selected yet: the first notch lands on the first row so the wheel can start
             // walking a cursor through the table.
             self.state.selection = Some(CellSelection::new(0, 0));
@@ -206,6 +327,14 @@ impl GridView {
             cx.notify();
             return true;
         };
+        // A selected block (or a multi-range selection) is content the user is inspecting: the
+        // wheel scrolls the viewport and leaves it intact. Walking the cursor here used to replace
+        // the whole range with a single cell without moving the view, so scrolling looked dead
+        // while a range was selected.
+        if !selection.is_single_cell() {
+            return self.scroll_grid_view(delta, cx);
+        }
+        let (row, col) = selection.active_cursor();
         // One notch moves a single row, regardless of how many "lines" the OS reports for it.
         let steps: isize = if delta > 0.0 { -1 } else { 1 };
         let new_row = (row as isize + steps).clamp(0, rows as isize - 1) as usize;
@@ -216,6 +345,32 @@ impl GridView {
         self.state.selection = Some(CellSelection::single((new_row, col), (new_row, col)));
         self.list_scroll
             .scroll_to_item(new_row, ScrollStrategy::Nearest);
+        cx.notify();
+        true
+    }
+
+    /// Scroll the rows by `delta` pixels (`> 0` scrolls toward the first row), leaving the
+    /// selection where it is. This is the wheel's behaviour while a multi-cell range is selected:
+    /// the range is what the user is reading, so the gesture must move the table under it instead
+    /// of collapsing it to a cursor walk.
+    fn scroll_grid_view(&mut self, delta: f32, cx: &mut Context<'_, Self>) -> bool {
+        let handle = self.list_scroll.0.borrow().base_handle.clone();
+        let viewport = f32::from(handle.bounds().size.height);
+        let rows = self.display_row_count();
+        let mut max = f32::from(handle.max_offset().y);
+        if max <= 0.0 {
+            max = (rows as f32 * GRID_ROW_HEIGHT - viewport).max(0.0);
+        }
+        if max <= 0.0 {
+            return false;
+        }
+        let scroll = -f32::from(handle.offset().y);
+        let new_scroll = (scroll - delta).clamp(0.0, max);
+        if (new_scroll - scroll).abs() < 0.5 {
+            return false;
+        }
+        let x = handle.offset().x;
+        handle.set_offset(Point::new(x, px(-new_scroll)));
         cx.notify();
         true
     }

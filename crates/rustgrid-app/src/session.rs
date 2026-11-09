@@ -213,6 +213,15 @@ impl CellSelection {
         self.active().cursor
     }
 
+    /// Whether the selection covers exactly one cell. The wheel walks the cursor while it does,
+    /// and scrolls the viewport (keeping the selection intact) once more than one cell is selected.
+    pub fn is_single_cell(&self) -> bool {
+        self.ranges.len() == 1 && {
+            let range = &self.ranges[0];
+            range.anchor == range.cursor
+        }
+    }
+
     pub fn contains(&self, row: usize, col: usize) -> bool {
         self.ranges.iter().any(|range| range.contains(row, col))
     }
@@ -1825,6 +1834,19 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn only_a_one_cell_selection_counts_as_single_cell() {
+        assert!(CellSelection::new(3, 4).is_single_cell());
+        assert!(CellSelection::single((3, 4), (3, 4)).is_single_cell());
+        assert!(!CellSelection::single((3, 4), (3, 5)).is_single_cell());
+        assert!(!CellSelection::single((3, 4), (4, 4)).is_single_cell());
+
+        // Several single-cell ranges (Ctrl+click) are not a cursor: the wheel scrolls instead.
+        let mut selection = CellSelection::new(0, 0);
+        selection.ranges.push(CellRange::new(5, 5));
+        assert!(!selection.is_single_cell());
     }
 
     #[test]

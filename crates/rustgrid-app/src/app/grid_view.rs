@@ -88,6 +88,9 @@ impl GridView {
             vscroll_grab: None,
             focus: cx.focus_handle(),
             selecting_cells: false,
+            select_pointer: None,
+            select_rows: false,
+            select_autoscroll: Default::default(),
             cell_press: None,
             cell_press_reselect: false,
             fill_drag: None,
@@ -960,10 +963,10 @@ impl Render for GridView {
                             // (a very quick press-release); the grid still owns the release.
                             if this.fill_drag.is_some() {
                                 this.finish_fill_drag(cx);
-                                this.selecting_cells = false;
+                                this.grid_select_end_drag(cx);
                                 return;
                             }
-                            this.selecting_cells = false;
+                            this.grid_select_end_drag(cx);
                             let press = this.cell_press.take();
                             let dragged = this.cell_dragged;
                             this.cell_dragged = false;
@@ -1083,6 +1086,43 @@ impl Render for GridView {
                                 return;
                             }
                             let _ = up_weak.update(cx, |grid, cx| grid.status_sql_end_drag(cx));
+                        });
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            );
+        }
+        // A selection drag may leave the row strip (to auto-scroll past the last visible row):
+        // the strip stops receiving mouse moves/releases there, so a window-level listener keeps
+        // extending the selection and ends the drag even when the button is released outside.
+        if self.selecting_cells {
+            let select_weak = self.self_weak.clone();
+            root = root.child(
+                canvas(
+                    |_bounds, _window, _cx| {},
+                    move |_bounds, _hitbox, window, _cx| {
+                        let move_weak = select_weak.clone();
+                        window.on_mouse_event(move |event: &MouseMoveEvent, phase, _window, cx| {
+                            if phase != DispatchPhase::Capture {
+                                return;
+                            }
+                            if event.pressed_button != Some(MouseButton::Left) {
+                                let _ =
+                                    move_weak.update(cx, |grid, cx| grid.grid_select_end_drag(cx));
+                                return;
+                            }
+                            let position = event.position;
+                            let _ = move_weak.update(cx, |grid, cx| {
+                                grid.grid_select_pointer_moved(position, cx)
+                            });
+                        });
+                        let up_weak = select_weak.clone();
+                        window.on_mouse_event(move |_event: &MouseUpEvent, phase, _window, cx| {
+                            if phase != DispatchPhase::Capture {
+                                return;
+                            }
+                            let _ = up_weak.update(cx, |grid, cx| grid.grid_select_end_drag(cx));
                         });
                     },
                 )

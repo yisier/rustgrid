@@ -385,6 +385,17 @@ fn snapshot_database(
     // the branch again. A database that was never opened keeps its tables `Idle` — the search
     // never issues a catalog query of its own.
     let read_tables = database.expanded || (searching && !key_value && database.opened);
+    // A bare name search only reaches the schemas the user has opened; tables in a schema that
+    // was never opened are not search results. A qualified query (`schema.table`) still reaches
+    // every loaded schema, and a schema-name match still brings its tables (so typing the schema
+    // itself locates it). Schema-less engines (MySQL/SQLite) have no such gate.
+    let qualified_search = query.contains('.');
+    let schema_is_searchable = |schema: &str| {
+        qualified_search
+            || database.expanded_schemas.contains(schema)
+            || database.opened_schemas.contains(schema)
+            || schema_search_matches(query, &database.name, schema)
+    };
     let tables: Loadable<Vec<TreeTable>> = if !read_tables {
         Loadable::Idle
     } else {
@@ -397,11 +408,14 @@ fn snapshot_database(
                     .iter()
                     .map(tree_table)
                     .filter(|table| {
-                        !(searching && !key_value)
-                            || table_search_matches(query, table, &database.name)
-                            // A schema-less engine's database is its schema, so a database match
-                            // brings that schema's tables into the result.
-                            || (database_matches && table.schema.is_none())
+                        if !(searching && !key_value) {
+                            return true;
+                        }
+                        let matches = table_search_matches(query, table, &database.name)
+                            || (database_matches && table.schema.is_none());
+                        // A schema-less engine's database is its schema, so a database match
+                        // brings that schema's tables into the result.
+                        matches && table.schema.as_deref().is_none_or(&schema_is_searchable)
                     })
                     .collect(),
             ),
@@ -3368,6 +3382,70 @@ mod nav_tests {
         assert!(snapshot.shows_category(Category::Tables, Some("ORDER")));
         assert!(!snapshot.shows_category(Category::Views, Some("ORDER")));
         assert!(!snapshot.shows_category(Category::Functions, Some("ORDER")));
+    }
+
+    #[test]
+    fn a_bare_search_skips_tables_in_unopened_schemas() {
+        let mut database = database(
+            "shop",
+            vec![
+                table("public.users", rustgrid_core::ObjectKind::Table),
+                table("sales.orders", rustgrid_core::ObjectKind::Table),
+            ],
+            &["public", "sales"],
+        );
+        database.expanded_schemas.insert("public".to_string());
+
+        // An opened schema's table is found by its bare name.
+        let query = tree_search_query("users").unwrap();
+        let snapshot =
+            snapshot_database(&database, 0, Some(&query), false, false).expect("a match");
+        let Loadable::Loaded(tables) = &snapshot.tables else {
+            panic!("tables should be loaded");
+        };
+        assert_eq!(
+            tables
+                .iter()
+                .map(|table| table.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["public.users"]
+        );
+        assert_eq!(snapshot.schemas, vec!["public".to_string()]);
+
+        // A table in a schema that was never opened is not pulled in by its bare name.
+        let query = tree_search_query("orders").unwrap();
+        assert!(snapshot_database(&database, 0, Some(&query), false, false).is_none());
+
+        // The schema name itself still locates it...
+        let query = tree_search_query("sales").unwrap();
+        let snapshot =
+            snapshot_database(&database, 0, Some(&query), false, false).expect("a match");
+        let Loadable::Loaded(tables) = &snapshot.tables else {
+            panic!("tables should be loaded");
+        };
+        assert_eq!(
+            tables
+                .iter()
+                .map(|table| table.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sales.orders"]
+        );
+
+        // ...and so does a qualified `schema.table` query.
+        let query = tree_search_query("sales.orders").unwrap();
+        let snapshot =
+            snapshot_database(&database, 0, Some(&query), false, false).expect("a match");
+        assert_eq!(snapshot.schemas, vec!["sales".to_string()]);
+        let Loadable::Loaded(tables) = &snapshot.tables else {
+            panic!("tables should be loaded");
+        };
+        assert_eq!(
+            tables
+                .iter()
+                .map(|table| table.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sales.orders"]
+        );
     }
 
     #[test]

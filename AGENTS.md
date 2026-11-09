@@ -589,7 +589,11 @@ touching UI code.
   range's `cursor`, and **Ctrl/Cmd+click** toggles the clicked cell's range in/out
   (`add_or_remove_range`). Anything that reads a "selection" — status bar, delete, `set_selection_null`,
   multi-cell edit, header highlight — must go through `contains`/`cells`/`row_indices`/`col_indices`
-  rather than assuming a single rectangle.
+  rather than assuming a single rectangle. A drag held past the top/bottom of the rows auto-scrolls
+  them (`gpui_base::AutoScroll` through a window-level move/up listener painted while
+  `selecting_cells`, in `grid_view.rs`) and keeps extending the selection into the revealed rows;
+  the wheel over a multi-cell range likewise scrolls the viewport, while a single-cell cursor keeps
+  the wheel's cursor walk (see `grid_input.rs`).
 - Embed bitmap images with `img(ImageSource::Resource(Resource::Embedded("name".into())))`.
   Calling `img("name")` treats the bare filename as a **URI** and fails with
   `Failed to load asset ... loading image asset from "name"`.
@@ -985,14 +989,17 @@ shadcn chrome described above. Implemented today:
     the ORDER schema first. A schema matches its name or `database.schema`. The filter only sees
     objects that are already loaded: opening a database loads all its schemas' tables, which is
     what makes the qualified search work, while a database that was never opened is matched by its
-    name only and the search never issues a catalog query of its own. A matching branch keeps its
-    immediate children (a matched connection shows its databases, a matched database its schemas),
-    the branches on the way to a match open, only 表/视图 are drawn while filtering (with just the
-    matching objects), and a group without a surviving connection is skipped. Down / Up in the
-    search box hands the keyboard to the filtered rows — Down selects the first table/view result,
-    Up the last (falling back to the first/last row when only a branch matched) — and the tree keeps
-    the focus, so its arrows, Page Up/Down and Enter work from there. Esc or the field's ✕ clears
-    the filter and restores the saved tree; 无匹配项 is shown when nothing matches.
+    name only and the search never issues a catalog query of its own. A bare name search stops at
+    the schemas the tree has opened (or expanded), so it never pulls a table out of a schema the
+    user has not opened; `sales.orders` and `sales` still locate one (a qualified query reaches
+    every loaded schema, and a schema-name match brings that schema's tables). A matching branch
+    keeps its immediate children (a matched connection shows its databases, a matched database its
+    schemas), the branches on the way to a match open, only 表/视图 are drawn while filtering (with
+    just the matching objects), and a group without a surviving connection is skipped. Down / Up
+    in the search box hands the keyboard to the filtered rows — Down selects the first table/view
+    result, Up the last (falling back to the first/last row when only a branch matched) — and the
+    tree keeps the focus, so its arrows, Page Up/Down and Enter work from there. Esc or the field's
+    ✕ clears the filter and restores the saved tree; 无匹配项 is shown when nothing matches.
 
 Still out of scope: engines other than MySQL, MariaDB, SQLite, SQL Server, PostgreSQL, Oracle and
 Redis, and the disabled placeholder UI

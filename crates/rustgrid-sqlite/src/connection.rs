@@ -43,6 +43,44 @@ impl SqliteConnection {
         Ok(0)
     }
 
+    /// The value the next generated key will have for a table whose key SQLite assigns (a single
+    /// `INTEGER PRIMARY KEY`, i.e. the rowid alias). `None` for tables without one. A table that
+    /// declares `AUTOINCREMENT` continues from `sqlite_sequence.seq + 1` (so deleting every row
+    /// never reuses an id); a plain rowid alias continues from `MAX(key) + 1`, or 1 when empty.
+    async fn auto_increment_value(&self, table: &str) -> Result<Option<u64>> {
+        let columns = self.columns("main", table).await?;
+        let Some(key) = columns
+            .iter()
+            .find(|column| column.auto_increment)
+            .map(|column| column.name.clone())
+        else {
+            return Ok(None);
+        };
+        // Only AUTOINCREMENT tables keep a row in `sqlite_sequence`; its absence (including the
+        // whole sequence table being absent) means the next id comes from the current maximum.
+        let sequence =
+            sqlx::query_scalar::<_, i64>("SELECT seq FROM sqlite_sequence WHERE name = ?")
+                .bind(table)
+                .fetch_optional(&self.pool)
+                .await
+                .ok()
+                .flatten();
+        if let Some(sequence) = sequence {
+            return Ok(Some(sequence.max(0) as u64 + 1));
+        }
+        let max = self
+            .scalar_u64(
+                format!(
+                    "SELECT COALESCE(MAX({}), 0) FROM {}",
+                    quote_identifier(&key),
+                    quote_identifier(table)
+                ),
+                &[],
+            )
+            .await?;
+        Ok(Some(max + 1))
+    }
+
     /// The `CREATE` statement of one object, as SQLite stores it in `sqlite_master`.
     async fn object_create_sql(&self, kind: &str, name: &str) -> Result<String> {
         let row = sqlx::query("SELECT sql FROM sqlite_master WHERE type = ? AND name = ?")
@@ -542,10 +580,24 @@ impl Connection for SqliteConnection {
             )
             .await
             .ok();
+        // SQLite keeps no per-table size in its catalog. The bundled build carries the `dbstat`
+        // virtual table, whose `pgsize` column reports the bytes of every b-tree page a table
+        // owns; `SUM` gives the data length Navicat shows (and a missing dbstat just leaves it
+        // empty rather than failing the whole overview).
+        let data_length = self
+            .scalar_u64(
+                "SELECT COALESCE(SUM(pgsize), 0) FROM dbstat WHERE name = ?".to_string(),
+                &[table.to_string()],
+            )
+            .await
+            .ok();
+        let auto_increment = self.auto_increment_value(table).await.ok().flatten();
         let _ = database;
         Ok(TableStatus {
             engine: Some("SQLite".to_string()),
             rows,
+            data_length,
+            auto_increment,
             ..Default::default()
         })
     }

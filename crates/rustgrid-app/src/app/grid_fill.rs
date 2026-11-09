@@ -231,6 +231,8 @@ impl GridView {
     /// Begin dragging the selection's fill handle. The block's range is captured now; its values
     /// are read on release, so later mouse moves only move the target.
     pub(super) fn begin_fill_drag(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.select_autoscroll.stop();
+        self.select_pointer = None;
         if !self.state.editable
             || self.state.loading
             || self.state.visible_columns == 0
