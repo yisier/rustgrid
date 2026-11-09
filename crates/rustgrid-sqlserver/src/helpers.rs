@@ -116,10 +116,183 @@ pub(crate) fn leading_keyword(sql: &str) -> String {
 /// Split a T-SQL script into top-level statements on semicolons, respecting string
 /// literals, quoted identifiers, comments and `BEGIN`/`CASE` ... `END` blocks.
 ///
-/// If a block is left open at the end (unbalanced `BEGIN`/`END`, or a `BEGIN TRANSACTION`
-/// that is closed by `COMMIT` rather than `END`), the whole script is returned as one
+/// `GO` lines (the client-side batch separator `sqlcmd`/SSMS use, optionally with a repeat
+/// count and a trailing `--` comment) are removed and start a new batch: SQL Server itself
+/// rejects `GO`, so it must never reach the server. Each batch is split independently.
+///
+/// If a block is left open at the end of a batch (unbalanced `BEGIN`/`END`, or a `BEGIN
+/// TRANSACTION` that is closed by `COMMIT` rather than `END`), that batch is returned as one
 /// statement so the server receives it intact.
 pub(crate) fn split_statements(sql: &str) -> Vec<String> {
+    let mut statements = Vec::new();
+    for batch in split_batches(sql) {
+        let batch_statements = split_batch_statements(&batch.text);
+        if batch.repeat > 1 {
+            // `GO n` runs its batch n times, the way sqlcmd/SSMS do.
+            let repeated = batch_statements
+                .iter()
+                .cloned()
+                .cycle()
+                .take(batch_statements.len() * batch.repeat);
+            statements.extend(repeated);
+        } else {
+            statements.extend(batch_statements);
+        }
+    }
+    statements
+}
+
+/// One `GO`-delimited batch, with the repeat count of `GO n`.
+struct Batch {
+    text: String,
+    repeat: usize,
+}
+
+/// Split a script on `GO` lines. Strings, quoted identifiers and comments are skipped whole,
+/// so a `GO` inside any of them is not a separator; only a line whose first token is `GO`
+/// (followed by an optional count and an optional `--` comment) separates batches.
+fn split_batches(sql: &str) -> Vec<Batch> {
+    let bytes = sql.as_bytes();
+    let mut batches = Vec::new();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    let mut line_start = true;
+
+    while i < bytes.len() {
+        // Newlines and leading indentation keep the scanner at the start of a line; any other
+        // byte ends that state before the construct skippers below consume it.
+        if bytes[i] == b'\n' {
+            i += 1;
+            line_start = true;
+            continue;
+        }
+        if line_start && matches!(bytes[i], b' ' | b'\t' | b'\r') {
+            i += 1;
+            continue;
+        }
+        if line_start {
+            line_start = false;
+            if let Some((end, repeat)) = go_separator(bytes, i) {
+                let text = sql[start..i].trim();
+                if has_sql_content(text) {
+                    batches.push(Batch {
+                        text: text.to_string(),
+                        repeat,
+                    });
+                }
+                i = end;
+                start = i;
+                line_start = true;
+                continue;
+            }
+        }
+
+        match bytes[i] {
+            quote @ (b'\'' | b'"') => {
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == quote {
+                        if i + 1 < bytes.len() && bytes[i + 1] == quote {
+                            i += 2;
+                            continue;
+                        }
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            b'[' => {
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == b']' {
+                        if i + 1 < bytes.len() && bytes[i + 1] == b']' {
+                            i += 2;
+                            continue;
+                        }
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            b'-' if bytes.get(i + 1) == Some(&b'-') => {
+                i += 2;
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i = (i + 2).min(bytes.len());
+            }
+            _ => i += 1,
+        }
+    }
+
+    let text = sql[start..].trim();
+    if has_sql_content(text) {
+        batches.push(Batch {
+            text: text.to_string(),
+            repeat: 1,
+        });
+    }
+    batches
+}
+
+/// The `GO [count] [-- comment]` separator starting at `index`, if this really is one.
+/// Returns the index just past its line and the repeat count. `GOTO` and identifiers such as
+/// `GO_OBJECT` are not separators.
+fn go_separator(bytes: &[u8], index: usize) -> Option<(usize, usize)> {
+    let tail = &bytes[index..];
+    if tail.len() < 2
+        || !tail[0].eq_ignore_ascii_case(&b'G')
+        || !tail[1].eq_ignore_ascii_case(&b'O')
+    {
+        return None;
+    }
+    if tail.get(2).is_some_and(|byte| is_ident_byte(*byte)) {
+        return None;
+    }
+
+    let mut i = index + 2;
+    while matches!(bytes.get(i), Some(b' ' | b'\t' | b'\r')) {
+        i += 1;
+    }
+    let digits_start = i;
+    while bytes.get(i).is_some_and(u8::is_ascii_digit) {
+        i += 1;
+    }
+    let repeat = if i > digits_start {
+        std::str::from_utf8(&bytes[digits_start..i])
+            .ok()
+            .and_then(|digits| digits.parse::<usize>().ok())
+            .unwrap_or(1)
+            .clamp(1, 1000)
+    } else {
+        1
+    };
+    while matches!(bytes.get(i), Some(b' ' | b'\t' | b'\r')) {
+        i += 1;
+    }
+    match bytes.get(i) {
+        None => Some((i, repeat)),
+        Some(b'\n') => Some((i + 1, repeat)),
+        Some(b'-') if bytes.get(i + 1) == Some(&b'-') => {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            Some(((i + 1).min(bytes.len()), repeat))
+        }
+        _ => None,
+    }
+}
+
+/// Split one `GO`-delimited batch on top-level semicolons.
+fn split_batch_statements(sql: &str) -> Vec<String> {
     let bytes = sql.as_bytes();
     let mut statements = Vec::new();
     let mut start = 0usize;
@@ -591,6 +764,52 @@ mod tests {
     fn falls_back_to_whole_script_when_unbalanced() {
         let script = "BEGIN TRAN; SELECT 1";
         assert_eq!(split_statements(script), vec![script]);
+    }
+
+    #[test]
+    fn splits_on_go_batch_separators() {
+        // The DDL the table designer shows ends with `GO`; SQL Server rejects it, so the
+        // splitter drops it instead of sending it.
+        let script = "CREATE TABLE [dbo].[t] (\n  [id] int\n)\nGO";
+        assert_eq!(
+            split_statements(script),
+            vec!["CREATE TABLE [dbo].[t] (\n  [id] int\n)"]
+        );
+        // A `GO` between statements (and a lower-case one) separates them too.
+        assert_eq!(
+            split_statements("SELECT 1;\nGO\nselect 2\n  go  "),
+            vec!["SELECT 1", "select 2"]
+        );
+    }
+
+    #[test]
+    fn go_with_a_count_repeats_the_batch() {
+        assert_eq!(
+            split_statements("INSERT INTO t VALUES (1)\nGO 3\n"),
+            vec![
+                "INSERT INTO t VALUES (1)",
+                "INSERT INTO t VALUES (1)",
+                "INSERT INTO t VALUES (1)"
+            ]
+        );
+    }
+
+    #[test]
+    fn go_inside_a_string_or_comment_is_not_a_separator() {
+        let script = "SELECT 'a\nGO\nb' AS value /*\nGO\n*/";
+        assert_eq!(split_statements(script), vec![script]);
+        assert_eq!(
+            split_statements("-- GO\nSELECT 1\nGO -- done\nSELECT 2"),
+            vec!["-- GO\nSELECT 1", "SELECT 2"]
+        );
+    }
+
+    #[test]
+    fn goto_is_not_a_go_separator() {
+        assert_eq!(
+            split_statements("GOTO done;\nSELECT 1;\ndone:"),
+            vec!["GOTO done", "SELECT 1", "done:"]
+        );
     }
 
     #[test]

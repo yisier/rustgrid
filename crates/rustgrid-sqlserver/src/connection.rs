@@ -664,7 +664,9 @@ impl Connection for SqlServerConnection {
             return Ok(empty_result(sql.trim().to_string()));
         }
         if needs_single_batch(&statements) {
-            let results = run_batch_sets(&mut client, sql).await?;
+            // `GO` is a client-side separator, so the batch is rebuilt from the split
+            // statements rather than resending the source (which would still contain it).
+            let results = run_batch_sets(&mut client, &statements.join(";\n")).await?;
             return Ok(results
                 .into_iter()
                 .find(|result| result.has_result_set)
@@ -675,7 +677,7 @@ impl Connection for SqlServerConnection {
         // The batch path returns them all and this keeps only the first, matching the single
         // result `execute_query` promises (the query editor uses `execute_query_many`).
         if statements.len() == 1 && returns_result_set(&statements[0]) {
-            let results = run_batch_sets(&mut client, sql).await?;
+            let results = run_batch_sets(&mut client, &statements[0]).await?;
             return Ok(results
                 .into_iter()
                 .find(|result| result.has_result_set)
@@ -720,13 +722,14 @@ impl Connection for SqlServerConnection {
         }
         if needs_single_batch(&statements) {
             // A script that declares batch-scoped variables cannot be split across
-            // round-trips; run it whole and return one result per result set.
-            return run_batch_sets(&mut client, sql).await;
+            // round-trips; run it whole (without the client-side `GO` lines) and return one
+            // result per result set.
+            return run_batch_sets(&mut client, &statements.join(";\n")).await;
         }
         // A single statement the splitter could not divide —several `SELECT`s without
         // semicolons, which SQL Server runs as one batch —still carries every result set.
         if statements.len() == 1 && returns_result_set(&statements[0]) {
-            return run_batch_sets(&mut client, sql).await;
+            return run_batch_sets(&mut client, &statements[0]).await;
         }
         let mut results = Vec::with_capacity(statements.len());
         for statement in &statements {

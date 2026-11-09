@@ -1121,7 +1121,10 @@ make more engines cheap later — do not build those features early.
   statements use the parameterized RPC path, DML uses the RPC path for its row count, and everything
   else (DDL, `CREATE PROCEDURE`/`CREATE VIEW`) is sent as one text batch so the server receives it
   intact; `helpers::split_statements` splits scripts on top-level semicolons while tracking
-  `BEGIN`/`CASE … END` and falls back to the whole script when blocks are unbalanced. Decimal/numeric
+  `BEGIN`/`CASE … END` and falls back to the whole script when blocks are unbalanced. `GO` on a
+  line of its own (optionally with a repeat count and a trailing `--` comment) is a **client-side**
+  batch separator, so the splitter drops it and splits each batch independently — SQL Server rejects
+  it (`Incorrect syntax near 'GO'`), and the DDL `table_ddl` shows ends with `GO`. Decimal/numeric
   values decode to `CellValue::Text` (their exact `Numeric` string) rather than a lossy `f64`; money
   decodes to `Float`. The driver's `columns`/`fetch_page` fully qualify objects because a pooled
   session's database cannot be assumed. Three T-SQL quirks matter: `DROP VIEW`/`DROP PROCEDURE`/
