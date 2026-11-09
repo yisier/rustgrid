@@ -790,6 +790,10 @@ pub(super) struct TableDesignView {
     /// position and selection survive.
     pub(super) preview_editor: Option<Entity<ui::SqlEditor>>,
     pub(super) self_weak: WeakEntity<TableDesignView>,
+    /// The shared field clipboard (see `AppView::design_clipboard`): 复制 stores the copied
+    /// columns here and 粘贴 reads them back, so a field can move between two designers while
+    /// keeping its exact `ColumnDef` rather than a lossy TSV round-trip.
+    design_clipboard: Rc<RefCell<Vec<ColumnDef>>>,
 }
 
 /// A case-insensitive subsequence test used by the type drop-down's search field.
@@ -867,6 +871,28 @@ fn option_combo(
     })
 }
 
+/// A column name not already in `existing`, appending `_copy` / `_copy2` / … and recording the
+/// chosen name so a later paste in the same batch does not repeat it.
+fn unique_column_name(base: &str, existing: &mut Vec<String>) -> String {
+    let taken = |candidate: &str| {
+        existing
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(candidate))
+    };
+    if !taken(base) {
+        existing.push(base.to_string());
+        return base.to_string();
+    }
+    let mut candidate = format!("{base}_copy");
+    let mut n = 2;
+    while taken(&candidate) {
+        candidate = format!("{base}_copy{n}");
+        n += 1;
+    }
+    existing.push(candidate.clone());
+    candidate
+}
+
 impl TableDesignView {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
@@ -881,6 +907,7 @@ impl TableDesignView {
         app: WeakEntity<AppView>,
         runtime: Arc<Runtime>,
         theme: Theme,
+        design_clipboard: Rc<RefCell<Vec<ColumnDef>>>,
         cx: &mut Context<'_, Self>,
     ) -> Self {
         let weak = cx.weak_entity();
@@ -930,6 +957,7 @@ impl TableDesignView {
             is_view,
             is_new,
             designer,
+            design_clipboard,
             schema: TableSchema::default(),
             original: None,
             tab: DesignerTab::Fields,
@@ -1528,7 +1556,55 @@ impl TableDesignView {
             lines.push(values.join("\t"));
         }
         cx.write_to_clipboard(ClipboardItem::new_string(lines.join("\n")));
+        // Also keep the whole copied columns (not just the selected cells) in the shared field
+        // clipboard, so 粘贴 in another designer reproduces each field exactly.
+        let copied: Vec<ColumnDef> = (start_row..=end_row)
+            .filter_map(|row| self.schema.columns.get(row).cloned())
+            .collect();
+        *self.design_clipboard.borrow_mut() = copied;
         cx.notify();
+    }
+
+    /// Ctrl/Cmd+V in the 字段 grid: append the columns copied in any designer (see
+    /// [`Self::copy_field_selection`]) to the end of the field list. Each pasted field keeps its
+    /// copied definition but drops the primary-key, auto-increment and identity flags, so it never
+    /// collides with the target table's own key, and takes a unique name when the target already has
+    /// that column.
+    pub(super) fn paste_fields(&mut self, cx: &mut Context<'_, Self>) {
+        if self.tab != DesignerTab::Fields {
+            return;
+        }
+        let copied: Vec<ColumnDef> = self.design_clipboard.borrow().clone();
+        if copied.is_empty() {
+            return;
+        }
+        let at = self.schema.columns.len();
+        let mut existing: Vec<String> = self
+            .schema
+            .columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect();
+        let mut last = at;
+        for (offset, mut column) in copied.into_iter().enumerate() {
+            column.primary_key = false;
+            column.auto_increment = false;
+            column.identity.clear();
+            column.identity_start.clear();
+            column.identity_increment.clear();
+            if !column.name.is_empty() {
+                column.name = unique_column_name(&column.name, &mut existing);
+            }
+            last = at + offset;
+            self.schema.columns.insert(last, column);
+        }
+        self.selected_field = Some(last);
+        self.selected_cell = Some((last, FieldCell::Name));
+        let last_column = self.field_column_count().saturating_sub(1);
+        self.field_selection = Some(CellSelection::single((at, 0), (last, last_column)));
+        self.reveal_design_row(last);
+        self.sync_selected_input(cx);
+        self.mark_dirty(cx);
     }
 
     /// The text a fields-grid cell contributes to a copy: the edited value for text cells, `1`
@@ -4414,6 +4490,7 @@ impl AppView {
         let runtime = self.runtime.clone();
         let theme = self.theme;
         let designer = self.table_designer(connection_index);
+        let design_clipboard = self.design_clipboard.clone();
         let entity = cx.new(|cx| {
             TableDesignView::new(
                 id,
@@ -4427,6 +4504,7 @@ impl AppView {
                 app,
                 runtime,
                 theme,
+                design_clipboard,
                 cx,
             )
         });
@@ -4468,6 +4546,7 @@ impl AppView {
         let runtime = self.runtime.clone();
         let theme = self.theme;
         let designer = self.table_designer(connection_index);
+        let design_clipboard = self.design_clipboard.clone();
         let entity = cx.new(|cx| {
             TableDesignView::new(
                 id,
@@ -4481,6 +4560,7 @@ impl AppView {
                 app,
                 runtime,
                 theme,
+                design_clipboard,
                 cx,
             )
         });

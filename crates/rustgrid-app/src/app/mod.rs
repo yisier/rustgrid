@@ -206,7 +206,8 @@ gpui::actions!(
         DesignerRowUp,
         DesignerRowDown,
         DesignerSelectAll,
-        DesignerCopy
+        DesignerCopy,
+        DesignerPaste
     ]
 );
 
@@ -2651,6 +2652,10 @@ pub struct AppView {
     error_dialog: Option<String>,
     /// The cell clipboard every grid shares (see [`GridClipboard`]).
     grid_clipboard: Rc<RefCell<GridClipboard>>,
+    /// The field clipboard every table designer shares: the last columns copied in a designer's
+    /// 字段 grid, so a field copied in one table can be pasted into another with its exact
+    /// definition (see `TableDesignView::paste_fields`).
+    design_clipboard: Rc<RefCell<Vec<rustgrid_core::ColumnDef>>>,
     /// Transient notifications queued for the next frame, which has the window needed to hand
     /// them to `Root`.
     pending_toasts: Vec<(ToastKind, String)>,
@@ -3553,6 +3558,7 @@ impl AppView {
             delete_confirm: None,
             error_dialog: None,
             grid_clipboard: Rc::new(RefCell::new(GridClipboard::default())),
+            design_clipboard: Rc::new(RefCell::new(Vec::new())),
             pending_toasts: Vec::new(),
             refresh_toasts: Vec::new(),
             refresh_object_feedback: None,
