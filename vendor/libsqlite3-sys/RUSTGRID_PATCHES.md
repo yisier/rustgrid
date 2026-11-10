@@ -18,7 +18,9 @@ libtomcrypt on every platform and adds no native build tooling.
 ## Changes
 
 1. `build.rs` compiles `sqlcipher-src`'s SQLCipher amalgamation and its libtomcrypt provider
-   (AES/CBC, SHA-1/256/512, HMAC, PBKDF2, Fortuna) instead of SQLite/OpenSSL.
+   (AES/CBC, SHA-1/256/512, HMAC, PBKDF2, Fortuna) instead of SQLite/OpenSSL, and defines
+   libtomcrypt's endianness/word size on MSVC ARM64, whose compiler macros its detection does not
+   recognise.
 2. `src/bindings.rs` is included directly instead of being copied from `OUT_DIR` by the build
    script. `Cargo.toml` keeps only the features the workspace's dependency graph asks for.
 

@@ -53,6 +53,13 @@ fn main() {
     }
     println!("cargo:rerun-if-changed={}", source_dir.display());
 
+    // libtomcrypt's endianness detection knows MSVC's `_M_X64`/`_M_IX86` macros but not
+    // `_M_ARM64`, and MSVC defines no `__BYTE_ORDER__`, so `tomcrypt_cfg.h` stops with "Cannot
+    // detect endianness" on Windows ARM64. Every Windows target is little-endian; tell it the
+    // word size too, because the header requires both.
+    let msvc_arm64 = env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("aarch64")
+        && env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc");
+
     // SQLCipher itself. The amalgamation only encrypts once `PRAGMA key` runs, so an unkeyed
     // connection keeps reading plain SQLite files.
     let mut sqlite = cc::Build::new();
@@ -98,6 +105,10 @@ fn main() {
     }
     // `ARGTYPE=4` makes a bad argument return CRYPT_INVALID_ARG instead of raising a signal.
     sqlite.define("ARGTYPE", "4");
+    if msvc_arm64 {
+        sqlite.define("ENDIAN_LITTLE", None);
+        sqlite.define("ENDIAN_64BITWORD", None);
+    }
     sqlite.warnings(false);
     sqlite.compile("sqlcipher");
 
@@ -119,6 +130,10 @@ fn main() {
         tomcrypt.define(define, None);
     }
     tomcrypt.define("ARGTYPE", "4");
+    if msvc_arm64 {
+        tomcrypt.define("ENDIAN_LITTLE", None);
+        tomcrypt.define("ENDIAN_64BITWORD", None);
+    }
     tomcrypt.warnings(false);
     tomcrypt.compile("sqlcipher_libtomcrypt");
 
