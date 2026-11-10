@@ -1762,11 +1762,7 @@ impl GridView {
             .p_0()
             .rounded_sm()
             .tooltip_placement(Placement::Top)
-            .when(enabled, move |this| {
-                this.cursor_pointer()
-                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-                    .on_click(on_click)
-            })
+            .when(enabled, |this| this.cursor_pointer().on_click(on_click))
             .when(!enabled, |this| this.disabled(true))
             .child(
                 svg()
