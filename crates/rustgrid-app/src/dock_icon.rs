@@ -11,8 +11,13 @@ use objc2::MainThreadMarker;
 use objc2_app_kit::{NSApplication, NSImage};
 use objc2_foundation::NSData;
 
-/// The app logo as PNG bytes — the same asset the 关于 page embeds.
-static LOGO_PNG: &[u8] = include_bytes!("../assets/logo.png");
+/// The app logo as PNG bytes, padded for the Dock.
+///
+/// `logo.png` (the asset the 关于 page embeds) fills ~94% of its canvas; the Dock scales whatever
+/// it gets to the slot, so a near-full-bleed image renders visibly larger than every other app's
+/// icon. `logo_dock.png` is the same art drawn at ~80% of a 512x512 canvas, matching the macOS
+/// icon grid's built-in padding (the `.icns` in the release bundle is built from the same file).
+static LOGO_PNG: &[u8] = include_bytes!("../assets/logo_dock.png");
 
 /// Hand the embedded logo to the shared `NSApplication` as its icon.
 ///

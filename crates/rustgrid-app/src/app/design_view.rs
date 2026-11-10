@@ -57,6 +57,7 @@ impl TableDesignView {
             .on_action(
                 cx.listener(|this, _: &DesignerCopy, _window, cx| this.copy_field_selection(cx)),
             )
+            .on_action(cx.listener(|this, _: &DesignerPaste, _window, cx| this.paste_fields(cx)))
             .on_action(cx.listener(|this, _: &NextDesignerCell, window, cx| {
                 this.tab_designer_cell(false, window, cx)
             }))
