@@ -22,8 +22,8 @@ work="$(mktemp -d "${TMPDIR:-/tmp}/rustgrid-icns.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
 # `iconutil` only accepts the `.iconset` layout, and it wants the @2x names to hold the doubled
-# pixel size (so `icon_512x512@2x.png` is 1024x1024). The logo is 512x512, so the two largest
-# entries are upscaled by `sips` — slightly soft, but it keeps the iconset complete.
+# pixel size (so `icon_512x512@2x.png` is 1024x1024). The padded Dock logo is 512x512, so the
+# largest entry is upscaled by `sips` — slightly soft, but it keeps the iconset complete.
 iconset="$work/AppIcon.iconset"
 mkdir -p "$iconset"
 for entry in \
