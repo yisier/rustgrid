@@ -548,8 +548,15 @@ impl GridView {
     /// The horizontal position is deliberately kept: sorting or filtering reuses the same
     /// columns, and snapping them back to the first column made the user lose the width they
     /// had scrolled to. The handle clamps the offset itself when a new column set is narrower.
+    ///
+    /// The tracked handle is reused rather than replaced: a fresh handle knows no viewport until
+    /// its first paint, and the scrollbar painted from that zero viewport a full-length thumb for
+    /// a frame, which made applying a filter or a sort (or turning a page) flicker — even when the
+    /// new rows all fit and no scrollbar was needed.
     fn reset_scroll(&mut self) {
-        self.list_scroll = UniformListScrollHandle::new();
+        let mut scroll = self.list_scroll.0.borrow_mut();
+        scroll.deferred_scroll_to_item = None;
+        scroll.base_handle.set_offset(Point::default());
     }
 
     fn reload_query(&mut self, reset_scroll: bool, cx: &mut Context<'_, Self>) {

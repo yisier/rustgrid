@@ -518,9 +518,14 @@ pub(super) fn scrollbar_thumb(viewport: f32, max: f32) -> (f32, f32) {
 
 /// The thumb's `(top, length)` as fractions of the track, for `relative()` placement. Because the
 /// thumb is sized and positioned relative to the track it is drawn in, it can never overflow the
-/// track even when the viewport used for the math and the track's own size disagree.
+/// track even when the viewport used for the math and the track's own size disagree. An
+/// unmeasured viewport (a fresh scroll handle's first frame) paints **no** thumb: treating it as
+/// a full-length one made a scrollbar flash into place whenever the handle was replaced.
 pub(super) fn scrollbar_fractions(viewport: f32, max: f32, scroll: f32) -> (f32, f32) {
-    if viewport <= 0.0 || max <= 0.0 {
+    if viewport <= 0.0 {
+        return (0.0, 0.0);
+    }
+    if max <= 0.0 {
         return (0.0, 1.0);
     }
     let content = (viewport + max).max(1.0);
@@ -594,4 +599,26 @@ pub(super) fn hscrollbar_track(
                 .h(px(12.0))
                 .bg(rgb(theme.scroll_thumb)),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unmeasured_scrollbar_paints_no_thumb() {
+        // A fresh scroll handle knows no viewport yet. A full-length thumb for that one frame is
+        // exactly what made applying a filter or a sort flicker; nothing is drawn instead.
+        assert_eq!(scrollbar_fractions(0.0, 500.0, 0.0), (0.0, 0.0));
+        assert_eq!(scrollbar_fractions(0.0, 500.0, 100.0), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_measured_scrollbar_keeps_its_thumb_inside_the_track() {
+        assert_eq!(scrollbar_fractions(200.0, 0.0, 0.0), (0.0, 1.0));
+        let (top, length) = scrollbar_fractions(200.0, 800.0, 400.0);
+        assert!(length > 0.0 && length < 1.0);
+        assert!(top > 0.0 && top + length <= 1.0);
+        assert_eq!(scrollbar_fractions(200.0, 800.0, 9_999.0).0, 1.0 - length);
+    }
 }
