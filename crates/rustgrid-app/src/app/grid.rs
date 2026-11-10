@@ -388,9 +388,15 @@ impl GridView {
         self.load_page_inner(true, cx);
     }
 
-    /// Reload the current page without moving the view: used after a write and by the Refresh
-    /// button, so the user keeps their scroll position.
+    /// Reload the current page without moving the view after a successful write, so the user
+    /// keeps their scroll position.
     pub(super) fn reload_after_write(&mut self, cx: &mut Context<'_, Self>) {
+        // The write has landed, so its values are exactly what the page will hold. Fold them into
+        // the page *before* the reload drops the staged edits: clearing them up front painted
+        // every edited cell with its old value for the whole refetch, so a saved cell flashed
+        // back and then jumped to the new text.
+        let rows: &mut Vec<Vec<CellValue>> = Arc::make_mut(&mut self.state.rows);
+        fold_written_edits(rows, &self.state.column_order, &self.state.edits);
         self.load_page_inner(false, cx);
     }
 
@@ -783,7 +789,9 @@ impl GridView {
     /// toolbar / context-menu / F5 refresh never looks like a dropped click.
     fn refresh_now(&mut self, cx: &mut Context<'_, Self>) {
         self.refresh_feedback = true;
-        self.reload_after_write(cx);
+        // A plain refresh discards staged edits instead of assuming they were written, so it goes
+        // through the load path directly rather than the post-write reload that folds them in.
+        self.load_page_inner(false, cx);
     }
 
     pub(super) fn toggle_sort_panel(&mut self, cx: &mut Context<'_, Self>) {
@@ -1989,6 +1997,32 @@ fn display_of_insert(inserts: &[PendingInsert], data_rows: usize, index: usize) 
     }
 }
 
+/// Replace the loaded page's cells with the edits that were just written to the database.
+///
+/// The reload that follows a write refetches the page anyway, but it drops the staged edits
+/// before starting that fetch. Without folding them in first the edited cells painted their old
+/// values until the fresh page arrived — a saved cell visibly flashed back, then jumped to the
+/// new text. `column_order` maps a display column to the row's engine-order cell.
+fn fold_written_edits(
+    rows: &mut [Vec<CellValue>],
+    column_order: &[usize],
+    edits: &BTreeMap<(usize, usize), Option<String>>,
+) {
+    if edits.is_empty() {
+        return;
+    }
+    for (&(row, col), value) in edits {
+        let source = column_order.get(col).copied().unwrap_or(col);
+        let Some(cell) = rows.get_mut(row).and_then(|values| values.get_mut(source)) else {
+            continue;
+        };
+        *cell = match value {
+            Some(text) => CellValue::Text(text.clone()),
+            None => CellValue::Null,
+        };
+    }
+}
+
 /// Build the pending insert row for a clone of `row`: every column's value, except the ones the
 /// engine owns (auto-increment and generated columns stay unset, so the engine fills them) and
 /// binary cells. The pending insert path carries text only, so writing a BLOB back as its hex
@@ -2129,5 +2163,17 @@ mod tests {
         edits.insert((0, 0), Some("new".to_string()));
         let values = duplicate_values(&columns, &[0], &rows, 0, &edits);
         assert_eq!(values.get(&0), Some(&Some("new".to_string())));
+    }
+
+    #[test]
+    fn a_written_edit_replaces_the_loaded_value_in_the_page() {
+        // Display order: "id" (engine 1), "name" (engine 0).
+        let mut rows = vec![vec![CellValue::Text("old".to_string()), CellValue::Int(3)]];
+        let mut edits = BTreeMap::new();
+        edits.insert((0, 0), Some("new".to_string()));
+        edits.insert((0, 1), None);
+        fold_written_edits(&mut rows, &[1, 0], &edits);
+        assert_eq!(rows[0][0].as_display(), "NULL");
+        assert_eq!(rows[0][1].as_display(), "new");
     }
 }
