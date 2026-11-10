@@ -660,6 +660,22 @@ impl AppView {
             page = page.child(option);
         }
 
+        // A file-based engine normally has no credentials, but one that encrypts its file (SQLite
+        // with SQLCipher) shows the standard password field as its key. It follows the engine
+        // option that turns encryption on, and hides again when that option is off.
+        if form.home == ConnectionHomePage::File
+            && form.standard_field_visible(ConnectionStandardField::Password)
+        {
+            page = page.child(form_field(
+                label(ConnectionStandardField::Password, "form.password"),
+                false,
+                error_hint(FormField::Password)
+                    .or_else(|| label_hint(ConnectionStandardField::Password)),
+                input(FormField::Password),
+                theme,
+            ));
+        }
+
         // A network engine's default database (Oracle's 服务名/SID, SQL Server's 初始数据库)
         // follows the engine fields and hides when the engine declares it unused (Oracle's TNS /
         // connect-string types).
@@ -686,8 +702,11 @@ impl AppView {
             page = page.child(self.transport_toggles(form, theme, cx));
         }
 
-        // 记住密码: the network and ODBC layouts both carry credentials; a file engine does not.
-        if form.home != ConnectionHomePage::File {
+        // 记住密码: the network and ODBC layouts both carry credentials; a file engine does only
+        // when its password field is shown (SQLCipher's key).
+        if form.home != ConnectionHomePage::File
+            || form.standard_field_visible(ConnectionStandardField::Password)
+        {
             page = page.child(self.save_password_row(form, theme, cx));
         }
 

@@ -1,0 +1,41 @@
+[package]
+name = "libsqlite3-sys"
+version = "0.37.0"
+edition = "2021"
+license = "MIT"
+description = "Native bindings to SQLCipher, patched for RustGrid to build with libtomcrypt (no OpenSSL)"
+links = "sqlite3"
+build = "build.rs"
+
+[lib]
+name = "libsqlite3_sys"
+path = "src/lib.rs"
+
+[features]
+default = ["bundled-sqlcipher"]
+# The set sqlx-sqlite asks for. Any one of `bundled*` builds SQLCipher.
+bundled = []
+bundled-sqlcipher = ["bundled"]
+bundled-sqlcipher-vendored-openssl = ["bundled-sqlcipher"]
+bundled-windows = []
+bundled_bindings = []
+buildtime_bindgen = []
+column_metadata = []
+in_gecko = []
+loadable_extension = []
+min_sqlite_version_3_34_1 = []
+preupdate_hook = []
+session = []
+sqlcipher = []
+unlock_notify = []
+wasm32-wasi-vfs = []
+with-asan = []
+# sqlx-sqlite enables these two; they only influence pkg-config probes upstream.
+pkg-config = []
+vcpkg = []
+
+[build-dependencies]
+cc = "1"
+# SQLCipher 4.20.0 + SQLite 3.54.1 + libtomcrypt 1.18.2, as plain C sources. Taking the
+# amalgamation from a build dependency keeps this patched crate small.
+sqlcipher-src = "=420.0.0"

@@ -55,7 +55,7 @@ MongoDB 数据库管理工具。它的界面布局和交互习惯对齐 Navicat�
 | 引擎                       | 状态                              |
 | -------------------------- | --------------------------------- |
 | MySQL / MariaDB            | 已支持                            |
-| SQLite                     | 已支持                            |
+| SQLite / SQLCipher         | 已支持（SQLCipher 3/4 加密）      |
 | SQL Server                 | 已支持                            |
 | PostgreSQL                 | 已支持                            |
 | Oracle                     | 已支持                            |

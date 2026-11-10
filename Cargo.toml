@@ -17,11 +17,11 @@ members = [
     "crates/rustgrid-config",
     "crates/rustgrid-app",
 ]
-# A patched third-party crate (see `[patch.crates-io]`), not a workspace member.
-exclude = ["vendor/sqlx-mysql"]
+# Patched third-party crates (see `[patch.crates-io]`), not workspace members.
+exclude = ["vendor/sqlx-mysql", "vendor/libsqlite3-sys"]
 
 [workspace.package]
-version = "0.1.10"
+version = "0.1.11"
 edition = "2024"
 rust-version = "1.94"
 license = "Apache-2.0"
@@ -150,6 +150,10 @@ windows = { version = "0.61", features = [
 # older than 5.5 accept the login. Drop this once an upstream sqlx release carries them.
 [patch.crates-io]
 sqlx-mysql = { path = "vendor/sqlx-mysql" }
+# libsqlite3-sys 0.37.0 (the version sqlx-sqlite 0.9 accepts) builds SQLCipher only against
+# OpenSSL. This patched copy builds it with libtomcrypt, so SQLCipher support needs no Perl or
+# OpenSSL toolchain. See `vendor/libsqlite3-sys/RUSTGRID_PATCHES.md`.
+libsqlite3-sys = { path = "vendor/libsqlite3-sys" }
 
 [profile.dev]
 # Debug artifacts used to dwarf the sources: `target/debug` passed 40 GB, almost all of it DWARF

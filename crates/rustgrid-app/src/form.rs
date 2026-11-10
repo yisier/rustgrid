@@ -626,6 +626,38 @@ mod tests {
         );
     }
 
+    /// A SQLite form only shows its password field while a SQLCipher encryption mode is chosen,
+    /// because the standard password field carries the database key and goes to the secret store.
+    #[test]
+    fn sqlite_exposes_the_sqlcipher_key_as_the_password_field() {
+        use rustgrid_core::Driver as _;
+        use rustgrid_sqlite::SqliteDriver;
+
+        let mut form = ConnectionForm::for_driver(DriverId::new("sqlite"), 0, "");
+        form.apply_spec(&SqliteDriver::new().descriptor().connection_form);
+        assert!(form.file_based);
+        assert!(!form.standard_field_visible(ConnectionStandardField::Password));
+
+        form.set_option("sqlite.encryption", "sqlcipher4".to_string());
+        assert!(form.standard_field_visible(ConnectionStandardField::Password));
+        assert_eq!(
+            form.label_override(ConnectionStandardField::Password)
+                .map(|label| label.label_key),
+            Some("form.sqlite.encryption_key")
+        );
+
+        // The selection survives into the profile options (the key itself never does).
+        form.set_value(FormField::Name, "encrypted".to_string());
+        form.set_value(FormField::Database, "C:/data/app.db".to_string());
+        form.set_value(FormField::Password, "secret".to_string());
+        let profile = form.to_profile();
+        assert_eq!(
+            profile.options.get("sqlite.encryption").map(String::as_str),
+            Some("sqlcipher4")
+        );
+        assert!(!format!("{profile:?}").contains("secret"));
+    }
+
     /// The driver's spec is applied to the form: the page list, the 常规 shape, the standard-field
     /// renames, the option placement and the `visible_when` gating.
     #[test]

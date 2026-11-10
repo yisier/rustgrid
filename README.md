@@ -56,7 +56,7 @@ Click a screenshot to view it full size.
 | Engine                 | Status                                      |
 | ---------------------- | ------------------------------------------- |
 | MySQL / MariaDB        | Supported                                   |
-| SQLite                 | Supported                                   |
+| SQLite / SQLCipher     | Supported (SQLCipher 3/4 encryption)        |
 | SQL Server             | Supported                                   |
 | PostgreSQL             | Supported                                   |
 | Oracle                 | Supported                                   |

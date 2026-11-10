@@ -6,6 +6,23 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.1.11] - 2026-11-10
+
+### 新增
+
+- SQLite 可打开 SQLCipher 3/4 加密数据库（[#53](https://github.com/yisier/rustgrid/issues/53)）。
+- 表设计器可粘贴字段，连同完整定义复制到其他表。
+- 表格记录操作按钮带提示和快捷键，Insert 可新增一行（[#51](https://github.com/yisier/rustgrid/issues/51)）。
+
+### 修复
+
+- macOS 程序坞图标不再偏大（[#49](https://github.com/yisier/rustgrid/issues/49)）。
+- 筛选或排序后表格滚动条不再闪烁（[#50](https://github.com/yisier/rustgrid/issues/50)）。
+- 字段筛选的按钮在长语言下保持在弹窗内（[#52](https://github.com/yisier/rustgrid/issues/52)）。
+- 连接树搜索只包含已打开的模式，点击模式的展开箭头会打开它（[#44](https://github.com/yisier/rustgrid/issues/44)）。
+- 保存单元格后，翻页加载期间新值保持显示。
+- 连接树中正在加载的行显示加载动画。
+
 ## [0.1.10] - 2026-11-09
 
 ### 新增

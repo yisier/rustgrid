@@ -10,6 +10,29 @@ UI labels are quoted as the app shows them, so this file quotes the English stri
 [`CHANGELOG_zh.md`](CHANGELOG_zh.md) and [`CHANGELOG_ru.md`](CHANGELOG_ru.md) quote the 简体中文 and
 Russian ones.
 
+## [0.1.11] - 2026-11-10
+
+### Added
+
+- SQLite opens SQLCipher 3 and 4 encrypted databases
+  ([#53](https://github.com/yisier/rustgrid/issues/53)).
+- Table Designer pastes fields with their definitions into another table.
+- The grid's record buttons show tooltips with their shortcuts, and Insert adds a row
+  ([#51](https://github.com/yisier/rustgrid/issues/51)).
+
+### Fixed
+
+- The macOS Dock icon is no longer oversized
+  ([#49](https://github.com/yisier/rustgrid/issues/49)).
+- The grid scrollbar no longer flickers after filtering or sorting
+  ([#50](https://github.com/yisier/rustgrid/issues/50)).
+- Field Filter keeps its buttons inside the popup with long labels
+  ([#52](https://github.com/yisier/rustgrid/issues/52)).
+- Connection-tree search only covers opened schemas, and a schema's chevron opens it
+  ([#44](https://github.com/yisier/rustgrid/issues/44)).
+- A saved cell keeps its new value on screen while the page reloads.
+- A loading tree row shows a spinner.
+
 ## [0.1.10] - 2026-11-09
 
 ### Added

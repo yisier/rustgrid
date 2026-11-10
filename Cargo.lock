@@ -4716,12 +4716,9 @@ dependencies = [
 [[package]]
 name = "libsqlite3-sys"
 version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1f111c8c41e7c61a49cd34e44c7619462967221a6443b0ec299e0ac30cfb9b1"
 dependencies = [
  "cc",
- "pkg-config",
- "vcpkg",
+ "sqlcipher-src",
 ]
 
 [[package]]
@@ -7586,7 +7583,7 @@ dependencies = [
 
 [[package]]
 name = "rustgrid-app"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -7632,7 +7629,7 @@ dependencies = [
 
 [[package]]
 name = "rustgrid-backup"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "rustgrid-core",
  "serde",
@@ -7644,7 +7641,7 @@ dependencies = [
 
 [[package]]
 name = "rustgrid-config"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "aes 0.8.4",
  "base64 0.22.1",
@@ -7663,7 +7660,7 @@ dependencies = [
 
 [[package]]
 name = "rustgrid-core"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "async-trait",
  "serde",
@@ -7672,7 +7669,7 @@ dependencies = [
 
 [[package]]
 name = "rustgrid-export"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "rust_xlsxwriter",
  "rustgrid-core",
@@ -7681,7 +7678,7 @@ dependencies = [
 
 [[package]]
 name = "rustgrid-import"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "calamine",
  "chrono",
@@ -7692,7 +7689,7 @@ dependencies = [
 
 [[package]]
 name = "rustgrid-mongodb"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -7708,7 +7705,7 @@ dependencies = [
 
 [[package]]
 name = "rustgrid-mysql"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "async-trait",
  "chrono",
@@ -7721,7 +7718,7 @@ dependencies = [
 
 [[package]]
 name = "rustgrid-odbc"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "async-trait",
  "libloading",
@@ -7732,7 +7729,7 @@ dependencies = [
 
 [[package]]
 name = "rustgrid-oracle"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "async-trait",
  "chrono",
@@ -7744,7 +7741,7 @@ dependencies = [
 
 [[package]]
 name = "rustgrid-postgresql"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "async-trait",
  "chrono",
@@ -7757,7 +7754,7 @@ dependencies = [
 
 [[package]]
 name = "rustgrid-redis"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -7769,7 +7766,7 @@ dependencies = [
 
 [[package]]
 name = "rustgrid-sqlite"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "async-trait",
  "rustgrid-core",
@@ -7779,7 +7776,7 @@ dependencies = [
 
 [[package]]
 name = "rustgrid-sqlserver"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "async-trait",
  "bb8",
@@ -7795,7 +7792,7 @@ dependencies = [
 
 [[package]]
 name = "rustgrid-tunnel"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "base64 0.22.1",
  "russh",
@@ -8626,6 +8623,12 @@ name = "sponge-cursor"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a0219bd7d979d58245a4f41f695e1ac9f8befdffadd7f61f1bae9e39abc6620"
+
+[[package]]
+name = "sqlcipher-src"
+version = "420.0.0+sqlcipher-4.20.0-sqlite-3.54.1-libtomcrypt-1.18.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd6b5280ed2593d07b2816ec531821c15c306903bcca224716f1fbcc2bbfedfe"
 
 [[package]]
 name = "sqlformat"
@@ -10055,12 +10058,6 @@ name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
-
-[[package]]
-name = "vcpkg"
-version = "0.2.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "version_check"

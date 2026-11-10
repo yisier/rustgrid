@@ -27,7 +27,24 @@ not a later refactor.
 - `crates/rustgrid-sqlite` — the file-based **SQLite** driver. One database is one file: the
   profile's `database` holds the path and there is no server/user/password (see `Driver::is_file_based`).
   Browsing, paging, editing, arbitrary SQL, table DDL and backup/restore are implemented; SQLite has
-  no stored routines or events, so those trait methods return empty.
+  no stored routines or events, so those trait methods return empty. Its 常规 page also offers
+  **SQLCipher** encryption (`sqlite.encryption` = `none` / `sqlcipher4` / `sqlcipher3`, default
+  `none`); `sqlcipher3` applies `PRAGMA cipher_compatibility = 3` after the key and before the first
+  read, so databases created by SQLCipher 3 open too. The key is the **standard password field**
+  (relabelled `form.sqlite.encryption_key`, `visible_when` a SQLCipher mode), so it is stored in the
+  encrypted secret store rather than `connections.json`. The driver applies `PRAGMA key` to every
+  pooled connection (via `after_connect`, because sqlx's `SqliteConnectOptions::pragma` order is not
+  enough), verifies it with one probe connection (a wrong key is `Error::Authentication`, which
+  opens the password prompt, and must not become the pool's 30-second `PoolTimedOut`), and opens the
+  same build for plain SQLite files (SQLCipher only encrypts once a key is set). The key is rendered
+  as a SQL string literal with `''` escaping, never bound as a parameter (PRAGMA takes none).
+- `vendor/libsqlite3-sys` — the published `libsqlite3-sys` 0.37 API surface (the version sqlx-sqlite
+  0.9 accepts), patched to build **SQLCipher with libtomcrypt** (`sqlcipher-src`) instead of
+  SQLite/OpenSSL. Upstream's `bundled-sqlcipher` needs OpenSSL (Perl/NASM/`make` on Windows), which
+  the project does not otherwise require; this keeps SQLCipher support in every build without new
+  native tooling. `build.rs` compiles SQLCipher and the minimal libtomcrypt provider, and
+  `src/bindings.rs` is included directly. See `vendor/libsqlite3-sys/RUSTGRID_PATCHES.md`; remove it
+  once upstream (or an sqlx release) builds SQLCipher with libtomcrypt.
 - `crates/rustgrid-sqlserver` — the **Microsoft SQL Server** driver, built on **tiberius** (pure-Rust
   async TDS) with a **bb8** connection pool (`pool.rs`). It is not sqlx-based (sqlx 0.9 has no MSSQL
   driver). `driver.rs` builds the tiberius `Config` (host/port, SQL authentication, TLS, timeouts) and
@@ -186,8 +203,9 @@ not a later refactor.
 - MySQL: **sqlx 0.9**, `default-features = false`, only features
   `runtime-tokio`, `mysql`, `tls-rustls-ring`, `chrono`.
 - SQLite: the same **sqlx 0.9** with its `sqlite` feature added by `rustgrid-sqlite` (this
-  statically bundles SQLite through `libsqlite3-sys`, so a C compiler is required — `gcc` on
-  Windows, see Gotchas).
+  statically bundles **SQLCipher** through the patched `vendor/libsqlite3-sys`, so a C compiler is
+  required — `gcc` on Windows, see Gotchas — but no OpenSSL/Perl toolchain: libtomcrypt is compiled
+  from `sqlcipher-src`'s C sources). The same library opens plain SQLite files.
 - PostgreSQL: the same **sqlx 0.9** with its `postgres` feature added by `rustgrid-postgresql`
   (TLS via the workspace's `tls-rustls-ring`, so no new native dependency).
 - Oracle: **`oracledb = "=26.0.0-beta.4"`** (Oracle's official pure-Rust thin driver, `default-features
@@ -1268,6 +1286,18 @@ make more engines cheap later — do not build those features early.
 - Stored passwords are encrypted with XChaCha20-Poly1305 (`rustgrid-config/src/secrets.rs`);
   `secrets.json` holds ciphertext keyed by profile `id` and `secret.key` holds the key. The
   profile JSON must stay password-free (a test asserts the plaintext never hits disk).
+- **SQLCipher replaces the SQLite library; it is not an attachable extension.** The workspace
+  patches `libsqlite3-sys` 0.37 (`vendor/libsqlite3-sys`) to compile SQLCipher + libtomcrypt from
+  `sqlcipher-src`, so there is no OpenSSL/Perl dependency. Its key is the **connection password**
+  (the standard field, stored encrypted), applied as `PRAGMA key` in `after_connect`; never put the
+  key in `profile.options`. Order matters: `PRAGMA cipher_compatibility = 3` comes **after** the key
+  and before the first read, or a SQLCipher 3 database looks like a wrong password. A wrong key
+  reports SQLITE_NOTADB (26); `driver.rs` maps it to `Error::Authentication` so the app's password
+  prompt appears. Do not verify the key inside the pool's `after_connect`: sqlx retries that until
+  `acquire_timeout` and reports `PoolTimedOut`, hiding the cause — the driver probes one connection
+  first. A pool connection re-applies only the key (and the init SQL). Plain SQLite files keep
+  working because SQLCipher writes plaintext until a key is set. Do not switch the patch to
+  `bundled-sqlcipher-vendored-openssl`; it needs Perl/NASM/`make` on Windows.
 - **Windows needs a linker and a C compiler** (sqlx's `ring`). On this machine the MSVC
   `link.exe` is **not** installed, so always build with the GNU toolchain by prepending
   `RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-gnu`,
