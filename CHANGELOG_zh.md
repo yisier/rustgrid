@@ -10,8 +10,8 @@
 
 ### 新增
 
-- SQLite 可打开 SQLCipher 3/4 加密数据库（[#53](https://github.com/yisier/rustgrid/issues/53)）。
-- 表设计器可粘贴字段，连同完整定义复制到其他表。
+- SQLite 连接设置中增加支持 SQLCipher 3/4 加密数据库（[#53](https://github.com/yisier/rustgrid/issues/53)）。
+- 表设计器可粘贴字段，连同完整定义复制到其他表（[#54](https://github.com/yisier/rustgrid/pull/54)）。
 - 表格记录操作按钮带提示和快捷键，Insert 可新增一行（[#51](https://github.com/yisier/rustgrid/issues/51)）。
 
 ### 修复

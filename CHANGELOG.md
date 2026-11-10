@@ -14,9 +14,10 @@ Russian ones.
 
 ### Added
 
-- SQLite opens SQLCipher 3 and 4 encrypted databases
+- SQLite connection settings add SQLCipher 3 and 4 encrypted database support
   ([#53](https://github.com/yisier/rustgrid/issues/53)).
-- Table Designer pastes fields with their definitions into another table.
+- Table Designer pastes fields with their definitions into another table
+  ([#54](https://github.com/yisier/rustgrid/pull/54)).
 - The grid's record buttons show tooltips with their shortcuts, and Insert adds a row
   ([#51](https://github.com/yisier/rustgrid/issues/51)).
 
