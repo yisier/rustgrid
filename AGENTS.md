@@ -509,8 +509,13 @@ touching UI code.
   or a click outside just discards it, so the grid only ever shows an applied layout. The footer is
   重置 (`field_filter_reset`: table order + every field shown), 全选 (`field_filter_show_all`: every
   field shown) and 反选 (`field_filter_invert` → `GridFieldLayout::invert_visibility`, which never
-  hides the last visible field) on the left, 取消 / 确定 on the right. The popup title
-  stays 字段筛选, which is what tells it apart from the WHERE button.
+  hides the last visible field) on the left, 取消 / 确定 on the right. The three left actions are
+  **icon buttons with localized tooltips** (`rotate-ccw.svg` / `list-checks.svg` /
+  `flip-vertical-2.svg`), not text: their translations (Russian especially) were wider than the
+  252px panel and pushed 取消/确定 outside the popup and the window. The footer wraps and the
+  right-hand group grows to fill the row (`flex_1` + `justify_end`), so a long locale wraps the
+  buttons instead of overflowing. The popup title stays 字段筛选, which is what tells it apart from
+  the WHERE button.
 - **A field layout never touches the row data.** `GridState` keeps the engine's columns in
   `all_columns`, the display order in `column_order` (display position -> natural index, visible
   fields first), and `visible_columns`; `columns`/`column_widths` are the *projection* of that order

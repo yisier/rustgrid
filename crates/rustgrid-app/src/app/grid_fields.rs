@@ -502,8 +502,8 @@ impl GridView {
         let footer = div()
             .flex()
             .flex_row()
+            .flex_wrap()
             .items_center()
-            .justify_between()
             .gap_1()
             .px_2()
             .py_1()
@@ -516,18 +516,21 @@ impl GridView {
                     .flex_row()
                     .items_center()
                     .gap_1()
-                    .child(self.field_filter_action(
+                    .child(self.field_filter_icon_action(
                         "field-filter-reset",
+                        "icons/rotate-ccw.svg",
                         t!("grid.field_filter_reset").to_string(),
                         cx.listener(|this, _event, _window, cx| this.field_filter_reset(cx)),
                     ))
-                    .child(self.field_filter_action(
+                    .child(self.field_filter_icon_action(
                         "field-filter-select-all",
+                        "icons/list-checks.svg",
                         t!("grid.field_filter_select_all").to_string(),
                         cx.listener(|this, _event, _window, cx| this.field_filter_show_all(cx)),
                     ))
-                    .child(self.field_filter_action(
+                    .child(self.field_filter_icon_action(
                         "field-filter-invert",
+                        "icons/flip-vertical-2.svg",
                         t!("grid.field_filter_invert").to_string(),
                         cx.listener(|this, _event, _window, cx| this.field_filter_invert(cx)),
                     )),
@@ -536,7 +539,10 @@ impl GridView {
                 div()
                     .flex()
                     .flex_row()
+                    .flex_wrap()
+                    .flex_1()
                     .items_center()
+                    .justify_end()
                     .gap_1()
                     .child(ui::popup_button(
                         "field-filter-cancel",
@@ -586,10 +592,12 @@ impl GridView {
             .into_any_element()
     }
 
-    /// One footer action of the 字段筛选 popup.
-    fn field_filter_action(
+    /// One icon action of the 字段筛选 popup. The label lives in the tooltip: Russian (and other
+    /// long translations) overflowed the narrow panel when the footer carried text buttons.
+    fn field_filter_icon_action(
         &self,
         id: &'static str,
+        icon: &'static str,
         label: String,
         on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> impl IntoElement {
@@ -599,15 +607,21 @@ impl GridView {
             .flex()
             .items_center()
             .justify_center()
+            .w(px(24.0))
             .h(px(20.0))
-            .px_2()
             .rounded_sm()
             .flex_none()
-            .text_size(px(11.0))
-            .text_color(rgb(theme.text))
             .cursor_pointer()
             .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            .tooltip(ui::text_tooltip(label))
             .on_click(on_click)
-            .child(label)
+            .child(
+                svg()
+                    .path(icon)
+                    .w(px(14.0))
+                    .h(px(14.0))
+                    .flex_none()
+                    .text_color(rgb(theme.text)),
+            )
     }
 }

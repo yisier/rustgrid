@@ -57,6 +57,11 @@ impl AssetSource for Assets {
             "icons/text.svg" => Some(include_bytes!("../assets/icons/text.svg")),
             "icons/filter.svg" => Some(include_bytes!("../assets/icons/filter.svg")),
             "icons/field_filter.svg" => Some(include_bytes!("../assets/icons/field_filter.svg")),
+            "icons/rotate-ccw.svg" => Some(include_bytes!("../assets/icons/rotate-ccw.svg")),
+            "icons/list-checks.svg" => Some(include_bytes!("../assets/icons/list-checks.svg")),
+            "icons/flip-vertical-2.svg" => {
+                Some(include_bytes!("../assets/icons/flip-vertical-2.svg"))
+            }
             "icons/drag_handle.svg" => Some(include_bytes!("../assets/icons/drag_handle.svg")),
             "icons/sort.svg" => Some(include_bytes!("../assets/icons/sort.svg")),
             "icons/refresh.svg" => Some(include_bytes!("../assets/icons/refresh.svg")),
@@ -97,5 +102,26 @@ impl AssetSource for Assets {
 
     fn list(&self, _path: &str) -> Result<Vec<SharedString>> {
         Ok(Vec::new())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Assets;
+    use gpui::AssetSource;
+
+    #[test]
+    fn field_filter_icons_are_available() {
+        // The footer's icon actions: registered app assets, never a missing path.
+        for path in [
+            "icons/rotate-ccw.svg",
+            "icons/list-checks.svg",
+            "icons/flip-vertical-2.svg",
+        ] {
+            assert!(
+                Assets.load(path).expect("asset lookup").is_some(),
+                "{path} is missing"
+            );
+        }
     }
 }
