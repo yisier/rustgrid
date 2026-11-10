@@ -2342,8 +2342,9 @@ const FIELD_FILTER_ROW_HEIGHT: f32 = 24.0;
 /// The tallest the 字段筛选 popup's field list grows before it scrolls.
 const FIELD_FILTER_LIST_MAX_HEIGHT: f32 = 620.0;
 /// The popup's fixed chrome (header, search box, footer and the borders between them), reserved
-/// out of the pane height when sizing the field list.
-const FIELD_FILTER_CHROME_HEIGHT: f32 = 124.0;
+/// out of the pane height when sizing the field list. The footer may wrap onto several lines in a
+/// long locale (Russian), so the reserve covers a two-line footer plus a separate 取消/确定 row.
+const FIELD_FILTER_CHROME_HEIGHT: f32 = 156.0;
 
 pub struct AppView {
     registry: Arc<DriverRegistry>,
