@@ -1227,7 +1227,14 @@ impl AppView {
     }
 
     /// Handle a double-click on a schema tree row: open the schema (highlight it, expand it and show
-    /// its objects) when it is not already showing, otherwise collapse/expand it like a plain node.
+    /// its objects) when it is not already open and showing, otherwise collapse/expand it like a
+    /// plain node.
+    ///
+    /// "Already open" needs both the schema's own `opened_schemas` flag and the content pane showing
+    /// it. The pane alone is not enough: expanding a schema's categories shows them without opening
+    /// the schema, and using only the pane made a double-click merely toggle the expansion — the
+    /// schema stayed grey (unopened) and the tree search, which only searches opened schemas, could
+    /// not find its tables.
     pub(super) fn select_schema(
         &mut self,
         connection_index: usize,
@@ -1236,13 +1243,47 @@ impl AppView {
         cx: &mut Context<'_, Self>,
     ) {
         self.clear_tree_selection(cx);
-        let already_open = self.object_pane.as_ref().is_some_and(|pane| {
+        let opened = self
+            .connections
+            .get(connection_index)
+            .and_then(|node| match &node.databases {
+                Loadable::Loaded(databases) => databases.get(database_index),
+                _ => None,
+            })
+            .is_some_and(|database| database.opened_schemas.contains(&schema));
+        let pane_shows = self.object_pane.as_ref().is_some_and(|pane| {
             let pane = pane.read(cx);
             pane.connection_index == connection_index
                 && pane.database_index == database_index
                 && pane.schema.as_deref() == Some(schema.as_str())
         });
-        if already_open {
+        if opened && pane_shows {
+            self.toggle_schema(connection_index, database_index, schema, cx);
+        } else {
+            self.open_schema(connection_index, database_index, schema, cx);
+        }
+    }
+
+    /// Expand or collapse a schema from its chevron or the Right arrow. A schema that was never
+    /// opened is opened first, so the tree never holds an expanded-but-unopened schema — that
+    /// state was invisible to the tree search (which only searches opened schemas) and made the
+    /// same chevron behave differently from a double-click.
+    pub(super) fn expand_schema(
+        &mut self,
+        connection_index: usize,
+        database_index: usize,
+        schema: String,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let opened = self
+            .connections
+            .get(connection_index)
+            .and_then(|node| match &node.databases {
+                Loadable::Loaded(databases) => databases.get(database_index),
+                _ => None,
+            })
+            .is_some_and(|database| database.opened_schemas.contains(&schema));
+        if opened {
             self.toggle_schema(connection_index, database_index, schema, cx);
         } else {
             self.open_schema(connection_index, database_index, schema, cx);

@@ -1714,6 +1714,8 @@ impl TreePane {
         let app = self.app.clone();
         let menu_app = self.app.clone();
         let menu_schema = schema.to_string();
+        let chevron_app = self.app.clone();
+        let chevron_name = schema.to_string();
 
         let row = div()
             .id(SharedString::from(schema_id))
@@ -1774,7 +1776,31 @@ impl TreePane {
                     });
                 }),
             )
-            .child(tree_chevron(expanded, theme.chevron))
+            .child(
+                // The chevron opens a closed schema and expands/collapses an open one, exactly
+                // like the Right arrow — a schema is never expanded without being opened.
+                div()
+                    .id(SharedString::from(format!(
+                        "schema-toggle-{connection_index}-{database_index}-{schema}"
+                    )))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .flex_none()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |_this, _event, _window, cx| {
+                        cx.stop_propagation();
+                        let _ = chevron_app.update(cx, |app, cx| {
+                            app.expand_schema(
+                                connection_index,
+                                database_index,
+                                chevron_name.clone(),
+                                cx,
+                            );
+                        });
+                    }))
+                    .child(tree_chevron(expanded, theme.chevron)),
+            )
             .child(tree_icon(
                 "icons/database.svg",
                 if database.opened_schemas.contains(schema) {
@@ -1799,7 +1825,7 @@ impl TreePane {
                 Rc::new(move |_this, _window, cx| {
                     let name = toggle_name.clone();
                     let _ = toggle_app.update(cx, |app, cx| {
-                        app.toggle_schema(connection_index, database_index, name, cx)
+                        app.expand_schema(connection_index, database_index, name, cx)
                     });
                 }),
             )

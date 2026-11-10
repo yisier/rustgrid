@@ -994,10 +994,14 @@ shadcn chrome described above. Implemented today:
     objects that are already loaded: opening a database loads all its schemas' tables, which is
     what makes the qualified search work, while a database that was never opened is matched by its
     name only and the search never issues a catalog query of its own. A bare name search stops at
-    the schemas the tree has opened (double-clicked, or opened from the context menu); merely
-    expanding one (keyboard Right) is not opening it, so it never pulls a table out of a schema the
-    user has not opened; `sales.orders` and `sales` still locate one (a qualified query reaches
-    every loaded schema, and a schema-name match brings that schema's tables). A matching branch
+    the schemas the tree has opened (double-clicked, opened from the context menu, or expanded with
+    its chevron / the Right arrow, which opens a closed schema first), so a table in a schema the
+    user has not opened is not a search result; `sales.orders` and `sales` still locate one (a
+    qualified query reaches every loaded schema, and a schema-name match brings that schema's
+    tables). A double-click toggles expansion only when the schema is both opened (`opened_schemas`)
+    and already shown in the content pane; if the pane shows it merely because its categories were
+    expanded, the double-click opens it (sets `opened_schemas`) instead of only toggling. A matching
+    branch
     keeps its immediate children (a matched connection shows its databases, a matched database its
     schemas), the branches on the way to a match open, only 表/视图 are drawn while filtering (with
     just the matching objects), and a group without a surviving connection is skipped. Down / Up
