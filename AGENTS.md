@@ -1331,17 +1331,22 @@ make more engines cheap later — do not build those features early.
   carries it. Skipping `a11y_init` is the only in-process way to avoid it; the cost is that
   VoiceOver cannot read the app on macOS. **Remove the macOS arm of `application()` as soon as
   `gpui-fast` ships the fix.**
-- **The Dock icon is also set at runtime from the embedded logo.** `src/dock_icon.rs` (macOS-only,
-  called from the launch callback) pushes `assets/logo.png` into
+- **The Dock icon is also set at runtime from the padded logo.** `src/dock_icon.rs` (macOS-only,
+  called from the launch callback) pushes `assets/logo_dock.png` into
   `NSApplication.setApplicationIconImage:` through the `objc2` crates, which are already in the lock
-  file via `gpui-fast-macos`. A real bundle takes its icon from `AppIcon.icns` (next bullet), so this
-  is the fallback that keeps a bundle-less run — an install the updater left bare, or the executable
-  copied out of `Contents/MacOS` — from showing the generic executable icon.
+  file via `gpui-fast-macos`. That file is the near-full-bleed `assets/logo.png` art scaled to ~80%
+  of a 512×512 canvas, because macOS does not inset app artwork itself: handing it `logo.png` made
+  the Dock tile larger than every system icon (issue #49). A real bundle takes its icon from
+  `AppIcon.icns` (next bullet), so this is the fallback that keeps a bundle-less run — an install the
+  updater left bare, or the executable copied out of `Contents/MacOS` — from showing the generic
+  executable icon.
 - **The macOS release is a `.app` bundle, and the updater swaps it as one.** `.github/workflows/
   release.yml` assembles `RustGrid.app` from `packaging/macos/` (an `Info.plist` template plus
-  `make-icns.sh`, which turns `assets/logo.png` into `Contents/Resources/AppIcon.icns` with
-  `sips`/`iconutil`) and ad-hoc signs it, so Finder, the menu bar and the Dock read their icon and
-  app name from the bundle. `update.rs::configure_macos_layout` mirrors that layout: inside a bundle
+  `make-icns.sh`, which turns `assets/logo_dock.png` into `Contents/Resources/AppIcon.icns` with
+  `sips`/`iconutil` — the same padded art keeps Finder and the Dock consistent, and the 1024px
+  `icon_512x512@2x` entry is upscaled from the 512px source) and ad-hoc signs it, so Finder, the
+  menu bar and the Dock read their icon and app name from the bundle.
+  `update.rs::configure_macos_layout` mirrors that layout: inside a bundle
   it uses `self_update`'s **bundle mode** (`bundle_path_in_archive("RustGrid.app")`, which swaps the
   whole directory in one rename and defaults its install path to the nearest `.app` ancestor of the
   running exe), and a bare-executable install instead extracts `RustGrid.app/Contents/MacOS/RustGrid`
