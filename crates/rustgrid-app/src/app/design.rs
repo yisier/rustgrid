@@ -893,6 +893,37 @@ fn unique_column_name(base: &str, existing: &mut Vec<String>) -> String {
     candidate
 }
 
+/// The whole field definitions a 复制 keeps for 粘贴: every row the selection touches, not the
+/// empty gap rows inside its bounding rectangle (a Ctrl/Cmd-click selection may have several
+/// ranges), cloned so later edits to the source designer cannot change the clipboard.
+fn copied_columns(columns: &[ColumnDef], selection: &CellSelection) -> Vec<ColumnDef> {
+    selection
+        .row_indices()
+        .into_iter()
+        .filter_map(|row| columns.get(row).cloned())
+        .collect()
+}
+
+/// The columns a 粘贴 appends: each copied definition with its primary-key, auto-increment and
+/// identity flags cleared, so it cannot collide with the target table's own key, and a name that
+/// avoids every column already in the target and every earlier field in this same paste.
+fn pasted_columns(copied: Vec<ColumnDef>, existing: &mut Vec<String>) -> Vec<ColumnDef> {
+    copied
+        .into_iter()
+        .map(|mut column| {
+            column.primary_key = false;
+            column.auto_increment = false;
+            column.identity.clear();
+            column.identity_start.clear();
+            column.identity_increment.clear();
+            if !column.name.is_empty() {
+                column.name = unique_column_name(&column.name, existing);
+            }
+            column
+        })
+        .collect()
+}
+
 impl TableDesignView {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
@@ -1557,11 +1588,9 @@ impl TableDesignView {
         }
         cx.write_to_clipboard(ClipboardItem::new_string(lines.join("\n")));
         // Also keep the whole copied columns (not just the selected cells) in the shared field
-        // clipboard, so 粘贴 in another designer reproduces each field exactly.
-        let copied: Vec<ColumnDef> = (start_row..=end_row)
-            .filter_map(|row| self.schema.columns.get(row).cloned())
-            .collect();
-        *self.design_clipboard.borrow_mut() = copied;
+        // clipboard, so 粘贴 in another designer reproduces each field exactly. A multi-range
+        // selection must not carry the unselected gap rows inside its bounding rectangle.
+        *self.design_clipboard.borrow_mut() = copied_columns(&self.schema.columns, &selection);
         cx.notify();
     }
 
@@ -1571,7 +1600,8 @@ impl TableDesignView {
     /// collides with the target table's own key, and takes a unique name when the target already has
     /// that column.
     pub(super) fn paste_fields(&mut self, cx: &mut Context<'_, Self>) {
-        if self.tab != DesignerTab::Fields {
+        // The schema load replaces `columns` wholesale, so a paste while it runs would vanish.
+        if self.tab != DesignerTab::Fields || self.loading {
             return;
         }
         let copied: Vec<ColumnDef> = self.design_clipboard.borrow().clone();
@@ -1585,19 +1615,9 @@ impl TableDesignView {
             .iter()
             .map(|column| column.name.clone())
             .collect();
-        let mut last = at;
-        for (offset, mut column) in copied.into_iter().enumerate() {
-            column.primary_key = false;
-            column.auto_increment = false;
-            column.identity.clear();
-            column.identity_start.clear();
-            column.identity_increment.clear();
-            if !column.name.is_empty() {
-                column.name = unique_column_name(&column.name, &mut existing);
-            }
-            last = at + offset;
-            self.schema.columns.insert(last, column);
-        }
+        let pasted = pasted_columns(copied, &mut existing);
+        let last = at + pasted.len() - 1;
+        self.schema.columns.extend(pasted);
         self.selected_field = Some(last);
         self.selected_cell = Some((last, FieldCell::Name));
         let last_column = self.field_column_count().saturating_sub(1);
@@ -4983,5 +5003,68 @@ mod tests {
         assert_eq!(selection.row_indices(), vec![2, 3, 4]);
         assert!(selection.contains(3, 1));
         assert!(!selection.contains(3, 0));
+    }
+
+    fn named_columns(names: &[&str]) -> Vec<ColumnDef> {
+        names
+            .iter()
+            .map(|name| ColumnDef {
+                name: name.to_string(),
+                ..ColumnDef::default()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_copy_skips_the_gap_rows_of_a_multi_range_selection() {
+        let columns = named_columns(&["id", "name", "email", "created_at"]);
+        // Ctrl/Cmd-click on rows 0 and 2: row 1 is inside the bounding rectangle but not selected.
+        let selection = CellSelection {
+            ranges: vec![CellRange::new(0, 0), CellRange::new(2, 0)],
+            active: 0,
+        };
+        let copied = copied_columns(&columns, &selection);
+        let names: Vec<&str> = copied.iter().map(|column| column.name.as_str()).collect();
+        assert_eq!(names, ["id", "email"]);
+    }
+
+    #[test]
+    fn a_paste_clears_key_flags_and_avoids_taken_names() {
+        let copied = vec![
+            ColumnDef {
+                name: "id".to_string(),
+                data_type: "bigint".to_string(),
+                primary_key: true,
+                auto_increment: true,
+                identity: "ALWAYS".to_string(),
+                identity_start: "10".to_string(),
+                identity_increment: "2".to_string(),
+                ..ColumnDef::default()
+            },
+            ColumnDef {
+                name: "id".to_string(),
+                data_type: "bigint".to_string(),
+                ..ColumnDef::default()
+            },
+        ];
+        let mut existing = vec!["id".to_string(), "id_copy".to_string()];
+        let pasted = pasted_columns(copied, &mut existing);
+        assert_eq!(pasted[0].name, "id_copy2");
+        assert_eq!(pasted[1].name, "id_copy3");
+        assert!(!pasted[0].primary_key);
+        assert!(!pasted[0].auto_increment);
+        assert!(pasted[0].identity.is_empty());
+        assert!(pasted[0].identity_start.is_empty());
+        assert!(pasted[0].identity_increment.is_empty());
+        assert_eq!(pasted[0].data_type, "bigint");
+        assert_eq!(
+            existing,
+            vec![
+                "id".to_string(),
+                "id_copy".to_string(),
+                "id_copy2".to_string(),
+                "id_copy3".to_string()
+            ]
+        );
     }
 }
