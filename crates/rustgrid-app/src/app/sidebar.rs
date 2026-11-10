@@ -1237,6 +1237,18 @@ impl TreePane {
                         ),
                 )
             })
+            // Loading an expanded connection's databases spins on the connection row itself.
+            .when(
+                connection.expanded
+                    && !matches!(connection.status, TreeStatus::Connecting)
+                    && matches!(connection.databases, Loadable::Loading),
+                |row| {
+                    row.child(tree_loading_spinner(
+                        SharedString::from(format!("conn-db-loading-{index}")),
+                        theme,
+                    ))
+                },
+            )
             // Keep the environment colour readable on the selected row as a thin left strip.
             .when_some(node_accent, |row, color| {
                 row.child(
@@ -1272,14 +1284,7 @@ impl TreePane {
 
         if connection.expanded {
             match &connection.databases {
-                Loadable::Idle => {}
-                Loadable::Loading => {
-                    sub = sub.child(tree_message(
-                        t!("common.loading").to_string(),
-                        26.0,
-                        theme.text_muted,
-                    ));
-                }
+                Loadable::Idle | Loadable::Loading => {}
                 Loadable::Failed(error) => {
                     sub = sub.child(tree_message(error.clone(), 26.0, theme.danger));
                 }
@@ -1457,7 +1462,22 @@ impl TreePane {
                         .text_color(rgb(theme.text_muted))
                         .child(format!("({count})")),
                 )
-            });
+            })
+            // The database row carries the spinner (right end) while it loads its objects, so no
+            // "加载中..." row is inserted below it.
+            .when(
+                database.expanded
+                    && (matches!(database.tables, Loadable::Loading)
+                        || matches!(database.namespaces, Loadable::Loading)),
+                |row| {
+                    row.child(tree_loading_spinner(
+                        SharedString::from(format!(
+                            "db-loading-{connection_index}-{database_index}"
+                        )),
+                        theme,
+                    ))
+                },
+            );
         let nav_id = format!("db-{connection_index}-{database_index}");
         let toggle_id = nav_id.clone();
         let row = self.nav_row(
@@ -1485,14 +1505,7 @@ impl TreePane {
                 ));
             } else {
                 match &database.tables {
-                    Loadable::Idle => {}
-                    Loadable::Loading => {
-                        sub = sub.child(tree_message(
-                            t!("common.loading").to_string(),
-                            36.0,
-                            theme.text_muted,
-                        ));
-                    }
+                    Loadable::Idle | Loadable::Loading => {}
                     Loadable::Failed(error) => {
                         sub = sub.child(tree_message(error.clone(), 36.0, theme.danger));
                     }
@@ -1913,6 +1926,10 @@ impl TreePane {
         let app = self.app.clone();
         let menu_app = self.app.clone();
         let menu_schema = schema.map(str::to_string);
+        // 函数 loads its routines when the category expands; its own row spins while they arrive.
+        let routines_busy = category == Category::Functions
+            && expanded
+            && matches!(database.routines, Loadable::Idle | Loadable::Loading);
 
         let row = div()
             .id(SharedString::from(cat_id))
@@ -1982,7 +1999,23 @@ impl TreePane {
             )
             .child(tree_chevron(expanded, theme.chevron))
             .child(tree_icon(category.icon_path(), icon_color))
-            .child(div().child(label.clone()));
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .child(label.clone()),
+            )
+            .when(routines_busy, |row| {
+                row.child(tree_loading_spinner(
+                    SharedString::from(format!(
+                        "cat-loading-{connection_index}-{database_index}-{scope}-{}",
+                        category.id()
+                    )),
+                    theme,
+                ))
+            });
         let toggle_app = self.app.clone();
         let toggle_schema = schema.map(str::to_string);
         let row = self.nav_row(
@@ -2068,13 +2101,7 @@ impl TreePane {
                     }
                 }
                 Category::Functions => match &database.routines {
-                    Loadable::Idle | Loadable::Loading => {
-                        sub = sub.child(tree_message(
-                            t!("common.loading").to_string(),
-                            52.0,
-                            theme.text_muted,
-                        ));
-                    }
+                    Loadable::Idle | Loadable::Loading => {}
                     Loadable::Failed(error) => {
                         sub = sub.child(tree_message(error.clone(), 52.0, theme.danger));
                     }
@@ -3146,6 +3173,22 @@ impl Render for TreePane {
             .child(container)
             .into_any_element()
     }
+}
+
+/// The connection tree's busy indicator: the same spinner a connecting connection row draws, placed
+/// at the right end of whichever row is loading (a tree never gets a "加载中..." placeholder row).
+fn tree_loading_spinner(id: SharedString, theme: Theme) -> impl IntoElement {
+    div()
+        .id(id)
+        .flex_none()
+        .flex()
+        .items_center()
+        .tooltip(ui::text_tooltip(t!("common.loading").to_string()))
+        .child(
+            Spinner::new()
+                .with_size(gpui_kit::component::Size::Small)
+                .color(rgb(theme.warning).into()),
+        )
 }
 
 /// Whether a click event was actually a drag (press and release far apart), so a row drag of the
