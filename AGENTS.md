@@ -990,7 +990,8 @@ shadcn chrome described above. Implemented today:
     objects that are already loaded: opening a database loads all its schemas' tables, which is
     what makes the qualified search work, while a database that was never opened is matched by its
     name only and the search never issues a catalog query of its own. A bare name search stops at
-    the schemas the tree has opened (or expanded), so it never pulls a table out of a schema the
+    the schemas the tree has opened (double-clicked, or opened from the context menu); merely
+    expanding one (keyboard Right) is not opening it, so it never pulls a table out of a schema the
     user has not opened; `sales.orders` and `sales` still locate one (a qualified query reaches
     every loaded schema, and a schema-name match brings that schema's tables). A matching branch
     keeps its immediate children (a matched connection shows its databases, a matched database its

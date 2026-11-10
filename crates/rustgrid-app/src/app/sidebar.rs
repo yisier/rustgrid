@@ -386,13 +386,14 @@ fn snapshot_database(
     // never issues a catalog query of its own.
     let read_tables = database.expanded || (searching && !key_value && database.opened);
     // A bare name search only reaches the schemas the user has opened; tables in a schema that
-    // was never opened are not search results. A qualified query (`schema.table`) still reaches
-    // every loaded schema, and a schema-name match still brings its tables (so typing the schema
-    // itself locates it). Schema-less engines (MySQL/SQLite) have no such gate.
+    // was never opened are not search results. Merely expanding a schema (keyboard Right) is not
+    // opening it — an expanded-only schema stays out of the search too. A qualified query
+    // (`schema.table`) still reaches every loaded schema, and a schema-name match still brings its
+    // tables (so typing the schema itself locates it). Schema-less engines (MySQL/SQLite) have no
+    // such gate.
     let qualified_search = query.contains('.');
     let schema_is_searchable = |schema: &str| {
         qualified_search
-            || database.expanded_schemas.contains(schema)
             || database.opened_schemas.contains(schema)
             || schema_search_matches(query, &database.name, schema)
     };
@@ -3394,9 +3395,18 @@ mod nav_tests {
             ],
             &["public", "sales"],
         );
+        // Neither opened nor expanded: no table of that schema is a search result.
+        let query = tree_search_query("users").unwrap();
+        assert!(snapshot_database(&database, 0, Some(&query), false, false).is_none());
+
+        // Merely expanding a schema (keyboard Right) is not opening it: its tables are not
+        // search results either.
         database.expanded_schemas.insert("public".to_string());
+        let query = tree_search_query("users").unwrap();
+        assert!(snapshot_database(&database, 0, Some(&query), false, false).is_none());
 
         // An opened schema's table is found by its bare name.
+        database.opened_schemas.insert("public".to_string());
         let query = tree_search_query("users").unwrap();
         let snapshot =
             snapshot_database(&database, 0, Some(&query), false, false).expect("a match");
