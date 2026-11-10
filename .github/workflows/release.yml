@@ -253,7 +253,7 @@ jobs:
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
           cp "target/${{ matrix.target }}/release/RustGrid" "$app/Contents/MacOS/RustGrid"
           sed "s/@VERSION@/${ver}/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
-          sh packaging/macos/make-icns.sh crates/rustgrid-app/assets/logo.png \
+          sh packaging/macos/make-icns.sh crates/rustgrid-app/assets/logo_dock.png \
             "$app/Contents/Resources/AppIcon.icns"
           # Fail on a malformed property list or a missing icon rather than shipping a bundle
           # macOS cannot read its name/icon/version from.
