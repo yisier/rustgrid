@@ -860,6 +860,13 @@ impl Render for GridView {
         // Keyboard commands (keymap): F5 refresh and the spreadsheet jumps.
         .key_context(GRID_CONTEXT)
         .on_action(cx.listener(|this, _: &GridRefresh, _window, cx| this.refresh(cx)))
+        .on_action(cx.listener(|this, _: &GridInsertRow, window, cx| {
+            // Insert is an editing gesture: while a cell editor (or the date picker) holds the
+            // keyboard, it must not append a row behind the editor.
+            if this.cell_editor.is_none() && this.date_picker.is_none() {
+                this.add_insert_row(window, cx);
+            }
+        }))
         .on_action(
             cx.listener(|this, _: &GridDuplicateRow, window, cx| this.duplicate_row(window, cx)),
         )

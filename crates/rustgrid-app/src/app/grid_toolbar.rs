@@ -1,5 +1,8 @@
 use super::grid::filter_node;
 use super::*;
+use gpui_kit::base::Placement;
+use gpui_kit::component::Disableable;
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::spinner::Spinner;
 
 /// The status bar's SQL line: how close (px) the pointer gets to an edge before a selection drag
@@ -1519,23 +1522,24 @@ impl GridView {
                             && !scalar_key
                             && !self.state.loading
                             && self.state.visible_columns > 0,
+                        t!("grid.add_row").to_string(),
+                        Some(&GridInsertRow),
                         cx.listener(|this, _event, window, cx| this.add_insert_row(window, cx)),
                     ))
-                    .child(
-                        self.grid_icon_button(
-                            "grid-duplicate",
-                            "icons/copy.svg",
-                            theme.icon_connection,
-                            self.state.editable
-                                && !scalar_key
-                                && !self.state.loading
-                                && self.state.visible_columns > 0
-                                && self.state.selection.is_some()
-                                && !self.state.rows.is_empty(),
-                            cx.listener(|this, _event, window, cx| this.duplicate_row(window, cx)),
-                        )
-                        .tooltip(ui::text_tooltip(t!("grid.duplicate_row").to_string())),
-                    )
+                    .child(self.grid_icon_button(
+                        "grid-duplicate",
+                        "icons/copy.svg",
+                        theme.icon_connection,
+                        self.state.editable
+                            && !scalar_key
+                            && !self.state.loading
+                            && self.state.visible_columns > 0
+                            && self.state.selection.is_some()
+                            && !self.state.rows.is_empty(),
+                        t!("grid.duplicate_row").to_string(),
+                        Some(&GridDuplicateRow),
+                        cx.listener(|this, _event, window, cx| this.duplicate_row(window, cx)),
+                    ))
                     .child(self.grid_icon_button(
                         "grid-delete",
                         "icons/minus.svg",
@@ -1544,6 +1548,8 @@ impl GridView {
                             && !scalar_key
                             && self.state.selection.is_some()
                             && !self.state.rows.is_empty(),
+                        t!("grid.delete_row").to_string(),
+                        None,
                         cx.listener(|this, _event, _window, cx| this.open_delete_confirm(cx)),
                     ))
                     .child(self.grid_icon_button(
@@ -1553,6 +1559,8 @@ impl GridView {
                         self.cell_editor.is_some()
                             || !self.state.edits.is_empty()
                             || !self.inserts.is_empty(),
+                        t!("grid.save_changes").to_string(),
+                        None,
                         cx.listener(|this, _event, _window, cx| this.save_grid(cx)),
                     ))
                     .child(self.grid_icon_button(
@@ -1562,6 +1570,8 @@ impl GridView {
                         self.cell_editor.is_some()
                             || !self.state.edits.is_empty()
                             || !self.inserts.is_empty(),
+                        t!("grid.cancel_changes").to_string(),
+                        None,
                         cx.listener(|this, _event, _window, cx| this.cancel_edits(cx)),
                     ))
                     .child(self.grid_icon_button(
@@ -1569,6 +1579,8 @@ impl GridView {
                         "icons/refresh.svg",
                         active,
                         true,
+                        t!("grid.refresh").to_string(),
+                        Some(&GridRefresh),
                         cx.listener(|this, _event, _window, cx| this.refresh(cx)),
                     ))
                     .when_some(selection_info, |row, text| {
@@ -1605,6 +1617,8 @@ impl GridView {
                     "icons/first.svg",
                     active,
                     !at_first,
+                    t!("grid.first_page").to_string(),
+                    None,
                     cx.listener(|this, _event, _window, cx| this.first_page(cx)),
                 ))
                 .child(self.grid_icon_button(
@@ -1612,6 +1626,8 @@ impl GridView {
                     "icons/prev.svg",
                     active,
                     !at_first,
+                    t!("grid.prev_page").to_string(),
+                    None,
                     cx.listener(|this, _event, _window, cx| this.prev_page(cx)),
                 ))
                 .child(self.render_page_input())
@@ -1620,6 +1636,8 @@ impl GridView {
                     "icons/next.svg",
                     active,
                     !at_last,
+                    t!("grid.next_page").to_string(),
+                    None,
                     cx.listener(|this, _event, _window, cx| this.next_page(cx)),
                 ))
                 .child(self.grid_icon_button(
@@ -1627,6 +1645,8 @@ impl GridView {
                     "icons/last.svg",
                     active,
                     !at_last,
+                    t!("grid.last_page").to_string(),
+                    None,
                     cx.listener(|this, _event, _window, cx| this.last_page(cx)),
                 ))
                 .child(self.grid_icon_button(
@@ -1638,6 +1658,8 @@ impl GridView {
                         muted
                     },
                     true,
+                    t!("grid.limit_records").to_string(),
+                    None,
                     cx.listener(|this, _event, _window, cx| this.toggle_page_size_menu(cx)),
                 ))
                 .child(self.render_form_toggle(cx))
@@ -1674,7 +1696,7 @@ impl GridView {
 
     /// The footer's 编辑表单 toggle, right of the page-size gear. It only lights up (and is only
     /// clickable) while a data row is selected, and opens the right-hand pane's row form.
-    fn render_form_toggle(&self, cx: &mut Context<'_, Self>) -> Stateful<Div> {
+    fn render_form_toggle(&self, cx: &mut Context<'_, Self>) -> Button {
         let theme = self.theme;
         let has_row = self.state.selection.as_ref().is_some_and(|selection| {
             selection
@@ -1683,23 +1705,23 @@ impl GridView {
                 .any(|row| matches!(self.row_at(row), Some(GridRow::Data(_))))
         });
         let open = self.app.upgrade().is_some_and(|app| app.read(cx).form_open);
-        let button = self
-            .grid_icon_button(
-                "grid-form",
-                "icons/form.svg",
-                if open { theme.brand } else { theme.text },
-                has_row,
-                cx.listener(|this, _event, _window, cx| {
-                    if let Some(app) = this.app.upgrade() {
-                        app.update(cx, |app, cx| app.toggle_form(cx));
-                    }
-                    // The button's lit state reads `AppView::form_open`; repaint this grid. Do it here
-                    // rather than through `AppView::notify_grids`, which would update this very grid
-                    // re-entrantly and abort.
-                    cx.notify();
-                }),
-            )
-            .tooltip(ui::text_tooltip(t!("grid.form_view").to_string()));
+        let button = self.grid_icon_button(
+            "grid-form",
+            "icons/form.svg",
+            if open { theme.brand } else { theme.text },
+            has_row,
+            t!("grid.form_view").to_string(),
+            None,
+            cx.listener(|this, _event, _window, cx| {
+                if let Some(app) = this.app.upgrade() {
+                    app.update(cx, |app, cx| app.toggle_form(cx));
+                }
+                // The button's lit state reads `AppView::form_open`; repaint this grid. Do it here
+                // rather than through `AppView::notify_grids`, which would update this very grid
+                // re-entrantly and abort.
+                cx.notify();
+            }),
+        );
         // The form pane covers the right side of the window, so the footer toggle must stay visibly
         // "on": the brand tint and its muted fill read at a glance where the primary/black icon
         // tone did not.
@@ -1713,30 +1735,39 @@ impl GridView {
         if has_row { button } else { button.opacity(0.4) }
     }
 
+    /// A row-action icon button: gpui-kit's ghost button, so it carries a managed tooltip.
+    ///
+    /// The tooltip prefers the top side (a bubble under the button covered the record rows it acts
+    /// on) and, when `action` is bound in the grid's key context, shows that shortcut on its right —
+    /// the configured one, since Options → 快捷键 can change or clear it.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn grid_icon_button(
         &self,
         id: &'static str,
         icon: &'static str,
         color: u32,
         enabled: bool,
+        tooltip: String,
+        action: Option<&dyn gpui::Action>,
         on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    ) -> Stateful<Div> {
+    ) -> Button {
         let theme = self.theme;
         let tint = if enabled { color } else { theme.text_muted };
-        div()
-            .id(id)
-            .flex()
-            .items_center()
-            .justify_center()
+        let button = Button::new(id)
+            .ghost()
+            .tab_stop(false)
+            .accessibility_label(tooltip.clone())
             .w(px(24.0))
             .h(px(22.0))
+            .p_0()
             .rounded_sm()
-            .when(enabled, move |style| {
-                style
-                    .cursor_pointer()
+            .tooltip_placement(Placement::Top)
+            .when(enabled, move |this| {
+                this.cursor_pointer()
                     .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                    .on_click(on_click)
             })
-            .when(enabled, |this| this.on_click(on_click))
+            .when(!enabled, |this| this.disabled(true))
             .child(
                 svg()
                     .path(icon)
@@ -1744,7 +1775,11 @@ impl GridView {
                     .h(px(14.0))
                     .flex_none()
                     .text_color(rgb(tint)),
-            )
+            );
+        match action {
+            Some(action) => button.tooltip_with_action(tooltip, action, Some(GRID_CONTEXT)),
+            None => button.tooltip(tooltip),
+        }
     }
 
     pub(super) fn render_page_input(&self) -> impl IntoElement {

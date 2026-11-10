@@ -166,6 +166,7 @@ gpui::actions!(
     gridnav,
     [
         GridRefresh,
+        GridInsertRow,
         GridDuplicateRow,
         GridEditValue,
         GridPageUp,

@@ -21,10 +21,10 @@ use super::{
     BACKUP_LIST_CONTEXT, BackupFocusSearch, CloseActiveTab, CloseAllTabs, CloseOtherTabs,
     CopyBackupFile, CopyQueryFile, CopyStatusSql, DESIGNER_CONTEXT, DeleteTransferConfig,
     DesignerCopy, DesignerPaste, DesignerSelectAll, DuplicateLines, GRID_CONTEXT,
-    GRID_STATUS_CONTEXT, GridDuplicateRow, GridEditValue, GridFirstCell, GridLastCell,
-    GridNextCell, GridPageDown, GridPageUp, GridPrevCell, GridRefresh, GridRowEnd, GridRowStart,
-    GridSelectPageDown, GridSelectPageUp, MoveLinesDown, MoveLinesUp, NewQueryTab, NextTab,
-    OBJECT_LIST_CONTEXT, ObjectDown, ObjectEnd, ObjectFocusSearch, ObjectHome, ObjectLeft,
+    GRID_STATUS_CONTEXT, GridDuplicateRow, GridEditValue, GridFirstCell, GridInsertRow,
+    GridLastCell, GridNextCell, GridPageDown, GridPageUp, GridPrevCell, GridRefresh, GridRowEnd,
+    GridRowStart, GridSelectPageDown, GridSelectPageUp, MoveLinesDown, MoveLinesUp, NewQueryTab,
+    NextTab, OBJECT_LIST_CONTEXT, ObjectDown, ObjectEnd, ObjectFocusSearch, ObjectHome, ObjectLeft,
     ObjectOpen, ObjectPageDown, ObjectPageUp, ObjectRename, ObjectRight, ObjectSelectAll, ObjectUp,
     OpenTransferConfig, PAGE_CONTEXT, PasteBackupFile, PasteQueryFile, PrevTab,
     QUERY_EDITOR_CONTEXT, QUERY_LIST_CONTEXT, QueryFocusSearch, ROW_FORM_CONTEXT, RefreshPage,
@@ -347,6 +347,12 @@ pub(super) const COMMANDS: &[Command] = &[
         GridEditValue
     ),
     grid_command!("grid.refresh", "keymap.grid.refresh", &["f5"], GridRefresh),
+    grid_command!(
+        "grid.insert_row",
+        "keymap.grid.insert_row",
+        &["insert"],
+        GridInsertRow
+    ),
     grid_command!(
         "grid.duplicate_row",
         "keymap.grid.duplicate_row",
