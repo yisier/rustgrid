@@ -13,7 +13,9 @@ use rustgrid_core::{
     UserEdit, ViewDetails, ViewEdit,
 };
 use sqlx::mysql::{MySqlColumn, MySqlRow};
-use sqlx::{AssertSqlSafe, Column, Either, Executor, Row, SqlSafeStr, Statement, ValueRef};
+use sqlx::{
+    Acquire, AssertSqlSafe, Column, Either, Executor, Row, SqlSafeStr, Statement, ValueRef,
+};
 use sqlx::{MySql, MySqlConnection, MySqlPool, pool::PoolConnection};
 
 use crate::engine::Engine;
@@ -31,6 +33,12 @@ pub struct MysqlConnection {
     /// server-side prepares altogether, so this session then runs every generated statement
     /// through the text protocol (and reads the catalog with the classic `SHOW` statements).
     text_protocol: AtomicBool,
+    /// `true` once a statement was rejected with `1046 ER_NO_DB_ERROR` ("No database selected").
+    /// MySQL-protocol middlewares (UDAL/TeleDB DBProxy) parse and route each statement themselves
+    /// and refuse it while their session has no current database — even a fully qualified
+    /// `information_schema` query. Once seen, every database-scoped statement selects its
+    /// database on the session first (`USE`).
+    needs_database: AtomicBool,
     /// The tunnel forwarding this connection, kept alive for as long as the connection is.
     _tunnel: Option<rustgrid_tunnel::Tunnel>,
 }
@@ -42,6 +50,7 @@ impl MysqlConnection {
             engine,
             generation_expression: AtomicBool::new(true),
             text_protocol: AtomicBool::new(false),
+            needs_database: AtomicBool::new(false),
             _tunnel: tunnel,
         }
     }
@@ -56,10 +65,88 @@ impl MysqlConnection {
         self.text_protocol.store(true, Ordering::Relaxed);
     }
 
+    /// Whether this session already met a middleware that rejects statements while it has no
+    /// current database: every database-scoped operation then selects its database first.
+    fn needs_database(&self) -> bool {
+        self.needs_database.load(Ordering::Relaxed)
+    }
+
+    fn mark_needs_database(&self) {
+        self.needs_database.store(true, Ordering::Relaxed);
+    }
+
+    /// Acquire one pooled connection for an operation on `database`, selecting the database first
+    /// when a middleware already demanded one (see [`Self::needs_database`]).
+    async fn database_connection(&self, database: &str) -> Result<PoolConnection<MySql>> {
+        let mut connection = self.pool.acquire().await.map_err(map_query_error)?;
+        if self.needs_database() {
+            use_database(&mut connection, database)
+                .await
+                .map_err(map_query_error)?;
+        }
+        Ok(connection)
+    }
+
+    /// Run a prepared query on `connection`. A middleware that answers `1046 ER_NO_DB_ERROR`
+    /// ("No database selected") gets the database selected on that session and the statement
+    /// retried once; the middleware is remembered, so later operations select the database up
+    /// front instead of paying for a failed attempt first.
+    async fn prepared_rows(
+        &self,
+        connection: &mut MySqlConnection,
+        database: &str,
+        sql: &str,
+        binds: &[&str],
+    ) -> std::result::Result<Vec<MySqlRow>, sqlx::Error> {
+        let build = || {
+            let mut query = sqlx::query(sqlx::AssertSqlSafe(sql.to_string()));
+            for bind in binds {
+                query = query.bind(*bind);
+            }
+            query
+        };
+
+        let rows = build().fetch_all(&mut *connection).await;
+        if matches!(&rows, Err(error) if is_no_database_error(error)) {
+            self.mark_needs_database();
+            use_database(connection, database).await?;
+            return build().fetch_all(&mut *connection).await;
+        }
+        rows
+    }
+
+    /// Run a text statement on `connection`. A middleware that answers `1046 ER_NO_DB_ERROR`
+    /// ("No database selected") — even to a `SHOW` — gets the database selected and the statement
+    /// retried once, like [`Self::prepared_rows`].
+    async fn text_rows(
+        &self,
+        connection: &mut MySqlConnection,
+        database: &str,
+        sql: String,
+    ) -> Result<Vec<MySqlRow>> {
+        let rows = sqlx::raw_sql(sqlx::AssertSqlSafe(sql.clone()))
+            .fetch_all(&mut *connection)
+            .await;
+        let rows = match rows {
+            Err(error) if is_no_database_error(&error) => {
+                self.mark_needs_database();
+                use_database(connection, database)
+                    .await
+                    .map_err(map_query_error)?;
+                sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+                    .fetch_all(&mut *connection)
+                    .await
+            }
+            rows => rows,
+        };
+        rows.map_err(map_query_error)
+    }
+
     /// The `INFORMATION_SCHEMA.COLUMNS` rows of one table, ordered by position. `with_generation`
     /// adds `generation_expression`, which only MySQL 5.7.6+ and MariaDB 10.2+ report.
     async fn schema_column_rows(
         &self,
+        connection: &mut MySqlConnection,
         database: &str,
         table: &str,
         with_generation: bool,
@@ -77,21 +164,23 @@ impl MysqlConnection {
              WHERE table_schema = ? AND table_name = ? \
              ORDER BY ordinal_position"
         );
-        sqlx::query(sqlx::AssertSqlSafe(sql))
-            .bind(database)
-            .bind(table)
-            .fetch_all(&self.pool)
+        self.prepared_rows(connection, database, &sql, &[database, table])
             .await
     }
 
-    async fn scalar_u64(&self, sql: String, binds: &[String]) -> Result<u64> {
+    async fn scalar_u64(
+        &self,
+        connection: &mut MySqlConnection,
+        sql: String,
+        binds: &[String],
+    ) -> Result<u64> {
         let row = if self.text_protocol() {
             // A proxy that rejected the catalog's prepared statements rejects every
             // COM_STMT_PREPARE, so the count runs as one text statement.
             let values: Vec<BoundValue> = binds.iter().map(|bind| BoundValue::Text(bind)).collect();
             let sql = text_statement(&sql, &values);
             sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
-                .fetch_one(&self.pool)
+                .fetch_one(&mut *connection)
                 .await
                 .map_err(map_query_error)?
         } else {
@@ -99,7 +188,10 @@ impl MysqlConnection {
             for bind in binds {
                 query = query.bind(bind);
             }
-            query.fetch_one(&self.pool).await.map_err(map_query_error)?
+            query
+                .fetch_one(&mut *connection)
+                .await
+                .map_err(map_query_error)?
         };
 
         if let Ok(value) = row.try_get::<i64, _>(0) {
@@ -121,8 +213,9 @@ impl MysqlConnection {
             quote_identifier(database),
             quote_identifier(table)
         );
+        let mut connection = self.database_connection(database).await?;
         sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
-            .execute(&self.pool)
+            .execute(&mut *connection)
             .await
             .map_err(map_query_error)?;
         Ok(())
@@ -189,12 +282,13 @@ impl MysqlConnection {
     /// The table list through `SHOW FULL TABLES`, which MySQL-protocol proxies translate without
     /// touching `INFORMATION_SCHEMA`. A view's updatability only exists in
     /// `INFORMATION_SCHEMA.VIEWS` (rejected by those proxies), so it stays `false` here.
-    async fn list_tables_via_show(&self, database: &str) -> Result<Vec<TableInfo>> {
+    async fn list_tables_via_show(
+        &self,
+        connection: &mut MySqlConnection,
+        database: &str,
+    ) -> Result<Vec<TableInfo>> {
         let sql = format!("SHOW FULL TABLES FROM {}", quote_identifier(database));
-        let rows = sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
-            .fetch_all(&self.pool)
-            .await
-            .map_err(map_query_error)?;
+        let rows = self.text_rows(connection, database, sql).await?;
 
         let mut tables = Vec::with_capacity(rows.len());
         for row in rows {
@@ -218,16 +312,18 @@ impl MysqlConnection {
     /// The columns through `SHOW FULL COLUMNS`, the form proxies translate themselves. Its `Type`
     /// is `column_type` (length/unsigned included), and `Extra` carries the auto-increment and
     /// generated markers the catalog query reads from `EXTRA`.
-    async fn columns_via_show(&self, database: &str, table: &str) -> Result<Vec<ColumnInfo>> {
+    async fn columns_via_show(
+        &self,
+        connection: &mut MySqlConnection,
+        database: &str,
+        table: &str,
+    ) -> Result<Vec<ColumnInfo>> {
         let sql = format!(
             "SHOW FULL COLUMNS FROM {}.{}",
             quote_identifier(database),
             quote_identifier(table)
         );
-        let rows = sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
-            .fetch_all(&self.pool)
-            .await
-            .map_err(map_query_error)?;
+        let rows = self.text_rows(connection, database, sql).await?;
 
         let mut columns = Vec::with_capacity(rows.len());
         for row in rows {
@@ -257,18 +353,21 @@ impl MysqlConnection {
     /// The `INFORMATION_SCHEMA.TABLES` overview used when the server answers that catalog.
     async fn table_statuses_from_catalog(
         &self,
+        connection: &mut MySqlConnection,
         database: &str,
     ) -> std::result::Result<Vec<(String, TableStatus)>, sqlx::Error> {
-        let rows = sqlx::query(
-            "SELECT table_name, engine, table_rows, auto_increment, update_time, data_length, \
-                    table_comment \
-             FROM information_schema.tables \
-             WHERE table_schema = ? AND table_type <> 'VIEW' \
-             ORDER BY table_name",
-        )
-        .bind(database)
-        .fetch_all(&self.pool)
-        .await?;
+        let rows = self
+            .prepared_rows(
+                connection,
+                database,
+                "SELECT table_name, engine, table_rows, auto_increment, update_time, data_length, \
+                        table_comment \
+                 FROM information_schema.tables \
+                 WHERE table_schema = ? AND table_type <> 'VIEW' \
+                 ORDER BY table_name",
+                &[database],
+            )
+            .await?;
 
         let mut statuses = Vec::with_capacity(rows.len());
         for row in &rows {
@@ -301,21 +400,28 @@ impl MysqlConnection {
 
     /// The same overview through `SHOW TABLE STATUS`, which proxies translate themselves. A proxy
     /// may route it to one shard, so the names are matched against the object list by name.
-    async fn table_statuses_via_show(&self, database: &str) -> Result<Vec<(String, TableStatus)>> {
+    async fn table_statuses_via_show(
+        &self,
+        connection: &mut MySqlConnection,
+        database: &str,
+    ) -> Result<Vec<(String, TableStatus)>> {
         let sql = format!("SHOW TABLE STATUS FROM {}", quote_identifier(database));
-        let result = self.execute_query(None, &sql).await?;
-        let mut statuses = Vec::with_capacity(result.rows.len());
-        for row in &result.rows {
-            let Some(name) = result
-                .columns
+        let rows = self.text_rows(connection, database, sql).await?;
+        let mut statuses = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let columns = columns_from_row(row);
+            let values: Vec<CellValue> = (0..columns.len())
+                .map(|index| decode_cell(row, index))
+                .collect();
+            let Some(name) = columns
                 .iter()
                 .position(|column| column.name.eq_ignore_ascii_case("Name"))
-                .and_then(|index| row.get(index))
+                .and_then(|index| values.get(index))
                 .and_then(text_value)
             else {
                 continue;
             };
-            statuses.push((name, table_status_from(&result.columns, row)));
+            statuses.push((name, table_status_from(&columns, &values)));
         }
         Ok(statuses)
     }
@@ -329,10 +435,11 @@ impl MysqlConnection {
         order_by: &str,
         database: &str,
     ) -> Result<Vec<String>> {
+        let mut connection = self.database_connection(database).await?;
         let mut names: Vec<String> = if self.text_protocol() {
             let sql = text_statement(sql, &[BoundValue::Text(database)]);
             let rows = sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
-                .fetch_all(&self.pool)
+                .fetch_all(&mut *connection)
                 .await
                 .map_err(map_query_error)?;
             rows.iter()
@@ -340,9 +447,8 @@ impl MysqlConnection {
                 .collect::<Result<Vec<_>>>()?
         } else {
             let sql = format!("{sql} ORDER BY {order_by}");
-            let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
-                .bind(database)
-                .fetch_all(&self.pool)
+            let rows = self
+                .prepared_rows(&mut connection, database, &sql, &[database])
                 .await
                 .map_err(map_query_error)?;
             rows.iter()
@@ -394,7 +500,9 @@ impl Connection for MysqlConnection {
     ) -> Result<Option<Box<dyn ScriptSession>>> {
         let mut connection = self.pool.acquire().await.map_err(map_query_error)?;
         if let Some(database) = database {
-            use_database(&mut connection, database).await?;
+            use_database(&mut connection, database)
+                .await
+                .map_err(map_query_error)?;
         }
         Ok(Some(Box::new(MySqlScriptSession { connection })))
     }
@@ -415,26 +523,29 @@ impl Connection for MysqlConnection {
     }
 
     async fn list_tables(&self, database: &str) -> Result<Vec<TableInfo>> {
+        let mut connection = self.database_connection(database).await?;
         if self.text_protocol() {
-            return self.list_tables_via_show(database).await;
+            return self.list_tables_via_show(&mut connection, database).await;
         }
 
-        let rows = sqlx::query(
-            "SELECT t.table_name, t.table_type, v.is_updatable \
-             FROM information_schema.tables AS t \
-             LEFT JOIN information_schema.views AS v \
-               ON v.table_schema = t.table_schema AND v.table_name = t.table_name \
-             WHERE t.table_schema = ? \
-             ORDER BY t.table_name",
-        )
-        .bind(database)
-        .fetch_all(&self.pool)
-        .await;
+        let rows = self
+            .prepared_rows(
+                &mut connection,
+                database,
+                "SELECT t.table_name, t.table_type, v.is_updatable \
+                 FROM information_schema.tables AS t \
+                 LEFT JOIN information_schema.views AS v \
+                   ON v.table_schema = t.table_schema AND v.table_name = t.table_name \
+                 WHERE t.table_schema = ? \
+                 ORDER BY t.table_name",
+                &[database],
+            )
+            .await;
         let rows = match rows {
             Ok(rows) => rows,
             Err(error) if is_unknown_command_error(&error) => {
                 self.mark_text_protocol();
-                return self.list_tables_via_show(database).await;
+                return self.list_tables_via_show(&mut connection, database).await;
             }
             Err(error) => return Err(map_query_error(error)),
         };
@@ -459,8 +570,11 @@ impl Connection for MysqlConnection {
     }
 
     async fn columns(&self, database: &str, table: &str) -> Result<Vec<ColumnInfo>> {
+        let mut connection = self.database_connection(database).await?;
         if self.text_protocol() {
-            return self.columns_via_show(database, table).await;
+            return self
+                .columns_via_show(&mut connection, database, table)
+                .await;
         }
 
         // `EXTRA` is a MySQL/MariaDB column. StarRocks' information_schema is only a subset, so it
@@ -477,16 +591,16 @@ impl Connection for MysqlConnection {
              WHERE table_schema = ? AND table_name = ? \
              ORDER BY ordinal_position"
         };
-        let rows = sqlx::query(sql)
-            .bind(database)
-            .bind(table)
-            .fetch_all(&self.pool)
+        let rows = self
+            .prepared_rows(&mut connection, database, sql, &[database, table])
             .await;
         let rows = match rows {
             Ok(rows) => rows,
             Err(error) if is_unknown_command_error(&error) => {
                 self.mark_text_protocol();
-                return self.columns_via_show(database, table).await;
+                return self
+                    .columns_via_show(&mut connection, database, table)
+                    .await;
             }
             Err(error) => return Err(map_query_error(error)),
         };
@@ -531,6 +645,7 @@ impl Connection for MysqlConnection {
         page: PageRequest,
     ) -> Result<TablePage> {
         let columns = self.columns(database, table).await?;
+        let mut connection = self.database_connection(database).await?;
         let qualified = format!("{}.{}", quote_identifier(database), quote_identifier(table));
 
         let (where_clause, binds) = filter_clause(&page.filter);
@@ -539,6 +654,7 @@ impl Connection for MysqlConnection {
             None
         } else {
             self.scalar_u64(
+                &mut connection,
                 format!("SELECT COUNT(*) FROM {qualified}{where_clause}"),
                 &binds,
             )
@@ -574,7 +690,7 @@ impl Connection for MysqlConnection {
             }
             let sql = text_statement(&page_sql, &values);
             sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
-                .fetch_all(&self.pool)
+                .fetch_all(&mut *connection)
                 .await
                 .map_err(map_query_error)?
         } else {
@@ -585,7 +701,10 @@ impl Connection for MysqlConnection {
             if !starrocks {
                 query = query.bind(page.page_size as i64).bind(page.offset() as i64);
             }
-            query.fetch_all(&self.pool).await.map_err(map_query_error)?
+            query
+                .fetch_all(&mut *connection)
+                .await
+                .map_err(map_query_error)?
         };
 
         let mut decoded = Vec::with_capacity(rows.len());
@@ -618,6 +737,7 @@ impl Connection for MysqlConnection {
         // prepares altogether. Run each row as a plain text statement for both: the values are
         // already decoded cell strings, so quoting them is safe and keeps the same semantics.
         if self.engine == Engine::StarRocks || self.text_protocol() {
+            let mut connection = self.database_connection(database).await?;
             for update in updates {
                 if update.set.is_empty() {
                     continue;
@@ -647,14 +767,15 @@ impl Connection for MysqlConnection {
                 };
                 let sql = format!("UPDATE {qualified} SET {set_clause} WHERE {where_clause}");
                 sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
-                    .execute(&self.pool)
+                    .execute(&mut *connection)
                     .await
                     .map_err(map_query_error)?;
             }
             return Ok(());
         }
 
-        let mut transaction = self.pool.begin().await.map_err(map_query_error)?;
+        let mut connection = self.database_connection(database).await?;
+        let mut transaction = connection.begin().await.map_err(map_query_error)?;
 
         for update in updates {
             if update.set.is_empty() {
@@ -711,11 +832,12 @@ impl Connection for MysqlConnection {
         // See `update_rows`: both StarRocks and a proxy that rejects prepares need the text
         // protocol with quoted literals.
         if self.engine == Engine::StarRocks || self.text_protocol() {
+            let mut connection = self.database_connection(database).await?;
             for row in rows {
                 if row.values.is_empty() {
                     let sql = format!("INSERT INTO {qualified} () VALUES ()");
                     sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
-                        .execute(&self.pool)
+                        .execute(&mut *connection)
                         .await
                         .map_err(map_query_error)?;
                     continue;
@@ -734,14 +856,15 @@ impl Connection for MysqlConnection {
                     .join(", ");
                 let sql = format!("INSERT INTO {qualified} ({columns}) VALUES ({values})");
                 sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
-                    .execute(&self.pool)
+                    .execute(&mut *connection)
                     .await
                     .map_err(map_query_error)?;
             }
             return Ok(());
         }
 
-        let mut transaction = self.pool.begin().await.map_err(map_query_error)?;
+        let mut connection = self.database_connection(database).await?;
+        let mut transaction = connection.begin().await.map_err(map_query_error)?;
 
         for row in rows {
             if row.values.is_empty() {
@@ -792,6 +915,7 @@ impl Connection for MysqlConnection {
         // See `update_rows`: use the text protocol for StarRocks and for a proxy that rejects
         // prepares.
         if self.engine == Engine::StarRocks || self.text_protocol() {
+            let mut connection = self.database_connection(database).await?;
             for row_keys in keys {
                 if row_keys.is_empty() {
                     return Err(Error::Query("delete requires key columns".to_string()));
@@ -813,14 +937,15 @@ impl Connection for MysqlConnection {
                     format!("DELETE FROM {qualified} WHERE {where_clause} LIMIT 1")
                 };
                 sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
-                    .execute(&self.pool)
+                    .execute(&mut *connection)
                     .await
                     .map_err(map_query_error)?;
             }
             return Ok(());
         }
 
-        let mut transaction = self.pool.begin().await.map_err(map_query_error)?;
+        let mut connection = self.database_connection(database).await?;
+        let mut transaction = connection.begin().await.map_err(map_query_error)?;
 
         for row_keys in keys {
             if row_keys.is_empty() {
@@ -856,7 +981,9 @@ impl Connection for MysqlConnection {
         let mut connection = self.pool.acquire().await.map_err(map_query_error)?;
 
         if let Some(database) = database {
-            use_database(&mut connection, database).await?;
+            use_database(&mut connection, database)
+                .await
+                .map_err(map_query_error)?;
         }
 
         execute_one(&mut connection, sql).await
@@ -870,7 +997,9 @@ impl Connection for MysqlConnection {
         let mut connection = self.pool.acquire().await.map_err(map_query_error)?;
 
         if let Some(database) = database {
-            use_database(&mut connection, database).await?;
+            use_database(&mut connection, database)
+                .await
+                .map_err(map_query_error)?;
         }
 
         fetch_results(&mut connection, sql).await
@@ -918,8 +1047,9 @@ impl Connection for MysqlConnection {
             quote_identifier(database),
             quote_identifier(table)
         );
+        let mut connection = self.database_connection(database).await?;
         sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
-            .execute(&self.pool)
+            .execute(&mut *connection)
             .await
             .map_err(map_query_error)?;
         Ok(())
@@ -937,14 +1067,16 @@ impl Connection for MysqlConnection {
             quote_identifier(database),
             quote_identifier(new_name)
         );
+        let mut connection = self.database_connection(database).await?;
         sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
-            .execute(&self.pool)
+            .execute(&mut *connection)
             .await
             .map_err(map_query_error)?;
         Ok(())
     }
 
     async fn database_options(&self, name: &str) -> Result<DatabaseOptions> {
+        let mut connection = self.database_connection(name).await?;
         let row = if self.text_protocol() {
             let sql = text_statement(
                 "SELECT default_character_set_name, default_collation_name \
@@ -953,20 +1085,24 @@ impl Connection for MysqlConnection {
                 &[BoundValue::Text(name)],
             );
             sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
-                .fetch_one(&self.pool)
+                .fetch_all(&mut *connection)
                 .await
                 .map_err(map_query_error)?
         } else {
-            sqlx::query(
+            self.prepared_rows(
+                &mut connection,
+                name,
                 "SELECT default_character_set_name, default_collation_name \
                  FROM information_schema.schemata \
                  WHERE schema_name = ?",
+                &[name],
             )
-            .bind(name)
-            .fetch_one(&self.pool)
             .await
             .map_err(map_query_error)?
-        };
+        }
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::Query(format!("database {name} does not exist")))?;
 
         let charset: String = row.try_get(0).map_err(map_query_error)?;
         let collation: String = row.try_get(1).map_err(map_query_error)?;
@@ -987,7 +1123,9 @@ impl Connection for MysqlConnection {
     }
 
     async fn session_count(&self) -> Result<u64> {
+        let mut connection = self.pool.acquire().await.map_err(map_query_error)?;
         self.scalar_u64(
+            &mut connection,
             "SELECT COUNT(*) FROM information_schema.PROCESSLIST".to_string(),
             &[],
         )
@@ -1008,14 +1146,20 @@ impl Connection for MysqlConnection {
     }
 
     async fn table_statuses(&self, database: &str) -> Result<Vec<(String, TableStatus)>> {
+        let mut connection = self.database_connection(database).await?;
         let mut statuses = if self.text_protocol() {
-            self.table_statuses_via_show(database).await?
+            self.table_statuses_via_show(&mut connection, database)
+                .await?
         } else {
-            match self.table_statuses_from_catalog(database).await {
+            match self
+                .table_statuses_from_catalog(&mut connection, database)
+                .await
+            {
                 Ok(statuses) => statuses,
                 Err(error) if is_unknown_command_error(&error) => {
                     self.mark_text_protocol();
-                    self.table_statuses_via_show(database).await?
+                    self.table_statuses_via_show(&mut connection, database)
+                        .await?
                 }
                 Err(error) => return Err(map_query_error(error)),
             }
@@ -1041,8 +1185,8 @@ impl Connection for MysqlConnection {
             // user's database forbids reading one), keep the catalog estimate instead of failing
             // the whole object list. The statement has no parameters, so the text protocol (which
             // a MySQL-protocol proxy also understands) is enough.
-            let count_rows = sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
-                .fetch_all(&self.pool)
+            let count_rows = self
+                .text_rows(&mut connection, database, sql)
                 .await
                 .unwrap_or_default();
             for row in &count_rows {
@@ -1163,16 +1307,20 @@ impl Connection for MysqlConnection {
             BackupObjectKind::Table => return self.table_metadata(database, name).await,
             BackupObjectKind::View => self.show_create(database, name, "VIEW").await?,
             BackupObjectKind::Function => {
-                let routine_type: Option<String> = sqlx::query(
-                    "SELECT routine_type FROM information_schema.routines \
-                     WHERE routine_schema = ? AND routine_name = ?",
-                )
-                .bind(database)
-                .bind(name)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(map_query_error)?
-                .and_then(|row| row.try_get(0).ok());
+                let mut connection = self.database_connection(database).await?;
+                let routine_type: Option<String> = self
+                    .prepared_rows(
+                        &mut connection,
+                        database,
+                        "SELECT routine_type FROM information_schema.routines \
+                         WHERE routine_schema = ? AND routine_name = ?",
+                        &[database, name],
+                    )
+                    .await
+                    .map_err(map_query_error)?
+                    .into_iter()
+                    .next()
+                    .and_then(|row| row.try_get(0).ok());
                 let verb = if routine_type
                     .as_deref()
                     .is_some_and(|value| value.eq_ignore_ascii_case("PROCEDURE"))
@@ -1216,7 +1364,8 @@ impl Connection for MysqlConnection {
         // time instead of materialising the whole table. `poll_fn` drives it without pulling in
         // the whole `futures-util` surface. No parameters: the text protocol keeps the backup
         // working on a MySQL-protocol proxy too.
-        let mut stream = sqlx::raw_sql(sqlx::AssertSqlSafe(sql)).fetch(&self.pool);
+        let mut connection = self.database_connection(database).await?;
+        let mut stream = sqlx::raw_sql(sqlx::AssertSqlSafe(sql)).fetch(&mut *connection);
         let mut count = 0u64;
         while let Some(item) = std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await {
             let row = item.map_err(map_query_error)?;
@@ -1255,9 +1404,10 @@ impl Connection for MysqlConnection {
     }
 
     async fn table_schema(&self, database: &str, table: &str) -> Result<TableSchema> {
+        let mut connection = self.database_connection(database).await?;
         let mut with_generation = self.generation_expression.load(Ordering::Relaxed);
         let column_rows = match self
-            .schema_column_rows(database, table, with_generation)
+            .schema_column_rows(&mut connection, database, table, with_generation)
             .await
         {
             Ok(rows) => rows,
@@ -1266,7 +1416,10 @@ impl Connection for MysqlConnection {
             // servers have no generated columns either, so retry without it — failing the designer
             // (and structure sync) over an optional metadata column is worse than not reporting it.
             Err(error) if with_generation && is_unknown_column_error(&error) => {
-                match self.schema_column_rows(database, table, false).await {
+                match self
+                    .schema_column_rows(&mut connection, database, table, false)
+                    .await
+                {
                     Ok(rows) => {
                         with_generation = false;
                         self.generation_expression.store(false, Ordering::Relaxed);
@@ -1378,7 +1531,7 @@ impl Connection for MysqlConnection {
         )
         .bind(database)
         .bind(table)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *connection)
         .await
         .map_err(map_query_error)?;
 
@@ -1431,7 +1584,7 @@ impl Connection for MysqlConnection {
         )
         .bind(database)
         .bind(table)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *connection)
         .await
         .map_err(map_query_error)?;
 
@@ -1476,7 +1629,7 @@ impl Connection for MysqlConnection {
         )
         .bind(database)
         .bind(table)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *connection)
         .await
         .map_err(map_query_error)?;
 
@@ -1497,7 +1650,7 @@ impl Connection for MysqlConnection {
         )
         .bind(database)
         .bind(table)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *connection)
         .await
         .map_err(map_query_error)?;
 
@@ -1538,7 +1691,7 @@ impl Connection for MysqlConnection {
         )
         .bind(database)
         .bind(table)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *connection)
         .await
         .unwrap_or_default();
         let checks = check_rows
@@ -1559,7 +1712,7 @@ impl Connection for MysqlConnection {
         )
         .bind(database)
         .bind(table)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *connection)
         .await
         .unwrap_or_default();
         let partitioning = partition_clause(&partition_rows);
@@ -3057,12 +3210,24 @@ fn is_unknown_column_error(error: &sqlx::Error) -> bool {
 /// statements their own parser cannot route with this generic error, which `map_query_error`
 /// renders as `<code> - <message>`.
 fn is_unknown_command_error(error: &sqlx::Error) -> bool {
+    mysql_error_number(error) == Some(1047)
+}
+
+/// Whether the server (a middleware that routes each statement itself, such as UDAL/TeleDB's
+/// DBProxy) refused the statement with `1046 ER_NO_DB_ERROR` because its session has no current
+/// database. It answers that even for a fully qualified `information_schema` query, so the
+/// database has to be selected first.
+fn is_no_database_error(error: &sqlx::Error) -> bool {
+    mysql_error_number(error) == Some(1046)
+}
+
+fn mysql_error_number(error: &sqlx::Error) -> Option<u16> {
     let sqlx::Error::Database(database_error) = error else {
-        return false;
+        return None;
     };
     database_error
         .try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
-        .is_some_and(|mysql_error| mysql_error.number() == 1047)
+        .map(|mysql_error| mysql_error.number())
 }
 
 fn columns_from_row(row: &MySqlRow) -> Vec<ColumnInfo> {
@@ -3139,14 +3304,16 @@ fn returns_result_set(sql: &str) -> bool {
     )
 }
 
-/// Select `database` on an already-acquired connection so the following the text-protocol
-/// statement runs in its context.
-async fn use_database(connection: &mut MySqlConnection, database: &str) -> Result<()> {
+/// Select `database` on an already-acquired connection so the following statement runs in its
+/// context (and a middleware has the current database it demands).
+async fn use_database(
+    connection: &mut MySqlConnection,
+    database: &str,
+) -> std::result::Result<(), sqlx::Error> {
     let use_sql = format!("USE {}", quote_identifier(database));
     sqlx::raw_sql(sqlx::AssertSqlSafe(use_sql))
         .execute(&mut *connection)
-        .await
-        .map_err(map_query_error)?;
+        .await?;
     Ok(())
 }
 

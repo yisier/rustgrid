@@ -151,9 +151,13 @@ async fn mariadb_ignores_mysql_compatibility_option() {
 //
 // UDAL/TeleDB's DBProxy answers `1047 ER_UNKNOWN_COM_ERROR` to `COM_STMT_PREPARE` (the issue
 // reported "1047 - UDAL - Unknown command" when a database was opened), while the text protocol
-// works — which is how Navicat talks to it. The fixture below rejects every prepare that way and
-// serves the classic `SHOW` statements plus the generated text statements, so the connection has
-// to fall back for its table list, columns, overview, pages and writes.
+// works — which is how Navicat talks to it. It also refuses every statement — even a fully
+// qualified `information_schema` one — with `1046 ER_NO_DB_ERROR` ("No database selected") until
+// the session selects a database, the second shape of the same issue. The fixture below emulates
+// both: a statement without a current database gets 1046, a prepared statement after a `USE` gets
+// 1047, and the classic `SHOW` statements plus the generated text statements are served. The
+// connection therefore has to select the database and then fall back for its table list, columns,
+// overview, pages and writes.
 
 const FULL_COLUMNS: &[&str] = &[
     "Field",
@@ -349,27 +353,61 @@ fn serve_connection(mut stream: TcpStream, queries: std::sync::Arc<std::sync::Mu
     };
     write_packet(&mut stream, 2, OK);
 
+    // UDAL's DBProxy refuses every statement — including a fully qualified
+    // `information_schema` query — with `1046 No database selected` while the session has no
+    // current database. A `USE` fixes it; prepared statements are then rejected with 1047.
+    let mut current_database: Option<String> = None;
     while let Some(packet) = read_packet_opt(&mut stream) {
         match packet[0] {
             1 => break,                             // COM_QUIT
             14 => write_packet(&mut stream, 1, OK), // COM_PING
             3 => {
                 let sql = String::from_utf8(packet[1..].to_vec()).unwrap();
-                respond(&mut stream, &sql);
+                if let Some(database) = sql.strip_prefix("USE ") {
+                    current_database = Some(database.trim().trim_matches('`').to_string());
+                    write_packet(&mut stream, 1, OK);
+                } else if current_database.is_none() && requires_database(&sql) {
+                    write_packet(
+                        &mut stream,
+                        1,
+                        &error_packet(
+                            1046,
+                            "HY000",
+                            &format!("UDAL - No database selected : {sql}"),
+                        ),
+                    );
+                } else {
+                    respond(&mut stream, &sql);
+                }
                 queries.lock().unwrap().push(sql);
             }
             0x16 => {
                 let sql = String::from_utf8(packet[1..].to_vec()).unwrap();
-                write_packet(
-                    &mut stream,
-                    1,
-                    &error_packet(1047, "08S01", "UDAL - Unknown command"),
-                );
+                let error = if current_database.is_none() {
+                    error_packet(
+                        1046,
+                        "HY000",
+                        &format!("UDAL - No database selected : {sql}"),
+                    )
+                } else {
+                    error_packet(1047, "08S01", "UDAL - Unknown command")
+                };
+                write_packet(&mut stream, 1, &error);
                 queries.lock().unwrap().push(format!("PREPARE {sql}"));
             }
             command => panic!("unexpected protocol command {command}"),
         }
     }
+}
+
+/// Whether UDAL's DBProxy needs a current database to accept `sql`.
+fn requires_database(sql: &str) -> bool {
+    sql.starts_with("SHOW FULL")
+        || sql.starts_with("SHOW TABLE STATUS")
+        || sql.starts_with("SELECT ")
+        || sql.starts_with("UPDATE ")
+        || sql.starts_with("INSERT ")
+        || sql.starts_with("DELETE ")
 }
 
 /// A proxy fixture that rejects every prepared statement with `1047 ER_UNKNOWN_COM_ERROR` and
@@ -453,7 +491,7 @@ async fn proxy_connection(port: u16) -> Box<dyn rustgrid_core::Connection> {
 }
 
 #[tokio::test]
-async fn catalog_falls_back_to_show_statements_after_unknown_command() {
+async fn catalog_selects_the_database_then_falls_back_after_unknown_command() {
     let proxy = Proxy::start();
     let connection = proxy_connection(proxy.port).await;
 
@@ -491,11 +529,18 @@ async fn catalog_falls_back_to_show_statements_after_unknown_command() {
         .iter()
         .position(|sql| sql.starts_with("PREPARE SELECT t.table_name, t.table_type"))
         .expect("the information_schema query is tried first");
+    // The first prepare answers `1046 No database selected` (UDAL); the driver then selects the
+    // database and prepares again, which answers `1047 Unknown command` and lands in the fallback.
+    let selected = queries
+        .iter()
+        .position(|sql| sql == "USE `shop`")
+        .expect("the session selects the database after 1046");
     let shown = queries
         .iter()
         .position(|sql| sql == "SHOW FULL TABLES FROM `shop`")
         .expect("SHOW FULL TABLES is the fallback");
-    assert!(prepared < shown);
+    assert!(prepared < selected);
+    assert!(selected < shown);
     assert!(
         queries
             .iter()
@@ -511,8 +556,8 @@ async fn catalog_falls_back_to_show_statements_after_unknown_command() {
             .iter()
             .filter(|sql| sql.starts_with("PREPARE"))
             .count(),
-        1,
-        "only the first catalog query pays for the rejected prepared statement: {queries:#?}"
+        2,
+        "the catalog query is tried once more after the database is selected: {queries:#?}"
     );
 }
 
@@ -557,8 +602,8 @@ async fn page_runs_as_one_text_statement_after_the_proxy_fallback() {
             .iter()
             .filter(|sql| sql.starts_with("PREPARE"))
             .count(),
-        1,
-        "only the catalog probe is prepared: {queries:#?}"
+        2,
+        "only the catalog probe is prepared (twice, before and after selecting the database): {queries:#?}"
     );
 }
 
@@ -598,8 +643,8 @@ async fn backup_object_lists_use_the_text_protocol() {
             .iter()
             .filter(|sql| sql.starts_with("PREPARE"))
             .count(),
-        1,
-        "only the catalog probe is prepared: {queries:#?}"
+        2,
+        "only the catalog probe is prepared (twice, before and after selecting the database): {queries:#?}"
     );
 }
 
@@ -669,8 +714,8 @@ async fn writes_use_the_text_protocol_after_the_proxy_fallback() {
             .iter()
             .filter(|sql| sql.starts_with("PREPARE"))
             .count(),
-        1,
-        "only the catalog probe is prepared: {queries:#?}"
+        2,
+        "only the catalog probe is prepared (twice, before and after selecting the database): {queries:#?}"
     );
 }
 

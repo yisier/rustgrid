@@ -1215,8 +1215,15 @@ make more engines cheap later — do not build those features early.
   `SHOW TABLE STATUS`, page queries and DML are rendered with `text_statement` (string values
   become `_utf8mb4 0x…` hex literals, which neither quotes nor `sql_mode` can break), and
   statements without parameters should use `raw_sql` so they never prepare either.
-  `crates/rustgrid-mysql/tests/mysql_compatibility.rs` reproduces the failure on a wire-protocol
-  fixture.
+  The same middleware also answers `1046 ER_NO_DB_ERROR` ("UDAL - No database selected") to a
+  statement — even a fully qualified `information_schema` query — while its session has no
+  current database (the second shape of the same problem, reported in issue #56).
+  `MysqlConnection::prepared_rows` records
+  that in `needs_database`, selects the database on the same connection (`USE`) and retries
+  once; from then on `database_connection` selects the database before every database-scoped
+  statement, and the `SHOW`/text fallbacks run on that pinned connection instead of the pool.
+  `crates/rustgrid-mysql/tests/mysql_compatibility.rs` reproduces both failures on a
+  wire-protocol fixture.
 - Grid writes identify a row by its primary key, falling back to **every column** when the table
   has no primary key (`GridState` column `primary_key` flags). Key values are
   `Option<String>` (`CellValue::as_edit_value`): `None` is SQL `NULL` and must render `IS NULL`,
