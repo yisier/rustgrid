@@ -1222,8 +1222,10 @@ make more engines cheap later — do not build those features early.
   that in `needs_database`, selects the database on the same connection (`USE`) and retries
   once; from then on `database_connection` selects the database before every database-scoped
   statement, and the `SHOW`/text fallbacks run on that pinned connection instead of the pool.
+  `tools/udal-proxy/proxy.js` reproduces both answers against a real MySQL server (leave the
+  connection form's 数据库 empty so the session starts without one), and
   `crates/rustgrid-mysql/tests/mysql_compatibility.rs` reproduces both failures on a
-  wire-protocol fixture.
+  wire-protocol fixture without a server.
 - Grid writes identify a row by its primary key, falling back to **every column** when the table
   has no primary key (`GridState` column `primary_key` flags). Key values are
   `Option<String>` (`CellValue::as_edit_value`): `None` is SQL `NULL` and must render `IS NULL`,
