@@ -301,8 +301,8 @@ impl GridView {
         self.state.selection = Some(CellSelection::new(row, 0));
         self.list_scroll.scroll_to_item(row, ScrollStrategy::Bottom);
         window.focus(&self.focus, cx);
-        // An empty table already opens with a blank insert row, so appending here adds nothing.
-        // Open that row's first cell instead of leaving the action looking like a dropped click.
+        // A repeat press on an untouched blank row would otherwise only refocus it; open its
+        // first cell instead so the action always has visible feedback.
         if blank && self.state.visible_columns > 0 {
             self.begin_edit((row, 0), None, window, cx);
         }
@@ -546,18 +546,9 @@ impl GridView {
                                 .resolved_order(&grid.state.all_columns);
                         }
                         grid.state.error = None;
-                        // An empty editable table opens with one blank insert row ready to type
-                        // into. Skipped for views, later pages and filtered views.
-                        if grid.state.editable
-                            && !grid.state.is_view
-                            && page_index == 0
-                            && grid.state.rows.is_empty()
-                            && grid.state.filters.is_empty()
-                            && grid.inserts.is_empty()
-                        {
-                            grid.inserts.push(PendingInsert::appended());
-                            grid.state.selection = Some(CellSelection::new(0, 0));
-                        }
+                        // An empty page keeps the kit's empty state rather than opening with a
+                        // blank insert row: the grid has nothing to paint until the user asks for
+                        // a record (Insert / "+").
                         if reset_scroll {
                             grid.reset_scroll();
                         }

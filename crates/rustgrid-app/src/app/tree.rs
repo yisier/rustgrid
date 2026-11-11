@@ -1835,6 +1835,9 @@ impl AppView {
         let entity = cx.new(|cx| GridView::new(state, app, runtime, theme, clipboard, cx));
         self.grids.push(entity.clone());
         self.active_grid = Some(self.grids.len() - 1);
+        // The grid takes the keyboard focus when its tab opens, so Insert / F5 / the spreadsheet
+        // keys work without clicking into the grid first.
+        self.grid_focus_pending = true;
         entity.update(cx, |grid, cx| grid.load_page(cx));
 
         if let Some(connection) = status_connection {
