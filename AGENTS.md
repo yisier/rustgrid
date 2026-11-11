@@ -1075,13 +1075,16 @@ make more engines cheap later — do not build those features early.
   namespace/query/backup rows defer the same way. Keep new row actions deferred, or fix it in the
   `AppView` method like `activate_grid` does.
 
-- **An empty grid shows gpui-kit's empty state, not a painted empty table.** With no rows to paint,
-  `GridView::render` swaps the `uniform_list` for a compact, centered
-  `gpui_kit::component::empty::Empty` card (inbox icon, `grid.no_rows` title and a muted hint) rather
-  than stretching the kit surface across the whole body. It carries no hitboxes, so nothing in it is
-  selectable; a click just focuses the grid. Do not bring back a decorative per-column filler: it
-  repeated the table header as blank cells and needed a measured `empty_grid_height` that fed back
-  into layout.
+- **An empty grid shows gpui-kit's empty state over the visible pane, not a painted empty table.**
+  With no rows to paint, `GridView::render` floats a compact
+  `gpui_kit::component::empty::Empty` card (inbox icon, `grid.no_rows` title and a muted hint) over
+  the body — below the header and above the horizontal scrollbar's reserved strip — rather than
+  placing it inside the scrollable column strip. The strip is as wide as every column, so with a
+  wide table a card centered in it sat off screen; the overlay stays centered in the visible pane
+  whatever the total width or horizontal scroll is. It carries no hitboxes, so nothing in it is
+  selectable; a click reaches the row list behind, which focuses the grid. Do not bring back a
+  decorative per-column filler: it repeated the table header as blank cells and needed a measured
+  `empty_grid_height` that fed back into layout.
 
 - **A pending insert row is not always at the bottom, so never index a displayed row into
   `state.rows`.** `GridView::inserts` holds `PendingInsert { values, after }`: the `+` button appends
