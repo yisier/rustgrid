@@ -450,19 +450,22 @@ impl GridView {
         // no index), so the rows are requested without it and the total is counted separately.
         // The page therefore paints as soon as its own query returns; the status line fills in
         // the total when the count lands, and a page turn under the same filter reuses it.
-        let count_needed = self.counted_filter.as_ref() != Some(&filter);
-        let mut count_request = None;
-        if count_needed {
+        if self.counted_filter.as_ref() != Some(&filter) {
             // The old total belongs to another filter; drop it rather than let the status line
             // claim a count that no longer describes these rows.
             self.state.total_rows = None;
+            // Abandon a count for another filter immediately. Its result is dropped by
+            // `count_epoch`, and it must not scan the table while this page is querying it:
+            // two full scans at once make the rows noticeably slower, and the count is only
+            // cosmetic.
             if self.counting_filter.as_ref() != Some(&filter) {
                 self.count_epoch = self.count_epoch.wrapping_add(1);
-                self.counting_filter = Some(filter.clone());
-                count_request = Some((self.count_epoch, filter.clone()));
+                self.counting_filter = None;
             }
         }
 
+        self.load_epoch = self.load_epoch.wrapping_add(1);
+        let load_epoch = self.load_epoch;
         self.selecting_cells = false;
         self.cell_editor = None;
         self.cell_editor_blur_subscription = None;
@@ -470,10 +473,10 @@ impl GridView {
         cx.notify();
 
         let runtime = self.runtime.clone();
-        let count_runtime = self.runtime.clone();
         let count_connection = connection.clone();
         let count_database = database.clone();
         let count_table = table.clone();
+        let count_filter = filter.clone();
         let started = std::time::Instant::now();
         cx.spawn(async move |this, cx| {
             let result = match runtime
@@ -496,14 +499,21 @@ impl GridView {
             };
             let elapsed = started.elapsed();
 
-            let _ = this.update(cx, |grid, cx| {
+            let count_request = this.update(cx, |grid, cx| {
+                // A newer fetch (page turn, filter, refresh) owns the rows and the spinner now.
+                if grid.load_epoch != load_epoch {
+                    return None;
+                }
                 grid.state.loading = false;
                 grid.state.elapsed = Some(elapsed);
                 // Consume the explicit-refresh marker now, so a fetch that replaces this one does
                 // not leave a stale "refreshed" confirmation behind.
                 let refreshed = std::mem::take(&mut grid.refresh_feedback);
+                let mut count_request = None;
                 match result {
                     Ok(page) => {
+                        let row_count = page.rows.len();
+                        let inline_total = page.total_rows;
                         // The widths carry over by column name when the user has dragged column
                         // edges, so paging/sorting does not snap them back.
                         let previous_columns = grid.state.columns.clone();
@@ -519,8 +529,27 @@ impl GridView {
                         grid.state.install_page(page.columns, page.rows, widths);
                         // The page is fetched with `skip_total`; a total that did arrive (an
                         // engine that counts inline) still wins over the background count.
-                        if page.total_rows.is_some() {
-                            grid.state.total_rows = page.total_rows;
+                        if let Some(total) = inline_total {
+                            grid.state.total_rows = Some(total);
+                            grid.counted_filter = Some(count_filter.clone());
+                        } else if let Some(total) =
+                            known_total_from_page(page_index, page_size, row_count)
+                        {
+                            // A short page is the last one, so its exact total is known without
+                            // a second scan. This is the common shape of a narrow filter (one
+                            // or two matching records), where `COUNT(*)` would scan the whole
+                            // table a second time.
+                            grid.state.total_rows = Some(total);
+                            grid.counted_filter = Some(count_filter.clone());
+                            grid.counting_filter = None;
+                        } else if grid.counted_filter.as_ref() != Some(&count_filter)
+                            && grid.counting_filter.as_ref() != Some(&count_filter)
+                        {
+                            // A full page cannot tell whether it is also the last one, so count
+                            // in the background — after the rows are painted, never beside them.
+                            grid.count_epoch = grid.count_epoch.wrapping_add(1);
+                            grid.counting_filter = Some(count_filter.clone());
+                            count_request = Some((grid.count_epoch, count_filter.clone()));
                         }
                         // Drop a kept selection that no longer fits the reloaded page.
                         let (rows, cols) = (grid.display_row_count(), grid.state.visible_columns);
@@ -575,43 +604,57 @@ impl GridView {
                     let _ = this.update(cx, |_, cx| cx.notify());
                 })
                 .detach();
+                count_request
+            });
+            let Ok(Some((count_epoch, count_filter))) = count_request else {
+                return;
+            };
+            // Let the page paint and the user's next gesture arrive before starting another full
+            // scan. A filter/refresh bumps `count_epoch` meanwhile, so the count never competes
+            // with the query the user is actually waiting for.
+            cx.background_executor()
+                .timer(Duration::from_millis(250))
+                .await;
+            let still_wanted = this
+                .update(cx, |grid, _cx| {
+                    grid.count_epoch == count_epoch
+                        && grid.counting_filter.as_ref() == Some(&count_filter)
+                })
+                .unwrap_or(false);
+            if !still_wanted {
+                return;
+            }
+
+            let request_filter = count_filter.clone();
+            let result = match runtime
+                .spawn(async move {
+                    count_connection
+                        .count_rows(&count_database, &count_table, &request_filter)
+                        .await
+                })
+                .await
+            {
+                Ok(inner) => inner,
+                Err(error) => Err(Error::other(error)),
+            };
+            let _ = this.update(cx, |grid, cx| {
+                // A newer filter or refresh owns the status line now.
+                if grid.count_epoch != count_epoch
+                    || grid.counting_filter.as_ref() != Some(&count_filter)
+                {
+                    return;
+                }
+                grid.counting_filter = None;
+                // Remember the filter even when the count failed, so paging does not retry a
+                // count the server could not answer; an explicit refresh clears it.
+                grid.counted_filter = Some(count_filter);
+                if let Ok(Some(total)) = result {
+                    grid.state.total_rows = Some(total);
+                    cx.notify();
+                }
             });
         })
         .detach();
-
-        if let Some((count_epoch, count_filter)) = count_request {
-            cx.spawn(async move |this, cx| {
-                let request_filter = count_filter.clone();
-                let result = match count_runtime
-                    .spawn(async move {
-                        count_connection
-                            .count_rows(&count_database, &count_table, &request_filter)
-                            .await
-                    })
-                    .await
-                {
-                    Ok(inner) => inner,
-                    Err(error) => Err(Error::other(error)),
-                };
-                let _ = this.update(cx, |grid, cx| {
-                    // A newer filter or refresh owns the status line now.
-                    if grid.count_epoch != count_epoch
-                        || grid.counting_filter.as_ref() != Some(&count_filter)
-                    {
-                        return;
-                    }
-                    grid.counting_filter = None;
-                    // Remember the filter even when the count failed, so paging does not retry a
-                    // count the server could not answer; an explicit refresh clears it.
-                    grid.counted_filter = Some(count_filter);
-                    if let Ok(Some(total)) = result {
-                        grid.state.total_rows = Some(total);
-                        cx.notify();
-                    }
-                });
-            })
-            .detach();
-        }
     }
 
     /// Put the grid's rows back at the top. Used when the row set changes identity (page turn,
@@ -1974,6 +2017,14 @@ fn inserts_before(inserts: &[PendingInsert], data: usize) -> usize {
         .count()
 }
 
+/// The exact row total a page proves on its own: a page that returned fewer rows than its size is
+/// the last one, so its offset plus the rows it holds is the whole result. A full page proves
+/// nothing, and its total needs a `COUNT(*)`.
+fn known_total_from_page(page_index: u64, page_size: u64, row_count: usize) -> Option<u64> {
+    (row_count < page_size as usize)
+        .then(|| page_index.saturating_mul(page_size) + row_count as u64)
+}
+
 /// Map a displayed row position to its owner. Data rows and their cloned rows interleave; the
 /// "+" rows (`after: None`) follow the whole page.
 pub(super) fn row_origin(
@@ -2146,6 +2197,20 @@ mod tests {
             values: BTreeMap::new(),
             after,
         }
+    }
+
+    #[test]
+    fn a_short_page_proves_the_total_without_a_count() {
+        assert_eq!(known_total_from_page(0, 1000, 1), Some(1));
+        assert_eq!(known_total_from_page(0, 1000, 0), Some(0));
+        assert_eq!(known_total_from_page(2, 1000, 500), Some(2500));
+        assert_eq!(known_total_from_page(1, 1000, 0), Some(1000));
+    }
+
+    #[test]
+    fn a_full_page_leaves_the_total_to_the_count() {
+        assert_eq!(known_total_from_page(0, 1000, 1000), None);
+        assert_eq!(known_total_from_page(3, 500, 500), None);
     }
 
     #[test]

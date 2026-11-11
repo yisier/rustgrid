@@ -5,6 +5,7 @@ use gpui::HitboxBehavior;
 use gpui_kit::component::empty::{
     Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyMediaVariant, EmptyTitle,
 };
+use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{Icon, IconName};
 
 impl GridView {
@@ -118,6 +119,7 @@ impl GridView {
             counted_filter: None,
             counting_filter: None,
             count_epoch: 0,
+            load_epoch: 0,
             filter_value_inputs: BTreeMap::new(),
             filter_field_combos: BTreeMap::new(),
             filter_operator_combos: BTreeMap::new(),
@@ -223,6 +225,46 @@ impl GridView {
         let extra_lines =
             usize::from(self.show_column_types(cx)) + usize::from(self.show_column_comments(cx));
         GRID_ROW_HEIGHT + extra_lines as f32 * GRID_HEADER_LINE_HEIGHT
+    }
+
+    /// The table's loading state: a centered card over the body while a fetch runs. It is an
+    /// overlay, not a row, so starting or finishing a fetch never shifts the table; the old rows
+    /// stay visible underneath, dimmed, until the new page replaces them.
+    fn render_loading_overlay(&self) -> impl IntoElement {
+        let theme = self.theme;
+        div()
+            .id(SharedString::from(format!(
+                "grid-loading-overlay-{}",
+                self.state.id
+            )))
+            .absolute()
+            .inset_0()
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba((theme.window_bg << 8) | 0xB4))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_2()
+                    .px_5()
+                    .py_4()
+                    .rounded(px(10.0))
+                    .bg(rgb(theme.dialog_bg))
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .shadow(ui::soft_shadow())
+                    .child(Spinner::new().color(rgb(theme.text_muted).into()))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(theme.text_muted))
+                            .child(t!("common.loading").to_string()),
+                    ),
+            )
     }
 }
 
@@ -1153,9 +1195,9 @@ impl Render for GridView {
                 .inset_0(),
             );
         }
-        // Surface a failed fetch above the table. A running one is a spinner inside the toolbar
-        // (or the status bar when there is none) — never a row of its own, which would push the
-        // rows down and back up on every refresh.
+        // Surface a failed fetch above the table. A running one is the centered overlay over the
+        // body (or the status bar for a grid without one) — never a row of its own, which would
+        // push the rows down and back up on every refresh.
         if let Some(error) = self.state.error.clone() {
             root = root.child(
                 div()
@@ -1171,11 +1213,6 @@ impl Render for GridView {
         }
         let wheel_weak = cx.weak_entity();
         let wheel_focus = self.focus.clone();
-        // A grid with no bar to hang the spinner on (the view designer's preview) floats it over
-        // the header's right end instead — still without taking a row from the table.
-        let floating_loading: Option<AnyElement> =
-            (self.state.loading && !self.state.show_toolbar && !self.state.show_footer)
-                .then(|| self.render_loading_spinner().into_any_element());
         root = root.child(
             div()
                 .relative()
@@ -1183,11 +1220,6 @@ impl Render for GridView {
                 .flex_1()
                 .min_w(px(0.0))
                 .min_h(px(0.0))
-                .children(
-                    floating_loading.map(|spinner| {
-                        div().absolute().top(px(2.0)).right(px(14.0)).child(spinner)
-                    }),
-                )
                 .child(
                     div()
                         .flex()
@@ -1274,6 +1306,12 @@ impl Render for GridView {
                     )
                     .absolute()
                     .inset_0()
+                })
+                // A fetch in progress is a centered table state, not a small glyph in the toolbar,
+                // so a slow query is unmistakable. The overlay floats over the body and never
+                // changes the layout.
+                .when(self.state.loading, |body| {
+                    body.child(self.render_loading_overlay())
                 }),
         );
 

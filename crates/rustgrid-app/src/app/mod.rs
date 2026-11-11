@@ -1877,6 +1877,9 @@ struct GridView {
     /// Bumped whenever the row count is invalidated (a filter change, a refresh, a write), so a
     /// late count from a previous state is dropped.
     count_epoch: u64,
+    /// Bumped for every table fetch; a page that lands after a newer fetch (page turn, filter,
+    /// refresh) is dropped instead of repainting stale rows.
+    load_epoch: u64,
 
     /// The single-line editors of the filter builder's value fields, keyed by `(node path, slot)`.
     /// Rebuilt after any structural change so the paths stay valid. A real [`TextInput`] gives the

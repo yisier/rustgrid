@@ -40,9 +40,9 @@ fn filter_path_key(path: &[usize]) -> String {
 }
 
 impl GridView {
-    /// The grid's running-fetch indicator: one spinner, dropped into a bar the grid already
-    /// draws — the toolbar when it has one, the status bar otherwise. It is never a row of its
-    /// own, so a fetch starting or ending shifts nothing under the pointer.
+    /// A compact running-fetch indicator for grids without a table body to overlay — the SQL
+    /// result status bar and the designer preview. Table grids use the centered
+    /// [`Self::render_loading_overlay`] instead.
     pub(super) fn render_loading_spinner(&self) -> impl IntoElement {
         let theme = self.theme;
         div()
@@ -139,12 +139,6 @@ impl GridView {
                         false,
                         cx.listener(|this, _event, _window, cx| this.toggle_field_filter(cx)),
                     ))
-            })
-            // The spinner sits at the toolbar's far end while a fetch runs; the toolbar has a
-            // fixed 28px height, so the table below never moves for it.
-            .when(self.state.loading, |bar| {
-                bar.child(div().flex_1())
-                    .child(self.render_loading_spinner())
             })
     }
 
@@ -1964,6 +1958,14 @@ impl GridView {
                 "grid.page_info",
                 end = end,
                 total = total,
+                page = self.state.page_index + 1
+            )
+            .to_string(),
+            // A page with an unknown total may have a count in flight; say so instead of
+            // looking like the total is simply unavailable.
+            None if self.counting_filter.is_some() => t!(
+                "grid.page_info_counting",
+                end = end,
                 page = self.state.page_index + 1
             )
             .to_string(),
