@@ -301,6 +301,11 @@ impl GridView {
         self.state.selection = Some(CellSelection::new(row, 0));
         self.list_scroll.scroll_to_item(row, ScrollStrategy::Bottom);
         window.focus(&self.focus, cx);
+        // An empty table already opens with a blank insert row, so appending here adds nothing.
+        // Open that row's first cell instead of leaving the action looking like a dropped click.
+        if blank && self.state.visible_columns > 0 {
+            self.begin_edit((row, 0), None, window, cx);
+        }
         cx.notify();
     }
 

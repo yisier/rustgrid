@@ -853,56 +853,7 @@ impl Render for GridView {
             cx.listener(|this, event: &MouseDownEvent, window, cx| {
                 this.grid_right_mouse_down(event, window, cx);
             }),
-        )
-        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-            this.grid_key(event, window, cx);
-        }))
-        // Keyboard commands (keymap): F5 refresh and the spreadsheet jumps.
-        .key_context(GRID_CONTEXT)
-        .on_action(cx.listener(|this, _: &GridRefresh, _window, cx| this.refresh(cx)))
-        .on_action(cx.listener(|this, _: &GridInsertRow, window, cx| {
-            // Insert is an editing gesture: while a cell editor (or the date picker) holds the
-            // keyboard, it must not append a row behind the editor.
-            if this.cell_editor.is_none() && this.date_picker.is_none() {
-                this.add_insert_row(window, cx);
-            }
-        }))
-        .on_action(
-            cx.listener(|this, _: &GridDuplicateRow, window, cx| this.duplicate_row(window, cx)),
-        )
-        .on_action(
-            cx.listener(|this, _: &GridEditValue, window, cx| this.open_value_editor(window, cx)),
-        )
-        .on_action(cx.listener(|this, _: &GridPageUp, _window, cx| {
-            this.grid_jump(super::grid_input::GridJump::PageUp, false, cx)
-        }))
-        .on_action(cx.listener(|this, _: &GridPageDown, _window, cx| {
-            this.grid_jump(super::grid_input::GridJump::PageDown, false, cx)
-        }))
-        .on_action(cx.listener(|this, _: &GridSelectPageUp, _window, cx| {
-            this.grid_jump(super::grid_input::GridJump::PageUp, true, cx)
-        }))
-        .on_action(cx.listener(|this, _: &GridSelectPageDown, _window, cx| {
-            this.grid_jump(super::grid_input::GridJump::PageDown, true, cx)
-        }))
-        .on_action(cx.listener(|this, _: &GridRowStart, _window, cx| {
-            this.grid_jump(super::grid_input::GridJump::RowStart, false, cx)
-        }))
-        .on_action(cx.listener(|this, _: &GridRowEnd, _window, cx| {
-            this.grid_jump(super::grid_input::GridJump::RowEnd, false, cx)
-        }))
-        .on_action(cx.listener(|this, _: &GridFirstCell, _window, cx| {
-            this.grid_jump(super::grid_input::GridJump::First, false, cx)
-        }))
-        .on_action(cx.listener(|this, _: &GridLastCell, _window, cx| {
-            this.grid_jump(super::grid_input::GridJump::Last, false, cx)
-        }))
-        .on_action(cx.listener(|this, _: &GridNextCell, _window, cx| {
-            this.grid_jump(super::grid_input::GridJump::Next, false, cx)
-        }))
-        .on_action(cx.listener(|this, _: &GridPrevCell, _window, cx| {
-            this.grid_jump(super::grid_input::GridJump::Prev, false, cx)
-        }));
+        );
 
         // With no rows to paint, show the kit's empty state instead of a blank pane under the
         // header. A compact card is centered in the body rather than stretched across the whole
@@ -944,6 +895,68 @@ impl Render for GridView {
             } else {
                 list.into_any_element()
             };
+
+        // The keyboard context lives on a wrapper shared by the row list and the empty state: with
+        // no rows to paint the list is replaced by the empty card, so bindings attached to the list
+        // itself (Insert, F5, the spreadsheet jumps) would otherwise never fire in an empty table.
+        let list_body =
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h(px(0.0))
+                .min_w(px(0.0))
+                .key_context(GRID_CONTEXT)
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    this.grid_key(event, window, cx);
+                }))
+                // Keyboard commands (keymap): F5 refresh and the spreadsheet jumps.
+                .on_action(cx.listener(|this, _: &GridRefresh, _window, cx| this.refresh(cx)))
+                .on_action(cx.listener(|this, _: &GridInsertRow, window, cx| {
+                    // Insert is an editing gesture: while a cell editor (or the date picker) holds the
+                    // keyboard, it must not append a row behind the editor.
+                    if this.cell_editor.is_none() && this.date_picker.is_none() {
+                        this.add_insert_row(window, cx);
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &GridDuplicateRow, window, cx| {
+                    this.duplicate_row(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &GridEditValue, window, cx| {
+                    this.open_value_editor(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &GridPageUp, _window, cx| {
+                    this.grid_jump(super::grid_input::GridJump::PageUp, false, cx)
+                }))
+                .on_action(cx.listener(|this, _: &GridPageDown, _window, cx| {
+                    this.grid_jump(super::grid_input::GridJump::PageDown, false, cx)
+                }))
+                .on_action(cx.listener(|this, _: &GridSelectPageUp, _window, cx| {
+                    this.grid_jump(super::grid_input::GridJump::PageUp, true, cx)
+                }))
+                .on_action(cx.listener(|this, _: &GridSelectPageDown, _window, cx| {
+                    this.grid_jump(super::grid_input::GridJump::PageDown, true, cx)
+                }))
+                .on_action(cx.listener(|this, _: &GridRowStart, _window, cx| {
+                    this.grid_jump(super::grid_input::GridJump::RowStart, false, cx)
+                }))
+                .on_action(cx.listener(|this, _: &GridRowEnd, _window, cx| {
+                    this.grid_jump(super::grid_input::GridJump::RowEnd, false, cx)
+                }))
+                .on_action(cx.listener(|this, _: &GridFirstCell, _window, cx| {
+                    this.grid_jump(super::grid_input::GridJump::First, false, cx)
+                }))
+                .on_action(cx.listener(|this, _: &GridLastCell, _window, cx| {
+                    this.grid_jump(super::grid_input::GridJump::Last, false, cx)
+                }))
+                .on_action(cx.listener(|this, _: &GridNextCell, _window, cx| {
+                    this.grid_jump(super::grid_input::GridJump::Next, false, cx)
+                }))
+                .on_action(cx.listener(|this, _: &GridPrevCell, _window, cx| {
+                    this.grid_jump(super::grid_input::GridJump::Prev, false, cx)
+                }))
+                .child(list_body)
+                .into_any_element();
 
         let table = div()
             .id("grid-hscroll")
