@@ -1139,7 +1139,7 @@ make more engines cheap later — do not build those features early.
   field owns caret, selection, clipboard and IME, `accepts` keeps it digits-only, `on_submit`
   commits (Enter) and `on_cancel` restores the current value (Escape). The 限制记录 panel's
   page-size control is the project's compact `ui::ComboBox` (`GridView::page_size_combo`, options
-  `PAGE_SIZE_OPTIONS` = 500/1000/2000/5000/10000, default 1000) rather than a typed box, its
+  `PAGE_SIZE_OPTIONS` = 100/500/1000/2000/5000/10000, default 1000) rather than a typed box, its
   限制记录 checkbox applies the chosen size (or the no-limit cap) at once, and the panel sits at
   the right edge above the pager. `GridView` no longer implements `EntityInputHandler`; a new
   single-line field should be a `ui::TextInput` rather than a bespoke append-only editor.

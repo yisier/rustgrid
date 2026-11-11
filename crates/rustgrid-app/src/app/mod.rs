@@ -2323,7 +2323,7 @@ const GRID_SCROLLBAR_THICKNESS: f32 = 14.0;
 const NO_LIMIT_PAGE_SIZE: u64 = 200_000;
 /// The page sizes the 限制记录 dropdown offers, and the one it falls back to when the grid's
 /// current size is not among them.
-const PAGE_SIZE_OPTIONS: [u64; 5] = [500, 1_000, 2_000, 5_000, 10_000];
+const PAGE_SIZE_OPTIONS: [u64; 6] = [100, 500, 1_000, 2_000, 5_000, 10_000];
 const DEFAULT_PAGE_SIZE: u64 = 1_000;
 
 /// The Options window's left-nav pages.
