@@ -402,7 +402,16 @@ impl GridView {
         // back and then jumped to the new text.
         let rows: &mut Vec<Vec<CellValue>> = Arc::make_mut(&mut self.state.rows);
         fold_written_edits(rows, &self.state.column_order, &self.state.edits);
+        self.invalidate_row_count();
         self.load_page_inner(false, cx);
+    }
+
+    /// Forget the row total: a filter change, a refresh or a write means the count on screen may
+    /// no longer describe the rows the next page comes from.
+    fn invalidate_row_count(&mut self) {
+        self.counted_filter = None;
+        self.counting_filter = None;
+        self.count_epoch = self.count_epoch.wrapping_add(1);
     }
 
     fn load_page_inner(&mut self, reset_scroll: bool, cx: &mut Context<'_, Self>) {
@@ -437,6 +446,23 @@ impl GridView {
         let order_by = self.state.sort_columns();
         let filter = self.state.filter_conditions();
 
+        // `COUNT(*)` can take tens of seconds on a large table (especially with a filter that has
+        // no index), so the rows are requested without it and the total is counted separately.
+        // The page therefore paints as soon as its own query returns; the status line fills in
+        // the total when the count lands, and a page turn under the same filter reuses it.
+        let count_needed = self.counted_filter.as_ref() != Some(&filter);
+        let mut count_request = None;
+        if count_needed {
+            // The old total belongs to another filter; drop it rather than let the status line
+            // claim a count that no longer describes these rows.
+            self.state.total_rows = None;
+            if self.counting_filter.as_ref() != Some(&filter) {
+                self.count_epoch = self.count_epoch.wrapping_add(1);
+                self.counting_filter = Some(filter.clone());
+                count_request = Some((self.count_epoch, filter.clone()));
+            }
+        }
+
         self.selecting_cells = false;
         self.cell_editor = None;
         self.cell_editor_blur_subscription = None;
@@ -444,6 +470,10 @@ impl GridView {
         cx.notify();
 
         let runtime = self.runtime.clone();
+        let count_runtime = self.runtime.clone();
+        let count_connection = connection.clone();
+        let count_database = database.clone();
+        let count_table = table.clone();
         let started = std::time::Instant::now();
         cx.spawn(async move |this, cx| {
             let result = match runtime
@@ -454,7 +484,8 @@ impl GridView {
                             &table,
                             PageRequest::new(page_index, page_size)
                                 .with_order_by(order_by)
-                                .with_filter(filter),
+                                .with_filter(filter)
+                                .with_skip_total(true),
                         )
                         .await
                 })
@@ -486,7 +517,11 @@ impl GridView {
                             manual,
                         );
                         grid.state.install_page(page.columns, page.rows, widths);
-                        grid.state.total_rows = page.total_rows;
+                        // The page is fetched with `skip_total`; a total that did arrive (an
+                        // engine that counts inline) still wins over the background count.
+                        if page.total_rows.is_some() {
+                            grid.state.total_rows = page.total_rows;
+                        }
                         // Drop a kept selection that no longer fits the reloaded page.
                         let (rows, cols) = (grid.display_row_count(), grid.state.visible_columns);
                         if grid.state.selection.as_ref().is_some_and(|selection| {
@@ -552,6 +587,40 @@ impl GridView {
             });
         })
         .detach();
+
+        if let Some((count_epoch, count_filter)) = count_request {
+            cx.spawn(async move |this, cx| {
+                let request_filter = count_filter.clone();
+                let result = match count_runtime
+                    .spawn(async move {
+                        count_connection
+                            .count_rows(&count_database, &count_table, &request_filter)
+                            .await
+                    })
+                    .await
+                {
+                    Ok(inner) => inner,
+                    Err(error) => Err(Error::other(error)),
+                };
+                let _ = this.update(cx, |grid, cx| {
+                    // A newer filter or refresh owns the status line now.
+                    if grid.count_epoch != count_epoch
+                        || grid.counting_filter.as_ref() != Some(&count_filter)
+                    {
+                        return;
+                    }
+                    grid.counting_filter = None;
+                    // Remember the filter even when the count failed, so paging does not retry a
+                    // count the server could not answer; an explicit refresh clears it.
+                    grid.counted_filter = Some(count_filter);
+                    if let Ok(Some(total)) = result {
+                        grid.state.total_rows = Some(total);
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
     }
 
     /// Put the grid's rows back at the top. Used when the row set changes identity (page turn,
@@ -794,6 +863,8 @@ impl GridView {
     /// toolbar / context-menu / F5 refresh never looks like a dropped click.
     fn refresh_now(&mut self, cx: &mut Context<'_, Self>) {
         self.refresh_feedback = true;
+        // A plain refresh can land on a changed row set, so the total is counted again.
+        self.invalidate_row_count();
         // A plain refresh discards staged edits instead of assuming they were written, so it goes
         // through the load path directly rather than the post-write reload that folds them in.
         self.load_page_inner(false, cx);

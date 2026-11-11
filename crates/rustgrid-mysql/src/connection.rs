@@ -725,6 +725,25 @@ impl Connection for MysqlConnection {
         })
     }
 
+    async fn count_rows(
+        &self,
+        database: &str,
+        table: &str,
+        filter: &[FilterNode],
+    ) -> Result<Option<u64>> {
+        let qualified = format!("{}.{}", quote_identifier(database), quote_identifier(table));
+        let (where_clause, binds) = filter_clause(filter);
+        let mut connection = self.database_connection(database).await?;
+        let total = self
+            .scalar_u64(
+                &mut connection,
+                format!("SELECT COUNT(*) FROM {qualified}{where_clause}"),
+                &binds,
+            )
+            .await?;
+        Ok(Some(total))
+    }
+
     async fn update_rows(&self, database: &str, table: &str, updates: &[RowUpdate]) -> Result<()> {
         if updates.is_empty() {
             return Ok(());

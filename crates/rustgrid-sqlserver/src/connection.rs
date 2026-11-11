@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use futures_util::TryStreamExt;
 use rustgrid_core::{
     BackupObjectKind, CellValue, CheckDef, ColumnDef, ColumnInfo, Connection, DatabaseInfo,
-    DatabaseOptions, DriverId, Error, ForeignKeyDef, IndexColumnDef, IndexDef, ObjectDump,
-    ObjectKind, ObjectPrivilegeRow, PageRequest, PrivilegeCatalog, QueryResult, Result,
+    DatabaseOptions, DriverId, Error, FilterNode, ForeignKeyDef, IndexColumnDef, IndexDef,
+    ObjectDump, ObjectKind, ObjectPrivilegeRow, PageRequest, PrivilegeCatalog, QueryResult, Result,
     RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind, RowInsert, RowUpdate,
     ServerSecurableGrant, TableInfo, TableOptions, TablePage, TableSchema, TableStatus, TriggerDef,
     UniqueKeyDef, UserAccount, UserDetails, UserEdit, UserEditSection, UserMapping, ViewDetails,
@@ -527,6 +527,26 @@ impl Connection for SqlServerConnection {
             page_size: page.page_size,
             total_rows,
         })
+    }
+
+    async fn count_rows(
+        &self,
+        database: &str,
+        table: &str,
+        filter: &[FilterNode],
+    ) -> Result<Option<u64>> {
+        let (schema, bare) = self.resolve_object(database, table).await?;
+        let qualified = qualified_name(database, &schema, &bare);
+        let (where_clause, values) = filter_clause(filter);
+        let params: Vec<Option<String>> = values.into_iter().map(Some).collect();
+        let total = self
+            .scalar_text(
+                None,
+                &format!("SELECT COUNT(*) FROM {qualified}{where_clause}"),
+                &params,
+            )
+            .await?;
+        Ok(total.and_then(|value| value.parse::<u64>().ok()))
     }
 
     async fn update_rows(&self, database: &str, table: &str, updates: &[RowUpdate]) -> Result<()> {

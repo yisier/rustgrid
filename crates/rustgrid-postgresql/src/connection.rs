@@ -6,10 +6,10 @@ use async_trait::async_trait;
 use futures_util::TryStreamExt;
 use rustgrid_core::{
     BackupObjectKind, CellValue, ColumnInfo, Connection, DatabaseInfo, DatabaseOptions, DriverId,
-    Error, ObjectDump, ObjectKind, ObjectPrivilegeRow, PageRequest, PrivilegeCatalog, QueryResult,
-    Result, RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind, RowInsert, RowUpdate,
-    ScriptSession, TableInfo, TablePage, TableSchema, TableStatus, UserAccount, UserDetails,
-    UserEdit, UserEditSection, ViewDetails, ViewEdit,
+    Error, FilterNode, ObjectDump, ObjectKind, ObjectPrivilegeRow, PageRequest, PrivilegeCatalog,
+    QueryResult, Result, RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind, RowInsert,
+    RowUpdate, ScriptSession, TableInfo, TablePage, TableSchema, TableStatus, UserAccount,
+    UserDetails, UserEdit, UserEditSection, ViewDetails, ViewEdit,
 };
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::{AssertSqlSafe, Column, Either, Executor, Row, SqlSafeStr, Statement, TypeInfo};
@@ -467,6 +467,26 @@ impl Connection for PostgresConnection {
             page_size: page.page_size,
             total_rows,
         })
+    }
+
+    async fn count_rows(
+        &self,
+        database: &str,
+        table: &str,
+        filter: &[FilterNode],
+    ) -> Result<Option<u64>> {
+        let columns = self.columns(database, table).await?;
+        let (schema, bare) = self.resolve_object(database, table).await?;
+        let qualified = qualify(&schema, &bare);
+        let (where_clause, binds) = filter_clause(filter, &columns);
+        let total = self
+            .scalar_i64(
+                database,
+                &format!("SELECT count(*) FROM {qualified}{where_clause}"),
+                &binds,
+            )
+            .await?;
+        Ok(Some(total.max(0) as u64))
     }
 
     async fn update_rows(&self, database: &str, table: &str, updates: &[RowUpdate]) -> Result<()> {

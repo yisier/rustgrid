@@ -416,7 +416,7 @@ fn snapshot_database(
                             || (database_matches && table.schema.is_none());
                         // A schema-less engine's database is its schema, so a database match
                         // brings that schema's tables into the result.
-                        matches && table.schema.as_deref().is_none_or(&schema_is_searchable)
+                        matches && table.schema.as_deref().is_none_or(schema_is_searchable)
                     })
                     .collect(),
             ),

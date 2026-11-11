@@ -5,10 +5,10 @@ use async_trait::async_trait;
 use oracledb::{Connection as OracleRawConnection, ToDbValue};
 use rustgrid_core::{
     BackupObjectKind, ColumnInfo, Connection, DatabaseInfo, DatabaseOptions, DriverId, Error,
-    ObjectDump, ObjectKind, ObjectPrivilegeRow, PageRequest, PrivilegeCatalog, QueryResult, Result,
-    RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind, RowInsert, RowUpdate, TableInfo,
-    TablePage, TableSchema, TableStatus, UserAccount, UserDetails, UserEdit, UserEditSection,
-    ViewDetails, ViewEdit,
+    FilterNode, ObjectDump, ObjectKind, ObjectPrivilegeRow, PageRequest, PrivilegeCatalog,
+    QueryResult, Result, RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind, RowInsert,
+    RowUpdate, TableInfo, TablePage, TableSchema, TableStatus, UserAccount, UserDetails, UserEdit,
+    UserEditSection, ViewDetails, ViewEdit,
 };
 
 use crate::helpers::{
@@ -501,6 +501,25 @@ impl Connection for OracleConnection {
             page_size,
             total_rows,
         })
+    }
+
+    async fn count_rows(
+        &self,
+        database: &str,
+        table: &str,
+        filter: &[FilterNode],
+    ) -> Result<Option<u64>> {
+        let columns = self.columns(database, table).await?;
+        let (schema, bare) = self.resolve(table);
+        let qualified = qualify(&schema, &bare);
+        let (where_clause, binds) = filter_clause(filter, &columns);
+        let total = self
+            .scalar_i64(
+                &format!("SELECT count(*) FROM {qualified}{where_clause}"),
+                binds,
+            )
+            .await?;
+        Ok(Some(total.max(0) as u64))
     }
 
     async fn update_rows(&self, database: &str, table: &str, updates: &[RowUpdate]) -> Result<()> {

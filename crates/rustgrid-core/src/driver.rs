@@ -6,7 +6,7 @@ use crate::dialect::DriverDialect;
 use crate::error::{Error, Result};
 use crate::model::{
     BackupObjectKind, CollectionDefinition, ColumnInfo, ConnectionConfig, ConnectionProfile,
-    DatabaseInfo, DatabaseOptions, DriverId, ObjectCreate, ObjectDump, ObjectNamespace,
+    DatabaseInfo, DatabaseOptions, DriverId, FilterNode, ObjectCreate, ObjectDump, ObjectNamespace,
     PageRequest, QueryResult, RowInsert, RowUpdate, TableInfo, TablePage, TableSchema, TableStatus,
 };
 use crate::routine::{RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind};
@@ -359,6 +359,21 @@ pub trait Connection: Send + Sync {
     /// stable across pages so pagination stays coherent.
     async fn fetch_page(&self, database: &str, table: &str, page: PageRequest)
     -> Result<TablePage>;
+
+    /// Count the rows a filter matches, without reading them.
+    ///
+    /// The grid fetches its page with [`PageRequest::skip_total`] and asks for the count in a
+    /// separate task, so a `COUNT(*)` over a huge table never holds the rows back: the page (and
+    /// its spinner) settles first, then the record status fills in the total. Engines that cannot
+    /// count cheaply keep this default; the status line then omits the total.
+    async fn count_rows(
+        &self,
+        _database: &str,
+        _table: &str,
+        _filter: &[FilterNode],
+    ) -> Result<Option<u64>> {
+        Ok(None)
+    }
 
     async fn update_rows(&self, database: &str, table: &str, updates: &[RowUpdate]) -> Result<()>;
 

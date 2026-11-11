@@ -339,6 +339,23 @@ impl Connection for SqliteConnection {
         })
     }
 
+    async fn count_rows(
+        &self,
+        _database: &str,
+        table: &str,
+        filter: &[FilterNode],
+    ) -> Result<Option<u64>> {
+        let qualified = quote_identifier(table);
+        let (where_clause, binds) = filter_clause(filter);
+        let total = self
+            .scalar_u64(
+                format!("SELECT COUNT(*) FROM {qualified}{where_clause}"),
+                &binds,
+            )
+            .await?;
+        Ok(Some(total))
+    }
+
     async fn update_rows(&self, _database: &str, table: &str, updates: &[RowUpdate]) -> Result<()> {
         if updates.is_empty() {
             return Ok(());

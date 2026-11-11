@@ -1013,6 +1013,26 @@ impl Connection for OdbcConnection {
         })
     }
 
+    async fn count_rows(
+        &self,
+        database: &str,
+        table: &str,
+        filter: &[FilterNode],
+    ) -> Result<Option<u64>> {
+        let table = self.qualify(database, table);
+        let quote = |name: &str| self.quote(name);
+        let (where_sql, params) = filter_clause(filter, &quote);
+        let count_sql = format!("SELECT COUNT(*) FROM {table}{where_sql}");
+        Ok(self
+            .run_prepared(&count_sql, &params)
+            .ok()
+            .and_then(|(_columns, rows, _affected)| {
+                rows.first()
+                    .and_then(|row| row.first())
+                    .and_then(|value| value.as_display().trim().parse::<u64>().ok())
+            }))
+    }
+
     async fn update_rows(&self, database: &str, table: &str, updates: &[RowUpdate]) -> Result<()> {
         let table = self.qualify(database, table);
         for update in updates {

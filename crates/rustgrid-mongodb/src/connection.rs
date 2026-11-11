@@ -20,8 +20,8 @@ use mongodb::{
 };
 use rustgrid_core::{
     BackupObjectKind, CellValue, CollectionDefinition, ColumnInfo, Connection, DatabaseInfo,
-    DatabaseOptions, DriverId, Error, ObjectDump, ObjectKind, PageRequest, QueryResult, Result,
-    RowInsert, RowUpdate, TableInfo, TablePage, TableSchema, TableStatus,
+    DatabaseOptions, DriverId, Error, FilterNode, ObjectDump, ObjectKind, PageRequest, QueryResult,
+    Result, RowInsert, RowUpdate, TableInfo, TablePage, TableSchema, TableStatus,
 };
 use rustgrid_tunnel::Tunnel;
 
@@ -696,6 +696,22 @@ impl Connection for MongoConnection {
             page_size,
             total_rows,
         })
+    }
+
+    async fn count_rows(
+        &self,
+        database: &str,
+        table: &str,
+        filter: &[FilterNode],
+    ) -> Result<Option<u64>> {
+        let columns = self.schema(database, table).await?;
+        let query = filter::build(filter, &columns);
+        let total = self
+            .collection(database, table)
+            .count_documents(query)
+            .await
+            .map_err(query_error)?;
+        Ok(Some(total))
     }
 
     async fn update_rows(&self, database: &str, table: &str, updates: &[RowUpdate]) -> Result<()> {

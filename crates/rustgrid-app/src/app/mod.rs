@@ -1867,6 +1867,16 @@ struct GridView {
     /// Set by an explicit 刷新 (toolbar / context menu / F5) so the fetch that follows confirms
     /// itself with a toast; page turns and post-write reloads leave it off.
     refresh_feedback: bool,
+    /// The filter the status line's row total belongs to. A grid loads its rows without waiting
+    /// for `COUNT(*)`; page turns under the same filter reuse the total instead of counting a
+    /// huge table again.
+    counted_filter: Option<Vec<FilterNode>>,
+    /// The filter a background count is running for, so paging while it is in flight does not
+    /// start a duplicate.
+    counting_filter: Option<Vec<FilterNode>>,
+    /// Bumped whenever the row count is invalidated (a filter change, a refresh, a write), so a
+    /// late count from a previous state is dropped.
+    count_epoch: u64,
 
     /// The single-line editors of the filter builder's value fields, keyed by `(node path, slot)`.
     /// Rebuilt after any structural change so the paths stay valid. A real [`TextInput`] gives the
