@@ -10,6 +10,29 @@ UI labels are quoted as the app shows them, so this file quotes the English stri
 [`CHANGELOG_zh.md`](CHANGELOG_zh.md) and [`CHANGELOG_ru.md`](CHANGELOG_ru.md) quote the 简体中文 and
 Russian ones.
 
+## [0.1.12] - 2026-11-11
+
+### Added
+
+- Limit Records offers a 100-row page size.
+
+### Changed
+
+- A running fetch is shown as a centered loading card over the table.
+- A table paints its rows before its total is counted, and the status line shows the total when it
+  arrives.
+
+### Fixed
+
+- Filtering a large table no longer takes tens of seconds
+  ([#57](https://github.com/yisier/rustgrid/issues/57)).
+- A narrow filter counts its few matches from the page instead of scanning the table again.
+- An empty table shows the empty state, and Insert and F5 work there
+  ([#51](https://github.com/yisier/rustgrid/issues/51)).
+- The empty state stays centered when the table is wider than the pane.
+- Opening a database through UDAL/TeleDB's DBProxy no longer fails with "No database selected"
+  ([#56](https://github.com/yisier/rustgrid/issues/56)).
+
 ## [0.1.11] - 2026-11-10
 
 ### Added

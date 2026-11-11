@@ -6,6 +6,25 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.1.12] - 2026-11-11
+
+### 新增
+
+- 「限制记录」增加每页 100 条的分页大小。
+
+### 变更
+
+- 表格加载时显示居中的加载卡片。
+- 表格先显示数据行再统计总数，统计完成前状态栏会说明正在统计。
+
+### 修复
+
+- 对大表筛选不再需要几十秒（[#57](https://github.com/yisier/rustgrid/issues/57)）。
+- 筛选结果较少时直接由当前页得出总数，不再重复扫描整表。
+- 空表显示空状态，Insert 和 F5 在空表中也可用（[#51](https://github.com/yisier/rustgrid/issues/51)）。
+- 表格列比窗口宽时，空状态保持居中。
+- 通过 UDAL/TeleDB 的 DBProxy 打开数据库不再报「No database selected」（[#56](https://github.com/yisier/rustgrid/issues/56)）。
+
 ## [0.1.11] - 2026-11-10
 
 ### 新增
