@@ -900,27 +900,26 @@ impl Render for GridView {
             }),
         );
 
-        // With no rows to paint, show the kit's empty state instead of a blank pane under the
-        // header. A compact card is centered in the body rather than stretched across the whole
-        // grid, so an empty table reads as an intentional state rather than an unfinished pane.
-        let list_body: AnyElement =
-            if empty_page && !self.state.loading && !self.state.columns.is_empty() {
+        // With no rows to paint, show the kit's empty state over the *visible* body rather than
+        // inside the scrollable column strip: that strip is as wide as every column, so a card
+        // centered in it sits off screen as soon as the columns overflow. Anchoring the card to
+        // the pane keeps it centered whatever the total width or horizontal scroll is.
+        let empty_state: Option<AnyElement> =
+            (empty_page && !self.state.loading && !self.state.columns.is_empty()).then(|| {
                 div()
+                    .id(SharedString::from(format!(
+                        "grid-empty-state-{}",
+                        self.state.id
+                    )))
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top(px(header_height))
+                    .bottom(px(GRID_SCROLLBAR_THICKNESS))
                     .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h(px(0.0))
-                    .w_full()
                     .items_center()
                     .justify_center()
                     .p_6()
-                    .track_focus(&self.focus)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _event, window, cx| {
-                            window.focus(&this.focus, cx);
-                        }),
-                    )
                     .child(
                         Empty::new().flex_none().w(px(420.0)).header(
                             EmptyHeader::new()
@@ -937,71 +936,7 @@ impl Render for GridView {
                         ),
                     )
                     .into_any_element()
-            } else {
-                list.into_any_element()
-            };
-
-        // The keyboard context lives on a wrapper shared by the row list and the empty state: with
-        // no rows to paint the list is replaced by the empty card, so bindings attached to the list
-        // itself (Insert, F5, the spreadsheet jumps) would otherwise never fire in an empty table.
-        let list_body =
-            div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_h(px(0.0))
-                .min_w(px(0.0))
-                .key_context(GRID_CONTEXT)
-                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                    this.grid_key(event, window, cx);
-                }))
-                // Keyboard commands (keymap): F5 refresh and the spreadsheet jumps.
-                .on_action(cx.listener(|this, _: &GridRefresh, _window, cx| this.refresh(cx)))
-                .on_action(cx.listener(|this, _: &GridInsertRow, window, cx| {
-                    // Insert is an editing gesture: while a cell editor (or the date picker) holds the
-                    // keyboard, it must not append a row behind the editor.
-                    if this.cell_editor.is_none() && this.date_picker.is_none() {
-                        this.add_insert_row(window, cx);
-                    }
-                }))
-                .on_action(cx.listener(|this, _: &GridDuplicateRow, window, cx| {
-                    this.duplicate_row(window, cx)
-                }))
-                .on_action(cx.listener(|this, _: &GridEditValue, window, cx| {
-                    this.open_value_editor(window, cx)
-                }))
-                .on_action(cx.listener(|this, _: &GridPageUp, _window, cx| {
-                    this.grid_jump(super::grid_input::GridJump::PageUp, false, cx)
-                }))
-                .on_action(cx.listener(|this, _: &GridPageDown, _window, cx| {
-                    this.grid_jump(super::grid_input::GridJump::PageDown, false, cx)
-                }))
-                .on_action(cx.listener(|this, _: &GridSelectPageUp, _window, cx| {
-                    this.grid_jump(super::grid_input::GridJump::PageUp, true, cx)
-                }))
-                .on_action(cx.listener(|this, _: &GridSelectPageDown, _window, cx| {
-                    this.grid_jump(super::grid_input::GridJump::PageDown, true, cx)
-                }))
-                .on_action(cx.listener(|this, _: &GridRowStart, _window, cx| {
-                    this.grid_jump(super::grid_input::GridJump::RowStart, false, cx)
-                }))
-                .on_action(cx.listener(|this, _: &GridRowEnd, _window, cx| {
-                    this.grid_jump(super::grid_input::GridJump::RowEnd, false, cx)
-                }))
-                .on_action(cx.listener(|this, _: &GridFirstCell, _window, cx| {
-                    this.grid_jump(super::grid_input::GridJump::First, false, cx)
-                }))
-                .on_action(cx.listener(|this, _: &GridLastCell, _window, cx| {
-                    this.grid_jump(super::grid_input::GridJump::Last, false, cx)
-                }))
-                .on_action(cx.listener(|this, _: &GridNextCell, _window, cx| {
-                    this.grid_jump(super::grid_input::GridJump::Next, false, cx)
-                }))
-                .on_action(cx.listener(|this, _: &GridPrevCell, _window, cx| {
-                    this.grid_jump(super::grid_input::GridJump::Prev, false, cx)
-                }))
-                .child(list_body)
-                .into_any_element();
+            });
 
         let table = div()
             .id("grid-hscroll")
@@ -1048,7 +983,7 @@ impl Render for GridView {
                         }),
                     )
                     .child(header)
-                    .child(list_body)
+                    .child(list)
                     .child(self.render_date_picker(cx)),
             );
 
@@ -1220,6 +1155,58 @@ impl Render for GridView {
                 .flex_1()
                 .min_w(px(0.0))
                 .min_h(px(0.0))
+                // The keyboard context lives on the whole body, not on the row list: with no rows
+                // to paint the list is covered by the empty state, and the body is the common
+                // ancestor of both (and of the scrollbars).
+                .key_context(GRID_CONTEXT)
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    this.grid_key(event, window, cx);
+                }))
+                // Keyboard commands (keymap): F5 refresh and the spreadsheet jumps.
+                .on_action(cx.listener(|this, _: &GridRefresh, _window, cx| this.refresh(cx)))
+                .on_action(cx.listener(|this, _: &GridInsertRow, window, cx| {
+                    // Insert is an editing gesture: while a cell editor (or the date picker) holds the
+                    // keyboard, it must not append a row behind the editor.
+                    if this.cell_editor.is_none() && this.date_picker.is_none() {
+                        this.add_insert_row(window, cx);
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &GridDuplicateRow, window, cx| {
+                    this.duplicate_row(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &GridEditValue, window, cx| {
+                    this.open_value_editor(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &GridPageUp, _window, cx| {
+                    this.grid_jump(super::grid_input::GridJump::PageUp, false, cx)
+                }))
+                .on_action(cx.listener(|this, _: &GridPageDown, _window, cx| {
+                    this.grid_jump(super::grid_input::GridJump::PageDown, false, cx)
+                }))
+                .on_action(cx.listener(|this, _: &GridSelectPageUp, _window, cx| {
+                    this.grid_jump(super::grid_input::GridJump::PageUp, true, cx)
+                }))
+                .on_action(cx.listener(|this, _: &GridSelectPageDown, _window, cx| {
+                    this.grid_jump(super::grid_input::GridJump::PageDown, true, cx)
+                }))
+                .on_action(cx.listener(|this, _: &GridRowStart, _window, cx| {
+                    this.grid_jump(super::grid_input::GridJump::RowStart, false, cx)
+                }))
+                .on_action(cx.listener(|this, _: &GridRowEnd, _window, cx| {
+                    this.grid_jump(super::grid_input::GridJump::RowEnd, false, cx)
+                }))
+                .on_action(cx.listener(|this, _: &GridFirstCell, _window, cx| {
+                    this.grid_jump(super::grid_input::GridJump::First, false, cx)
+                }))
+                .on_action(cx.listener(|this, _: &GridLastCell, _window, cx| {
+                    this.grid_jump(super::grid_input::GridJump::Last, false, cx)
+                }))
+                .on_action(cx.listener(|this, _: &GridNextCell, _window, cx| {
+                    this.grid_jump(super::grid_input::GridJump::Next, false, cx)
+                }))
+                .on_action(cx.listener(|this, _: &GridPrevCell, _window, cx| {
+                    this.grid_jump(super::grid_input::GridJump::Prev, false, cx)
+                }))
                 .child(
                     div()
                         .flex()
@@ -1312,7 +1299,10 @@ impl Render for GridView {
                 // changes the layout.
                 .when(self.state.loading, |body| {
                     body.child(self.render_loading_overlay())
-                }),
+                })
+                // The empty state floats over the visible pane instead of sitting inside the
+                // horizontally scrollable strip, so wide tables cannot push it off screen.
+                .when_some(empty_state, |body, empty| body.child(empty)),
         );
 
         if self.state.show_toolbar && self.page_size_menu_open {

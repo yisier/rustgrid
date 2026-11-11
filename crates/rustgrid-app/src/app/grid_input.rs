@@ -34,6 +34,10 @@ impl GridView {
 
         let Some(hit) = self.grid_hit(event.position) else {
             self.cell_press = None;
+            // A click below the last row (or over an empty table) still targets the grid, so its
+            // shortcuts (Insert, F5) keep working from the empty state too.
+            window.focus(&self.focus, cx);
+            cx.notify();
             return;
         };
         let column_count = self.state.visible_columns;
