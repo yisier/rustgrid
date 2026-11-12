@@ -45,6 +45,14 @@ not a later refactor.
   native tooling. `build.rs` compiles SQLCipher and the minimal libtomcrypt provider, and
   `src/bindings.rs` is included directly. See `vendor/libsqlite3-sys/RUSTGRID_PATCHES.md`; remove it
   once upstream (or an sqlx release) builds SQLCipher with libtomcrypt.
+- `vendor/sqlx-mysql` — the published `sqlx-mysql` 0.9.0 (the version sqlx 0.9 drives MySQL with),
+  patched through `[patch.crates-io]`. The older fixes let MySQL before 5.5 log in; the current
+  ones make it match **MariaDB Connector/C**, which Navicat uses, on MySQL-protocol middlewares:
+  it never negotiates `CLIENT_DEPRECATE_EOF` (UDAL leaves a plain OK packet after the column
+  metadata, which sqlx otherwise parses as the first row) and exposes
+  `MySqlConnection::select_database` (COM_INIT_DB, what `mysql_select_db` sends) so a `USE`
+  statement never goes through the proxy's SQL parser. See
+  `vendor/sqlx-mysql/RUSTGRID_PATCHES.md`; remove it once upstream behaves the same.
 - `crates/rustgrid-sqlserver` — the **Microsoft SQL Server** driver, built on **tiberius** (pure-Rust
   async TDS) with a **bb8** connection pool (`pool.rs`). It is not sqlx-based (sqlx 0.9 has no MSSQL
   driver). `driver.rs` builds the tiberius `Config` (host/port, SQL authentication, TLS, timeouts) and
@@ -1212,23 +1220,30 @@ make more engines cheap later — do not build those features early.
   identifiers escaped (`quote_identifier`) and use bind parameters for all values.
 - **A MySQL-protocol proxy may reject server-side prepares.** UDAL/TeleDB's DBProxy answers
   `1047 ER_UNKNOWN_COM_ERROR` ("UDAL - Unknown command") to `COM_STMT_PREPARE` while the text
-  protocol keeps working — Navicat, which uses it, opens the same database fine. sqlx prepares
-  whenever a query carries bound arguments, so `MysqlConnection` turns the first catalog 1047
-  into `text_protocol`: the catalog then reads `SHOW FULL TABLES` / `SHOW FULL COLUMNS` /
-  `SHOW TABLE STATUS`, page queries and DML are rendered with `text_statement` (string values
-  become `_utf8mb4 0x…` hex literals, which neither quotes nor `sql_mode` can break), and
-  statements without parameters should use `raw_sql` so they never prepare either.
-  The same middleware also answers `1046 ER_NO_DB_ERROR` ("UDAL - No database selected") to a
-  statement — even a fully qualified `information_schema` query — while its session has no
-  current database (the second shape of the same problem, reported in issue #56).
-  `MysqlConnection::prepared_rows` records
-  that in `needs_database`, selects the database on the same connection (`USE`) and retries
-  once; from then on `database_connection` selects the database before every database-scoped
-  statement, and the `SHOW`/text fallbacks run on that pinned connection instead of the pool.
-  `tools/udal-proxy/proxy.js` reproduces both answers against a real MySQL server (leave the
-  connection form's 数据库 empty so the session starts without one), and
-  `crates/rustgrid-mysql/tests/mysql_compatibility.rs` reproduces both failures on a
-  wire-protocol fixture without a server.
+  protocol keeps working — Navicat, which uses MariaDB Connector/C, opens the same database fine.
+  It also answers `1046 ER_NO_DB_ERROR` ("UDAL - No database selected") to a statement — even a
+  fully qualified `information_schema` query — while its session has no current database (issue
+  #56). `MysqlConnection` records both in `text_protocol` / `needs_database` and then follows
+  Navicat exactly:
+  - the database is selected with **`COM_INIT_DB`** (`MySqlConnection::select_database`, the
+    command `mysql_select_db` sends), never a `USE` statement, so the proxy's SQL parser is not
+    involved;
+  - catalog reads are text statements and use the **unqualified** `SHOW FULL TABLES` /
+    `SHOW FULL COLUMNS FROM <table>` / `SHOW TABLE STATUS`, never a prepared
+    `information_schema.tables` query. UDAL rewrites that to `<db>.tables` (error 3013), so the
+    prepared query must not be retried after the database is selected;
+  - page queries and DML are rendered with `text_statement` (string values become
+    `_utf8mb4 0x…` hex literals, which neither quotes nor `sql_mode` can break), and statements
+    without parameters use `raw_sql` so they never prepare either.
+  `vendor/sqlx-mysql` also stops negotiating `CLIENT_DEPRECATE_EOF`: UDAL advertises the
+  capability but still sends a plain OK packet after the column metadata, so upstream sqlx leaves
+  it in the stream, reads it as the first text row and fails with
+  `buffer exhausted when reading data for column ...` (the second part of issue #56). MariaDB
+  Connector/C has no such capability and reads the classic EOF terminator, which is what the
+  patched driver now does too. `tools/udal-proxy/proxy.js` reproduces all of this against a real
+  MySQL server (leave the connection form's 数据库 empty so the session starts without one), and
+  `crates/rustgrid-mysql/tests/mysql_compatibility.rs` reproduces it on a wire-protocol fixture
+  without a server (including the plain-OK metadata terminator when `DEPRECATE_EOF` is requested).
 - Grid writes identify a row by its primary key, falling back to **every column** when the table
   has no primary key (`GridState` column `primary_key` flags). Key values are
   `Option<String>` (`CellValue::as_edit_value`): `None` is SQL `NULL` and must render `IS NULL`,

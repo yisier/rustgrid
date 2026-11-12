@@ -8,12 +8,13 @@ pub(crate) use stream::{MySqlStream, Waiting};
 use crate::collation::Collation;
 use crate::common::StatementCache;
 use crate::error::Error;
-use crate::protocol::response::Status;
+use crate::io::ProtocolDecode;
+use crate::protocol::response::{ErrPacket, OkPacket, Status};
 use crate::protocol::statement::StmtClose;
-use crate::protocol::text::{Ping, Quit};
+use crate::protocol::text::{InitDb, Ping, Quit};
 use crate::statement::MySqlStatementMetadata;
 use crate::transaction::Transaction;
-use crate::{MySql, MySqlConnectOptions};
+use crate::{MySql, MySqlConnectOptions, MySqlDatabaseError};
 
 mod auth;
 mod establish;
@@ -56,6 +57,29 @@ impl MySqlConnection {
         self.inner
             .status_flags
             .intersects(Status::SERVER_STATUS_IN_TRANS)
+    }
+
+    /// Select the connection's current database with `COM_INIT_DB`, the command
+    /// [`mysql_select_db`](https://mariadb.com/kb/en/mysql_select_db/) sends. It bypasses the
+    /// SQL parser, which is what MySQL-protocol middlewares such as UDAL/TeleDB's DBProxy need
+    /// before they will route catalog statements; a `USE` statement goes through their parser and
+    /// can be rewritten (`information_schema.tables` becomes `<db>.tables`).
+    pub async fn select_database(&mut self, database: &str) -> Result<(), Error> {
+        self.inner.stream.wait_until_ready().await?;
+        self.inner.stream.send_packet(InitDb(database)).await?;
+
+        let packet = self.inner.stream.recv_packet().await?;
+        if packet.first().copied() == Some(0xff) {
+            let error = MySqlDatabaseError(ErrPacket::decode_with(
+                packet.0,
+                self.inner.stream.capabilities,
+            )?);
+            return Err(Error::Database(Box::new(error)));
+        }
+
+        let ok: OkPacket = packet.ok()?;
+        self.inner.status_flags = ok.status;
+        Ok(())
     }
 }
 

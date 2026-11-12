@@ -6,6 +6,6 @@ mod row;
 
 pub(crate) use column::{ColumnDefinition, ColumnFlags, ColumnType};
 pub(crate) use ping::Ping;
-pub(crate) use query::Query;
+pub(crate) use query::{InitDb, Query};
 pub(crate) use quit::Quit;
 pub(crate) use row::TextRow;

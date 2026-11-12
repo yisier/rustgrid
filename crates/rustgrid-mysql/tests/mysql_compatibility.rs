@@ -147,17 +147,25 @@ async fn mariadb_ignores_mysql_compatibility_option() {
     );
 }
 
-// ----- Fallback for a proxy that rejects server-side prepares -------------------------------
+// ----- UDAL/TeleDB DBProxy compatibility -----------------------------------------------------
 //
-// UDAL/TeleDB's DBProxy answers `1047 ER_UNKNOWN_COM_ERROR` to `COM_STMT_PREPARE` (the issue
-// reported "1047 - UDAL - Unknown command" when a database was opened), while the text protocol
-// works — which is how Navicat talks to it. It also refuses every statement — even a fully
-// qualified `information_schema` one — with `1046 ER_NO_DB_ERROR` ("No database selected") until
-// the session selects a database, the second shape of the same issue. The fixture below emulates
-// both: a statement without a current database gets 1046, a prepared statement after a `USE` gets
-// 1047, and the classic `SHOW` statements plus the generated text statements are served. The
-// connection therefore has to select the database and then fall back for its table list, columns,
-// overview, pages and writes.
+// The proxy behaves like the Navicat setup: MariaDB Connector/C talks to it with the text
+// protocol, selects the database with COM_INIT_DB (`mysql_select_db`), and lists tables with the
+// unqualified `SHOW FULL TABLES`. Two shapes break a generic sqlx client:
+//
+//   * without a current database it answers `1046 ER_NO_DB_ERROR` to every statement, even a
+//     fully qualified `information_schema` query;
+//   * after a database is selected it answers `1047 ER_UNKNOWN_COM_ERROR` to
+//     `COM_STMT_PREPARE`, rewrites a prepared `information_schema.tables` query to
+//     `<database>.tables` (error 3013), and — because it advertises `CLIENT_DEPRECATE_EOF` but
+//     still sends a plain OK packet after the column metadata — makes sqlx decode that OK packet
+//     as the first text row (`buffer exhausted ... decoded length is 47`).
+//
+// The fixture emulates all of it: COM_INIT_DB sets the current database, prepared statements get
+// 1047/3013, unqualified `SHOW` statements are served, and a client that requests DEPRECATE_EOF
+// gets the plain-OK metadata terminator that reproduces issue #56. The patched driver must select
+// the database with COM_INIT_DB, keep the catalog on the text protocol with unqualified SHOWs, and
+// never negotiate DEPRECATE_EOF.
 
 const FULL_COLUMNS: &[&str] = &[
     "Field",
@@ -218,7 +226,12 @@ fn column_packet(name: &str) -> Vec<u8> {
     payload
 }
 
-fn write_result_set(stream: &mut TcpStream, columns: &[&str], rows: &[Vec<Option<&str>>]) {
+fn write_result_set(
+    stream: &mut TcpStream,
+    columns: &[&str],
+    rows: &[Vec<Option<&str>>],
+    deprecate_eof: bool,
+) {
     let mut sequence = 1;
     write_packet(stream, sequence, &[columns.len() as u8]);
     sequence += 1;
@@ -226,7 +239,20 @@ fn write_result_set(stream: &mut TcpStream, columns: &[&str], rows: &[Vec<Option
         write_packet(stream, sequence, &column_packet(name));
         sequence += 1;
     }
-    write_packet(stream, sequence, EOF);
+    if deprecate_eof {
+        // UDAL's DBProxy advertises CLIENT_DEPRECATE_EOF but still sends an OK packet as the
+        // metadata terminator instead of omitting it. Upstream sqlx does not read it and then
+        // decodes that OK as the first text row (`buffer exhausted ... decoded length is 47, but
+        // only 4 bytes remain`, issue #56). `0x2f` is the status-flag byte that becomes the
+        // bogus value length.
+        write_packet(
+            stream,
+            sequence,
+            &[0x00, 0x00, 0x00, 0x2f, 0x00, 0x00, 0x00],
+        );
+    } else {
+        write_packet(stream, sequence, EOF);
+    }
     sequence += 1;
     for row in rows {
         write_packet(stream, sequence, &text_row(row));
@@ -235,8 +261,8 @@ fn write_result_set(stream: &mut TcpStream, columns: &[&str], rows: &[Vec<Option
     write_packet(stream, sequence, EOF);
 }
 
-fn respond(stream: &mut TcpStream, sql: &str) {
-    if sql.starts_with("SHOW FULL TABLES FROM") {
+fn respond(stream: &mut TcpStream, sql: &str, deprecate_eof: bool) {
+    if sql.starts_with("SHOW FULL TABLES") {
         write_result_set(
             stream,
             &["Tables_in_shop", "Table_type"],
@@ -244,6 +270,7 @@ fn respond(stream: &mut TcpStream, sql: &str) {
                 vec![Some("users"), Some("BASE TABLE")],
                 vec![Some("v"), Some("VIEW")],
             ],
+            deprecate_eof,
         );
     } else if sql.starts_with("SHOW FULL COLUMNS FROM") {
         write_result_set(
@@ -273,8 +300,9 @@ fn respond(stream: &mut TcpStream, sql: &str) {
                     Some("display name"),
                 ],
             ],
+            deprecate_eof,
         );
-    } else if sql.starts_with("SHOW TABLE STATUS FROM") {
+    } else if sql.starts_with("SHOW TABLE STATUS") {
         write_result_set(
             stream,
             &[
@@ -295,16 +323,28 @@ fn respond(stream: &mut TcpStream, sql: &str) {
                 Some("16384"),
                 Some("account table"),
             ]],
+            deprecate_eof,
         );
     } else if sql.starts_with("SELECT routine_name FROM information_schema.routines") {
-        write_result_set(stream, &["routine_name"], &[vec![Some("calc_total")]]);
+        write_result_set(
+            stream,
+            &["routine_name"],
+            &[vec![Some("calc_total")]],
+            deprecate_eof,
+        );
     } else if sql.starts_with("SELECT event_name FROM information_schema.events") {
-        write_result_set(stream, &["event_name"], &[vec![Some("nightly_cleanup")]]);
+        write_result_set(
+            stream,
+            &["event_name"],
+            &[vec![Some("nightly_cleanup")]],
+            deprecate_eof,
+        );
     } else if sql.starts_with("SELECT default_character_set_name, default_collation_name") {
         write_result_set(
             stream,
             &["default_character_set_name", "default_collation_name"],
             &[vec![Some("utf8mb4"), Some("utf8mb4_0900_ai_ci")]],
+            deprecate_eof,
         );
     } else if sql.starts_with("SET ")
         || sql.starts_with("SELECT ")
@@ -338,7 +378,7 @@ fn serve_connection(mut stream: TcpStream, queries: std::sync::Arc<std::sync::Mu
     stream
         .set_write_timeout(Some(Duration::from_secs(10)))
         .unwrap();
-    let capabilities: u32 = 1 | 0x200 | 0x8000 | 0x20000 | 0x40000 | 0x80000;
+    let capabilities: u32 = 1 | 0x200 | 0x8000 | 0x20000 | 0x40000 | 0x80000 | 0x1000000;
     let mut greeting = b"\x0a8.0.33-UDAL-DBPROXY\0\x01\0\0\0abcdefgh\0".to_vec();
     greeting.extend_from_slice(&(capabilities as u16).to_le_bytes());
     greeting.push(45);
@@ -348,19 +388,36 @@ fn serve_connection(mut stream: TcpStream, queries: std::sync::Arc<std::sync::Mu
     greeting.extend_from_slice(&[0; 10]);
     greeting.extend_from_slice(b"ijklmnopqrst\0mysql_native_password\0");
     write_packet(&mut stream, 0, &greeting);
-    let Some(_login) = read_packet_opt(&mut stream) else {
+    let Some(login) = read_packet_opt(&mut stream) else {
         return;
     };
+    let mut deprecate_eof = false;
+    if login.len() >= 4 {
+        let flags = u32::from_le_bytes([login[0], login[1], login[2], login[3]]);
+        deprecate_eof = flags & 0x0100_0000 != 0;
+        queries
+            .lock()
+            .unwrap()
+            .push(format!("LOGIN_FLAGS {flags:#x}"));
+    }
     write_packet(&mut stream, 2, OK);
 
     // UDAL's DBProxy refuses every statement — including a fully qualified
     // `information_schema` query — with `1046 No database selected` while the session has no
-    // current database. A `USE` fixes it; prepared statements are then rejected with 1047.
+    // current database. `mysql_select_db` (COM_INIT_DB) fixes it; prepared statements are then
+    // rejected with 1047 (or, for an `information_schema` query, rewritten to `<db>.tables`).
     let mut current_database: Option<String> = None;
     while let Some(packet) = read_packet_opt(&mut stream) {
         match packet[0] {
             1 => break,                             // COM_QUIT
             14 => write_packet(&mut stream, 1, OK), // COM_PING
+            2 => {
+                // COM_INIT_DB: the command MariaDB Connector/C's mysql_select_db sends.
+                let database = String::from_utf8(packet[1..].to_vec()).unwrap();
+                current_database = Some(database.clone());
+                write_packet(&mut stream, 1, OK);
+                queries.lock().unwrap().push(format!("INIT_DB {database}"));
+            }
             3 => {
                 let sql = String::from_utf8(packet[1..].to_vec()).unwrap();
                 if let Some(database) = sql.strip_prefix("USE ") {
@@ -377,7 +434,7 @@ fn serve_connection(mut stream: TcpStream, queries: std::sync::Arc<std::sync::Mu
                         ),
                     );
                 } else {
-                    respond(&mut stream, &sql);
+                    respond(&mut stream, &sql, deprecate_eof);
                 }
                 queries.lock().unwrap().push(sql);
             }
@@ -388,6 +445,19 @@ fn serve_connection(mut stream: TcpStream, queries: std::sync::Arc<std::sync::Mu
                         1046,
                         "HY000",
                         &format!("UDAL - No database selected : {sql}"),
+                    )
+                } else if sql.contains("information_schema.tables") {
+                    // UDAL rewrites `information_schema.tables` to `<current_db>.tables`.
+                    error_packet(
+                        3013,
+                        "HY000",
+                        &format!(
+                            "Table '{}.tables' doesn't exist.",
+                            current_database
+                                .as_deref()
+                                .unwrap_or_default()
+                                .to_lowercase()
+                        ),
                     )
                 } else {
                     error_packet(1047, "08S01", "UDAL - Unknown command")
@@ -529,35 +599,47 @@ async fn catalog_selects_the_database_then_falls_back_after_unknown_command() {
         .iter()
         .position(|sql| sql.starts_with("PREPARE SELECT t.table_name, t.table_type"))
         .expect("the information_schema query is tried first");
-    // The first prepare answers `1046 No database selected` (UDAL); the driver then selects the
-    // database and prepares again, which answers `1047 Unknown command` and lands in the fallback.
+    // The first prepare answers `1046 No database selected` (UDAL). The driver must not retry
+    // the prepared `information_schema` query — UDAL rewrites it to `<db>.tables` (3013). It
+    // selects the database with COM_INIT_DB (what Navicat's mysql_select_db sends) and uses the
+    // unqualified SHOW FULL TABLES, exactly like Navicat.
     let selected = queries
         .iter()
-        .position(|sql| sql == "USE `shop`")
-        .expect("the session selects the database after 1046");
+        .position(|sql| sql == "INIT_DB shop")
+        .expect("the session selects the database with COM_INIT_DB after 1046");
     let shown = queries
         .iter()
-        .position(|sql| sql == "SHOW FULL TABLES FROM `shop`")
-        .expect("SHOW FULL TABLES is the fallback");
+        .position(|sql| sql == "SHOW FULL TABLES")
+        .expect("the unqualified SHOW FULL TABLES is the fallback");
     assert!(prepared < selected);
     assert!(selected < shown);
     assert!(
         queries
             .iter()
-            .any(|sql| sql == "SHOW FULL COLUMNS FROM `shop`.`users`")
+            .any(|sql| sql == "SHOW FULL COLUMNS FROM `users`"),
+        "the columns use the unqualified SHOW form on a proxy: {queries:#?}"
     );
     assert!(
-        queries
-            .iter()
-            .any(|sql| sql == "SHOW TABLE STATUS FROM `shop`")
+        queries.iter().any(|sql| sql == "SHOW TABLE STATUS"),
+        "the overview uses the unqualified SHOW form on a proxy: {queries:#?}"
     );
     assert_eq!(
         queries
             .iter()
             .filter(|sql| sql.starts_with("PREPARE"))
             .count(),
-        2,
-        "the catalog query is tried once more after the database is selected: {queries:#?}"
+        1,
+        "the prepared catalog query is not retried after selecting the database: {queries:#?}"
+    );
+    let flags = queries
+        .iter()
+        .find_map(|sql| sql.strip_prefix("LOGIN_FLAGS "))
+        .expect("the fixture records the client handshake capabilities");
+    let flags = u32::from_str_radix(flags.trim_start_matches("0x"), 16).unwrap();
+    assert_eq!(
+        flags & 0x0100_0000,
+        0,
+        "CLIENT_DEPRECATE_EOF must not be negotiated (UDAL leaves its metadata terminator in place)"
     );
 }
 
@@ -602,8 +684,8 @@ async fn page_runs_as_one_text_statement_after_the_proxy_fallback() {
             .iter()
             .filter(|sql| sql.starts_with("PREPARE"))
             .count(),
-        2,
-        "only the catalog probe is prepared (twice, before and after selecting the database): {queries:#?}"
+        1,
+        "only the catalog probe is prepared (the database is selected with COM_INIT_DB): {queries:#?}"
     );
 }
 
@@ -643,8 +725,8 @@ async fn backup_object_lists_use_the_text_protocol() {
             .iter()
             .filter(|sql| sql.starts_with("PREPARE"))
             .count(),
-        2,
-        "only the catalog probe is prepared (twice, before and after selecting the database): {queries:#?}"
+        1,
+        "only the catalog probe is prepared (the database is selected with COM_INIT_DB): {queries:#?}"
     );
 }
 
@@ -714,8 +796,8 @@ async fn writes_use_the_text_protocol_after_the_proxy_fallback() {
             .iter()
             .filter(|sql| sql.starts_with("PREPARE"))
             .count(),
-        2,
-        "only the catalog probe is prepared (twice, before and after selecting the database): {queries:#?}"
+        1,
+        "only the catalog probe is prepared (the database is selected with COM_INIT_DB): {queries:#?}"
     );
 }
 
@@ -740,7 +822,7 @@ async fn columns_fall_back_on_their_own() {
     assert!(
         queries
             .iter()
-            .any(|sql| sql == "SHOW FULL COLUMNS FROM `shop`.`users`")
+            .any(|sql| sql == "SHOW FULL COLUMNS FROM `users`")
     );
 }
 
@@ -762,9 +844,5 @@ async fn table_statuses_fall_back_on_their_own() {
             .iter()
             .any(|sql| sql.starts_with("PREPARE SELECT table_name, engine"))
     );
-    assert!(
-        queries
-            .iter()
-            .any(|sql| sql == "SHOW TABLE STATUS FROM `shop`")
-    );
+    assert!(queries.iter().any(|sql| sql == "SHOW TABLE STATUS"));
 }

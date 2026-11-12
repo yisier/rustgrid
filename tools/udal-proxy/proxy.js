@@ -39,6 +39,7 @@ const BACKEND_HOST = process.env.BACKEND_HOST ?? '127.0.0.1';
 const BACKEND_PORT = Number(process.env.BACKEND_PORT ?? 3306);
 
 const COM_QUERY = 0x03;
+const COM_INIT_DB = 0x02;
 const COM_STMT_SEND_LONG_DATA = 0x18;
 const COM_STMT_CLOSE = 0x19;
 const COM_STMT_PREPARE = 0x16;
@@ -137,6 +138,16 @@ const server = net.createServer((client) => {
         continue;
       }
 
+      if (command === COM_INIT_DB) {
+        // COM_INIT_DB is what MariaDB Connector/C's mysql_select_db (and Navicat) sends. Track
+        // it as the session's current database and forward it to the real server.
+        const database = packet.subarray(5).toString('utf8');
+        currentDatabase = database;
+        console.log(`[udal-proxy] INIT_DB ${database}`);
+        upstream.write(packet);
+        continue;
+      }
+
       if (command === COM_QUERY) {
         const sql = packet.subarray(5).toString('utf8');
         const database = selectedDatabase(sql);
@@ -174,6 +185,12 @@ const server = net.createServer((client) => {
               `UDAL - No database selected : ${sql}`,
             ),
           );
+        } else if (/information_schema\.tables/i.test(sql)) {
+          // UDAL rewrites information_schema.tables to <current_database>.tables once a database
+          // is selected; a client that retries the prepared catalog query then sees 3013.
+          const message = `Table '${currentDatabase.toLowerCase()}.tables' doesn't exist.`;
+          console.log('[udal-proxy] 3013:', message);
+          client.write(errorPacket(1, 3013, 'HY000', message));
         } else {
           console.log('[udal-proxy] reject COM_STMT_PREPARE:', shortSql(sql));
           client.write(errorPacket(1, 1047, '08S01', 'UDAL - Unknown command'));

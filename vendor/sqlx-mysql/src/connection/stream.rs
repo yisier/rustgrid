@@ -34,7 +34,6 @@ impl<S: Socket> MySqlStream<S> {
     pub(crate) fn with_socket(options: &MySqlConnectOptions, socket: S) -> Self {
         let mut capabilities = Capabilities::PROTOCOL_41
             | Capabilities::IGNORE_SPACE
-            | Capabilities::DEPRECATE_EOF
             | Capabilities::FOUND_ROWS
             | Capabilities::TRANSACTIONS
             | Capabilities::SECURE_CONNECTION
@@ -44,6 +43,13 @@ impl<S: Socket> MySqlStream<S> {
             | Capabilities::PLUGIN_AUTH
             | Capabilities::PS_MULTI_RESULTS
             | Capabilities::SSL;
+        // RustGrid: do not ask for CLIENT_DEPRECATE_EOF. MySQL-protocol middlewares (UDAL/TeleDB
+        // DBProxy) advertise it but still terminate result-set metadata with a plain OK packet;
+        // sqlx assumes the terminator is omitted under this capability, parses that OK packet as
+        // the first text row and fails with "buffer exhausted when reading data for column ...".
+        // MariaDB Connector/C, which Navicat uses, has no such capability and always uses the
+        // classic EOF packets, so UDAL works with it. Classic EOF is supported by every MySQL and
+        // MariaDB version; only the one-packet optimization is lost.
 
         if options.database.is_some() {
             capabilities |= Capabilities::CONNECT_WITH_DB;
