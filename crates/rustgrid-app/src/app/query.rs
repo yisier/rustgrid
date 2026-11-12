@@ -2811,6 +2811,16 @@ impl AppView {
         Some((node.profile.id.clone(), database.name.clone(), schema))
     }
 
+    /// Whether the Queries list has a scope to draw for the tree's current selection: a database
+    /// scope, a selected group, or a connection whose parent group owns saved queries. A group has
+    /// no connection/database scope of its own, so the list must not be hidden by `query_scope`
+    /// alone.
+    pub(super) fn query_list_active(&self, cx: &App) -> bool {
+        self.query_scope(cx).is_some()
+            || self.single_selected_group(cx).is_some()
+            || self.selected_connection_group(cx).is_some()
+    }
+
     /// The parent group of the connection row selected in the tree, if any. Used to show a group's
     /// saved queries when one of its connections (rather than the group row) is selected.
     fn selected_connection_group(&self, cx: &App) -> Option<u64> {
@@ -3281,15 +3291,19 @@ impl AppView {
 
     /// Reveal the current scope's saved-query folder in the OS file manager.
     pub(super) fn reveal_query_folder(&mut self, cx: &mut Context<'_, Self>) {
-        let Some((connection_id, database, schema)) = self.query_scope(cx) else {
+        let dir = if let Some(group_id) = self.single_selected_group(cx) {
+            self.config.group_queries_dir().join(group_id.to_string())
+        } else if let Some((connection_id, database, schema)) = self.query_scope(cx) {
+            self.config
+                .query_file_path(&connection_id, &database, schema.as_deref(), "")
+                .parent()
+                .map(|parent| parent.to_path_buf())
+                .unwrap_or_else(|| self.config.queries_dir())
+        } else if let Some(group_id) = self.selected_connection_group(cx) {
+            self.config.group_queries_dir().join(group_id.to_string())
+        } else {
             return;
         };
-        let dir = self
-            .config
-            .query_file_path(&connection_id, &database, schema.as_deref(), "")
-            .parent()
-            .map(|parent| parent.to_path_buf())
-            .unwrap_or_else(|| self.config.queries_dir());
         let _ = std::fs::create_dir_all(&dir);
         reveal_in_file_manager(&dir);
         cx.notify();

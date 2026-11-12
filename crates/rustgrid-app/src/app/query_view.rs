@@ -1152,7 +1152,7 @@ impl AppView {
                 }),
             );
 
-        if self.query_scope(cx).is_none() {
+        if !self.query_list_active(cx) {
             return div()
                 .flex()
                 .flex_col()
