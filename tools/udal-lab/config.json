@@ -1,0 +1,160 @@
+{
+  "functions": {},
+  "olap": {},
+  "hosts": {
+    "host_0000000000": {
+      "name": "host_0000000000",
+      "ip": "udal-mariadb",
+      "sshUser": "root",
+      "sshPassword": "",
+      "sshPort": 22
+    }
+  },
+  "mysql": {
+    "mysql_0000000000": {
+      "name": "mysql_group_0",
+      "threadsRunningThreshold": "10000",
+      "dbproxyUser": { "user": "udal", "password": "udal123" },
+      "ddlUser": { "user": "udal", "password": "udal123" },
+      "binlogUser": { "user": "udal", "password": "udal123" },
+      "nodes": {
+        "node_0000000000": {
+          "name": "node_0000000000",
+          "host": "host_0000000000",
+          "port": 3306,
+          "type": "MASTER"
+        }
+      }
+    }
+  },
+  "dbproxy_cluster": {
+    "dbproxy_cluster_0000000000": {
+      "name": "udal_lab",
+      "event": {},
+      "nodes": {
+        "node_0000000000": {
+          "name": "node_0000000000",
+          "host": "host_0000000000",
+          "deployPath": "/opt/dbproxy",
+          "serverPort": 8066,
+          "managerPort": 9066,
+          "weight": "100"
+        }
+      },
+      "properties": {
+        "server": {
+          "serverPort": 8066,
+          "managerPort": 9066,
+          "bindIp": "0.0.0.0",
+          "charset": "utf8",
+          "processors": 2,
+          "processorExecutor": 4,
+          "processorBufferPool": 134217728,
+          "processorBufferChunk": 4096,
+          "processorBufferLocalPercent": 100,
+          "idleTimeout": 1800000,
+          "processorCheckPeriod": 1000,
+          "dataNodeIdleCheckPeriod": 300000,
+          "dataNodeHeartbeatPeriod": 10000,
+          "sqlExecuteTimeout": 300000,
+          "maxPacketSize": 16,
+          "latchLimit": 800,
+          "defaultMaxLimit": 1000
+        },
+        "sequence": { "increment": 1, "loadFactor": 1.0, "needCheck": false },
+        "storages": {
+          "active": "mysql",
+          "redis": {
+            "host": "127.0.0.1",
+            "port": 6379,
+            "maxIdle": 10,
+            "maxTotal": 100,
+            "minIdle": 1
+          }
+        },
+        "transaction": {},
+        "monitor": {},
+        "overload": {},
+        "config_file": {}
+      },
+      "storages": {
+        "active": "mysql",
+        "redis": {
+          "host": "127.0.0.1",
+          "port": 6379,
+          "maxIdle": 10,
+          "maxTotal": 100,
+          "minIdle": 1
+        }
+      },
+      "config_file": {
+        "log4j2.xml": {
+          "fileContent": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Configuration status=\"WARN\"><Appenders><Console name=\"Console\" target=\"SYSTEM_OUT\"><PatternLayout pattern=\"%d{HH:mm:ss.SSS} %-5level %logger{36} - %msg%n\"/></Console><File name=\"File\" fileName=\"logs/dbproxy.log\"><PatternLayout pattern=\"%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level %logger{36} - %msg%n\"/></File></Appenders><Loggers><Root level=\"info\"><AppenderRef ref=\"Console\"/><AppenderRef ref=\"File\"/></Root></Loggers></Configuration>"
+        }
+      },
+      "shardings": {
+        "data_host": {
+          "data_host_0000000000": {
+            "name": "dh0",
+            "mysql": "mysql_0000000000",
+            "dbType": "mysql",
+            "dbDriver": "native",
+            "balance": 0,
+            "writeType": 0,
+            "maxCon": 128,
+            "maxIdle": 10,
+            "idleTimeout": 1800000,
+            "connectTimeout": 5000,
+            "heartbeatSQL": "select 1",
+            "schema": "TEST",
+            "database": "UDAL_TEST"
+          }
+        },
+        "data_node": {
+          "data_node_0000000000": {
+            "name": "dn0",
+            "database": "UDAL_TEST",
+            "datahost": "data_host_0000000000",
+            "dbType": "mysql",
+            "dbDriver": "native",
+            "mysql": "mysql_0000000000"
+          }
+        }
+      },
+      "schemas": {
+        "schema_0000000000": {
+          "name": "TEST",
+          "dataNode": "data_node_0000000000",
+          "standardDataNode": "data_node_0000000000",
+          "sequence": { "increment": 1, "loadFactor": 1.0, "needCheck": false },
+          "index": {},
+          "table": {},
+          "sqlMaxLimit": 1000,
+          "checkSQLschema": false,
+          "isPermitComplexInnerTableSql": true,
+          "maxNodeForRrs": 0,
+          "sqlCntPerNode": 3
+        }
+      },
+      "users": {
+        "user_0000000000": {
+          "name": "root",
+          "type": "user",
+          "encryptedPassword": "MTIzNDU2",
+          "manageCommand": true,
+          "privilege": {
+            "schema_privilege_0000000000": { "name": "TEST", "privilege": "ALL" }
+          }
+        }
+      },
+      "tablerule": {},
+      "roles": {},
+      "profiles": {},
+      "whitelist": {},
+      "blacklist": {},
+      "interceptor": { "dml": {} },
+      "monitor": { "metrics": {}, "reporters": {} },
+      "olap": {}
+    }
+  }
+}

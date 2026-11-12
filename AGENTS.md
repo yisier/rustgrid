@@ -49,9 +49,10 @@ not a later refactor.
   patched through `[patch.crates-io]`. The older fixes let MySQL before 5.5 log in; the current
   ones make it match **MariaDB Connector/C**, which Navicat uses, on MySQL-protocol middlewares:
   it never negotiates `CLIENT_DEPRECATE_EOF` (UDAL leaves a plain OK packet after the column
-  metadata, which sqlx otherwise parses as the first row) and exposes
+  metadata, which sqlx otherwise parses as the first row), exposes
   `MySqlConnection::select_database` (COM_INIT_DB, what `mysql_select_db` sends) so a `USE`
-  statement never goes through the proxy's SQL parser. See
+  statement never goes through the proxy's SQL parser, and keeps the greeting's full
+  `server_version_string` so the driver can recognise UDAL before sending a prepare. See
   `vendor/sqlx-mysql/RUSTGRID_PATCHES.md`; remove it once upstream behaves the same.
 - `crates/rustgrid-sqlserver` — the **Microsoft SQL Server** driver, built on **tiberius** (pure-Rust
   async TDS) with a **bb8** connection pool (`pool.rs`). It is not sqlx-based (sqlx 0.9 has no MSSQL
@@ -1259,10 +1260,29 @@ make more engines cheap later — do not build those features early.
   it in the stream, reads it as the first text row and fails with
   `buffer exhausted when reading data for column ...` (the second part of issue #56). MariaDB
   Connector/C has no such capability and reads the classic EOF terminator, which is what the
-  patched driver now does too. `tools/udal-proxy/proxy.js` reproduces all of this against a real
-  MySQL server (leave the connection form's 数据库 empty so the session starts without one), and
+  patched driver now does too. **That alone is not enough**: the DBProxy sets a session-wide
+  `prepared` flag on the **first** `COM_STMT_PREPARE` and never clears it
+  (`ServerPrepareHandler` → `NonBlockingSession.setPrepared(true)`), so every later **text**
+  statement is answered with binary rows (`0x00` + a NULL bitmap before the values) and sqlx
+  fails with the same `buffer exhausted`. Navicat never prepares. The driver therefore recognises
+  UDAL from the **greeting version** (`5.7.21-UDAL-DBPROXY...`;
+  `MySqlConnection::server_version_string`, exposed by the vendored crate) in `after_connect` and
+  switches the whole pool to the text protocol before the first statement — no `SELECT VERSION()`
+  probe and no extra connection.
+  A middleware that routes statements itself also treats a **qualified** `<logical>.<table>` as a
+  physical database name: `TEST.users` hits the backend `TEST`, while unqualified `users` uses the
+  logical schema's real `UDAL_TEST`. `MysqlConnection::table_ref` emits unqualified names once
+  `needs_database` is set, and `table_schema_via_show` reads columns/indexes/options with
+  `SHOW FULL COLUMNS` / `SHOW INDEX` / `SHOW TABLE STATUS` instead of `information_schema`
+  filtered by the logical name (which reads the physical database, or nothing when the shards are
+  named differently).
+  `tools/udal-proxy/proxy.js` reproduces the reactive fallback against a real MySQL server (leave
+  the connection form's 数据库 empty so the session starts without one), and
   `crates/rustgrid-mysql/tests/mysql_compatibility.rs` reproduces it on a wire-protocol fixture
   without a server (including the plain-OK metadata terminator when `DEPRECATE_EOF` is requested).
+  A **real** DBProxy lab (`tools/udal-lab/`, built from `gitee.com/teledb/teledb-dbproxy`) and the
+  ignored `crates/rustgrid-mysql/tests/live_udal.rs` cover the proactive path against the actual
+  server; the open-source DBProxy forbids every `CREATE`/`DROP` (`UDAL - CREATE command denied`).
 - Grid writes identify a row by its primary key, falling back to **every column** when the table
   has no primary key (`GridState` column `primary_key` flags). Key values are
   `Option<String>` (`CellValue::as_edit_value`): `None` is SQL `NULL` and must render `IS NULL`,

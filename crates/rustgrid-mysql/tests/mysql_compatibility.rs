@@ -385,7 +385,11 @@ fn read_packet_opt(stream: &mut TcpStream) -> Option<Vec<u8>> {
     Some(payload)
 }
 
-fn serve_connection(mut stream: TcpStream, queries: std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+fn serve_connection(
+    mut stream: TcpStream,
+    queries: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    version: &'static str,
+) {
     // Windows may hand an accepted socket the listener's non-blocking mode down to it.
     stream.set_nonblocking(false).unwrap();
     stream
@@ -395,7 +399,7 @@ fn serve_connection(mut stream: TcpStream, queries: std::sync::Arc<std::sync::Mu
         .set_write_timeout(Some(Duration::from_secs(10)))
         .unwrap();
     let capabilities: u32 = 1 | 0x200 | 0x8000 | 0x20000 | 0x40000 | 0x80000 | 0x1000000;
-    let mut greeting = b"\x0a8.0.33-UDAL-DBPROXY\0\x01\0\0\0abcdefgh\0".to_vec();
+    let mut greeting = format!("\x0a{version}\0\x01\0\0\0abcdefgh\0").into_bytes();
     greeting.extend_from_slice(&(capabilities as u16).to_le_bytes());
     greeting.push(45);
     greeting.extend_from_slice(&[2, 0]);
@@ -508,6 +512,10 @@ struct Proxy {
 
 impl Proxy {
     fn start() -> Self {
+        Self::start_with_version("8.0.33-fixture")
+    }
+
+    fn start_with_version(version: &'static str) -> Self {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::{Arc, Mutex};
 
@@ -524,7 +532,9 @@ impl Proxy {
                 match listener.accept() {
                     Ok((stream, _)) => {
                         let queries = Arc::clone(&accept_queries);
-                        workers.push(thread::spawn(move || serve_connection(stream, queries)));
+                        workers.push(thread::spawn(move || {
+                            serve_connection(stream, queries, version)
+                        }));
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         let stopped = accept_stop.load(Ordering::Relaxed);
@@ -659,6 +669,32 @@ async fn catalog_selects_the_database_then_falls_back_after_unknown_command() {
     );
 }
 
+/// A greeting that names UDAL must switch the session to the text protocol **before** the first
+/// statement: UDAL's DBProxy never clears its session-wide prepared flag, and every later text
+/// query then returns binary rows (issue #56). The version string is already in the handshake, so
+/// the driver must not send a `SELECT VERSION()` probe to discover it.
+#[tokio::test]
+async fn udaul_greeting_uses_text_without_any_prepare() {
+    let proxy = Proxy::start_with_version("5.7.21-UDAL-DBPROXY-2.7.5");
+    let connection = proxy_connection(proxy.port).await;
+
+    let tables = connection.list_tables("shop").await.expect("list tables");
+    assert_eq!(tables.len(), 2);
+
+    connection.close().await.unwrap();
+    let queries = proxy.stop();
+    assert!(
+        queries.iter().all(|sql| !sql.starts_with("PREPARE")),
+        "UDAL must never see COM_STMT_PREPARE: {queries:#?}"
+    );
+    assert!(
+        queries
+            .iter()
+            .any(|sql| sql.starts_with("SHOW FULL TABLES")),
+        "the catalog must use the text SHOW directly: {queries:#?}"
+    );
+}
+
 #[tokio::test]
 async fn page_runs_as_one_text_statement_after_the_proxy_fallback() {
     let proxy = Proxy::start();
@@ -684,7 +720,7 @@ async fn page_runs_as_one_text_statement_after_the_proxy_fallback() {
     let queries = proxy.stop();
     let statement = queries
         .iter()
-        .find(|sql| sql.starts_with("SELECT * FROM `shop`.`users`"))
+        .find(|sql| sql.starts_with("SELECT * FROM `users`"))
         .expect("the page is a text statement");
     assert!(
         !statement.contains('?'),
@@ -798,19 +834,19 @@ async fn writes_use_the_text_protocol_after_the_proxy_fallback() {
         .find(|sql| sql.starts_with("UPDATE "))
         .expect("the update is a text statement");
     assert_eq!(
-        update, "UPDATE `shop`.`users` SET `name` = 'a\\'b' WHERE `id` = '1'",
+        update, "UPDATE `users` SET `name` = 'a\\'b' WHERE `id` = '1'",
         "{queries:#?}"
     );
     assert!(
         queries
             .iter()
-            .any(|sql| sql == "INSERT INTO `shop`.`users` (`id`, `name`) VALUES ('2', NULL)"),
+            .any(|sql| sql == "INSERT INTO `users` (`id`, `name`) VALUES ('2', NULL)"),
         "{queries:#?}"
     );
     assert!(
         queries
             .iter()
-            .any(|sql| sql == "DELETE FROM `shop`.`users` WHERE `id` = '1' LIMIT 1"),
+            .any(|sql| sql == "DELETE FROM `users` WHERE `id` = '1' LIMIT 1"),
         "{queries:#?}"
     );
     assert_eq!(

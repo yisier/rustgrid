@@ -9,6 +9,7 @@ use std::collections::VecDeque;
 
 struct MapStream {
     server_version: (u16, u16, u16),
+    server_version_string: String,
     capabilities: Capabilities,
     sequence_id: u8,
     waiting: VecDeque<Waiting>,
@@ -78,6 +79,7 @@ pub(super) async fn maybe_upgrade<S: Socket>(
         tls_config,
         MapStream {
             server_version: stream.server_version,
+            server_version_string: stream.server_version_string,
             capabilities: stream.capabilities,
             sequence_id: stream.sequence_id,
             waiting: stream.waiting,
@@ -93,6 +95,7 @@ impl WithSocket for MapStream {
         MySqlStream {
             socket: BufferedSocket::new(Box::new(socket)),
             server_version: self.server_version,
+            server_version_string: self.server_version_string,
             capabilities: self.capabilities,
             sequence_id: self.sequence_id,
             waiting: self.waiting,

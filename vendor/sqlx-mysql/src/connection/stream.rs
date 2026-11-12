@@ -15,6 +15,9 @@ pub struct MySqlStream<S = Box<dyn Socket>> {
     // Wrapping the socket in `Box` allows us to unsize in-place.
     pub(crate) socket: BufferedSocket<S>,
     pub(crate) server_version: (u16, u16, u16),
+    /// The greeting's full version string (`5.7.21-UDAL-DBPROXY-...`). The parsed tuple loses
+    /// the vendor suffix that identifies MySQL-protocol middlewares.
+    pub(crate) server_version_string: String,
     pub(super) capabilities: Capabilities,
     pub(crate) sequence_id: u8,
     pub(crate) waiting: VecDeque<Waiting>,
@@ -59,6 +62,7 @@ impl<S: Socket> MySqlStream<S> {
             waiting: VecDeque::new(),
             capabilities,
             server_version: (0, 0, 0),
+            server_version_string: String::new(),
             sequence_id: 0,
             socket: BufferedSocket::new(socket),
             is_tls: false,
@@ -177,11 +181,6 @@ impl<S: Socket> MySqlStream<S> {
             );
         }
 
-        if std::env::var_os("RUSTGRID_MYSQL_TRACE").is_some() {
-            let head = &payload[..payload.len().min(32)];
-            eprintln!("[sqlx] recv len={} head={:02x?}", payload.len(), head);
-        }
-
         Ok(Packet(payload))
     }
 
@@ -198,20 +197,9 @@ impl<S: Socket> MySqlStream<S> {
 
     pub(crate) async fn maybe_recv_eof(&mut self) -> Result<Option<EofPacket>, Error> {
         if self.capabilities.contains(Capabilities::DEPRECATE_EOF) {
-            if std::env::var_os("RUSTGRID_MYSQL_TRACE").is_some() {
-                eprintln!("[sqlx] maybe_recv_eof skipped (DEPRECATE_EOF negotiated)");
-            }
             Ok(None)
         } else {
-            let packet = self.recv_packet().await?;
-            if std::env::var_os("RUSTGRID_MYSQL_TRACE").is_some() {
-                eprintln!(
-                    "[sqlx] metadata terminator first={:02x} len={}",
-                    packet[0],
-                    packet.len()
-                );
-            }
-            packet.decode_with(self.capabilities).map(Some)
+            self.recv().await.map(Some)
         }
     }
 
@@ -231,6 +219,7 @@ impl<S: Socket> MySqlStream<S> {
         MySqlStream {
             socket: self.socket.boxed(),
             server_version: self.server_version,
+            server_version_string: self.server_version_string,
             capabilities: self.capabilities,
             sequence_id: self.sequence_id,
             waiting: self.waiting,

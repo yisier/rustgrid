@@ -78,6 +78,7 @@ impl<'a> DoHandshake<'a> {
         // FIXME: server version parse is a bit ugly
         // expecting MAJOR.MINOR.PATCH
 
+        let server_version_string = handshake.server_version.clone();
         let mut server_version = handshake.server_version.split('.');
 
         let server_version_major: u16 = server_version
@@ -103,6 +104,7 @@ impl<'a> DoHandshake<'a> {
             server_version_minor,
             server_version_patch,
         );
+        stream.server_version_string = server_version_string;
 
         // Servers older than MySQL 5.5 send only the lower 16 capability bits in their greeting
         // (the upper ones are reserved zeros) although every 4.1+ server supports multiple

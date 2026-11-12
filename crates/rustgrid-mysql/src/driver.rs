@@ -1,3 +1,5 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -9,7 +11,7 @@ use rustgrid_core::{
 };
 use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlSslMode};
 
-use crate::connection::MysqlConnection;
+use crate::connection::{MysqlConnection, is_prepare_sticky_proxy};
 use crate::engine::Engine;
 use rustgrid_tunnel::Tunnel;
 
@@ -285,47 +287,65 @@ async fn connect(config: &ConnectionConfig, engine: Engine) -> Result<Box<dyn Co
     let query_timeout = settings.query_timeout.filter(|seconds| *seconds > 0);
     let read_only = settings.read_only;
     let init_sql = settings.init_sql.trim().to_string();
-    if query_timeout.is_some() || read_only || !init_sql.is_empty() {
-        pool_options = pool_options.after_connect(move |connection, _metadata| {
-            let init_sql = init_sql.clone();
-            Box::pin(async move {
-                if !init_sql.is_empty() {
-                    sqlx::raw_sql(sqlx::AssertSqlSafe(init_sql))
-                        .execute(&mut *connection)
-                        .await?;
-                }
-                if read_only {
-                    sqlx::raw_sql(sqlx::AssertSqlSafe(
-                        "SET SESSION TRANSACTION READ ONLY".to_string(),
-                    ))
+    // Shared by every pooled connection: once one greeting names UDAL/TeleDB's DBProxy, the
+    // whole pool must stay on the text protocol (its first COM_STMT_PREPARE makes every later
+    // text query return binary rows — issue #56). The greeting already carries the version, so
+    // no extra query or connection is needed.
+    let text_protocol = Arc::new(AtomicBool::new(false));
+    let needs_database = Arc::new(AtomicBool::new(false));
+    let after_text_protocol = Arc::clone(&text_protocol);
+    let after_needs_database = Arc::clone(&needs_database);
+    pool_options = pool_options.after_connect(move |connection, _metadata| {
+        let init_sql = init_sql.clone();
+        let text_protocol = Arc::clone(&after_text_protocol);
+        let needs_database = Arc::clone(&after_needs_database);
+        Box::pin(async move {
+            if is_prepare_sticky_proxy(connection.server_version_string()) {
+                text_protocol.store(true, Ordering::Relaxed);
+                needs_database.store(true, Ordering::Relaxed);
+            }
+            if !init_sql.is_empty() {
+                sqlx::raw_sql(sqlx::AssertSqlSafe(init_sql))
                     .execute(&mut *connection)
                     .await?;
+            }
+            if read_only {
+                sqlx::raw_sql(sqlx::AssertSqlSafe(
+                    "SET SESSION TRANSACTION READ ONLY".to_string(),
+                ))
+                .execute(&mut *connection)
+                .await?;
+            }
+            if let Some(seconds) = query_timeout {
+                let applied =
+                    sqlx::raw_sql(sqlx::AssertSqlSafe(engine.statement_timeout_sql(seconds)))
+                        .execute(&mut *connection)
+                        .await;
+                // MySQL before 5.7 and MariaDB before 10.1 have no per-statement timeout
+                // and reject the variable as unknown: run without the cap there rather
+                // than failing every connection to an older server.
+                if let Err(error) = applied
+                    && !is_unknown_system_variable(&error)
+                {
+                    return Err(error);
                 }
-                if let Some(seconds) = query_timeout {
-                    let applied =
-                        sqlx::raw_sql(sqlx::AssertSqlSafe(engine.statement_timeout_sql(seconds)))
-                            .execute(&mut *connection)
-                            .await;
-                    // MySQL before 5.7 and MariaDB before 10.1 have no per-statement timeout
-                    // and reject the variable as unknown: run without the cap there rather
-                    // than failing every connection to an older server.
-                    if let Err(error) = applied
-                        && !is_unknown_system_variable(&error)
-                    {
-                        return Err(error);
-                    }
-                }
-                Ok(())
-            })
-        });
-    }
+            }
+            Ok(())
+        })
+    });
 
     let pool = pool_options
         .connect_with(options)
         .await
         .map_err(map_connect_error)?;
 
-    Ok(Box::new(MysqlConnection::new(pool, engine, tunnel)))
+    Ok(Box::new(MysqlConnection::new(
+        pool,
+        engine,
+        tunnel,
+        text_protocol,
+        needs_database,
+    )))
 }
 
 /// How long a pooled connection may sit idle when the profile sets no keep-alive. The pool's

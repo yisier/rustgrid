@@ -59,6 +59,12 @@ impl MySqlConnection {
             .intersects(Status::SERVER_STATUS_IN_TRANS)
     }
 
+    /// The full version string from the server's greeting (`5.7.21-UDAL-DBPROXY-...`),
+    /// including the vendor suffix that [`MySqlConnection::server_version`] drops.
+    pub fn server_version_string(&self) -> &str {
+        &self.inner.stream.server_version_string
+    }
+
     /// Select the connection's current database with `COM_INIT_DB`, the command
     /// [`mysql_select_db`](https://mariadb.com/kb/en/mysql_select_db/) sends. It bypasses the
     /// SQL parser, which is what MySQL-protocol middlewares such as UDAL/TeleDB's DBProxy need

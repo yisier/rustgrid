@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
@@ -32,25 +33,31 @@ pub struct MysqlConnection {
     /// middlewares (UDAL/TeleDB DBProxy, MyCAT, ...) run their own SQL parser and can refuse
     /// server-side prepares altogether, so this session then runs every generated statement
     /// through the text protocol (and reads the catalog with the classic `SHOW` statements).
-    text_protocol: AtomicBool,
+    text_protocol: Arc<AtomicBool>,
     /// `true` once a statement was rejected with `1046 ER_NO_DB_ERROR` ("No database selected").
     /// MySQL-protocol middlewares (UDAL/TeleDB DBProxy) parse and route each statement themselves
     /// and refuse it while their session has no current database — even a fully qualified
     /// `information_schema` query. Once seen, every database-scoped statement selects its
     /// database on the session first (`USE`).
-    needs_database: AtomicBool,
+    needs_database: Arc<AtomicBool>,
     /// The tunnel forwarding this connection, kept alive for as long as the connection is.
     _tunnel: Option<rustgrid_tunnel::Tunnel>,
 }
 
 impl MysqlConnection {
-    pub fn new(pool: MySqlPool, engine: Engine, tunnel: Option<rustgrid_tunnel::Tunnel>) -> Self {
+    pub fn new(
+        pool: MySqlPool,
+        engine: Engine,
+        tunnel: Option<rustgrid_tunnel::Tunnel>,
+        text_protocol: Arc<AtomicBool>,
+        needs_database: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             pool,
             engine,
             generation_expression: AtomicBool::new(true),
-            text_protocol: AtomicBool::new(false),
-            needs_database: AtomicBool::new(false),
+            text_protocol,
+            needs_database,
             _tunnel: tunnel,
         }
     }
@@ -89,6 +96,150 @@ impl MysqlConnection {
                 .map_err(map_query_error)?;
         }
         Ok(connection)
+    }
+
+    /// The table reference to use in a generated statement.
+    ///
+    /// A proxy that routes every statement itself (UDAL) maps the **unqualified** table name
+    /// through the selected logical schema. A qualified `<logical-schema>.<table>` is treated as
+    /// a physical database name and bypasses that mapping — `TEST.users` reads the backend
+    /// `TEST` database instead of the schema's real `UDAL_TEST`. Once such a proxy selected the
+    /// database on the session ([`Self::needs_database`]), generated statements therefore keep
+    /// the table unqualified, exactly like Navicat.
+    fn table_ref(&self, database: &str, table: &str) -> String {
+        if self.needs_database() {
+            quote_identifier(table)
+        } else {
+            format!("{}.{}", quote_identifier(database), quote_identifier(table))
+        }
+    }
+
+    /// The table designer's model for a proxy that maps **unqualified** names through the logical
+    /// schema. `INFORMATION_SCHEMA` filtered by the logical name inspects the physical database
+    /// of that name — or nothing at all when the shards are named differently — so read the
+    /// logical table with `SHOW FULL COLUMNS`, `SHOW INDEX` and `SHOW TABLE STATUS` instead.
+    ///
+    /// Foreign keys, checks and triggers stay empty: the open-source DBProxy forbids DDL and does
+    /// not expose the logical catalog for them, and the designer cannot save there anyway.
+    async fn table_schema_via_show(&self, database: &str, table: &str) -> Result<TableSchema> {
+        let qualified = quote_identifier(table);
+
+        let column_result = self
+            .execute_query(
+                Some(database),
+                &format!("SHOW FULL COLUMNS FROM {qualified}"),
+            )
+            .await?;
+        let mut columns = Vec::with_capacity(column_result.rows.len());
+        for row in &column_result.rows {
+            let name = show_text(row, 0).unwrap_or_default();
+            let raw_type = show_text(row, 1).unwrap_or_default();
+            let collation = show_text(row, 2).unwrap_or_default();
+            let nullable = show_text(row, 3).is_some_and(|value| value.eq_ignore_ascii_case("YES"));
+            let key = show_text(row, 4).unwrap_or_default();
+            let default = match row.get(5) {
+                Some(CellValue::Text(value)) if value.is_empty() => "''".to_string(),
+                Some(CellValue::Text(value)) => value.clone(),
+                _ => String::new(),
+            };
+            let extra = show_text(row, 6).unwrap_or_default();
+            let comment = show_text(row, 8).unwrap_or_default();
+
+            let (data_type, length, decimals, unsigned, zerofill) =
+                parse_show_column_type(&raw_type);
+            let extra_lower = extra.to_ascii_lowercase();
+            let on_update = extra_lower
+                .find("on update")
+                .map(|index| extra[index..].trim().to_string())
+                .unwrap_or_default();
+            let charset = collation
+                .split_once('_')
+                .map(|(charset, _)| charset.to_string())
+                .unwrap_or_default();
+
+            columns.push(ColumnDef {
+                name,
+                data_type,
+                length,
+                decimals,
+                nullable,
+                default,
+                primary_key: key.eq_ignore_ascii_case("PRI"),
+                auto_increment: extra_lower.contains("auto_increment"),
+                identity: String::new(),
+                identity_start: String::new(),
+                identity_increment: String::new(),
+                unsigned,
+                zerofill,
+                sparse: false,
+                comment,
+                charset,
+                collation,
+                extra: on_update,
+                generated: String::new(),
+                stored: extra_lower.contains("stored"),
+            });
+        }
+
+        let index_result = self
+            .execute_query(Some(database), &format!("SHOW INDEX FROM {qualified}"))
+            .await?;
+        let mut indexes: Vec<IndexDef> = Vec::new();
+        for row in &index_result.rows {
+            let name = show_text(row, 2).unwrap_or_default();
+            let non_unique = show_text(row, 1).unwrap_or_else(|| "1".to_string());
+            let index_column = show_text(row, 4).map(|column| IndexColumnDef {
+                name: column,
+                descending: show_text(row, 5).is_some_and(|value| value.eq_ignore_ascii_case("D")),
+                prefix_length: show_text(row, 7).unwrap_or_default(),
+            });
+            if let Some(existing) = indexes.iter_mut().find(|index| index.name == name) {
+                if let Some(column) = index_column {
+                    existing.columns.push(column);
+                }
+            } else {
+                indexes.push(IndexDef {
+                    name: name.clone(),
+                    columns: index_column.into_iter().collect(),
+                    unique: non_unique == "0",
+                    primary: name.eq_ignore_ascii_case("PRIMARY"),
+                    index_type: show_text(row, 10).unwrap_or_default(),
+                    comment: show_text(row, 12)
+                        .or_else(|| show_text(row, 11))
+                        .unwrap_or_default(),
+                });
+            }
+        }
+
+        let status = self.table_status(database, table).await.unwrap_or_default();
+        let collation = status.collation.unwrap_or_default();
+        let charset = collation
+            .split_once('_')
+            .map(|(charset, _)| charset.to_string())
+            .unwrap_or_default();
+        let options = TableOptions {
+            engine: status.engine.unwrap_or_default(),
+            charset,
+            collation,
+            comment: status.comment.unwrap_or_default(),
+            auto_increment: status
+                .auto_increment
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+        };
+
+        Ok(TableSchema {
+            columns,
+            indexes,
+            unique_keys: Vec::new(),
+            checks: Vec::new(),
+            excludes: Vec::new(),
+            rules: Vec::new(),
+            foreign_keys: Vec::new(),
+            triggers: Vec::new(),
+            partitioning: String::new(),
+            options,
+        })
     }
 
     /// Run a prepared query on `connection`. A middleware that answers `1046 ER_NO_DB_ERROR`
@@ -237,11 +388,7 @@ impl MysqlConnection {
     /// Run a table-scoped DDL statement (`DROP TABLE` / `TRUNCATE TABLE`) through the text
     /// protocol, which MySQL requires for DDL.
     async fn run_table_ddl(&self, verb: &str, database: &str, table: &str) -> Result<()> {
-        let sql = format!(
-            "{verb} {}.{}",
-            quote_identifier(database),
-            quote_identifier(table)
-        );
+        let sql = format!("{verb} {}", self.table_ref(database, table));
         let mut connection = self.database_connection(database).await?;
         sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
             .execute(&mut *connection)
@@ -254,11 +401,7 @@ impl MysqlConnection {
     /// The DDL lives in the result column whose name starts with "Create" (or contains
     /// "Statement" for `SHOW CREATE TRIGGER`).
     async fn show_create(&self, database: &str, name: &str, verb: &str) -> Result<String> {
-        let sql = format!(
-            "SHOW CREATE {verb} {}.{}",
-            quote_identifier(database),
-            quote_identifier(name)
-        );
+        let sql = format!("SHOW CREATE {verb} {}", self.table_ref(database, name));
         let result = self.execute_query(Some(database), &sql).await?;
         let index = result
             .columns
@@ -757,7 +900,7 @@ impl Connection for MysqlConnection {
     ) -> Result<TablePage> {
         let columns = self.columns(database, table).await?;
         let mut connection = self.database_connection(database).await?;
-        let qualified = format!("{}.{}", quote_identifier(database), quote_identifier(table));
+        let qualified = self.table_ref(database, table);
 
         let (where_clause, binds) = filter_clause(&page.filter);
 
@@ -842,7 +985,7 @@ impl Connection for MysqlConnection {
         table: &str,
         filter: &[FilterNode],
     ) -> Result<Option<u64>> {
-        let qualified = format!("{}.{}", quote_identifier(database), quote_identifier(table));
+        let qualified = self.table_ref(database, table);
         let (where_clause, binds) = filter_clause(filter);
         let mut connection = self.database_connection(database).await?;
         let total = self
@@ -860,7 +1003,7 @@ impl Connection for MysqlConnection {
             return Ok(());
         }
 
-        let qualified = format!("{}.{}", quote_identifier(database), quote_identifier(table));
+        let qualified = self.table_ref(database, table);
 
         // StarRocks rejects prepared INSERT/UPDATE/DELETE (`1295 ... not supported in the
         // prepared statement protocol yet`), and a MySQL-protocol proxy can refuse server-side
@@ -957,7 +1100,7 @@ impl Connection for MysqlConnection {
             return Ok(());
         }
 
-        let qualified = format!("{}.{}", quote_identifier(database), quote_identifier(table));
+        let qualified = self.table_ref(database, table);
 
         // See `update_rows`: both StarRocks and a proxy that rejects prepares need the text
         // protocol with quoted literals.
@@ -1040,7 +1183,7 @@ impl Connection for MysqlConnection {
             return Ok(());
         }
 
-        let qualified = format!("{}.{}", quote_identifier(database), quote_identifier(table));
+        let qualified = self.table_ref(database, table);
 
         // See `update_rows`: use the text protocol for StarRocks and for a proxy that rejects
         // prepares.
@@ -1174,11 +1317,7 @@ impl Connection for MysqlConnection {
     }
 
     async fn empty_table(&self, database: &str, table: &str) -> Result<()> {
-        let sql = format!(
-            "DELETE FROM {}.{}",
-            quote_identifier(database),
-            quote_identifier(table)
-        );
+        let sql = format!("DELETE FROM {}", self.table_ref(database, table));
         let mut connection = self.database_connection(database).await?;
         sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
             .execute(&mut *connection)
@@ -1193,11 +1332,9 @@ impl Connection for MysqlConnection {
 
     async fn rename_table(&self, database: &str, table: &str, new_name: &str) -> Result<()> {
         let sql = format!(
-            "RENAME TABLE {}.{} TO {}.{}",
-            quote_identifier(database),
-            quote_identifier(table),
-            quote_identifier(database),
-            quote_identifier(new_name)
+            "RENAME TABLE {} TO {}",
+            self.table_ref(database, table),
+            self.table_ref(database, new_name)
         );
         let mut connection = self.database_connection(database).await?;
         sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
@@ -1274,11 +1411,15 @@ impl Connection for MysqlConnection {
     }
 
     async fn table_status(&self, database: &str, table: &str) -> Result<TableStatus> {
-        let sql = format!(
-            "SHOW TABLE STATUS FROM {} LIKE '{}'",
-            quote_identifier(database),
-            escape_string_literal(table)
-        );
+        let sql = if self.needs_database() {
+            format!("SHOW TABLE STATUS LIKE '{}'", escape_string_literal(table))
+        } else {
+            format!(
+                "SHOW TABLE STATUS FROM {} LIKE '{}'",
+                quote_identifier(database),
+                escape_string_literal(table)
+            )
+        };
         let result = self.execute_query(Some(database), &sql).await?;
         let Some(row) = result.rows.into_iter().next() else {
             return Ok(TableStatus::default());
@@ -1584,6 +1725,9 @@ impl Connection for MysqlConnection {
     }
 
     async fn table_schema(&self, database: &str, table: &str) -> Result<TableSchema> {
+        if self.needs_database() {
+            return self.table_schema_via_show(database, table).await;
+        }
         let mut connection = self.database_connection(database).await?;
         let mut with_generation = self.generation_expression.load(Ordering::Relaxed);
         let column_rows = match self
@@ -2894,6 +3038,55 @@ fn alter_database_sql(
 /// Read a text column by any of its candidate names (case-insensitive), tolerating a missing
 /// column (older servers) or a `NULL` value. Temporal columns (`CREATED`, `LAST_ALTERED`) are
 /// decoded as datetimes and formatted.
+/// One cell of a text `SHOW` result as a string (`NULL` stays `None`).
+fn show_text(row: &[CellValue], index: usize) -> Option<String> {
+    match row.get(index) {
+        Some(CellValue::Text(value)) => Some(value.clone()),
+        Some(CellValue::Null) | None => None,
+        Some(other) => Some(other.as_display()),
+    }
+}
+
+/// Split a `SHOW FULL COLUMNS` type (`int(11) unsigned`, `decimal(20,6)`, `enum('a','b')`) into
+/// the designer's `data_type`, length, decimals, unsigned and zerofill fields.
+fn parse_show_column_type(raw: &str) -> (String, String, String, bool, bool) {
+    let mut rest = raw.trim().to_string();
+    let lower = rest.to_ascii_lowercase();
+    let unsigned = lower.contains(" unsigned");
+    let zerofill = lower.contains(" zerofill");
+    if let Some(index) = rest.to_ascii_lowercase().find(" unsigned") {
+        rest.truncate(index);
+    }
+    if let Some(index) = rest.to_ascii_lowercase().find(" zerofill") {
+        rest.truncate(index);
+    }
+
+    let (data_type, arguments) = match rest.find('(') {
+        Some(open) => {
+            let close = rest.rfind(')').unwrap_or(rest.len());
+            (
+                rest[..open].trim().to_ascii_lowercase(),
+                rest[open + 1..close].trim().to_string(),
+            )
+        }
+        None => (rest.trim().to_ascii_lowercase(), String::new()),
+    };
+
+    let (length, decimals) = if matches!(
+        data_type.as_str(),
+        "decimal" | "numeric" | "double" | "float"
+    ) {
+        match arguments.split_once(',') {
+            Some((length, decimals)) => (length.trim().to_string(), decimals.trim().to_string()),
+            None => (arguments, "0".to_string()),
+        }
+    } else {
+        (arguments, "0".to_string())
+    };
+
+    (data_type, length, decimals, unsigned, zerofill)
+}
+
 pub(crate) fn column_text(row: &MySqlRow, names: &[&str]) -> Option<String> {
     for name in names {
         let Some(index) = row
@@ -3431,6 +3624,15 @@ fn is_unknown_command_error(error: &sqlx::Error) -> bool {
 /// database has to be selected first.
 fn is_no_database_error(error: &sqlx::Error) -> bool {
     mysql_error_number(error) == Some(1046)
+}
+
+/// Whether the server version names a proxy that treats the first `COM_STMT_PREPARE` as a
+/// session-wide mode switch. UDAL/TeleDB's DBProxy does: it never clears the session's prepared
+/// flag, and every later text query is answered with binary result-set rows, which a text reader
+/// cannot decode. Such a server is only ever spoken to with the text protocol (as Navicat does).
+pub(crate) fn is_prepare_sticky_proxy(version: &str) -> bool {
+    let version = version.to_ascii_uppercase();
+    version.contains("UDAL") || version.contains("DBPROXY")
 }
 
 fn mysql_error_number(error: &sqlx::Error) -> Option<u16> {
@@ -4445,5 +4647,16 @@ mod tests {
             split_statements("SELECT 1; -- trailing\n"),
             vec!["SELECT 1"]
         );
+    }
+
+    #[test]
+    fn recognises_a_prepare_sticky_proxy_by_its_version() {
+        assert!(super::is_prepare_sticky_proxy(
+            "5.7.21-UDAL-DBPROXY-2.7.5-2026-11-12T09:31:37Z"
+        ));
+        assert!(super::is_prepare_sticky_proxy("5.7.21-dbproxy"));
+        assert!(!super::is_prepare_sticky_proxy("8.0.36"));
+        assert!(!super::is_prepare_sticky_proxy("10.11.6-MariaDB"));
+        assert!(!super::is_prepare_sticky_proxy("5.7.44-log"));
     }
 }

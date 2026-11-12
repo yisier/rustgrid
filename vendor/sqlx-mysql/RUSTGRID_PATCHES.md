@@ -38,6 +38,14 @@ it verbatim; every change since is listed here. Licence: MIT OR Apache-2.0 (the 
    Navicat) sends this command; a `USE` statement goes through a middleware's SQL parser, which
    can rewrite catalog statements (`information_schema.tables` becomes `<database>.tables`, error
    3013). `MySqlConnection::select_database` exposes the command to the driver.
+8. **The greeting's full version string** (`src/connection/{stream,establish,tls,mod}.rs`). sqlx
+   parses the greeting into a `(major, minor, patch)` tuple and drops the vendor suffix.
+   `MySqlConnection::server_version_string` keeps the whole string (`5.7.21-UDAL-DBPROXY-...`) so
+   a driver can recognise a middleware without a `SELECT VERSION()` round trip. RustGrid uses it
+   in `after_connect` to put UDAL/TeleDB's DBProxy on the text protocol before the first
+   statement: the DBProxy never clears its session-wide `prepared` flag, and after one
+   `COM_STMT_PREPARE` every later text query comes back as binary rows (`buffer exhausted ...`,
+   issue #56). Not negotiating `CLIENT_DEPRECATE_EOF` (change 6) is necessary but not sufficient.
 
 ## Removing it
 
