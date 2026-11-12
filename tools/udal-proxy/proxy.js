@@ -201,20 +201,30 @@ const server = net.createServer((client) => {
           console.log('[udal-proxy] 3013:', message);
           client.write(errorPacket(1, 3013, 'HY000', message));
         } else {
-          console.log('[udal-proxy] reject COM_STMT_PREPARE:', shortSql(sql));
-          client.write(errorPacket(1, 1047, '08S01', 'UDAL - Unknown command'));
+          // UDAL accepts server-side prepares once a current database is selected (that is how
+          // the prepared information_schema.tables probe reached its 3013 rewrite); forward the
+          // statement so the designer and zero-row metadata use the real server metadata.
+          console.log('[udal-proxy] forward COM_STMT_PREPARE:', shortSql(sql));
+          upstream.write(packet);
         }
         continue;
       }
 
-      // COM_STMT_CLOSE and COM_STMT_SEND_LONG_DATA expect no response; drop them silently.
+      // COM_STMT_CLOSE and COM_STMT_SEND_LONG_DATA expect no response; forward them so the
+      // backend releases a statement it prepared. Before a database is selected there is no
+      // valid statement id, so they can be dropped.
       if (command === COM_STMT_CLOSE || command === COM_STMT_SEND_LONG_DATA) {
+        if (currentDatabase !== null) upstream.write(packet);
         continue;
       }
 
       if (command === COM_STMT_EXECUTE || command === COM_STMT_RESET) {
-        console.log('[udal-proxy] reject prepared-statement command', command);
-        client.write(errorPacket(1, 1047, '08S01', 'UDAL - Unknown command'));
+        if (currentDatabase !== null) {
+          upstream.write(packet);
+        } else {
+          console.log('[udal-proxy] reject prepared-statement command', command);
+          client.write(errorPacket(1, 1047, '08S01', 'UDAL - Unknown command'));
+        }
         continue;
       }
 
@@ -231,6 +241,6 @@ server.listen(LISTEN_PORT, LISTEN_HOST, () => {
     `[udal-proxy] ${LISTEN_HOST}:${LISTEN_PORT} -> ${BACKEND_HOST}:${BACKEND_PORT}`,
   );
   console.log(
-    '[udal-proxy] a session without a database gets 1046; afterwards COM_STMT_PREPARE gets 1047',
+    '[udal-proxy] a session without a database gets 1046; afterwards COM_STMT_PREPARE is forwarded (except information_schema.tables, which gets 3013)',
   );
 });

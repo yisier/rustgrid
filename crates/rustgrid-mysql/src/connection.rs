@@ -1802,37 +1802,71 @@ impl Connection for MysqlConnection {
             });
         }
 
-        let option_row = sqlx::query(
-            "SELECT engine, table_collation, table_comment, auto_increment \
-             FROM information_schema.tables \
-             WHERE table_schema = ? AND table_name = ?",
-        )
-        .bind(database)
-        .bind(table)
-        .fetch_optional(&mut *connection)
-        .await
-        .map_err(map_query_error)?;
+        let options = if self.needs_database() {
+            // The proxy rewrites a prepared `information_schema.tables` query to `<db>.tables`
+            // (3013); Navicat reads the table's settings with the unqualified SHOW instead.
+            let sql = format!("SHOW TABLE STATUS LIKE '{}'", escape_string_literal(table));
+            let rows = self
+                .text_rows(&mut connection, database, sql)
+                .await
+                .unwrap_or_default();
+            rows.first()
+                .map(|row| {
+                    let columns = columns_from_row(row);
+                    let values: Vec<CellValue> = (0..columns.len())
+                        .map(|index| decode_cell(row, index))
+                        .collect();
+                    let status = table_status_from(&columns, &values);
+                    let collation = status.collation.unwrap_or_default();
+                    let charset = collation
+                        .split_once('_')
+                        .map(|(charset, _)| charset.to_string())
+                        .unwrap_or_default();
+                    TableOptions {
+                        engine: status.engine.unwrap_or_default(),
+                        charset,
+                        collation,
+                        comment: status.comment.unwrap_or_default(),
+                        auto_increment: status
+                            .auto_increment
+                            .map(|value| value.to_string())
+                            .unwrap_or_default(),
+                    }
+                })
+                .unwrap_or_default()
+        } else {
+            let option_row = sqlx::query(
+                "SELECT engine, table_collation, table_comment, auto_increment \
+                 FROM information_schema.tables \
+                 WHERE table_schema = ? AND table_name = ?",
+            )
+            .bind(database)
+            .bind(table)
+            .fetch_optional(&mut *connection)
+            .await
+            .map_err(map_query_error)?;
 
-        let options = match option_row {
-            Some(row) => {
-                let engine: Option<String> = row.try_get(0).unwrap_or(None);
-                let collation: Option<String> = row.try_get(1).unwrap_or(None);
-                let comment: String = row.try_get(2).unwrap_or_default();
-                let auto_increment = optional_u64(&row, 3);
-                let collation = collation.unwrap_or_default();
-                let charset = collation
-                    .split_once('_')
-                    .map(|(charset, _)| charset.to_string())
-                    .unwrap_or_default();
-                TableOptions {
-                    engine: engine.unwrap_or_default(),
-                    charset,
-                    collation,
-                    comment,
-                    auto_increment: auto_increment.map(|v| v.to_string()).unwrap_or_default(),
+            match option_row {
+                Some(row) => {
+                    let engine: Option<String> = row.try_get(0).unwrap_or(None);
+                    let collation: Option<String> = row.try_get(1).unwrap_or(None);
+                    let comment: String = row.try_get(2).unwrap_or_default();
+                    let auto_increment = optional_u64(&row, 3);
+                    let collation = collation.unwrap_or_default();
+                    let charset = collation
+                        .split_once('_')
+                        .map(|(charset, _)| charset.to_string())
+                        .unwrap_or_default();
+                    TableOptions {
+                        engine: engine.unwrap_or_default(),
+                        charset,
+                        collation,
+                        comment,
+                        auto_increment: auto_increment.map(|v| v.to_string()).unwrap_or_default(),
+                    }
                 }
+                None => TableOptions::default(),
             }
-            None => TableOptions::default(),
         };
 
         // MySQL 8.0.16+/MariaDB report CHECK constraints in `information_schema`; an older server

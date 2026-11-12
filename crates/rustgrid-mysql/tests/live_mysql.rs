@@ -444,6 +444,9 @@ async fn live_designer_round_trips_a_table() {
         .execute_query(None, &format!("CREATE DATABASE IF NOT EXISTS `{database}`"))
         .await
         .expect("create the scratch database");
+    // Select the database on the session first, exactly like opening it in the tree; a proxy
+    // otherwise refuses the qualified DROP/CREATE below with 1046.
+    let _ = connection.list_tables(database).await;
 
     let table = "rustgrid_designer";
     let _ = connection.drop_table(database, table).await;
