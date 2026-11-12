@@ -1586,29 +1586,28 @@ impl Connection for MysqlConnection {
     async fn table_schema(&self, database: &str, table: &str) -> Result<TableSchema> {
         let mut connection = self.database_connection(database).await?;
         let mut with_generation = self.generation_expression.load(Ordering::Relaxed);
-        let column_rows =
-            match self
-                .schema_column_rows(&mut connection, database, table, with_generation)
+        let column_rows = match self
+            .schema_column_rows(&mut connection, database, table, with_generation)
+            .await
+        {
+            Ok(rows) => rows,
+            // MySQL before 5.7.6, MariaDB before 10.2 and a few MySQL-compatible servers have no
+            // `GENERATION_EXPRESSION` column and reject the whole statement with `1054`. Those
+            // servers have no generated columns either, so retry without it — failing the designer
+            // (and structure sync) over an optional metadata column is worse than not reporting it.
+            Err(error) if with_generation && is_unknown_column_text_error(&error) => match self
+                .schema_column_rows(&mut connection, database, table, false)
                 .await
             {
-                Ok(rows) => rows,
-                // MySQL before 5.7.6, MariaDB before 10.2 and a few MySQL-compatible servers have no
-                // `GENERATION_EXPRESSION` column and reject the whole statement with `1054`. Those
-                // servers have no generated columns either, so retry without it — failing the designer
-                // (and structure sync) over an optional metadata column is worse than not reporting it.
-                Err(error) if with_generation && is_unknown_column_text_error(&error) => match self
-                    .schema_column_rows(&mut connection, database, table, false)
-                    .await
-                {
-                    Ok(rows) => {
-                        with_generation = false;
-                        self.generation_expression.store(false, Ordering::Relaxed);
-                        rows
-                    }
-                    Err(_) => return Err(error),
-                },
-                Err(error) => return Err(error),
-            };
+                Ok(rows) => {
+                    with_generation = false;
+                    self.generation_expression.store(false, Ordering::Relaxed);
+                    rows
+                }
+                Err(_) => return Err(error),
+            },
+            Err(error) => return Err(error),
+        };
 
         let mut columns = Vec::with_capacity(column_rows.len());
         for row in &column_rows {

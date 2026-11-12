@@ -81,13 +81,40 @@ function selectedDatabase(sql) {
  * `SHOW DATABASES` and version probes must keep working before the first `USE`; everything else
  * (including the catalog `SHOW`s and `information_schema` queries) needs one.
  */
+/**
+ * Whether MySQL can run `sql` without a current database. Constant expressions and the
+ * server-global `mysql.*` catalog are database-independent; a table/catalog query is not.
+ */
+function isDatabaseIndependent(sql) {
+  const normalized = sql.trimStart().toUpperCase();
+  if (!normalized.startsWith('SELECT ')) return false;
+  if (!/\bFROM\b/.test(normalized)) return true;
+  if (/\bFROM\s+`?MYSQL`?\./i.test(sql)) return true;
+  // Account management reads the server-wide grant catalog; it is not scoped to a schema.
+  if (
+    /\bFROM\s+INFORMATION_SCHEMA\.(USER|SCHEMA|TABLE|ROUTINE|COLUMN)_PRIVILEGES\b/i.test(sql)
+  ) {
+    return true;
+  }
+  if (
+    /\bFROM\s+INFORMATION_SCHEMA\.COLUMNS\b/i.test(sql) &&
+    /TABLE_SCHEMA\s*=\s*'MYSQL'/i.test(sql)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Whether UDAL's DBProxy refuses `sql` while the session has no current database. Session setup,
+ * `SHOW DATABASES` and version probes must keep working before the first `USE`; database-independent
+ * SELECTs and `mysql.*` reads are allowed too. Everything else (including the catalog `SHOW`s and
+ * `information_schema` queries) needs one.
+ */
 function requiresDatabase(sql) {
   const normalized = sql.trimStart().toUpperCase();
-  // A constant expression (or a session-variable probe) does not need a current database; MySQL
-  // executes it with no schema selected, so a proxy should not insist on one for it.
-  const fromLessSelect = normalized.startsWith('SELECT ') && !/\bFROM\b/.test(normalized);
   return !(
-    fromLessSelect ||
+    isDatabaseIndependent(sql) ||
     normalized.startsWith('USE ') ||
     normalized.startsWith('SET ') ||
     normalized.startsWith('SHOW DATABASES') ||
@@ -102,7 +129,13 @@ function requiresDatabase(sql) {
     normalized.startsWith('DROP DATABASE') ||
     normalized.startsWith('ALTER DATABASE') ||
     normalized.startsWith('CREATE USER') ||
+    normalized.startsWith('ALTER USER') ||
     normalized.startsWith('DROP USER') ||
+    normalized.startsWith('RENAME USER') ||
+    normalized.startsWith('CREATE ROLE') ||
+    normalized.startsWith('DROP ROLE') ||
+    normalized.startsWith('SET DEFAULT ROLE') ||
+    normalized.startsWith('SET ROLE') ||
     normalized.startsWith('GRANT ') ||
     normalized.startsWith('REVOKE ') ||
     normalized.startsWith('SET PASSWORD') ||
@@ -116,6 +149,9 @@ const server = net.createServer((client) => {
   let closed = false;
   // `USE` is connection state, so every client session tracks its own current database.
   let currentDatabase = null;
+  // A database-independent prepared statement (e.g. the zero-row SELECT metadata probe) is
+  // forwarded without a database; its execute/close must be forwarded too.
+  let forwardedPrepare = false;
 
   const fail = (error) => {
     if (closed) return;
@@ -182,13 +218,14 @@ const server = net.createServer((client) => {
           );
           continue;
         }
+        console.log('[udal-proxy] query:', shortSql(sql));
         upstream.write(packet);
         continue;
       }
 
       if (command === COM_STMT_PREPARE) {
         const sql = packet.subarray(5).toString('utf8');
-        if (currentDatabase === null) {
+        if (currentDatabase === null && !isDatabaseIndependent(sql)) {
           console.log('[udal-proxy] 1046 (no database):', shortSql(sql));
           client.write(
             errorPacket(
@@ -198,7 +235,7 @@ const server = net.createServer((client) => {
               `UDAL - No database selected : ${sql}`,
             ),
           );
-        } else if (/information_schema\.tables/i.test(sql)) {
+        } else if (currentDatabase !== null && /information_schema\.tables/i.test(sql)) {
           // UDAL rewrites information_schema.tables to <current_database>.tables once a database
           // is selected; a client that retries the prepared catalog query then sees 3013.
           const message = `Table '${currentDatabase.toLowerCase()}.tables' doesn't exist.`;
@@ -209,6 +246,7 @@ const server = net.createServer((client) => {
           // the prepared information_schema.tables probe reached its 3013 rewrite); forward the
           // statement so the designer and zero-row metadata use the real server metadata.
           console.log('[udal-proxy] forward COM_STMT_PREPARE:', shortSql(sql));
+          forwardedPrepare = true;
           upstream.write(packet);
         }
         continue;
@@ -218,12 +256,12 @@ const server = net.createServer((client) => {
       // backend releases a statement it prepared. Before a database is selected there is no
       // valid statement id, so they can be dropped.
       if (command === COM_STMT_CLOSE || command === COM_STMT_SEND_LONG_DATA) {
-        if (currentDatabase !== null) upstream.write(packet);
+        if (currentDatabase !== null || forwardedPrepare) upstream.write(packet);
         continue;
       }
 
       if (command === COM_STMT_EXECUTE || command === COM_STMT_RESET) {
-        if (currentDatabase !== null) {
+        if (currentDatabase !== null || forwardedPrepare) {
           upstream.write(packet);
         } else {
           console.log('[udal-proxy] reject prepared-statement command', command);

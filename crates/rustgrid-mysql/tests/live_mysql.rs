@@ -585,6 +585,12 @@ async fn live_designer_round_trips_a_table() {
 async fn live_auth_failure_maps_to_authentication() {
     let mut config = config();
     config.password = Some("definitely-wrong-password".to_string());
+    // MySQL 8.4's caching_sha2_password needs TLS (or the mysql-rsa feature) before it will
+    // answer the password challenge; with TLS the wrong password is a normal 1045. The Docker
+    // proxy forwards plaintext frames only, so this test runs directly with the flag set.
+    if std::env::var("RUSTGRID_MYSQL_TLS").is_ok() {
+        config.settings.tls.mode = rustgrid_core::TlsMode::Required;
+    }
 
     let driver = rustgrid_mysql::MysqlDriver::new();
     let error = match driver.connect(&config).await {
