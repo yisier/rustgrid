@@ -177,6 +177,11 @@ impl<S: Socket> MySqlStream<S> {
             );
         }
 
+        if std::env::var_os("RUSTGRID_MYSQL_TRACE").is_some() {
+            let head = &payload[..payload.len().min(32)];
+            eprintln!("[sqlx] recv len={} head={:02x?}", payload.len(), head);
+        }
+
         Ok(Packet(payload))
     }
 
@@ -193,9 +198,20 @@ impl<S: Socket> MySqlStream<S> {
 
     pub(crate) async fn maybe_recv_eof(&mut self) -> Result<Option<EofPacket>, Error> {
         if self.capabilities.contains(Capabilities::DEPRECATE_EOF) {
+            if std::env::var_os("RUSTGRID_MYSQL_TRACE").is_some() {
+                eprintln!("[sqlx] maybe_recv_eof skipped (DEPRECATE_EOF negotiated)");
+            }
             Ok(None)
         } else {
-            self.recv().await.map(Some)
+            let packet = self.recv_packet().await?;
+            if std::env::var_os("RUSTGRID_MYSQL_TRACE").is_some() {
+                eprintln!(
+                    "[sqlx] metadata terminator first={:02x} len={}",
+                    packet[0],
+                    packet.len()
+                );
+            }
+            packet.decode_with(self.capabilities).map(Some)
         }
     }
 

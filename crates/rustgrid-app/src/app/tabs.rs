@@ -698,16 +698,21 @@ impl Render for TabBar {
                         let group_name = groups::find_group(&app.tree_layout, batch.group_id)
                             .map(|group| group.name.clone())
                             .unwrap_or_else(|| batch.group_name.clone());
-                        (
-                            "icons/folder.svg",
-                            app.theme.icon_queries,
-                            format!(
+                        let title = match &query.name {
+                            Some(name) => format!("{name} - {}", t!("common.query")),
+                            None => format!(
                                 "{} · {} - {}",
                                 t!("query.batch.title"),
                                 group_name,
                                 t!("common.query")
                             ),
-                        )
+                        };
+                        let icon = if query.name.is_some() {
+                            "icons/queries.svg"
+                        } else {
+                            "icons/folder.svg"
+                        };
+                        (icon, app.theme.icon_queries, title)
                     } else {
                         let title = match &query.name {
                             Some(name) => format!("{name} - {}", t!("common.query")),

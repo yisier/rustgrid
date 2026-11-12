@@ -251,7 +251,16 @@ impl MySqlConnection {
 
                     let row = match format {
                         MySqlValueFormat::Binary => packet.decode_with::<BinaryRow, _>(&columns)?.0,
-                        MySqlValueFormat::Text => packet.decode_with::<TextRow, _>(&columns)?.0,
+                        MySqlValueFormat::Text => {
+                            if std::env::var_os("RUSTGRID_MYSQL_TRACE").is_some() {
+                                eprintln!(
+                                    "[sqlx] row packet first={:02x} len={}",
+                                    packet[0],
+                                    packet.len()
+                                );
+                            }
+                            packet.decode_with::<TextRow, _>(&columns)?.0
+                        }
                     };
 
                     let v = Either::Right(MySqlRow {

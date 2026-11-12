@@ -544,12 +544,14 @@ impl ConfigStore {
 
     /// The root directory of saved queries. Each query is a `.sql` file under
     /// `<root>/queries/<connection_id>/<database>/<name>.sql`, or under an extra
-    /// `<schema>/` segment when the query was saved while a schema was selected.
+    /// `<schema>/` segment when the query was saved while a schema was selected. A group query is
+    /// filed under `<root>/queries/_groups/<group_id>/<name>.sql`.
     pub fn queries_dir(&self) -> PathBuf {
         self.root.join(QUERIES_DIR)
     }
 
-    /// The file a saved query is written to. A `schema` files the query one level deeper.
+    /// The file a saved query is written to. A `schema` files the query one level deeper. A group
+    /// query lives under `_groups/<group_id>/` instead of a connection/database folder.
     pub fn query_file_path(
         &self,
         connection_id: &str,
@@ -567,14 +569,29 @@ impl ConfigStore {
         path.join(format!("{}.sql", sanitize_component(name)))
     }
 
+    /// The folder holding group queries, one subfolder per connection-tree group.
+    pub fn group_queries_dir(&self) -> PathBuf {
+        self.queries_dir().join("_groups")
+    }
+
+    /// The file a saved group query is written to: `queries/_groups/<group_id>/<name>.sql`.
+    pub fn group_query_file_path(&self, group_id: u64, name: &str) -> PathBuf {
+        self.group_queries_dir()
+            .join(group_id.to_string())
+            .join(format!("{}.sql", sanitize_component(name)))
+    }
+
     /// Write (or overwrite) one saved query's `.sql` file.
     pub fn save_query_file(&self, query: &SavedQuery) -> ConfigResult<PathBuf> {
-        let path = self.query_file_path(
-            &query.connection_id,
-            &query.database,
-            query.schema.as_deref(),
-            &query.name,
-        );
+        let path = match query.group_id {
+            Some(group_id) => self.group_query_file_path(group_id, &query.name),
+            None => self.query_file_path(
+                &query.connection_id,
+                &query.database,
+                query.schema.as_deref(),
+                &query.name,
+            ),
+        };
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;
         }
@@ -584,12 +601,15 @@ impl ConfigStore {
 
     /// Remove one saved query's `.sql` file.
     pub fn delete_query_file(&self, query: &SavedQuery) -> ConfigResult<()> {
-        let path = self.query_file_path(
-            &query.connection_id,
-            &query.database,
-            query.schema.as_deref(),
-            &query.name,
-        );
+        let path = match query.group_id {
+            Some(group_id) => self.group_query_file_path(group_id, &query.name),
+            None => self.query_file_path(
+                &query.connection_id,
+                &query.database,
+                query.schema.as_deref(),
+                &query.name,
+            ),
+        };
         if path.exists() {
             fs::remove_file(path)?;
         }

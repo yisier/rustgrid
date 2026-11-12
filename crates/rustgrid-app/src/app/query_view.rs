@@ -54,23 +54,16 @@ impl AppView {
             .flex_none()
             .bg(rgb(theme.toolbar_bg))
             .border_b_1()
-            .border_color(rgb(theme.border));
-        let save = self.query_tool_button(
-            "query-save",
-            "icons/save.svg",
-            t!("query.save").to_string(),
-            theme.text,
-            theme.text,
-            !is_batch,
-            cx.listener(|this, _event, window, cx| this.begin_save_query(window, cx)),
-        );
-        toolbar = toolbar.child(if is_batch {
-            save.tooltip(ui::text_tooltip(
-                t!("query.batch.save_unsupported").to_string(),
-            ))
-        } else {
-            save
-        });
+            .border_color(rgb(theme.border))
+            .child(self.query_tool_button(
+                "query-save",
+                "icons/save.svg",
+                t!("query.save").to_string(),
+                theme.text,
+                theme.text,
+                true,
+                cx.listener(|this, _event, window, cx| this.begin_save_query(window, cx)),
+            ));
         // Redis commands and MongoDB JSON commands are not SQL: there is nothing for 美化SQL to
         // format.
         if !key_value && !documents {

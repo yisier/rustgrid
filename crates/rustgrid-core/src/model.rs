@@ -70,9 +70,14 @@ pub struct ConnectionConfig {
 pub struct SavedQuery {
     pub name: String,
     pub sql: String,
-    /// The `ConnectionProfile::id` the query belongs to.
+    /// The `ConnectionProfile::id` the query belongs to. Empty for a group query.
     pub connection_id: String,
-    /// The database the query is filed under. Empty when the connection has no database.
+    /// The connection-tree group a group query belongs to (one result page per connection).
+    /// `None` for a normal single-connection query.
+    #[serde(default)]
+    pub group_id: Option<u64>,
+    /// The database the query is filed under. Empty when the connection has no database, or for
+    /// a group query.
     #[serde(default)]
     pub database: String,
     /// The schema the query is filed under, when it was saved while a schema was selected. `None`

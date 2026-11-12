@@ -2123,7 +2123,19 @@ impl AppView {
         let Some(file) = self.query_files.get(index) else {
             return div().into_any_element();
         };
-        let connection = self.query_connection_name(&file.connection_id);
+        let (connection_label, connection) = if let Some(group_id) = file.group_id {
+            (
+                t!("query.batch.group").to_string(),
+                groups::find_group(&self.tree_layout, group_id)
+                    .map(|group| group.name.clone())
+                    .unwrap_or_default(),
+            )
+        } else {
+            (
+                t!("info.connection").to_string(),
+                self.query_connection_name(&file.connection_id),
+            )
+        };
         let created = file.created.map(format_system_time);
         let modified = file.modified.map(format_system_time);
         let fields = vec![
@@ -2140,7 +2152,7 @@ impl AppView {
                 t!("backup.field.modified").to_string(),
                 modified.unwrap_or_else(|| "--".to_string()),
             ),
-            (t!("info.connection").to_string(), connection),
+            (connection_label, connection),
             (
                 t!("info.database").to_string(),
                 if file.database.is_empty() {

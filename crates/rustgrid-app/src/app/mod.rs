@@ -414,6 +414,9 @@ struct SaveQueryDialog {
     name: String,
     /// The selected connection, indexed into `AppView::connections`.
     connection_index: Option<usize>,
+    /// The connection-tree group a group query is saved under. When set, the dialog shows the
+    /// group instead of the connection/database pickers.
+    group_id: Option<u64>,
     database: String,
     /// The schema to file the query under, when the query's run target has one selected.
     schema: Option<String>,
@@ -536,9 +539,11 @@ struct QueryFileInfo {
     path: std::path::PathBuf,
     /// The file stem, e.g. `清理库存`.
     name: String,
-    /// The connection folder holding the file.
+    /// The connection folder holding the file. Empty for a group query.
     connection_id: String,
-    /// The database folder holding the file.
+    /// The connection-tree group a group query was saved under.
+    group_id: Option<u64>,
+    /// The database folder holding the file. Empty for a group query.
     database: String,
     /// The schema folder holding the file, when the query was filed under one.
     schema: Option<String>,
@@ -1741,6 +1746,9 @@ struct TreePane {
     /// Whether the tree is currently filtered by the search box, so groups open and empty
     /// categories are skipped instead of the saved expansion being replayed.
     searching: bool,
+    /// The active search query (already folded by [`tree_search_query`]), so group rows can tell
+    /// whether their own path matches instead of only surviving as the branch to a match.
+    search_query: Option<String>,
     /// Bumped by every keyboard move; the deferred app-wide refresh runs only for the latest.
     nav_generation: u64,
 }
@@ -4445,6 +4453,7 @@ impl AppView {
         // and the leaves paint the same selection their list does.
         for file in &self.query_files {
             file.name.hash(&mut hasher);
+            file.group_id.hash(&mut hasher);
             file.database.hash(&mut hasher);
             file.schema.hash(&mut hasher);
         }

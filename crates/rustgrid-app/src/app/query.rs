@@ -1339,7 +1339,6 @@ impl AppView {
                                     if let Some(node) = view.connections.get_mut(connection_index) {
                                         node.status =
                                             ConnectionStatus::Connected(connection.clone());
-                                        node.expanded = true;
                                     }
                                     view.load_databases(connection_index, cx);
                                 }
@@ -2291,14 +2290,10 @@ impl AppView {
         let Some(tab) = self.queries.get(index) else {
             return;
         };
-        // Group queries are not filed under a connection/database, so there is no save location
-        // for them yet; the toolbar disables Save for these tabs.
-        if tab.batch.is_some() {
-            return;
-        }
         let name = tab.name.clone().unwrap_or_default();
         let saved_path = tab.saved_path.clone();
         let tab_connection = tab.connection_index;
+        let group_id = tab.batch.as_ref().map(|batch| batch.group_id);
         let tab_database = tab.database.clone();
         let tab_schema = tab.schema.clone();
 
@@ -2314,16 +2309,22 @@ impl AppView {
             }
         }
 
-        let connection_index = tab_connection.or_else(|| self.default_query_connection(cx));
-        let database = tab_database
-            .or_else(|| connection_index.and_then(|i| self.default_query_database(i, cx)))
-            .unwrap_or_default();
-        // File the query under the schema its run target already selected, falling back to the
-        // schema the tree/object pane currently points at for this database.
-        let schema = tab_schema.or_else(|| {
-            connection_index
-                .and_then(|index| self.default_query_schema(cx, index, Some(database.as_str())))
-        });
+        // A group query is filed under its group; it has no connection/database/schema location.
+        let (connection_index, database, schema) = if group_id.is_some() {
+            (None, String::new(), None)
+        } else {
+            let connection_index = tab_connection.or_else(|| self.default_query_connection(cx));
+            let database = tab_database
+                .or_else(|| connection_index.and_then(|i| self.default_query_database(i, cx)))
+                .unwrap_or_default();
+            // File the query under the schema its run target already selected, falling back to the
+            // schema the tree/object pane currently points at for this database.
+            let schema = tab_schema.or_else(|| {
+                connection_index
+                    .and_then(|index| self.default_query_schema(cx, index, Some(database.as_str())))
+            });
+            (connection_index, database, schema)
+        };
 
         let theme = self.theme;
         let weak = cx.weak_entity();
@@ -2352,12 +2353,15 @@ impl AppView {
         input.update(cx, |input, cx| input.focus_state(window, cx));
         self.query_name_input = Some(input);
 
-        self.ensure_save_dialog_combos(theme, cx);
+        if group_id.is_none() {
+            self.ensure_save_dialog_combos(theme, cx);
+        }
 
         self.save_query_dialog = Some(SaveQueryDialog {
             tab_index: index,
             name,
             connection_index,
+            group_id,
             database,
             schema,
             error: None,
@@ -2497,6 +2501,10 @@ impl AppView {
         let Some(dialog) = self.save_query_dialog.as_ref() else {
             return;
         };
+        // A group query's dialog shows its group instead of the connection/database pickers.
+        if dialog.group_id.is_some() {
+            return;
+        }
         let connection_index = dialog.connection_index;
         let database = dialog.database.clone();
         let connection_options = self.save_connection_options();
@@ -2581,6 +2589,44 @@ impl AppView {
             self.save_query_error(t!("query.name_required").to_string(), cx);
             return;
         }
+        if let Some(group_id) = dialog.group_id {
+            let Some(sql) = self.queries.get(tab_index).map(|tab| tab.sql.clone()) else {
+                return;
+            };
+            let query = SavedQuery {
+                name: name.clone(),
+                sql,
+                connection_id: String::new(),
+                group_id: Some(group_id),
+                database: String::new(),
+                schema: None,
+            };
+            let saved_path = match self.config.save_query_file(&query) {
+                Ok(path) => path,
+                Err(error) => {
+                    self.save_query_error(error.to_string(), cx);
+                    return;
+                }
+            };
+            self.refresh_query_files(cx);
+            if let Some(index) = self
+                .query_files
+                .iter()
+                .position(|file| file.path == saved_path)
+            {
+                self.select_query_one(index);
+            }
+            if let Some(tab) = self.queries.get_mut(tab_index) {
+                tab.name = Some(name);
+                tab.saved_path = Some(saved_path);
+                tab.baseline = tab.sql.clone();
+            }
+            self.save_query_dialog = None;
+            self.query_name_input = None;
+            self.main_tab = MainTab::Queries;
+            cx.notify();
+            return;
+        }
         let Some(connection_id) = connection_index
             .and_then(|index| self.connections.get(index))
             .map(|node| node.profile.id.clone())
@@ -2601,6 +2647,7 @@ impl AppView {
             name: name.clone(),
             sql,
             connection_id,
+            group_id: None,
             database: database.clone(),
             schema: schema.clone(),
         };
@@ -2764,20 +2811,49 @@ impl AppView {
         Some((node.profile.id.clone(), database.name.clone(), schema))
     }
 
+    /// The parent group of the connection row selected in the tree, if any. Used to show a group's
+    /// saved queries when one of its connections (rather than the group row) is selected.
+    fn selected_connection_group(&self, cx: &App) -> Option<u64> {
+        let selected = self.tree_pane.read(cx).selected.clone()?;
+        let index = selected.strip_prefix("conn-")?.parse::<usize>().ok()?;
+        let connection_id = self.connections.get(index)?.profile.id.clone();
+        groups::group_of_connection(&self.tree_layout, &connection_id)
+    }
+
     /// Indices into `query_files` that belong to the current scope, in list order. A schema scope
     /// also shows database-level queries (saved without a schema), which belong to every schema.
+    /// A selected group shows the queries saved for that group; a member connection shows its
+    /// group's queries when no database scope is active.
     pub(super) fn visible_query_files(&self, cx: &App) -> Vec<usize> {
-        let Some((connection_id, database, schema)) = self.query_scope(cx) else {
+        if let Some(group_id) = self.single_selected_group(cx) {
+            return self
+                .query_files
+                .iter()
+                .enumerate()
+                .filter(|(_, file)| file.group_id == Some(group_id))
+                .map(|(index, _)| index)
+                .collect();
+        }
+        if let Some((connection_id, database, schema)) = self.query_scope(cx) {
+            return self
+                .query_files
+                .iter()
+                .enumerate()
+                .filter(|(_, file)| {
+                    file.connection_id == connection_id
+                        && file.database == database
+                        && query_in_scope(file, schema.as_deref())
+                })
+                .map(|(index, _)| index)
+                .collect();
+        }
+        let Some(group_id) = self.selected_connection_group(cx) else {
             return Vec::new();
         };
         self.query_files
             .iter()
             .enumerate()
-            .filter(|(_, file)| {
-                file.connection_id == connection_id
-                    && file.database == database
-                    && query_in_scope(file, schema.as_deref())
-            })
+            .filter(|(_, file)| file.group_id == Some(group_id))
             .map(|(index, _)| index)
             .collect()
     }
@@ -2846,6 +2922,34 @@ impl AppView {
             cx.notify();
             return;
         };
+        if let Some(group_id) = file.group_id {
+            let existing = self.queries.iter().position(|tab| {
+                tab.batch
+                    .as_ref()
+                    .is_some_and(|batch| batch.group_id == group_id)
+                    && tab.name.as_deref() == Some(name.as_str())
+            });
+            if let Some(existing) = existing {
+                self.activate_query(existing, cx);
+                return;
+            }
+            self.open_new_query_for_group(group_id, cx);
+            if let Some(active) = self.active_query
+                && let Some(tab) = self.queries.get_mut(active)
+            {
+                tab.sql = sql;
+                tab.baseline = tab.sql.clone();
+                tab.name = Some(name);
+                tab.saved_path = Some(saved_path);
+                tab.caret = tab.sql.len();
+                tab.anchor = tab.caret;
+            }
+            if let Some(active) = self.active_query {
+                self.sync_query_editor_text(active, cx);
+            }
+            cx.notify();
+            return;
+        }
         let connection_index = self
             .connections
             .iter()
@@ -2953,6 +3057,7 @@ impl AppView {
                 name: file.name.clone(),
                 sql: String::new(),
                 connection_id: file.connection_id.clone(),
+                group_id: file.group_id,
                 database: file.database.clone(),
                 schema: file.schema.clone(),
             };
@@ -2973,6 +3078,7 @@ impl AppView {
             name: file.name.clone(),
             sql: String::new(),
             connection_id: file.connection_id.clone(),
+            group_id: file.group_id,
             database: file.database.clone(),
             schema: file.schema.clone(),
         };
@@ -2995,34 +3101,39 @@ impl AppView {
         });
     }
 
-    /// Paste the copied query file into the current scope's database folder.
+    /// Paste the copied query file into the current scope: a group's folder when a group is
+    /// selected, otherwise the open database's folder.
     pub(super) fn paste_query_file(&mut self, cx: &mut Context<'_, Self>) {
         let Some(clipboard) = self.query_clipboard.clone() else {
             return;
         };
-        let Some((connection_id, database, schema)) = self.query_scope(cx) else {
-            return;
+        let (group_id, connection_id, database, schema) =
+            if let Some(group_id) = self.single_selected_group(cx) {
+                (Some(group_id), String::new(), String::new(), None)
+            } else if let Some((connection_id, database, schema)) = self.query_scope(cx) {
+                (None, connection_id, database, schema)
+            } else if let Some(group_id) = self.selected_connection_group(cx) {
+                (Some(group_id), String::new(), String::new(), None)
+            } else {
+                return;
+            };
+        let path_of = |name: &str| match group_id {
+            Some(group_id) => self.config.group_query_file_path(group_id, name),
+            None => self
+                .config
+                .query_file_path(&connection_id, &database, schema.as_deref(), name),
         };
         let suffix = t!("backup.copy_suffix").to_string();
         let mut name = clipboard.name.clone();
-        let mut dest =
-            self.config
-                .query_file_path(&connection_id, &database, schema.as_deref(), &name);
+        let mut dest = path_of(&name);
         if dest.exists() {
             let copy = format!("{name} - {suffix}");
             name = copy.clone();
-            dest = self
-                .config
-                .query_file_path(&connection_id, &database, schema.as_deref(), &name);
+            dest = path_of(&name);
             let mut number = 2u64;
             while dest.exists() {
                 name = format!("{copy} ({number})");
-                dest = self.config.query_file_path(
-                    &connection_id,
-                    &database,
-                    schema.as_deref(),
-                    &name,
-                );
+                dest = path_of(&name);
                 number += 1;
             }
         }
@@ -3131,11 +3242,15 @@ impl AppView {
         };
         let old_path = file.path.clone();
         let connection_id = file.connection_id.clone();
+        let group_id = file.group_id;
         let database = file.database.clone();
         let schema = file.schema.clone();
-        let new_path =
+        let new_path = if let Some(group_id) = group_id {
+            self.config.group_query_file_path(group_id, &new_name)
+        } else {
             self.config
-                .query_file_path(&connection_id, &database, schema.as_deref(), &new_name);
+                .query_file_path(&connection_id, &database, schema.as_deref(), &new_name)
+        };
         if new_path.exists() {
             self.error_dialog = Some(t!("query.rename_exists", name = new_name).to_string());
             cx.notify();
@@ -3227,7 +3342,7 @@ const SAVE_DIALOG_COMBO_WIDTH: f32 = 380.0;
 
 /// Scan the config dir's `queries/` tree for `.sql` files, sorted by name. A query is filed under
 /// `<connection>/<database>/` or, when it was saved with a schema selected,
-/// `<connection>/<database>/<schema>/`.
+/// `<connection>/<database>/<schema>/`; a group query lives under `_groups/<group_id>/`.
 pub(super) fn scan_query_files(config: &ConfigStore) -> Vec<QueryFileInfo> {
     let root = config.queries_dir();
     let mut files = Vec::new();
@@ -3239,6 +3354,23 @@ pub(super) fn scan_query_files(config: &ConfigStore) -> Vec<QueryFileInfo> {
             continue;
         }
         let connection_id = connection.file_name().to_string_lossy().into_owned();
+        // Group queries live under `_groups/<group_id>/<name>.sql`, not under a connection's
+        // `<database>/[schema]/` folders.
+        if connection_id == "_groups" {
+            let Ok(groups) = std::fs::read_dir(connection.path()) else {
+                continue;
+            };
+            for group in groups.flatten() {
+                if !is_dir(&group) {
+                    continue;
+                }
+                let Ok(group_id) = group.file_name().to_string_lossy().parse::<u64>() else {
+                    continue;
+                };
+                scan_query_dir(&group.path(), "", "", None, Some(group_id), &mut files);
+            }
+            continue;
+        }
         let Ok(databases) = std::fs::read_dir(connection.path()) else {
             continue;
         };
@@ -3252,6 +3384,7 @@ pub(super) fn scan_query_files(config: &ConfigStore) -> Vec<QueryFileInfo> {
                 &database.path(),
                 &connection_id,
                 &database_name,
+                None,
                 None,
                 &mut files,
             );
@@ -3269,6 +3402,7 @@ pub(super) fn scan_query_files(config: &ConfigStore) -> Vec<QueryFileInfo> {
                     &connection_id,
                     &database_name,
                     Some(&schema),
+                    None,
                     &mut files,
                 );
             }
@@ -3283,12 +3417,14 @@ fn is_dir(entry: &std::fs::DirEntry) -> bool {
     entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false)
 }
 
-/// Collect the `.sql` files directly inside one query folder (a database folder or a schema folder).
+/// Collect the `.sql` files directly inside one query folder (a database folder, a schema folder,
+/// or a group's folder).
 fn scan_query_dir(
     dir: &std::path::Path,
     connection_id: &str,
     database: &str,
     schema: Option<&str>,
+    group_id: Option<u64>,
     files: &mut Vec<QueryFileInfo>,
 ) {
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -3306,6 +3442,7 @@ fn scan_query_dir(
                 .map(|stem| stem.to_string_lossy().into_owned())
                 .unwrap_or_default(),
             connection_id: connection_id.to_string(),
+            group_id,
             database: database.to_string(),
             schema: schema.map(str::to_string),
             size: metadata.as_ref().map(|meta| meta.len()).unwrap_or(0),

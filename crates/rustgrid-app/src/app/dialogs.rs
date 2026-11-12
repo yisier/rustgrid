@@ -836,31 +836,56 @@ impl AppView {
             name_row = name_row.child(div().w_full().h(px(26.0)).child(input.clone()));
         }
 
-        let mut connection = div().flex().flex_col().gap_1().child(
-            div()
-                .text_size(px(12.0))
-                .child(t!("info.connection").to_string()),
-        );
-        if let Some(combo) = self.save_connection_combo.as_ref() {
-            connection = connection.child(div().w_full().child(combo.clone()));
+        let mut body = div().flex().flex_col().gap_3().p_4().child(name_row);
+        if let Some(group_id) = dialog.group_id {
+            let group_name = groups::find_group(&self.tree_layout, group_id)
+                .map(|group| group.name.clone())
+                .unwrap_or_default();
+            body = body.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .child(t!("query.batch.group").to_string()),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .h(px(26.0))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .rounded(px(4.0))
+                            .border_1()
+                            .border_color(rgb(theme.border))
+                            .bg(rgb(theme.input_bg))
+                            .text_size(px(12.0))
+                            .text_color(rgb(theme.text))
+                            .child(div().min_w(px(0.0)).truncate().child(group_name)),
+                    ),
+            );
+        } else {
+            let mut connection = div().flex().flex_col().gap_1().child(
+                div()
+                    .text_size(px(12.0))
+                    .child(t!("info.connection").to_string()),
+            );
+            if let Some(combo) = self.save_connection_combo.as_ref() {
+                connection = connection.child(div().w_full().child(combo.clone()));
+            }
+            let mut schema = div().flex().flex_col().gap_1().child(
+                div()
+                    .text_size(px(12.0))
+                    .child(t!("query.schema").to_string()),
+            );
+            if let Some(combo) = self.save_database_combo.as_ref() {
+                schema = schema.child(div().w_full().child(combo.clone()));
+            }
+            body = body.child(connection).child(schema);
         }
-        let mut schema = div().flex().flex_col().gap_1().child(
-            div()
-                .text_size(px(12.0))
-                .child(t!("query.schema").to_string()),
-        );
-        if let Some(combo) = self.save_database_combo.as_ref() {
-            schema = schema.child(div().w_full().child(combo.clone()));
-        }
-
-        let mut body = div()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .p_4()
-            .child(name_row)
-            .child(connection)
-            .child(schema);
         if let Some(error) = dialog.error.as_ref() {
             body = body.child(
                 div()

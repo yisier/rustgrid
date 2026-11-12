@@ -190,12 +190,84 @@ fn schema_search_matches(query: &str, database: &str, schema: &str) -> bool {
         || tree_search_matches(query, &format!("{database}.{schema}"))
 }
 
-/// Whether `group` still holds a connection in the filtered tree, so a group without a match is
-/// not drawn as an empty row while searching.
-fn group_has_visible_connection(group: &ConnectionGroup, connections: &[TreeConnection]) -> bool {
+/// A group's path inside the tree: its own name at the root, `outer.inner` when nested. The search
+/// matches groups by this path, so a nested group is reachable by its qualified name.
+fn join_group_path(parent: &str, name: &str) -> String {
+    if parent.is_empty() {
+        name.to_string()
+    } else {
+        format!("{parent}.{name}")
+    }
+}
+
+/// Record which group path holds each connection (`""` at the root), so a connection can also be
+/// searched by its group-qualified name (`group.connection`, nested paths included).
+fn collect_connection_group_paths(
+    entries: &[GroupEntry],
+    prefix: &str,
+    out: &mut BTreeMap<String, String>,
+) {
+    for entry in entries {
+        match entry {
+            GroupEntry::Connection(id) => {
+                out.insert(id.clone(), prefix.to_string());
+            }
+            GroupEntry::Group(group) => {
+                let path = join_group_path(prefix, &group.name);
+                collect_connection_group_paths(&group.children, &path, out);
+            }
+        }
+    }
+}
+
+/// Whether a connection row matches by its group-qualified name (`group.connection`, with the whole
+/// nested group path). A group name alone is handled by the group row, so this only adds the
+/// qualified addressing of a connection inside a group.
+fn qualified_connection_matches(query: &str, name: &str, group_path: Option<&str>) -> bool {
+    group_path.is_some_and(|path| {
+        !path.is_empty() && tree_search_matches(query, &format!("{path}.{name}"))
+    })
+}
+
+/// Record the connections directly inside a group whose path matches the search, so a matched
+/// group lists what it holds (like a matched connection lists its databases). A nested group's path
+/// extends its ancestors' path, so a matched group surfaces the connections of its whole subtree.
+fn collect_matched_group_connections(
+    entries: &[GroupEntry],
+    query: &str,
+    prefix: &str,
+    out: &mut BTreeSet<String>,
+) {
+    for entry in entries {
+        if let GroupEntry::Group(group) = entry {
+            let path = join_group_path(prefix, &group.name);
+            if tree_search_matches(query, &path) {
+                for child in &group.children {
+                    if let GroupEntry::Connection(id) = child {
+                        out.insert(id.clone());
+                    }
+                }
+            }
+            collect_matched_group_connections(&group.children, query, &path, out);
+        }
+    }
+}
+
+/// Whether `group` takes part in the filtered tree: its own path matches, a connection below it
+/// survived the object filter, or a nested group takes part (the branch on the way to a match).
+fn group_in_search(
+    group: &ConnectionGroup,
+    connection_visible: &dyn Fn(&str) -> bool,
+    query: &str,
+    parent_path: &str,
+) -> bool {
+    let path = join_group_path(parent_path, &group.name);
+    if tree_search_matches(query, &path) {
+        return true;
+    }
     group.children.iter().any(|child| match child {
-        GroupEntry::Connection(id) => connections.iter().any(|conn| &conn.id == id),
-        GroupEntry::Group(nested) => group_has_visible_connection(nested, connections),
+        GroupEntry::Connection(id) => connection_visible(id),
+        GroupEntry::Group(nested) => group_in_search(nested, connection_visible, query, &path),
     })
 }
 
@@ -247,11 +319,23 @@ fn backup_tree_id(connection_index: usize, database_index: usize, backup: &TreeB
     )
 }
 
-/// The tree's rendering snapshot. With `search` set, only the connections, databases, schemas and
-/// tables that match are kept (a name match on a branch keeps its immediate children too, so the
-/// located node is not an empty row); `None` snapshots the tree exactly as it is saved.
+/// The tree's rendering snapshot. With `search` set, only the groups, connections, databases,
+/// schemas and tables that match are kept (a name match on a branch keeps its immediate children
+/// too, so the located node is not an empty row); `None` snapshots the tree exactly as it is saved.
 fn snapshot_connections(app: &AppView, search: Option<&str>) -> Vec<TreeConnection> {
     let searching = search.is_some();
+    // A matched group lists the connections directly inside it, even when their own names (and
+    // databases) do not match; a connection also matches its group-qualified name.
+    let (group_paths, matched_group_connections) = match search {
+        Some(query) => {
+            let mut paths = BTreeMap::new();
+            collect_connection_group_paths(&app.tree_layout, "", &mut paths);
+            let mut matched = BTreeSet::new();
+            collect_matched_group_connections(&app.tree_layout, query, "", &mut matched);
+            (paths, matched)
+        }
+        None => (BTreeMap::new(), BTreeSet::new()),
+    };
     app.connections
         .iter()
         .enumerate()
@@ -263,8 +347,23 @@ fn snapshot_connections(app: &AppView, search: Option<&str>) -> Vec<TreeConnecti
             };
             let key_value = app.driver_supports(index, DriverCapability::KeyValue);
             let name = node.profile.name.clone();
-            let connection_matches =
-                search.is_some_and(|query| tree_search_matches(query, &name));
+            let group_path = group_paths.get(&node.profile.id).map(String::as_str);
+            // Whether the group holding this connection matched on its own name/path. The group row
+            // then lists this connection as a child; it must not also expand into every database.
+            let group_matched = search.is_some_and(|query| {
+                group_path.is_some_and(|path| !path.is_empty() && tree_search_matches(query, path))
+            });
+            // The connection's own name (or its `group.connection` form) matched: its databases
+            // stay as the match's direct children.
+            let connection_matches = search.is_some_and(|query| {
+                tree_search_matches(query, &name)
+                    || (!group_matched
+                        && qualified_connection_matches(query, &name, group_path))
+            });
+            // The connection is a direct child of a matched group: it stays as the located group's
+            // child, without opening to databases that did not match on their own.
+            let in_matched_group =
+                searching && matched_group_connections.contains(&node.profile.id);
             let databases = match &node.databases {
                 Loadable::Idle => Loadable::Idle,
                 Loadable::Loading => Loadable::Loading,
@@ -286,9 +385,10 @@ fn snapshot_connections(app: &AppView, search: Option<&str>) -> Vec<TreeConnecti
                 ),
             };
             // A connection with no database left under it is not part of the filtered tree — unless
-            // its own name matched, which keeps it as the located node.
+            // its own name or its group matched, which keeps it as the located node.
             if searching
                 && !connection_matches
+                && !in_matched_group
                 && !matches!(&databases, Loadable::Loaded(databases) if !databases.is_empty())
             {
                 return None;
@@ -645,6 +745,7 @@ impl TreePane {
             typeahead: String::new(),
             typeahead_at: None,
             searching: false,
+            search_query: None,
             nav_generation: 0,
         }
     }
@@ -2748,10 +2849,19 @@ impl TreePane {
         entry: &GroupEntry,
         connections: &[TreeConnection],
         group_rename: Option<&(u64, Entity<TextInput>)>,
+        parent_path: &str,
+        parent_matched: bool,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         match entry {
-            GroupEntry::Group(group) => self.render_group(group, connections, group_rename, cx),
+            GroupEntry::Group(group) => self.render_group(
+                group,
+                connections,
+                group_rename,
+                parent_path,
+                parent_matched,
+                cx,
+            ),
             GroupEntry::Connection(id) => match connections.iter().find(|conn| &conn.id == id) {
                 Some(conn) => self.render_connection(conn, cx).into_any_element(),
                 None => div().into_any_element(),
@@ -2765,12 +2875,27 @@ impl TreePane {
         group: &ConnectionGroup,
         connections: &[TreeConnection],
         group_rename: Option<&(u64, Entity<TextInput>)>,
+        parent_path: &str,
+        parent_matched: bool,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let theme = self.theme;
-        // A group with no surviving connection is not part of the filtered tree; with a match it
-        // opens so the match is visible.
-        if self.searching && !group_has_visible_connection(group, connections) {
+        let group_path = join_group_path(parent_path, &group.name);
+        let query = self.search_query.as_deref();
+        let matched = query.is_some_and(|query| tree_search_matches(query, &group_path));
+        // A group takes part in the filtered tree when its own name/path matches, when its parent
+        // group matched (immediate children of a match stay visible), or when a connection/nested
+        // group below it survived — the branch on the way to a match.
+        if self.searching
+            && !parent_matched
+            && !matched
+            && !group_in_search(
+                group,
+                &|id| connections.iter().any(|conn| conn.id == id),
+                query.unwrap_or_default(),
+                parent_path,
+            )
+        {
             return div().into_any_element();
         }
         let expanded = group.expanded || self.searching;
@@ -2940,6 +3065,8 @@ impl TreePane {
                         child,
                         connections,
                         group_rename,
+                        &group_path,
+                        matched,
                         cx,
                     ));
                 }
@@ -2983,6 +3110,7 @@ impl Render for TreePane {
         };
         self.theme = theme;
         self.searching = search_query.is_some();
+        self.search_query = search_query;
         self.rename_row = rename;
         self.group_renaming = group_renaming;
         // A database/schema/object click moves the single selection off the connections: the
@@ -3013,8 +3141,14 @@ impl Render for TreePane {
             );
         }
         for entry in &layout {
-            list =
-                list.child(self.render_tree_entry(entry, &connections, group_rename.as_ref(), cx));
+            list = list.child(self.render_tree_entry(
+                entry,
+                &connections,
+                group_rename.as_ref(),
+                "",
+                false,
+                cx,
+            ));
         }
         self.nav_rows = std::mem::take(&mut *self.nav_build.borrow_mut());
         // A filtered tree with no rows says so instead of looking like an empty connection.
@@ -3281,9 +3415,11 @@ pub(super) fn tree_marquee_element(
 #[cfg(test)]
 mod nav_tests {
     use super::{
-        BTreeSet, Category, CategoryExpansion, DatabaseNode, Loadable, NavRow, TreeTable,
-        nav_parent, search_result_target, snapshot_database, table_search_matches,
-        tree_search_query, typeahead_target,
+        BTreeMap, BTreeSet, Category, CategoryExpansion, ConnectionGroup, DatabaseNode, GroupEntry,
+        Loadable, NavRow, TreeTable, collect_connection_group_paths,
+        collect_matched_group_connections, group_in_search, nav_parent,
+        qualified_connection_matches, search_result_target, snapshot_database,
+        table_search_matches, tree_search_query, typeahead_target,
     };
 
     fn table(name: &str, kind: rustgrid_core::ObjectKind) -> rustgrid_core::TableInfo {
@@ -3291,6 +3427,15 @@ mod nav_tests {
             name: name.into(),
             kind,
             updatable: false,
+        }
+    }
+
+    fn search_group(name: &str, children: Vec<GroupEntry>) -> ConnectionGroup {
+        ConnectionGroup {
+            id: 1,
+            name: name.into(),
+            expanded: false,
+            children,
         }
     }
 
@@ -3380,6 +3525,120 @@ mod nav_tests {
         );
         assert_eq!(tree_search_query("   "), None);
         assert_eq!(tree_search_query(""), None);
+    }
+
+    #[test]
+    fn a_group_path_addresses_nested_groups_and_their_connections() {
+        let layout = vec![
+            GroupEntry::Connection("root".into()),
+            GroupEntry::Group(search_group(
+                "dev",
+                vec![
+                    GroupEntry::Connection("mysql_loc".into()),
+                    GroupEntry::Group(search_group(
+                        "inner",
+                        vec![GroupEntry::Connection("deep".into())],
+                    )),
+                ],
+            )),
+            GroupEntry::Group(search_group(
+                "prod",
+                vec![GroupEntry::Connection("live".into())],
+            )),
+        ];
+        let mut paths = BTreeMap::new();
+        collect_connection_group_paths(&layout, "", &mut paths);
+        assert_eq!(paths["root"], "");
+        assert_eq!(paths["mysql_loc"], "dev");
+        assert_eq!(paths["deep"], "dev.inner");
+        assert_eq!(paths["live"], "prod");
+
+        let query = tree_search_query("dev.inner.deep").unwrap();
+        assert!(qualified_connection_matches(
+            &query,
+            "deep",
+            Some("dev.inner")
+        ));
+        let query = tree_search_query("inner.deep").unwrap();
+        assert!(qualified_connection_matches(
+            &query,
+            "deep",
+            Some("dev.inner")
+        ));
+        let query = tree_search_query("prod.deep").unwrap();
+        assert!(!qualified_connection_matches(
+            &query,
+            "deep",
+            Some("dev.inner")
+        ));
+        // A root-level connection has no group prefix.
+        let query = tree_search_query("dev.root").unwrap();
+        assert!(!qualified_connection_matches(&query, "root", Some("")));
+        assert!(!qualified_connection_matches(&query, "root", None));
+    }
+
+    #[test]
+    fn searching_a_group_keeps_the_connections_inside_it() {
+        let layout = vec![
+            GroupEntry::Group(search_group(
+                "dev",
+                vec![
+                    GroupEntry::Connection("mysql_loc".into()),
+                    GroupEntry::Group(search_group(
+                        "inner",
+                        vec![GroupEntry::Connection("deep".into())],
+                    )),
+                ],
+            )),
+            GroupEntry::Group(search_group(
+                "prod",
+                vec![GroupEntry::Connection("live".into())],
+            )),
+        ];
+        let matched = |text: &str| {
+            let query = tree_search_query(text).unwrap();
+            let mut matched = BTreeSet::new();
+            collect_matched_group_connections(&layout, &query, "", &mut matched);
+            matched
+        };
+        // A matched group surfaces the connections of its whole subtree.
+        assert_eq!(
+            matched("dev"),
+            ["deep", "mysql_loc"]
+                .into_iter()
+                .map(String::from)
+                .collect::<BTreeSet<_>>()
+        );
+        // A nested group is reachable by its own name and lists its own connections.
+        assert_eq!(
+            matched("inner"),
+            ["deep"]
+                .into_iter()
+                .map(String::from)
+                .collect::<BTreeSet<_>>()
+        );
+        // A group name that matches nothing surfaces no connection.
+        assert!(matched("nothing").is_empty());
+    }
+
+    #[test]
+    fn a_group_branch_is_kept_only_for_a_match_on_it_or_below_it() {
+        let outer = search_group(
+            "dev",
+            vec![
+                GroupEntry::Connection("deep".into()),
+                GroupEntry::Group(search_group("inner", vec![])),
+            ],
+        );
+
+        // A surviving connection below it keeps the branch.
+        assert!(group_in_search(&outer, &|id| id == "deep", "nomatch", ""));
+        // A matched nested group keeps the branch even with no connections of its own.
+        assert!(group_in_search(&outer, &|_| false, "inner", ""));
+        // Its own name/path match keeps it, with or without children.
+        assert!(group_in_search(&outer, &|_| false, "dev", ""));
+        // Nothing matches: the group is skipped.
+        assert!(!group_in_search(&outer, &|_| false, "nothing", ""));
     }
 
     #[test]

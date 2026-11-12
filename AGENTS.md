@@ -739,8 +739,10 @@ shadcn chrome described above. Implemented today:
    stored password, and a missing password, connection failure or statement failure is reported **in
    that connection's page**, never as a global dialog that blocks the other servers. No database is
    selected: each connection runs in its own default context, so database-independent statements
-   work and `USE`/fully-qualified names address a database per server. Group tabs cannot be saved
-   yet (the toolbar disables Save with a tooltip).
+   work and `USE`/fully-qualified names address a database per server. A closed member is connected
+   for the run but its tree row is not expanded. A saved group query lives under
+   `queries/_groups/<group-id>/<name>.sql`, is listed when the group (or one of its member
+   connections) is selected, and reopens as a group tab.
 6. Right-clicking a table (in the object list or the connection tree) offers Open/Design plus Drop
    Table, Empty Table (`DELETE FROM`), Truncate Table and Rename; Drop/Empty/Truncate go through
    the shared confirm dialog, while Rename (or `F2` on the selection) edits the name **in place**
@@ -1021,8 +1023,10 @@ shadcn chrome described above. Implemented today:
     history.
 
 21. Connection-tree search (`app/sidebar.rs` + `app/tree.rs`): a search box at the top of the
-    connection tree filters what the tree already holds — connections, databases, schemas and
-    tables. A table matches its bare name, its schema-qualified `schema.table` and its
+    connection tree filters what the tree already holds — groups, connections, databases, schemas
+    and tables. A group matches its own name or its dotted nested path (`outer.inner`), a
+    connection matches its name or its group-qualified `group.connection` (nested paths included),
+    and a table matches its bare name, its schema-qualified `schema.table` and its
     fully-qualified `database.schema.table` (`database.table` on engines whose tree has no schema
     level), so `ORDER.ORDER_INFO` (or `sales.ORDER.ORDER_INFO`) finds the table without expanding
     the ORDER schema first. A schema matches its name or `database.schema`. The filter only sees
@@ -1037,9 +1041,11 @@ shadcn chrome described above. Implemented today:
     and already shown in the content pane; if the pane shows it merely because its categories were
     expanded, the double-click opens it (sets `opened_schemas`) instead of only toggling. A matching
     branch
-    keeps its immediate children (a matched connection shows its databases, a matched database its
-    schemas), the branches on the way to a match open, only 表/视图 are drawn while filtering (with
-    just the matching objects), and a group without a surviving connection is skipped. Down / Up
+    keeps its immediate children (a matched group lists the connections of its subtree — a nested
+    group's path extends the matched one — a matched connection its databases, a matched database
+    its schemas), the branches on the way to a match open, only 表/视图 are drawn while filtering
+    (with just the matching objects), and a group without a match on its own path, below it or in a
+    kept connection is skipped. Down / Up
     in the search box hands the keyboard to the filtered rows — Down selects the first table/view
     result, Up the last (falling back to the first/last row when only a branch matched) — and the
     tree keeps the focus, so its arrows, Page Up/Down and Enter work from there. Esc or the field's
