@@ -370,6 +370,12 @@ async fn live_text_query_rows_survive_the_proxy_metadata() {
         .expect("connect to the live server");
 
     let database = "rustgrid_live";
+    // A constant query needs no database; a proxy must not answer 1046 for it.
+    let now = connection
+        .execute_query(None, "SELECT NOW()")
+        .await
+        .expect("run a database-independent query");
+    assert!(!now.rows.is_empty());
     connection
         .execute_query(None, &format!("CREATE DATABASE IF NOT EXISTS `{database}`"))
         .await

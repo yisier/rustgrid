@@ -83,7 +83,11 @@ function selectedDatabase(sql) {
  */
 function requiresDatabase(sql) {
   const normalized = sql.trimStart().toUpperCase();
+  // A constant expression (or a session-variable probe) does not need a current database; MySQL
+  // executes it with no schema selected, so a proxy should not insist on one for it.
+  const fromLessSelect = normalized.startsWith('SELECT ') && !/\bFROM\b/.test(normalized);
   return !(
+    fromLessSelect ||
     normalized.startsWith('USE ') ||
     normalized.startsWith('SET ') ||
     normalized.startsWith('SHOW DATABASES') ||
