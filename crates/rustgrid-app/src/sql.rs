@@ -998,10 +998,12 @@ mod tests {
     }
 
     #[test]
-    fn builtin_functions_are_offered_only_for_mysql_family_engines() {
+    fn builtin_functions_follow_the_dialect() {
         assert!(!functions_for(DriverDialect::Mysql).is_empty());
-        assert!(functions_for(DriverDialect::SqlServer).is_empty());
-        assert!(functions_for(DriverDialect::Sqlite).is_empty());
+        assert!(functions_for(DriverDialect::SqlServer).contains(&"GETDATE"));
+        assert!(functions_for(DriverDialect::Postgres).contains(&"NOW"));
+        assert!(functions_for(DriverDialect::Oracle).contains(&"SYSDATE"));
+        assert!(functions_for(DriverDialect::Sqlite).contains(&"STRFTIME"));
         assert!(functions_for(DriverDialect::Generic).is_empty());
     }
 

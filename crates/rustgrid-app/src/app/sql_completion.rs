@@ -943,18 +943,15 @@ mod tests {
 
     /// A source with an empty catalog: only the built-in keywords and functions are offered, which
     /// is all the ordering test needs.
-    fn empty_catalog_source() -> CompletionSource {
+    fn empty_catalog_source_for(dialect: DriverDialect) -> CompletionSource {
         CompletionSource::new(Arc::new(std::sync::RwLock::new(
             CompletionCatalog::default(),
         )))
-        .with_scope(
-            Some(0),
-            Some("appdb".into()),
-            None,
-            false,
-            DriverDialect::Mysql,
-            false,
-        )
+        .with_scope(Some(0), Some("appdb".into()), None, false, dialect, false)
+    }
+
+    fn empty_catalog_source() -> CompletionSource {
+        empty_catalog_source_for(DriverDialect::Mysql)
     }
 
     /// A source whose catalog holds `tables`, and `columns` of `table`, in `appdb`.
@@ -986,6 +983,17 @@ mod tests {
     fn labels_for(source: &CompletionSource, sql: &str) -> Vec<String> {
         let context = crate::sql::completion_context(sql, sql.len(), DriverDialect::Mysql);
         build_items(source, &context)
+            .into_iter()
+            .map(|item| item.label)
+            .collect()
+    }
+
+    /// The labels offered for `sql` against an empty catalog of `dialect`: only the built-in
+    /// keywords and functions.
+    fn labels_for_dialect(dialect: DriverDialect, sql: &str) -> Vec<String> {
+        let source = empty_catalog_source_for(dialect);
+        let context = crate::sql::completion_context(sql, sql.len(), dialect);
+        build_items(&source, &context)
             .into_iter()
             .map(|item| item.label)
             .collect()
@@ -1062,6 +1070,27 @@ mod tests {
         assert!(
             matches!(from, Some(from) if matches!(base64, Some(base64) if from < base64)),
             "the FROM keyword must sort before FROM_BASE64: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn sqlserver_builtin_functions_are_offered() {
+        // Typing a T-SQL function's prefix must offer it, exactly like a MySQL function.
+        let labels = labels_for_dialect(DriverDialect::SqlServer, "SELECT getdat");
+        assert_eq!(
+            labels.first().map(String::as_str),
+            Some("GETDATE"),
+            "{labels:?}"
+        );
+    }
+
+    #[test]
+    fn sqlite_builtin_functions_are_offered() {
+        let labels = labels_for_dialect(DriverDialect::Sqlite, "SELECT strft");
+        assert_eq!(
+            labels.first().map(String::as_str),
+            Some("STRFTIME"),
+            "{labels:?}"
         );
     }
 
