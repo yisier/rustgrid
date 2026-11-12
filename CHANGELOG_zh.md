@@ -6,6 +6,21 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.1.13] - 2026-11-12
+
+### 新增
+
+- 「分组查询」在分组的每个连接上执行同一段 SQL，每个连接一个结果页，并可保存。
+- 连接树搜索支持分组、嵌套分组路径和「分组.连接」。
+- SQL 补全增加 SQL Server 与 SQLite 内置函数。
+
+### 修复
+
+- 通过 UDAL/TeleDB DBProxy 连接可以列出表、显示数据库信息并打开表设计器
+  （[#56](https://github.com/yisier/rustgrid/issues/56)）。
+- 通过代理执行的查询不再报 `buffer exhausted`
+  （[#56](https://github.com/yisier/rustgrid/issues/56)）。
+
 ## [0.1.12] - 2026-11-11
 
 ### 新增

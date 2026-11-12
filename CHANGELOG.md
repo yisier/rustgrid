@@ -10,6 +10,22 @@ UI labels are quoted as the app shows them, so this file quotes the English stri
 [`CHANGELOG_zh.md`](CHANGELOG_zh.md) and [`CHANGELOG_ru.md`](CHANGELOG_ru.md) quote the 简体中文 and
 Russian ones.
 
+## [0.1.13] - 2026-11-12
+
+### Added
+
+- Group Query runs one script on every connection of a connection-tree group, keeps a result page
+  per connection, and can be saved.
+- Connection-tree search matches groups, nested group paths and `group.connection`.
+- SQL completion offers SQL Server and SQLite built-in functions.
+
+### Fixed
+
+- UDAL/TeleDB DBProxy connections list tables, show database info and open the table designer
+  ([#56](https://github.com/yisier/rustgrid/issues/56)).
+- Queries through the proxy no longer fail with `buffer exhausted`
+  ([#56](https://github.com/yisier/rustgrid/issues/56)).
+
 ## [0.1.12] - 2026-11-11
 
 ### Added
