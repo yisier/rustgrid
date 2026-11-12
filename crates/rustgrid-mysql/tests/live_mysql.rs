@@ -357,6 +357,61 @@ async fn live_multi_statement_returns_every_result_set() {
     connection.close().await.expect("close");
 }
 
+/// The query editor's text path through a MySQL-protocol proxy. UDAL leaves a plain OK packet after
+/// the column metadata when `CLIENT_DEPRECATE_EOF` is requested (issue #56); the patched client
+/// must decode the real rows instead of that packet.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires a live MySQL server (set RUSTGRID_MYSQL_PASSWORD)"]
+async fn live_text_query_rows_survive_the_proxy_metadata() {
+    let driver = rustgrid_mysql::MysqlDriver::new();
+    let connection = driver
+        .connect(&config())
+        .await
+        .expect("connect to the live server");
+
+    let database = "rustgrid_live";
+    connection
+        .execute_query(None, &format!("CREATE DATABASE IF NOT EXISTS `{database}`"))
+        .await
+        .expect("create the scratch database");
+    // Trigger the proxy's 1046 path first, exactly like opening a database in the tree.
+    connection
+        .list_tables(database)
+        .await
+        .expect("list tables through the proxy");
+    let table = "rustgrid_text_proxy";
+    let _ = connection.drop_table(database, table).await;
+    connection
+        .execute_query(
+            Some(database),
+            &format!(
+                "CREATE TABLE `{table}` (\
+                 `id` int NOT NULL PRIMARY KEY, \
+                 `para_value` varchar(16000) NULL)"
+            ),
+        )
+        .await
+        .expect("create the scratch table");
+    connection
+        .execute_query(
+            Some(database),
+            &format!("INSERT INTO `{table}` VALUES (1, 'hello'), (2, NULL)"),
+        )
+        .await
+        .expect("insert rows");
+
+    let result = connection
+        .execute_query(Some(database), &format!("SELECT * FROM `{table}` LIMIT 10"))
+        .await
+        .expect("run the text query");
+    assert_eq!(result.columns.len(), 2);
+    assert_eq!(result.rows.len(), 2);
+    assert_eq!(result.rows[0][1].as_display(), "hello");
+
+    let _ = connection.drop_table(database, table).await;
+    connection.close().await.expect("close");
+}
+
 /// The table designer's write path: create a table from a `TableSchema`, read it back, alter it and
 /// read it again — including MySQL's per-column index options (子部分 / `DESC`).
 #[tokio::test(flavor = "multi_thread")]

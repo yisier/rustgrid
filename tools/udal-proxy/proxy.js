@@ -93,7 +93,16 @@ function requiresDatabase(sql) {
     normalized.startsWith('SELECT VERSION()') ||
     normalized.startsWith('SELECT @@') ||
     normalized.startsWith('SELECT DATABASE()') ||
-    normalized.startsWith('SELECT 1')
+    normalized.startsWith('SELECT 1') ||
+    normalized.startsWith('CREATE DATABASE') ||
+    normalized.startsWith('DROP DATABASE') ||
+    normalized.startsWith('ALTER DATABASE') ||
+    normalized.startsWith('CREATE USER') ||
+    normalized.startsWith('DROP USER') ||
+    normalized.startsWith('GRANT ') ||
+    normalized.startsWith('REVOKE ') ||
+    normalized.startsWith('SET PASSWORD') ||
+    normalized.startsWith('FLUSH ')
   );
 }
 
