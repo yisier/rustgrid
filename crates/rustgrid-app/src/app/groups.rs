@@ -203,6 +203,27 @@ fn collect_connection_ids(entries: &[GroupEntry], out: &mut BTreeSet<String>) {
     }
 }
 
+/// Collect the profile ids of every connection inside the group `id` (recursively), in display
+/// order. No-op when the group does not exist.
+pub(super) fn collect_subtree_connection_ids_ordered(
+    entries: &[GroupEntry],
+    id: u64,
+    out: &mut Vec<String>,
+) {
+    if let Some(group) = find_group(entries, id) {
+        collect_connection_ids_ordered(&group.children, out);
+    }
+}
+
+fn collect_connection_ids_ordered(entries: &[GroupEntry], out: &mut Vec<String>) {
+    for entry in entries {
+        match entry {
+            GroupEntry::Connection(id) => out.push(id.clone()),
+            GroupEntry::Group(group) => collect_connection_ids_ordered(&group.children, out),
+        }
+    }
+}
+
 /// The group that directly holds `connection_id`, if any.
 pub(super) fn group_of_connection(entries: &[GroupEntry], connection_id: &str) -> Option<u64> {
     for entry in entries {
@@ -844,6 +865,21 @@ mod tests {
         collapse_all(&mut layout);
         assert!(!find_group(&layout, 1).unwrap().expanded);
         assert!(!find_group(&layout, 2).unwrap().expanded);
+    }
+
+    #[test]
+    fn group_connections_are_collected_in_display_order() {
+        let layout = vec![
+            conn("root"),
+            group(
+                1,
+                "outer",
+                vec![conn("b"), group(2, "inner", vec![conn("c")]), conn("a")],
+            ),
+        ];
+        let mut ids = Vec::new();
+        collect_subtree_connection_ids_ordered(&layout, 1, &mut ids);
+        assert_eq!(ids, vec!["b", "c", "a"]);
     }
 
     #[test]

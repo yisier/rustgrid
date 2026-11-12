@@ -534,6 +534,112 @@ pub struct QueryResultTabs {
     pub overflow: Rc<Cell<bool>>,
 }
 
+/// One connection of a group query run. Every target owns a result page in the bottom panel, so a
+/// failed connection (or a missing password) has somewhere to report itself instead of aborting
+/// the whole run.
+pub struct BatchTarget {
+    /// The current index into `AppView::connections`, resolved when the run started.
+    pub connection_index: Option<usize>,
+    pub name: String,
+    pub state: BatchTargetState,
+    pub elapsed: Option<std::time::Duration>,
+    /// A connection-level failure (driver missing, connection failed, password required).
+    pub error: Option<String>,
+    /// One entry per executed statement's result set, or its failure.
+    pub results: Vec<BatchResult>,
+    /// Which entry of `results` this connection's page shows.
+    pub active_result: usize,
+    /// Statements skipped because of the single-run statement limit.
+    pub skipped: usize,
+}
+
+/// The state of one connection in a group query run.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BatchTargetState {
+    Pending,
+    Connecting,
+    Running,
+    Done,
+    Failed,
+    NeedsPassword,
+    Stopped,
+}
+
+/// One statement outcome inside a [`BatchTarget`]'s result page.
+pub struct BatchResult {
+    pub statement: String,
+    pub elapsed: std::time::Duration,
+    pub error: Option<String>,
+    pub grid_id: Option<u64>,
+    pub has_result_set: bool,
+    pub row_count: usize,
+    pub rows_affected: u64,
+}
+
+impl BatchTarget {
+    pub fn pending(connection_index: Option<usize>, name: String) -> Self {
+        Self {
+            connection_index,
+            name,
+            state: BatchTargetState::Pending,
+            elapsed: None,
+            error: None,
+            results: Vec::new(),
+            active_result: 0,
+            skipped: 0,
+        }
+    }
+
+    /// The grid of the statement selected in this connection's page.
+    pub fn active_grid_id(&self) -> Option<u64> {
+        self.results
+            .get(self.active_result)
+            .and_then(|result| result.grid_id)
+    }
+
+    /// Whether this connection's page should show an error: the connection failed, or one of its
+    /// statements did ("查询失败的在标签页内展示").
+    pub fn has_error(&self) -> bool {
+        matches!(
+            self.state,
+            BatchTargetState::Failed | BatchTargetState::NeedsPassword
+        ) || self.results.iter().any(|result| result.error.is_some())
+    }
+}
+
+/// A query tab that runs the same SQL on every connection of a connection-tree group, one result
+/// page per connection. The group is re-resolved on every run, so members added or removed after
+/// the tab was opened take effect immediately.
+pub struct BatchQuery {
+    pub group_id: u64,
+    pub group_name: String,
+    pub targets: Vec<BatchTarget>,
+}
+
+impl BatchQuery {
+    /// Every grid created by the last run, for cleanup.
+    pub fn grid_ids(&self) -> Vec<u64> {
+        self.targets
+            .iter()
+            .flat_map(|target| target.results.iter().filter_map(|result| result.grid_id))
+            .collect()
+    }
+
+    pub fn has_result_grid(&self) -> bool {
+        self.targets
+            .iter()
+            .any(|target| target.results.iter().any(|result| result.grid_id.is_some()))
+    }
+
+    /// The grid for a result-panel page (`1` is the first connection; `0` is 信息).
+    pub fn grid_for_page(&self, page: usize) -> Option<u64> {
+        if page == 0 {
+            return None;
+        }
+        self.targets.get(page - 1)?.active_grid_id()
+    }
+}
+
 /// An open SQL editor tab. `sql` is the editable document; `caret` and `anchor` are byte
 /// offsets into it, so they can be matched against `TextLayout` indices directly.
 pub struct QueryTab {
@@ -590,6 +696,9 @@ pub struct QueryTab {
     pub routine: Option<RoutineTabState>,
     /// `Some` when this tab designs a database view instead of a free-form query.
     pub view: Option<ViewTabState>,
+    /// `Some` when this tab runs on every connection of a connection-tree group (one result page
+    /// per connection) instead of on a single connection.
+    pub batch: Option<BatchQuery>,
 }
 
 impl QueryTab {
@@ -622,6 +731,7 @@ impl QueryTab {
             grid_id: None,
             routine: None,
             view: None,
+            batch: None,
         }
     }
 
@@ -633,6 +743,34 @@ impl QueryTab {
     /// Whether this tab has edits that have not been saved (or that were never persisted).
     pub fn is_dirty(&self) -> bool {
         self.sql != self.baseline
+    }
+
+    /// Every grid this tab created: a single-connection query's result sets, or every connection
+    /// page of a group query.
+    pub fn all_grid_ids(&self) -> Vec<u64> {
+        let mut ids: Vec<u64> = self.result_grids.iter().flatten().copied().collect();
+        if let Some(batch) = &self.batch {
+            for id in batch.grid_ids() {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+        if let Some(id) = self.grid_id
+            && !ids.contains(&id)
+        {
+            ids.push(id);
+        }
+        ids
+    }
+
+    /// Whether the bottom result panel has any grid to export.
+    pub fn has_result_grid(&self) -> bool {
+        self.result_grids.iter().any(|grid| grid.is_some())
+            || self
+                .batch
+                .as_ref()
+                .is_some_and(|batch| batch.has_result_grid())
     }
 }
 
@@ -1482,6 +1620,32 @@ mod tests {
 
     fn hidden(names: &[&str]) -> BTreeSet<String> {
         names.iter().map(|name| name.to_string()).collect()
+    }
+
+    #[test]
+    fn batch_pages_map_to_their_connection_grids() {
+        let mut tab = QueryTab::new(1);
+        let mut target = BatchTarget::pending(Some(0), "server-a".into());
+        target.results.push(BatchResult {
+            statement: "select 1".into(),
+            elapsed: std::time::Duration::ZERO,
+            error: None,
+            grid_id: Some(7),
+            has_result_set: true,
+            row_count: 1,
+            rows_affected: 0,
+        });
+        tab.batch = Some(BatchQuery {
+            group_id: 1,
+            group_name: "group".into(),
+            targets: vec![target],
+        });
+
+        assert_eq!(tab.batch.as_ref().unwrap().grid_for_page(0), None);
+        assert_eq!(tab.batch.as_ref().unwrap().grid_for_page(1), Some(7));
+        assert_eq!(tab.batch.as_ref().unwrap().grid_for_page(2), None);
+        assert_eq!(tab.all_grid_ids(), vec![7]);
+        assert!(tab.has_result_grid());
     }
 
     #[test]

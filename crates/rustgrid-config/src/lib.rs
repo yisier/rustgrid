@@ -67,6 +67,10 @@ pub struct SessionDatabase {
 pub struct SessionQuery {
     #[serde(default)]
     pub connection_id: Option<String>,
+    /// The connection-tree group this tab targets, for a group query (one result page per
+    /// connection). `None` for a normal single-connection query.
+    #[serde(default)]
+    pub group_id: Option<u64>,
     #[serde(default)]
     pub database: Option<String>,
     #[serde(default)]

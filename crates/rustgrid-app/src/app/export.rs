@@ -156,35 +156,89 @@ impl AppView {
         let Some(tab) = self.queries.get(query_index) else {
             return;
         };
-        let connection_index = tab.connection_index;
-        let database = tab.database.clone().unwrap_or_default();
+        let batch = tab.batch.as_ref();
+        let first_target = batch.and_then(|batch| batch.targets.first());
+        let connection_index = if batch.is_some() {
+            first_target.and_then(|target| target.connection_index)
+        } else {
+            tab.connection_index
+        };
+        let database = if batch.is_some() {
+            String::new()
+        } else {
+            tab.database.clone().unwrap_or_default()
+        };
         let dialect = connection_index
             .map(|index| self.driver_dialect(index))
             .unwrap_or_default();
         // Result tabs are numbered by the grid-backed sets (statements without a result set are
-        // skipped), so the export labels must use the same numbering as the tab strip.
+        // skipped), so the export labels must use the same numbering as the tab strip. A group
+        // query exports each connection's grids under that connection's name.
         let mut results: Vec<ExportSnapshot> = Vec::new();
         let mut result_number = 0usize;
         let mut active = 0usize;
-        for grid_id in tab.result_grids.iter().flatten() {
-            let Some(grid) = self
-                .grids
-                .iter()
-                .find(|grid| grid.read(cx).state.id == *grid_id)
-            else {
-                continue;
-            };
-            result_number += 1;
-            let grid = grid.read(cx);
-            let name = t!("query.result_tab", n = result_number).to_string();
-            if tab.active_result == result_number {
-                active = results.len();
+        if let Some(batch) = batch {
+            for (target_index, target) in batch.targets.iter().enumerate() {
+                let grid_count = target
+                    .results
+                    .iter()
+                    .filter(|result| result.grid_id.is_some())
+                    .count();
+                let mut grid_number = 0usize;
+                for (result_index, result) in target.results.iter().enumerate() {
+                    let Some(grid_id) = result.grid_id else {
+                        continue;
+                    };
+                    grid_number += 1;
+                    let Some(grid) = self
+                        .grids
+                        .iter()
+                        .find(|grid| grid.read(cx).state.id == grid_id)
+                    else {
+                        continue;
+                    };
+                    let grid = grid.read(cx);
+                    let name = if grid_count > 1 {
+                        format!(
+                            "{} · {}",
+                            target.name,
+                            t!("query.batch.statement_tab", n = grid_number)
+                        )
+                    } else {
+                        target.name.clone()
+                    };
+                    if tab.active_result == target_index + 1 && target.active_result == result_index
+                    {
+                        active = results.len();
+                    }
+                    results.push(ExportSnapshot {
+                        name,
+                        columns: grid.state.all_columns.clone(),
+                        rows: grid.state.rows.clone(),
+                    });
+                }
             }
-            results.push(ExportSnapshot {
-                name,
-                columns: grid.state.all_columns.clone(),
-                rows: grid.state.rows.clone(),
-            });
+        } else {
+            for grid_id in tab.result_grids.iter().flatten() {
+                let Some(grid) = self
+                    .grids
+                    .iter()
+                    .find(|grid| grid.read(cx).state.id == *grid_id)
+                else {
+                    continue;
+                };
+                result_number += 1;
+                let grid = grid.read(cx);
+                let name = t!("query.result_tab", n = result_number).to_string();
+                if tab.active_result == result_number {
+                    active = results.len();
+                }
+                results.push(ExportSnapshot {
+                    name,
+                    columns: grid.state.all_columns.clone(),
+                    rows: grid.state.rows.clone(),
+                });
+            }
         }
         if results.is_empty() {
             return;

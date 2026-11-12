@@ -1,5 +1,6 @@
 use super::query::query_file_key;
 use super::*;
+use gpui_kit::component::spinner::Spinner;
 
 impl AppView {
     pub(super) fn render_query_view(
@@ -20,22 +21,28 @@ impl AppView {
         }
         self.sync_query_selection(query_index, cx);
         let theme = self.theme;
+        let is_batch = self
+            .queries
+            .get(query_index)
+            .is_some_and(|query| query.batch.is_some());
         // 导出结果 is only useful when the last run produced at least one result set.
         let has_result_sets = self
             .queries
             .get(query_index)
-            .is_some_and(|query| query.result_grids.iter().any(|grid| grid.is_some()));
+            .is_some_and(|query| query.has_result_grid());
 
-        let key_value = self
-            .queries
-            .get(query_index)
-            .and_then(|query| query.connection_index)
-            .is_some_and(|index| self.driver_supports(index, DriverCapability::KeyValue));
-        let documents = self
-            .queries
-            .get(query_index)
-            .and_then(|query| query.connection_index)
-            .is_some_and(|index| self.driver_supports(index, DriverCapability::Documents));
+        let key_value = !is_batch
+            && self
+                .queries
+                .get(query_index)
+                .and_then(|query| query.connection_index)
+                .is_some_and(|index| self.driver_supports(index, DriverCapability::KeyValue));
+        let documents = !is_batch
+            && self
+                .queries
+                .get(query_index)
+                .and_then(|query| query.connection_index)
+                .is_some_and(|index| self.driver_supports(index, DriverCapability::Documents));
 
         let mut toolbar = div()
             .flex()
@@ -47,16 +54,23 @@ impl AppView {
             .flex_none()
             .bg(rgb(theme.toolbar_bg))
             .border_b_1()
-            .border_color(rgb(theme.border))
-            .child(self.query_tool_button(
-                "query-save",
-                "icons/save.svg",
-                t!("query.save").to_string(),
-                theme.text,
-                theme.text,
-                true,
-                cx.listener(|this, _event, window, cx| this.begin_save_query(window, cx)),
-            ));
+            .border_color(rgb(theme.border));
+        let save = self.query_tool_button(
+            "query-save",
+            "icons/save.svg",
+            t!("query.save").to_string(),
+            theme.text,
+            theme.text,
+            !is_batch,
+            cx.listener(|this, _event, window, cx| this.begin_save_query(window, cx)),
+        );
+        toolbar = toolbar.child(if is_batch {
+            save.tooltip(ui::text_tooltip(
+                t!("query.batch.save_unsupported").to_string(),
+            ))
+        } else {
+            save
+        });
         // Redis commands and MongoDB JSON commands are not SQL: there is nothing for 美化SQL to
         // format.
         if !key_value && !documents {
@@ -101,20 +115,37 @@ impl AppView {
             let Some(query) = self.queries.get(query_index) else {
                 return div().into_any_element();
             };
+            let is_group = query.batch.is_some();
             (
-                query
-                    .connection_index
-                    .and_then(|index| self.connection_arc(index))
-                    .is_some(),
+                // A group query may connect its members on Run, so it is runnable without an
+                // already-open connection (an empty group still reports itself in 信息).
+                is_group
+                    || query
+                        .connection_index
+                        .and_then(|index| self.connection_arc(index))
+                        .is_some(),
                 query.running,
                 query.caret != query.anchor,
                 query.grid_id,
                 query.result_error.is_some(),
-                !query.results.is_empty(),
+                if is_group {
+                    query.running
+                        || query.last_elapsed.is_some()
+                        || query.result_error.is_some()
+                        || query.batch.as_ref().is_some_and(|batch| {
+                            batch
+                                .targets
+                                .iter()
+                                .any(|target| !target.results.is_empty() || target.error.is_some())
+                        })
+                } else {
+                    !query.results.is_empty()
+                },
                 query.active_result,
-                query
-                    .connection_index
-                    .is_some_and(|index| self.driver_supports(index, DriverCapability::Schemas)),
+                !is_group
+                    && query.connection_index.is_some_and(|index| {
+                        self.driver_supports(index, DriverCapability::Schemas)
+                    }),
             )
         };
         let run_enabled = has_connection && !running;
@@ -131,23 +162,38 @@ impl AppView {
             None => t!("query.run").to_string(),
         };
 
-        let controls = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_1()
-            .px_1()
-            .py_0p5()
-            .flex_none()
-            .bg(rgb(theme.toolbar_bg))
-            .border_b_1()
-            .border_color(rgb(theme.border))
-            .child(self.query_connection_combo_element())
-            .child(self.query_database_combo_element());
-        let controls = if supports_schemas {
-            controls.child(self.query_schema_combo_element())
+        let controls = if is_batch {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .px_1()
+                .py_0p5()
+                .flex_none()
+                .bg(rgb(theme.toolbar_bg))
+                .border_b_1()
+                .border_color(rgb(theme.border))
+                .child(self.group_query_target_element(query_index))
         } else {
-            controls
+            let controls = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .px_1()
+                .py_0p5()
+                .flex_none()
+                .bg(rgb(theme.toolbar_bg))
+                .border_b_1()
+                .border_color(rgb(theme.border))
+                .child(self.query_connection_combo_element())
+                .child(self.query_database_combo_element());
+            if supports_schemas {
+                controls.child(self.query_schema_combo_element())
+            } else {
+                controls
+            }
         };
         let controls = controls
             .child(div().w(px(10.0)).flex_none())
@@ -204,8 +250,13 @@ impl AppView {
                 .child(editor)
                 .into_any_element()
         } else {
-            // `active_result` is 0 for the 信息 tab, 1..=n for the n-th result set.
-            let result_body: AnyElement = if running {
+            // `active_result` is 0 for the 信息 tab, 1..=n for the n-th result set (or the n-th
+            // connection page of a group query).
+            let result_body: AnyElement = if is_batch {
+                // A group run keeps every connection's state in its own page and updates it live;
+                // there is no single "running" placeholder covering them all.
+                self.render_group_result(query_index, cx)
+            } else if running {
                 div()
                     .flex_1()
                     .p_2()
@@ -310,19 +361,33 @@ impl AppView {
             .min_w(px(0.0))
             .overflow_x_scroll()
             .track_scroll(&scroll);
-        let mut result_number = 0usize;
-        for (index, _) in query.results.iter().enumerate() {
-            if query.result_grids.get(index).copied().flatten().is_none() {
-                continue;
+        if let Some(batch) = &query.batch {
+            // One tag per connection: a failed connection (or a missing password) has a page to
+            // report itself in, so every target gets a tag whether or not it produced a grid.
+            for (index, target) in batch.targets.iter().enumerate() {
+                strip = strip.child(self.group_query_result_tab(
+                    query_index,
+                    index,
+                    target,
+                    query.active_result == index + 1,
+                    cx,
+                ));
             }
-            result_number += 1;
-            strip = strip.child(self.query_result_tab(
-                SharedString::from(format!("query-result-{index}")),
-                t!("query.result_tab", n = result_number).to_string(),
-                result_number,
-                query.active_result == result_number,
-                cx,
-            ));
+        } else {
+            let mut result_number = 0usize;
+            for (index, _) in query.results.iter().enumerate() {
+                if query.result_grids.get(index).copied().flatten().is_none() {
+                    continue;
+                }
+                result_number += 1;
+                strip = strip.child(self.query_result_tab(
+                    SharedString::from(format!("query-result-{index}")),
+                    t!("query.result_tab", n = result_number).to_string(),
+                    result_number,
+                    query.active_result == result_number,
+                    cx,
+                ));
+            }
         }
 
         // The strip's content width is only known after layout, so a measurement canvas records
@@ -470,6 +535,482 @@ impl AppView {
                 this.select_query_result(tab, cx);
             }))
             .child(label)
+            .into_any_element()
+    }
+
+    /// The group chip shown where a single connection's picker would be. It names the group and
+    /// its target count; the actual member list is resolved again on every Run.
+    fn group_query_target_element(&self, query_index: usize) -> AnyElement {
+        let theme = self.theme;
+        let Some(batch) = self
+            .queries
+            .get(query_index)
+            .and_then(|query| query.batch.as_ref())
+        else {
+            return div().into_any_element();
+        };
+        let group = groups::find_group(&self.tree_layout, batch.group_id);
+        let name = group
+            .map(|group| group.name.clone())
+            .unwrap_or_else(|| batch.group_name.clone());
+        // Resolve the group now (Run does the same): the chip reports the current membership, not
+        // the membership of the last run.
+        let live_targets = self.resolve_group_targets(batch.group_id);
+        let count = live_targets.len();
+        let label = t!("query.batch.target_summary", name = name, count = count).to_string();
+        let names = live_targets
+            .iter()
+            .map(|target| target.name.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let tooltip = if names.is_empty() {
+            t!("query.batch.no_targets").to_string()
+        } else {
+            names
+        };
+        div()
+            .id(SharedString::from(format!(
+                "query-group-target-{query_index}"
+            )))
+            .flex()
+            .items_center()
+            .gap_1()
+            .h(px(20.0))
+            .px_2()
+            .max_w(px(320.0))
+            .rounded(px(4.0))
+            .bg(rgb(theme.button_bg))
+            .border_1()
+            .border_color(rgb(theme.border))
+            .text_size(px(12.0))
+            .text_color(rgb(theme.text))
+            .child(
+                svg()
+                    .path("icons/folder.svg")
+                    .w(px(13.0))
+                    .h(px(13.0))
+                    .flex_none()
+                    .text_color(rgb(theme.icon_queries)),
+            )
+            .child(div().min_w(px(0.0)).truncate().child(label))
+            .tooltip(ui::text_tooltip(tooltip))
+            .into_any_element()
+    }
+
+    /// One group-query result tag: the connection's name, a status dot (red for a failure or a
+    /// missing password, brand while connecting/running), and a tooltip with the state.
+    fn group_query_result_tab(
+        &self,
+        query_index: usize,
+        target_index: usize,
+        target: &BatchTarget,
+        active: bool,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let theme = self.theme;
+        let dot = if target.has_error() {
+            Some(theme.danger)
+        } else {
+            match target.state {
+                BatchTargetState::Connecting | BatchTargetState::Running => Some(theme.brand),
+                _ => None,
+            }
+        };
+        let tooltip = format!(
+            "{} · {}",
+            target.name,
+            super::query_editor::batch_state_label(
+                if target.state == BatchTargetState::Done && target.has_error() {
+                    BatchTargetState::Failed
+                } else {
+                    target.state
+                }
+            )
+        );
+        div()
+            .id(SharedString::from(format!(
+                "query-result-target-{query_index}-{target_index}"
+            )))
+            .flex()
+            .items_center()
+            .gap_1()
+            .h(px(20.0))
+            .px_2()
+            .max_w(px(200.0))
+            .rounded(px(4.0))
+            .text_size(px(11.5))
+            .cursor_pointer()
+            .when(active, move |style| {
+                style
+                    .bg(rgb(theme.editor_bg))
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .text_color(rgb(theme.text))
+            })
+            .when(!active, move |style| {
+                style
+                    .bg(rgb(theme.button_bg))
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .text_color(rgb(theme.text_muted))
+                    .hover(move |style| style.text_color(rgb(theme.text)))
+            })
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                this.select_query_result(target_index + 1, cx);
+            }))
+            .children(dot.map(|color| {
+                div()
+                    .w(px(6.0))
+                    .h(px(6.0))
+                    .flex_none()
+                    .rounded_full()
+                    .bg(rgb(color))
+            }))
+            .child(div().min_w(px(0.0)).truncate().child(target.name.clone()))
+            .tooltip(ui::text_tooltip(tooltip))
+            .into_any_element()
+    }
+
+    /// The body of the bottom panel for a group query: the 信息 page, or the active connection's
+    /// page. A group tab always keeps one page per connection, even when the run failed before
+    /// producing a grid.
+    fn render_group_result(
+        &mut self,
+        query_index: usize,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let active = self
+            .queries
+            .get(query_index)
+            .map(|query| query.active_result)
+            .unwrap_or(0);
+        if active == 0 {
+            return self.render_query_info(query_index, cx);
+        }
+        self.render_group_target_page(query_index, active - 1, cx)
+    }
+
+    /// One connection's result page: its state while running, or its statement results/error.
+    fn render_group_target_page(
+        &mut self,
+        query_index: usize,
+        target_index: usize,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let theme = self.theme;
+        let Some(query) = self.queries.get(query_index) else {
+            return div().into_any_element();
+        };
+        let tab_id = query.id;
+        let Some(target) = query
+            .batch
+            .as_ref()
+            .and_then(|batch| batch.targets.get(target_index))
+        else {
+            return div().into_any_element();
+        };
+        let name = target.name.clone();
+        let state = target.state;
+        let error = target.error.clone();
+        let skipped = target.skipped;
+
+        match state {
+            BatchTargetState::Pending => {
+                return self.group_status_page(t!("query.batch.state_pending").to_string(), false);
+            }
+            BatchTargetState::Connecting => {
+                return self
+                    .group_status_page(t!("query.batch.state_connecting").to_string(), true);
+            }
+            BatchTargetState::Running => {
+                return self.group_status_page(t!("query.batch.state_running").to_string(), true);
+            }
+            BatchTargetState::Stopped => {
+                return self.group_status_page(t!("query.batch.state_stopped").to_string(), false);
+            }
+            BatchTargetState::Failed | BatchTargetState::NeedsPassword => {
+                let title = super::query_editor::batch_state_label(state);
+                let mut detail = format!(
+                    "{name}\n\n{}",
+                    error.unwrap_or_else(|| t!("query.batch.no_error_detail").to_string())
+                );
+                if state == BatchTargetState::NeedsPassword {
+                    detail.push_str("\n\n");
+                    detail.push_str(t!("query.batch.needs_password_hint").as_ref());
+                }
+                return self.render_group_error_page(tab_id, title, detail, cx);
+            }
+            BatchTargetState::Done => {}
+        }
+
+        // The connection is done: extract the small per-statement metadata, then release the
+        // `queries` borrow so the error editor/grid renderers can use `&mut self`.
+        let (results_len, active_result, statements) = {
+            let Some(target) = self
+                .queries
+                .get(query_index)
+                .and_then(|query| query.batch.as_ref())
+                .and_then(|batch| batch.targets.get(target_index))
+            else {
+                return div().into_any_element();
+            };
+            (
+                target.results.len(),
+                target.active_result,
+                target
+                    .results
+                    .iter()
+                    .map(|result| {
+                        (
+                            result.statement.clone(),
+                            result.error.clone(),
+                            result.grid_id,
+                            result.has_result_set,
+                            result.row_count,
+                            result.rows_affected,
+                            result.elapsed,
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        };
+        if results_len == 0 {
+            return self.group_status_page(t!("query.batch.no_results").to_string(), false);
+        }
+        let active_result = active_result.min(results_len - 1);
+
+        let mut page = div().flex().flex_col().flex_1().min_h(px(0.0));
+        if results_len > 1 {
+            let mut tabs = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .py_1()
+                .flex_none()
+                .bg(rgb(theme.toolbar_bg))
+                .border_b_1()
+                .border_color(rgb(theme.border));
+            for (index, (_, error, _, _, _, _, _)) in statements.iter().enumerate() {
+                let active = index == active_result;
+                let dot = error.as_ref().map(|_| theme.danger);
+                tabs = tabs.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "group-statement-{query_index}-{target_index}-{index}"
+                        )))
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .h(px(20.0))
+                        .px_2()
+                        .rounded(px(4.0))
+                        .text_size(px(11.5))
+                        .cursor_pointer()
+                        .when(active, move |style| {
+                            style
+                                .bg(rgb(theme.editor_bg))
+                                .border_1()
+                                .border_color(rgb(theme.border))
+                                .text_color(rgb(theme.text))
+                        })
+                        .when(!active, move |style| {
+                            style
+                                .bg(rgb(theme.button_bg))
+                                .border_1()
+                                .border_color(rgb(theme.border))
+                                .text_color(rgb(theme.text_muted))
+                        })
+                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                            this.select_group_statement(query_index, target_index, index, cx);
+                        }))
+                        .children(dot.map(|color| {
+                            div()
+                                .w(px(6.0))
+                                .h(px(6.0))
+                                .flex_none()
+                                .rounded_full()
+                                .bg(rgb(color))
+                        }))
+                        .child(t!("query.batch.statement_tab", n = index + 1).to_string()),
+                );
+            }
+            page = page.child(tabs);
+        }
+        if skipped > 0 {
+            page = page.child(
+                div()
+                    .flex_none()
+                    .px_3()
+                    .py_1()
+                    .text_size(px(11.5))
+                    .text_color(rgb(theme.warning))
+                    .child(t!("query.batch.skipped", count = skipped).to_string()),
+            );
+        }
+        let Some((
+            statement,
+            statement_error,
+            grid_id,
+            has_result_set,
+            row_count,
+            rows_affected,
+            result_elapsed,
+        )) = statements.get(active_result)
+        else {
+            return div().into_any_element();
+        };
+        if let Some(error) = statement_error {
+            let detail = format!(
+                "{} · {name}\n\n{statement}\n\n{error}",
+                t!("query.batch.statement_error")
+            );
+            page.child(self.render_group_error_page(
+                tab_id,
+                t!("query.batch.statement_error").to_string(),
+                detail,
+                cx,
+            ))
+            .into_any_element()
+        } else if let Some(grid_id) = grid_id {
+            if let Some(grid) = self
+                .grids
+                .iter()
+                .find(|grid| grid.read(cx).state.id == *grid_id)
+                .cloned()
+            {
+                page.child(grid).into_any_element()
+            } else {
+                div().into_any_element()
+            }
+        } else {
+            let outcome = if *has_result_set {
+                t!("query.result_rows", count = row_count).to_string()
+            } else if *rows_affected > 0 {
+                t!("query.rows_affected", count = rows_affected).to_string()
+            } else {
+                t!("query.executed").to_string()
+            };
+            let line = format!(
+                "> {outcome}  ·  {} {}",
+                t!("query.elapsed"),
+                super::query_editor::format_elapsed(*result_elapsed)
+            );
+            page.child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .p_3()
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(line),
+            )
+            .into_any_element()
+        }
+    }
+
+    /// A centered status page (pending / connecting / running / stopped).
+    fn group_status_page(&self, label: String, spinning: bool) -> AnyElement {
+        let theme = self.theme;
+        let mut row = div()
+            .flex()
+            .flex_1()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .py_4()
+            .text_size(px(12.0))
+            .text_color(rgb(theme.text_muted));
+        if spinning {
+            row = row.child(Spinner::new().color(rgb(theme.text_muted).into()));
+        }
+        row.child(label).into_any_element()
+    }
+
+    /// A connection/statement error, with a read-only selectable/copyable editor (the same rule as
+    /// the 信息 log: text the user must copy goes through `ui::SqlEditor`).
+    fn render_group_error_page(
+        &mut self,
+        tab_id: u64,
+        title: String,
+        detail: String,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let theme = self.theme;
+        let editor = self
+            .batch_error_editors
+            .entry(tab_id)
+            .or_insert_with(|| {
+                cx.new(|cx| {
+                    ui::SqlEditor::new(cx).options(ui::SqlEditorOptions {
+                        language: "text".into(),
+                        font_size: 12.0,
+                        line_number: false,
+                        readonly: true,
+                        ..Default::default()
+                    })
+                })
+            })
+            .clone();
+        if editor.read(cx).text() != detail {
+            editor.update(cx, |editor, cx| editor.set_text(detail.clone(), cx));
+        }
+        let copy = detail.clone();
+        div()
+            .id(SharedString::from(format!("group-error-{tab_id}")))
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py_1()
+                    .flex_none()
+                    .border_b_1()
+                    .border_color(rgb(theme.border))
+                    .child(
+                        svg()
+                            .path("icons/warning.svg")
+                            .w(px(14.0))
+                            .h(px(14.0))
+                            .flex_none()
+                            .text_color(rgb(theme.danger)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .truncate()
+                            .text_size(px(12.0))
+                            .text_color(rgb(theme.danger))
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .id("group-error-copy")
+                            .flex_none()
+                            .h(px(20.0))
+                            .px_2()
+                            .rounded(px(4.0))
+                            .text_size(px(11.5))
+                            .text_color(rgb(theme.text_muted))
+                            .cursor_pointer()
+                            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                            .on_click(cx.listener(move |_this, _event, _window, cx| {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                    copy.clone(),
+                                ));
+                            }))
+                            .child(t!("query.batch.copy_error").to_string()),
+                    ),
+            )
+            .child(div().flex().flex_1().min_h(px(0.0)).child(editor))
             .into_any_element()
     }
 

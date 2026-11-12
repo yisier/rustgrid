@@ -694,6 +694,20 @@ impl Render for TabBar {
                                 t!(routine.kind.label_key())
                             ),
                         )
+                    } else if let Some(batch) = &query.batch {
+                        let group_name = groups::find_group(&app.tree_layout, batch.group_id)
+                            .map(|group| group.name.clone())
+                            .unwrap_or_else(|| batch.group_name.clone());
+                        (
+                            "icons/folder.svg",
+                            app.theme.icon_queries,
+                            format!(
+                                "{} · {} - {}",
+                                t!("query.batch.title"),
+                                group_name,
+                                t!("common.query")
+                            ),
+                        )
                     } else {
                         let title = match &query.name {
                             Some(name) => format!("{name} - {}", t!("common.query")),
@@ -705,6 +719,13 @@ impl Render for TabBar {
                     };
                     let color = query
                         .connection_index
+                        .or_else(|| {
+                            query
+                                .batch
+                                .as_ref()
+                                .and_then(|batch| batch.targets.first())
+                                .and_then(|target| target.connection_index)
+                        })
                         .and_then(|connection| app.connection_color(connection));
                     (index, query.id, title, icon, icon_color, color)
                 })

@@ -19,16 +19,26 @@ impl AppView {
     ) -> Option<Entity<ui::SqlEditor>> {
         let tab = self.queries.get(index)?;
         let sql = tab.sql.clone();
-        let connection_index = tab.connection_index;
-        let database = tab.database.clone();
-        let schema = tab.schema.clone();
+        let batch = tab.batch.is_some();
+        let connection_index = if batch { None } else { tab.connection_index };
+        let database = if batch { None } else { tab.database.clone() };
+        let schema = if batch { None } else { tab.schema.clone() };
         let supports_schemas = connection_index
             .is_some_and(|index| self.driver_supports(index, DriverCapability::Schemas));
         let key_value = connection_index
             .is_some_and(|index| self.driver_supports(index, DriverCapability::KeyValue));
         let documents = connection_index
             .is_some_and(|index| self.driver_supports(index, DriverCapability::Documents));
-        let dialect = connection_index
+        // A group query has no completion scope (no database), but its SQL is highlighted with the
+        // first target's dialect.
+        let dialect = tab
+            .connection_index
+            .or_else(|| {
+                tab.batch
+                    .as_ref()
+                    .and_then(|batch| batch.targets.first())
+                    .and_then(|target| target.connection_index)
+            })
             .map(|index| self.driver_dialect(index))
             .unwrap_or_default();
 
@@ -551,12 +561,114 @@ fn error_focus(error: &str) -> Option<std::ops::Range<usize>> {
     None
 }
 
+/// A group query's 信息 log: the group, the live target count, the script once, then one line per
+/// connection. The detailed error stays in the connection's own result page.
+fn batch_info_text(
+    query: &QueryTab,
+    batch: &BatchQuery,
+    mysql: bool,
+) -> (String, Vec<(std::ops::Range<usize>, InfoSpan)>) {
+    let mut out = String::new();
+    let mut spans = Vec::new();
+    let push_line = |out: &mut String, spans: &mut Vec<_>, line: &str, span: InfoSpan| {
+        let start = out.len();
+        out.push_str(line);
+        spans.push((start..out.len(), span));
+        out.push('\n');
+    };
+    push_line(
+        &mut out,
+        &mut spans,
+        &format!("{}: {}", t!("query.batch.group"), batch.group_name),
+        InfoSpan::Muted,
+    );
+    push_line(
+        &mut out,
+        &mut spans,
+        t!("query.batch.targets", count = batch.targets.len()).as_ref(),
+        InfoSpan::Muted,
+    );
+    if let Some(error) = &query.result_error {
+        push_line(&mut out, &mut spans, error, InfoSpan::Error);
+        return (out, spans);
+    }
+    let script = query.last_sql.trim();
+    if !script.is_empty() {
+        let start = out.len();
+        out.push_str(script);
+        for (range, kind) in sql_lex::tokens(script, mysql) {
+            spans.push((start + range.start..start + range.end, InfoSpan::Sql(kind)));
+        }
+        out.push('\n');
+    }
+    for target in &batch.targets {
+        out.push('\n');
+        let line = format!(
+            "[{}] {}  {}",
+            batch_state_label(target.state),
+            target.name,
+            target
+                .elapsed
+                .map(format_elapsed)
+                .unwrap_or_else(|| "--".to_string())
+        );
+        push_line(&mut out, &mut spans, &line, InfoSpan::Muted);
+        if let Some(error) = &target.error {
+            push_line(&mut out, &mut spans, &format!("> {error}"), InfoSpan::Error);
+        }
+        for result in &target.results {
+            if let Some(error) = &result.error {
+                push_line(&mut out, &mut spans, &format!("> {error}"), InfoSpan::Error);
+            } else {
+                let outcome = if result.has_result_set {
+                    t!("query.result_rows", count = result.row_count).to_string()
+                } else if result.rows_affected > 0 {
+                    t!("query.rows_affected", count = result.rows_affected).to_string()
+                } else {
+                    t!("query.executed").to_string()
+                };
+                push_line(
+                    &mut out,
+                    &mut spans,
+                    &format!("> {outcome}"),
+                    InfoSpan::Muted,
+                );
+            }
+        }
+        if target.skipped > 0 {
+            push_line(
+                &mut out,
+                &mut spans,
+                t!("query.batch.skipped", count = target.skipped).as_ref(),
+                InfoSpan::Muted,
+            );
+        }
+    }
+    (out, spans)
+}
+
+/// The localized label of one connection's state in a group query.
+pub(super) fn batch_state_label(state: BatchTargetState) -> String {
+    match state {
+        BatchTargetState::Pending => t!("query.batch.state_pending").to_string(),
+        BatchTargetState::Connecting => t!("query.batch.state_connecting").to_string(),
+        BatchTargetState::Running => t!("query.batch.state_running").to_string(),
+        BatchTargetState::Done => t!("query.batch.state_done").to_string(),
+        BatchTargetState::Failed => t!("query.batch.state_failed").to_string(),
+        BatchTargetState::NeedsPassword => t!("query.batch.state_needs_password").to_string(),
+        BatchTargetState::Stopped => t!("query.batch.state_stopped").to_string(),
+    }
+}
+
 /// The 信息 tab's text, as Navicat's Message tab writes it: each statement, then right under it
 /// its outcome (rows, affected rows or the error, in red) and its time; plus the spans to colour.
 fn query_info_text(
     query: &QueryTab,
     mysql: bool,
 ) -> (String, Vec<(std::ops::Range<usize>, InfoSpan)>) {
+    if let Some(batch) = &query.batch {
+        return batch_info_text(query, batch, mysql);
+    }
     let mut out = String::new();
     let mut spans = Vec::new();
     let push_line = |out: &mut String, spans: &mut Vec<_>, line: &str, span: InfoSpan| {
@@ -667,7 +779,14 @@ impl AppView {
     pub(super) fn query_uses_hash_comments(&self, index: usize) -> bool {
         self.queries
             .get(index)
-            .and_then(|tab| tab.connection_index)
+            .and_then(|tab| {
+                tab.connection_index.or_else(|| {
+                    tab.batch
+                        .as_ref()
+                        .and_then(|batch| batch.targets.first())
+                        .and_then(|target| target.connection_index)
+                })
+            })
             .is_some_and(|connection| {
                 self.driver_dialect(connection) == rustgrid_core::DriverDialect::Mysql
             })

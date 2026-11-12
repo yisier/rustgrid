@@ -40,10 +40,11 @@ use crate::form::{ConnectionForm, FORM_FIELDS, FormField};
 use crate::list_select::{ListSelection, MarqueeDrag, SelectMode, rects_intersect, selection_mode};
 use crate::runtime::Runtime;
 use crate::session::{
-    Category, CategoryExpansion, CellRange, CellSelection, ConnectionNode, ConnectionStatus,
-    DatabaseNode, EditAction, GridFieldLayout, GridState, Loadable, QueryResultPlan,
-    QueryResultSummary, QueryTab, RoutineTab, RoutineTabState, RunEntry, RunScope, SortRule,
-    ViewExplainTab, ViewTab, ViewTabState, compute_column_widths, page_column_widths,
+    BatchQuery, BatchResult, BatchTarget, BatchTargetState, Category, CategoryExpansion, CellRange,
+    CellSelection, ConnectionNode, ConnectionStatus, DatabaseNode, EditAction, GridFieldLayout,
+    GridState, Loadable, QueryResultPlan, QueryResultSummary, QueryTab, RoutineTab,
+    RoutineTabState, RunEntry, RunScope, SortRule, ViewExplainTab, ViewTab, ViewTabState,
+    compute_column_widths, page_column_widths,
 };
 use crate::sql::{self, SqlToken};
 use crate::theme::{ConnectionColor, Theme};
@@ -2646,6 +2647,9 @@ pub struct AppView {
     stop_on_error: bool,
     /// Each query tab's 信息 text, in a read-only editor (select, Shift+arrows, Ctrl+C), by tab id.
     query_info_editors: std::collections::HashMap<u64, Entity<ui::SqlEditor>>,
+    /// A group query's current connection/statement error, in a read-only editor (select and
+    /// Ctrl+C), by tab id. Only the page on screen is rendered, so one editor per tab is enough.
+    batch_error_editors: std::collections::HashMap<u64, Entity<ui::SqlEditor>>,
     /// The tab shown last frame, so a tab change (by click, Ctrl+Tab or a close) can move the
     /// keyboard focus to the newly shown pane and, unless the search is kept, clear it.
     last_shown_tab: Option<Option<TabTarget>>,
@@ -3482,6 +3486,7 @@ impl AppView {
             max_statements_per_run: settings.max_statements_per_run,
             stop_on_error: settings.stop_on_error,
             query_info_editors: std::collections::HashMap::new(),
+            batch_error_editors: std::collections::HashMap::new(),
             last_shown_tab: None,
             bound_keys,
             object_searches: BTreeMap::new(),
@@ -4141,6 +4146,11 @@ impl AppView {
         }
         // The result/信息 log is fixed at 12px; only the SQL 预览 panes follow the editor font.
         for editor in self.query_info_editors.values() {
+            editor.update(cx, |editor, cx| {
+                editor.set_display_options(font.clone(), 12.0, false, word_wrap, window, cx)
+            });
+        }
+        for editor in self.batch_error_editors.values() {
             editor.update(cx, |editor, cx| {
                 editor.set_display_options(font.clone(), 12.0, false, word_wrap, window, cx)
             });

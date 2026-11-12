@@ -1,6 +1,28 @@
 use super::backup::reveal_in_file_manager;
 use super::*;
 
+/// The connection material a group run needs, snapshotted when Run is pressed (the group's live
+/// membership is resolved then, so later changes wait for the next run).
+struct GroupQueryJob {
+    target_index: usize,
+    /// The profile id, so a successful connect updates the right node even if profiles were
+    /// reordered while the run was in flight.
+    connection_id: String,
+    /// An already-open connection; otherwise the job connects with the saved password.
+    existing: Option<Arc<dyn Connection>>,
+    profile: Option<rustgrid_core::ConnectionProfile>,
+    password: Option<String>,
+    driver: Option<Arc<dyn rustgrid_core::Driver>>,
+    dialect: rustgrid_core::DriverDialect,
+}
+
+/// One statement's outcome on one target, before it is installed into the UI.
+struct GroupQueryOutcome {
+    statement: String,
+    elapsed: std::time::Duration,
+    result: Result<Vec<rustgrid_core::QueryResult>, String>,
+}
+
 impl AppView {
     pub(super) fn default_query_connection(&self, cx: &Context<'_, Self>) -> Option<usize> {
         // A database picked in the connection tree wins, even before its connection is connected.
@@ -105,11 +127,85 @@ impl AppView {
     }
 
     pub(super) fn open_new_query(&mut self, cx: &mut Context<'_, Self>) {
+        // A group selected on its own creates a group query: the same SQL against every
+        // connection inside it, each with its own result page.
+        if let Some(group_id) = self.single_selected_group(cx) {
+            self.open_new_query_for_group(group_id, cx);
+            return;
+        }
         let connection_index = self.default_query_connection(cx);
         let database = connection_index.and_then(|index| self.default_query_database(index, cx));
         let schema = connection_index
             .and_then(|index| self.default_query_schema(cx, index, database.as_deref()));
         self.open_query_with(connection_index, database, schema, cx);
+    }
+
+    /// The group selected in the connection tree, when the selection is exactly that group row
+    /// (a plain click replaces the selection, so no connection row is included).
+    fn single_selected_group(&self, cx: &App) -> Option<u64> {
+        let items = self.tree_selection.items();
+        if items.len() == 1 {
+            return items[0].strip_prefix("group-")?.parse().ok();
+        }
+        if !items.is_empty() {
+            return None;
+        }
+        // Keyboard navigation updates the tree pane's row selection without touching the
+        // multi-selection, so fall back to it when no row is multi-selected.
+        let selected = self.tree_pane.read(cx).selected.clone()?;
+        selected.strip_prefix("group-")?.parse().ok()
+    }
+
+    /// Open a query tab that targets every connection of the group `group_id`. No database is
+    /// selected: each connection runs in its own default context, so database-independent
+    /// statements work and a `USE`/fully-qualified SQL can address a database per server.
+    pub(super) fn open_new_query_for_group(&mut self, group_id: u64, cx: &mut Context<'_, Self>) {
+        let group_name = groups::find_group(&self.tree_layout, group_id)
+            .map(|group| group.name.clone())
+            .unwrap_or_default();
+        let targets = self.resolve_group_targets(group_id);
+        let id = self.next_query_id;
+        self.next_query_id += 1;
+        let mut tab = QueryTab::new(id);
+        tab.batch = Some(BatchQuery {
+            group_id,
+            group_name,
+            targets,
+        });
+        self.queries.push(tab);
+        self.active_query = Some(self.queries.len() - 1);
+        self.active_grid = None;
+        self.active_design = None;
+        self.clear_object_search_unless_kept(cx);
+        self.query_focus_pending = true;
+        self.main_tab = MainTab::Queries;
+        cx.notify();
+    }
+
+    /// The group's connections in display order, as pending targets for a fresh run. The group is
+    /// re-resolved on every run, so a member added/removed after the tab opened is picked up.
+    pub(super) fn resolve_group_targets(&self, group_id: u64) -> Vec<BatchTarget> {
+        let mut ids = Vec::new();
+        groups::collect_subtree_connection_ids_ordered(&self.tree_layout, group_id, &mut ids);
+        let mut seen = std::collections::BTreeSet::new();
+        let mut targets = Vec::new();
+        for connection_id in ids {
+            if !seen.insert(connection_id.clone()) {
+                continue;
+            }
+            let Some(index) = self
+                .connections
+                .iter()
+                .position(|node| node.profile.id == connection_id)
+            else {
+                continue;
+            };
+            targets.push(BatchTarget::pending(
+                Some(index),
+                self.connections[index].profile.name.clone(),
+            ));
+        }
+        targets
     }
 
     /// Open a query tab bound to a specific connection, defaulting to its current database.
@@ -217,7 +313,9 @@ impl AppView {
         let active_id = self.active_grid_id(cx);
         let removed = self.queries.remove(index);
         self.remove_query_editor(index);
-        let mut grid_ids: Vec<u64> = removed.result_grids.iter().flatten().copied().collect();
+        self.query_info_editors.remove(&removed.id);
+        self.batch_error_editors.remove(&removed.id);
+        let mut grid_ids: Vec<u64> = removed.all_grid_ids();
         if let Some(id) = removed.grid_id
             && !grid_ids.contains(&id)
         {
@@ -567,6 +665,11 @@ impl AppView {
         let Some(tab) = self.queries.get(active) else {
             return;
         };
+        // A group query has no single connection/database/schema picker; its target chip is drawn
+        // by `render_query_view` instead.
+        if tab.batch.is_some() {
+            return;
+        }
         let connection_index = tab.connection_index;
         let database = tab.database.clone();
         let schema = tab.schema.clone();
@@ -717,6 +820,14 @@ impl AppView {
         let Some(index) = self.active_query else {
             return;
         };
+        if self
+            .queries
+            .get(index)
+            .is_some_and(|tab| tab.batch.is_some())
+        {
+            self.run_group_query(index, scope, cx);
+            return;
+        }
         let Some(tab) = self.queries.get(index) else {
             return;
         };
@@ -1014,6 +1125,686 @@ impl AppView {
         .detach();
     }
 
+    /// Run a group query: the same SQL on each connection of the tab's group, one result page per
+    /// connection. The group is resolved here (not when the tab was created), connections that are
+    /// not open are connected with their stored password, and every connection's failure stays in
+    /// its own page.
+    fn run_group_query(&mut self, index: usize, scope: RunScope, cx: &mut Context<'_, Self>) {
+        let Some(tab) = self.queries.get(index) else {
+            return;
+        };
+        if tab.running {
+            return;
+        }
+        let Some(batch) = tab.batch.as_ref() else {
+            return;
+        };
+        let group_id = batch.group_id;
+
+        // The wrapped editor owns the real selection; `QueryTab::caret/anchor` is only a mirror
+        // that may lag behind (the same contract as `run_query`).
+        let live_selection = self
+            .query_editors
+            .get(index)
+            .and_then(|editor| editor.as_ref())
+            .map(|editor| editor.read(cx).selected_range(cx));
+        let (selection_start, selection_end) = live_selection.unwrap_or_else(|| tab.selection());
+        let text = self
+            .query_editors
+            .get(index)
+            .and_then(|editor| editor.as_ref())
+            .map(|editor| editor.read(cx).live_text(cx))
+            .unwrap_or_else(|| tab.sql.clone());
+        let selected = text
+            .get(selection_start..selection_end)
+            .filter(|_| selection_start < selection_end && scope != RunScope::All);
+        let source: String = selected.map(str::to_string).unwrap_or(text);
+        let original = source.trim().to_string();
+        if original.is_empty() {
+            return;
+        }
+
+        // Live group resolution: members added or removed since the tab opened take effect now.
+        let Some(group) = groups::find_group(&self.tree_layout, group_id) else {
+            self.clear_batch_results(index, cx);
+            if let Some(tab) = self.queries.get_mut(index) {
+                tab.running = false;
+                tab.result_error = Some(t!("query.batch.group_missing").to_string());
+                tab.last_sql = original;
+                tab.last_elapsed = Some(std::time::Duration::ZERO);
+                tab.active_result = 0;
+                if let Some(batch) = &mut tab.batch {
+                    batch.targets.clear();
+                }
+            }
+            cx.notify();
+            return;
+        };
+        let group_name = group.name.clone();
+        let targets = self.resolve_group_targets(group_id);
+        if targets.is_empty() {
+            self.clear_batch_results(index, cx);
+            if let Some(tab) = self.queries.get_mut(index) {
+                tab.running = false;
+                tab.result_error = Some(t!("query.batch.no_targets").to_string());
+                tab.last_sql = original;
+                tab.last_elapsed = Some(std::time::Duration::ZERO);
+                tab.active_result = 0;
+                if let Some(batch) = &mut tab.batch {
+                    batch.group_name = group_name;
+                    batch.targets.clear();
+                }
+            }
+            cx.notify();
+            return;
+        }
+
+        // Drop the previous run's grids before installing the new target set.
+        self.clear_batch_results(index, cx);
+        let jobs = self.group_query_jobs(&targets);
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let max_statements = self.max_statements_per_run as usize;
+        let stop_on_error = self.stop_on_error;
+        let runtime = self.runtime.clone();
+
+        if let Some(tab) = self.queries.get_mut(index) {
+            tab.running = true;
+            tab.run_generation = tab.run_generation.wrapping_add(1);
+            tab.result_error = None;
+            tab.last_sql = original.clone();
+            tab.last_elapsed = None;
+            tab.run_started = Some(std::time::Instant::now());
+            tab.run_cancel = Some(cancel.clone());
+            tab.skipped_statements = 0;
+            tab.grid_id = None;
+            tab.active_result = 1;
+            tab.result_tabs.scroll.set_offset(Point::default());
+            if let Some(batch) = &mut tab.batch {
+                batch.group_name = group_name;
+                batch.targets = targets;
+            }
+        }
+        let generation = self
+            .queries
+            .get(index)
+            .map(|tab| tab.run_generation)
+            .unwrap_or(0);
+        if self.active_query == Some(index) {
+            self.active_grid = None;
+        }
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let started = std::time::Instant::now();
+            for job in jobs {
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                let GroupQueryJob {
+                    target_index,
+                    connection_id,
+                    existing,
+                    profile,
+                    password,
+                    driver,
+                    dialect,
+                } = job;
+
+                let current = this
+                    .update(cx, |view, _| {
+                        view.queries.get(index).map(|tab| tab.run_generation) == Some(generation)
+                    })
+                    .unwrap_or(false);
+                if !current {
+                    break;
+                }
+
+                // Already-open connections go straight to Running; closed ones first connect.
+                let connection = if let Some(connection) = existing {
+                    let _ = this.update(cx, |view, cx| {
+                        view.batch_set_target_state(
+                            index,
+                            generation,
+                            target_index,
+                            BatchTargetState::Running,
+                            None,
+                            cx,
+                        );
+                    });
+                    connection
+                } else {
+                    let _ = this.update(cx, |view, cx| {
+                        view.batch_set_target_state(
+                            index,
+                            generation,
+                            target_index,
+                            BatchTargetState::Connecting,
+                            None,
+                            cx,
+                        );
+                    });
+                    let Some(profile) = profile else {
+                        let _ = this.update(cx, |view, cx| {
+                            view.batch_set_target_state(
+                                index,
+                                generation,
+                                target_index,
+                                BatchTargetState::Failed,
+                                Some(t!("query.batch.connection_missing").to_string()),
+                                cx,
+                            );
+                        });
+                        continue;
+                    };
+                    let Some(driver) = driver else {
+                        let _ = this.update(cx, |view, cx| {
+                            view.batch_set_target_state(
+                                index,
+                                generation,
+                                target_index,
+                                BatchTargetState::Failed,
+                                Some(t!("error.driver_missing").to_string()),
+                                cx,
+                            );
+                        });
+                        continue;
+                    };
+                    let config = rustgrid_core::ConnectionConfig {
+                        driver: profile.driver.clone(),
+                        host: profile.host.clone(),
+                        port: profile.port,
+                        username: profile.username.clone(),
+                        password,
+                        database: profile.database.clone(),
+                        options: profile.options.clone(),
+                        settings: profile.settings.clone(),
+                    };
+                    let connected = runtime
+                        .spawn(async move { driver.connect(&config).await })
+                        .await;
+                    match connected {
+                        Ok(Ok(connection)) => {
+                            let connection: Arc<dyn Connection> = Arc::from(connection);
+                            let _ = this.update(cx, |view, cx| {
+                                if view.queries.get(index).map(|tab| tab.run_generation)
+                                    != Some(generation)
+                                {
+                                    return;
+                                }
+                                if let Some(connection_index) = view
+                                    .connections
+                                    .iter()
+                                    .position(|node| node.profile.id == connection_id)
+                                {
+                                    if let Some(node) = view.connections.get_mut(connection_index) {
+                                        node.status =
+                                            ConnectionStatus::Connected(connection.clone());
+                                        node.expanded = true;
+                                    }
+                                    view.load_databases(connection_index, cx);
+                                }
+                                view.batch_set_target_state(
+                                    index,
+                                    generation,
+                                    target_index,
+                                    BatchTargetState::Running,
+                                    None,
+                                    cx,
+                                );
+                            });
+                            connection
+                        }
+                        Ok(Err(Error::Authentication(error))) => {
+                            let message = error.to_string();
+                            let _ = this.update(cx, |view, cx| {
+                                view.batch_set_target_state(
+                                    index,
+                                    generation,
+                                    target_index,
+                                    BatchTargetState::NeedsPassword,
+                                    Some(message),
+                                    cx,
+                                );
+                            });
+                            continue;
+                        }
+                        Ok(Err(error)) => {
+                            let message = error.to_string();
+                            let _ = this.update(cx, |view, cx| {
+                                view.batch_set_target_state(
+                                    index,
+                                    generation,
+                                    target_index,
+                                    BatchTargetState::Failed,
+                                    Some(message),
+                                    cx,
+                                );
+                            });
+                            continue;
+                        }
+                        Err(error) => {
+                            let message = Error::other(error).to_string();
+                            let _ = this.update(cx, |view, cx| {
+                                view.batch_set_target_state(
+                                    index,
+                                    generation,
+                                    target_index,
+                                    BatchTargetState::Failed,
+                                    Some(message),
+                                    cx,
+                                );
+                            });
+                            continue;
+                        }
+                    }
+                };
+
+                // Each target has its own dialect, so the script is split with that engine's
+                // scanner, never the first connection's.
+                let mut statements = group_query_statements(&original, &connection, dialect);
+                let skipped = if max_statements > 0 && statements.len() > max_statements {
+                    let skipped = statements.len() - max_statements;
+                    statements.truncate(max_statements);
+                    skipped
+                } else {
+                    0
+                };
+
+                let target_started = std::time::Instant::now();
+                let opened = {
+                    let connection = connection.clone();
+                    runtime
+                        .spawn(async move { connection.script_session(None).await })
+                        .await
+                };
+                let mut session = super::runsql::ScriptSessionGuard {
+                    runtime: runtime.clone(),
+                    session: None,
+                };
+                let mut open_error: Option<String> = None;
+                match opened {
+                    Ok(Ok(opened)) => session.session = opened,
+                    Ok(Err(error)) => open_error = Some(error.to_string()),
+                    Err(error) => open_error = Some(Error::other(error).to_string()),
+                }
+
+                let mut outcomes: Vec<GroupQueryOutcome> = Vec::new();
+                if let Some(error) = open_error {
+                    // Report a failed session once, on the first statement, as the single-query
+                    // path does, instead of repeating it for every statement.
+                    if let Some(statement) = statements.first().cloned() {
+                        outcomes.push(GroupQueryOutcome {
+                            statement,
+                            elapsed: target_started.elapsed(),
+                            result: Err(error),
+                        });
+                    }
+                } else {
+                    for statement in statements {
+                        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                            break;
+                        }
+                        let begun = std::time::Instant::now();
+                        let result = if let Some(active) = session.take() {
+                            let sql = statement.clone();
+                            match runtime
+                                .spawn(async move {
+                                    let mut active = active;
+                                    let result = active.execute_many(&sql).await;
+                                    (result, active)
+                                })
+                                .await
+                            {
+                                Ok((result, returned)) => {
+                                    session.restore(returned);
+                                    result
+                                }
+                                Err(error) => Err(Error::other(error)),
+                            }
+                        } else {
+                            let connection = connection.clone();
+                            let sql = statement.clone();
+                            match runtime
+                                .spawn(
+                                    async move { connection.execute_query_many(None, &sql).await },
+                                )
+                                .await
+                            {
+                                Ok(result) => result,
+                                Err(error) => Err(Error::other(error)),
+                            }
+                        };
+                        let failed = result.is_err();
+                        outcomes.push(GroupQueryOutcome {
+                            statement,
+                            elapsed: begun.elapsed(),
+                            result: result.map_err(|error| error.to_string()),
+                        });
+                        if failed && stop_on_error {
+                            break;
+                        }
+                    }
+                }
+                // Release the pinned connection on the Tokio runtime, not gpui's executor.
+                drop(session);
+
+                let target_elapsed = target_started.elapsed();
+                let _ = this.update(cx, |view, cx| {
+                    view.install_group_query_results(
+                        index,
+                        generation,
+                        target_index,
+                        connection.clone(),
+                        dialect,
+                        target_elapsed,
+                        outcomes,
+                        skipped,
+                        cx,
+                    );
+                });
+            }
+
+            let _ = this.update(cx, |view, cx| {
+                if view.queries.get(index).map(|tab| tab.run_generation) != Some(generation) {
+                    return;
+                }
+                if let Some(tab) = view.queries.get_mut(index) {
+                    tab.running = false;
+                    tab.run_started = None;
+                    tab.run_cancel = None;
+                    tab.last_elapsed = Some(started.elapsed());
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Snapshot the material each target's connection needs. Done on the UI thread so the async
+    /// run never touches `AppView::connections`.
+    fn group_query_jobs(&self, targets: &[BatchTarget]) -> Vec<GroupQueryJob> {
+        targets
+            .iter()
+            .enumerate()
+            .map(|(target_index, target)| {
+                let mut job = GroupQueryJob {
+                    target_index,
+                    connection_id: String::new(),
+                    existing: None,
+                    profile: None,
+                    password: None,
+                    driver: None,
+                    dialect: rustgrid_core::DriverDialect::default(),
+                };
+                let Some(connection_index) = target.connection_index else {
+                    return job;
+                };
+                let Some(node) = self.connections.get(connection_index) else {
+                    return job;
+                };
+                job.connection_id = node.profile.id.clone();
+                job.existing = match &node.status {
+                    ConnectionStatus::Connected(connection) => Some(connection.clone()),
+                    _ => None,
+                };
+                job.profile = Some(node.profile.clone());
+                job.password = node.password.clone();
+                job.driver = self.registry.get(&node.profile.driver);
+                job.dialect = self.driver_dialect(connection_index);
+                job
+            })
+            .collect()
+    }
+
+    /// Record a target's connection/execution phase (and its error, when it failed).
+    fn batch_set_target_state(
+        &mut self,
+        index: usize,
+        generation: u64,
+        target_index: usize,
+        state: BatchTargetState,
+        error: Option<String>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.queries.get(index).map(|tab| tab.run_generation) != Some(generation) {
+            return;
+        }
+        if let Some(tab) = self.queries.get_mut(index)
+            && let Some(batch) = tab.batch.as_mut()
+            && let Some(target) = batch.targets.get_mut(target_index)
+        {
+            target.state = state;
+            if error.is_some() {
+                target.error = error;
+            }
+        }
+        cx.notify();
+    }
+
+    /// Drop a group tab's grids and reset every page to Pending before a new run.
+    fn clear_batch_results(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        let ids = self
+            .queries
+            .get(index)
+            .map(|tab| tab.all_grid_ids())
+            .unwrap_or_default();
+        for id in ids {
+            if let Some(position) = self
+                .grids
+                .iter()
+                .position(|grid| grid.read(cx).state.id == id)
+            {
+                self.grids.remove(position);
+            }
+        }
+        if let Some(tab) = self.queries.get_mut(index) {
+            tab.grid_id = None;
+            tab.active_result = 0;
+            tab.result_error = None;
+            tab.results.clear();
+            tab.result_grids.clear();
+            if let Some(batch) = &mut tab.batch {
+                for target in &mut batch.targets {
+                    target.results.clear();
+                    target.state = BatchTargetState::Pending;
+                    target.error = None;
+                    target.elapsed = None;
+                    target.active_result = 0;
+                    target.skipped = 0;
+                }
+            }
+        }
+        if self.active_query == Some(index) {
+            self.active_grid = None;
+        }
+        cx.notify();
+    }
+
+    /// Install one target's statement outcomes: a read-only grid per result set, or an error entry
+    /// for a failed statement. The connection page is selected by default when it is the tab's
+    /// active page.
+    #[allow(clippy::too_many_arguments)]
+    fn install_group_query_results(
+        &mut self,
+        index: usize,
+        generation: u64,
+        target_index: usize,
+        connection: Arc<dyn Connection>,
+        dialect: rustgrid_core::DriverDialect,
+        elapsed: std::time::Duration,
+        outcomes: Vec<GroupQueryOutcome>,
+        skipped: usize,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.queries.get(index).map(|tab| tab.run_generation) != Some(generation) {
+            return;
+        }
+        let Some(target_name) = self
+            .queries
+            .get(index)
+            .and_then(|tab| tab.batch.as_ref())
+            .and_then(|batch| batch.targets.get(target_index))
+            .map(|target| target.name.clone())
+        else {
+            return;
+        };
+
+        let mut results: Vec<BatchResult> = Vec::new();
+        for outcome in outcomes {
+            match outcome.result {
+                Ok(query_results) => {
+                    for result in query_results {
+                        let statement = result.statement.clone();
+                        let row_count = result.rows.len();
+                        let has_result_set = result.has_result_set;
+                        let rows_affected = result.rows_affected;
+                        let grid_id = if has_result_set {
+                            Some(self.install_group_query_grid(
+                                result,
+                                connection.clone(),
+                                target_name.clone(),
+                                dialect,
+                                outcome.elapsed,
+                                cx,
+                            ))
+                        } else {
+                            None
+                        };
+                        results.push(BatchResult {
+                            statement,
+                            elapsed: outcome.elapsed,
+                            error: None,
+                            grid_id,
+                            has_result_set,
+                            row_count,
+                            rows_affected,
+                        });
+                    }
+                }
+                Err(error) => results.push(BatchResult {
+                    statement: outcome.statement,
+                    elapsed: outcome.elapsed,
+                    error: Some(error),
+                    grid_id: None,
+                    has_result_set: false,
+                    row_count: 0,
+                    rows_affected: 0,
+                }),
+            }
+        }
+
+        // A failed statement is the most useful page to open on, the same way the single-query
+        // result panel switches to 信息 when something failed.
+        let active_result = results
+            .iter()
+            .position(|result| result.error.is_some())
+            .unwrap_or(0);
+        let mut active_grid = None;
+        {
+            let Some(tab) = self.queries.get_mut(index) else {
+                return;
+            };
+            let Some(batch) = tab.batch.as_mut() else {
+                return;
+            };
+            let Some(target) = batch.targets.get_mut(target_index) else {
+                return;
+            };
+            target.state = BatchTargetState::Done;
+            target.elapsed = Some(elapsed);
+            target.results = results;
+            target.active_result = active_result;
+            target.skipped = skipped;
+            if tab.active_result == target_index + 1 {
+                let grid_id = target.active_grid_id();
+                tab.grid_id = grid_id;
+                active_grid = grid_id;
+            }
+        }
+        if self.active_query == Some(index) && active_grid.is_some() {
+            self.active_grid = active_grid.and_then(|id| {
+                self.grids
+                    .iter()
+                    .position(|grid| grid.read(cx).state.id == id)
+            });
+        }
+        cx.notify();
+    }
+
+    /// Build the read-only grid for one group-query result set. The connection is the target's
+    /// own, so the grid's status line and reload paths stay meaningful.
+    #[allow(clippy::too_many_arguments)]
+    fn install_group_query_grid(
+        &mut self,
+        result: rustgrid_core::QueryResult,
+        connection: Arc<dyn Connection>,
+        connection_name: String,
+        dialect: rustgrid_core::DriverDialect,
+        elapsed: std::time::Duration,
+        cx: &mut Context<'_, Self>,
+    ) -> u64 {
+        let id = self.next_grid_id;
+        self.next_grid_id += 1;
+        let total = result.rows.len() as u64;
+        let column_widths = compute_column_widths(&result.columns, &result.rows);
+        let column_count = result.columns.len();
+        let state = GridState {
+            id,
+            connection,
+            dialect,
+            connection_name,
+            // A query result is not a table, so there is no field layout to key on.
+            connection_id: String::new(),
+            database: String::new(),
+            table: String::new(),
+            is_view: false,
+            key_status: None,
+            documents: false,
+            document_json: None,
+            document_key: None,
+            document_loading: false,
+            document_error: None,
+            document_edits: BTreeMap::new(),
+            page_index: 0,
+            page_size: total.max(1),
+            loading: false,
+            error: None,
+            columns: result.columns.clone(),
+            all_columns: result.columns,
+            field_layout: GridFieldLayout::default(),
+            column_order: (0..column_count).collect(),
+            visible_columns: column_count,
+            frozen_columns: Vec::new(),
+            rows: Arc::new(result.rows),
+            column_widths,
+            manual_column_widths: false,
+            total_rows: Some(total),
+            selection: None,
+            edits: BTreeMap::new(),
+            undo: Vec::new(),
+            redo: Vec::new(),
+            sql: Some(result.statement.clone()),
+            show_toolbar: false,
+            show_footer: true,
+            editable: false,
+            sort_rules: Vec::new(),
+            sort_open: false,
+            sort_draft: Vec::new(),
+            sort_selected: None,
+            filters: Vec::new(),
+            filter_open: false,
+            filter_draft: Vec::new(),
+            elapsed: Some(elapsed),
+        };
+        let app = cx.weak_entity();
+        let runtime = self.runtime.clone();
+        let theme = self.theme;
+        let clipboard = self.grid_clipboard.clone();
+        let entity = cx.new(|cx| GridView::new(state, app, runtime, theme, clipboard, cx));
+        self.grids.push(entity);
+        id
+    }
+
     /// Drop a tab's result grids and reset its result state, recording `error` for the 信息 tab.
     fn clear_query_results(
         &mut self,
@@ -1047,7 +1838,8 @@ impl AppView {
         cx.notify();
     }
 
-    /// Switch the bottom result panel to `tab` (`0` is 信息, `1..=n` the `n`-th result set).
+    /// Switch the bottom result panel to `tab` (`0` is 信息, `1..=n` the `n`-th result set, or the
+    /// `n`-th connection page for a group query).
     pub(super) fn select_query_result(&mut self, tab: usize, cx: &mut Context<'_, Self>) {
         let Some(query) = self.active_query else {
             return;
@@ -1055,24 +1847,31 @@ impl AppView {
         let Some(state) = self.queries.get_mut(query) else {
             return;
         };
-        let grid_count = state
-            .result_grids
-            .iter()
-            .filter(|grid| grid.is_some())
-            .count();
-        if tab > grid_count {
-            return;
-        }
-        state.active_result = tab;
-        let grid_id = if tab == 0 {
-            None
+        let grid_id = if let Some(batch) = &state.batch {
+            if tab > batch.targets.len() {
+                return;
+            }
+            batch.grid_for_page(tab)
         } else {
-            state
+            let grid_count = state
                 .result_grids
                 .iter()
-                .filter_map(|grid| *grid)
-                .nth(tab - 1)
+                .filter(|grid| grid.is_some())
+                .count();
+            if tab > grid_count {
+                return;
+            }
+            if tab == 0 {
+                None
+            } else {
+                state
+                    .result_grids
+                    .iter()
+                    .filter_map(|grid| *grid)
+                    .nth(tab - 1)
+            }
         };
+        state.active_result = tab;
         state.grid_id = grid_id;
         // Reveal the chosen tag in the (paged) strip. 信息 is pinned outside it, so only the
         // 结果 tags are items of its scroll handle.
@@ -1084,6 +1883,45 @@ impl AppView {
                 .iter()
                 .position(|grid| grid.read(cx).state.id == id)
         });
+        cx.notify();
+    }
+
+    /// Switch one connection page to another statement's result (a group query's page shows one
+    /// statement at a time).
+    pub(super) fn select_group_statement(
+        &mut self,
+        query_index: usize,
+        target_index: usize,
+        statement_index: usize,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let mut grid_id = None;
+        {
+            let Some(state) = self.queries.get_mut(query_index) else {
+                return;
+            };
+            let Some(batch) = state.batch.as_mut() else {
+                return;
+            };
+            let Some(target) = batch.targets.get_mut(target_index) else {
+                return;
+            };
+            if statement_index >= target.results.len() {
+                return;
+            }
+            target.active_result = statement_index;
+            if state.active_result == target_index + 1 {
+                grid_id = target.active_grid_id();
+                state.grid_id = grid_id;
+            }
+        }
+        if self.active_query == Some(query_index) && grid_id.is_some() {
+            self.active_grid = grid_id.and_then(|id| {
+                self.grids
+                    .iter()
+                    .position(|grid| grid.read(cx).state.id == id)
+            });
+        }
         cx.notify();
     }
 
@@ -1320,6 +2158,18 @@ impl AppView {
             }
             tab.last_elapsed = tab.run_started.take().map(|started| started.elapsed());
             tab.result_error = Some(t!("query.stopped").to_string());
+            if let Some(batch) = &mut tab.batch {
+                for target in &mut batch.targets {
+                    if matches!(
+                        target.state,
+                        BatchTargetState::Pending
+                            | BatchTargetState::Connecting
+                            | BatchTargetState::Running
+                    ) {
+                        target.state = BatchTargetState::Stopped;
+                    }
+                }
+            }
         }
         cx.notify();
     }
@@ -1441,6 +2291,11 @@ impl AppView {
         let Some(tab) = self.queries.get(index) else {
             return;
         };
+        // Group queries are not filed under a connection/database, so there is no save location
+        // for them yet; the toolbar disables Save for these tabs.
+        if tab.batch.is_some() {
+            return;
+        }
         let name = tab.name.clone().unwrap_or_default();
         let saved_path = tab.saved_path.clone();
         let tab_connection = tab.connection_index;
@@ -2344,6 +3199,26 @@ fn query_in_scope(file: &QueryFileInfo, schema: Option<&str>) -> bool {
     match schema {
         Some(scope) => file.schema.is_none() || file.schema.as_deref() == Some(scope),
         None => file.schema.is_none(),
+    }
+}
+
+/// Split a group-query script with the target connection's own scanner. MySQL/MariaDB uses the
+/// app's scanner (it understands `DELIMITER` and routine bodies); every other engine uses its
+/// driver's splitter. This is deliberately per target: a group may mix engines.
+fn group_query_statements(
+    source: &str,
+    connection: &Arc<dyn Connection>,
+    dialect: rustgrid_core::DriverDialect,
+) -> Vec<String> {
+    if dialect == rustgrid_core::DriverDialect::Mysql {
+        let prepared = sql_lex::prepare_for_server(source, true);
+        sql_lex::split_script(&prepared, true)
+            .into_iter()
+            .map(|range| prepared[range].trim().to_string())
+            .filter(|statement| sql_lex::has_code(statement, true))
+            .collect()
+    } else {
+        connection.split_statements(&sql_lex::prepare_for_server(source, false))
     }
 }
 

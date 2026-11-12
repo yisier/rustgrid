@@ -732,6 +732,15 @@ shadcn chrome described above. Implemented today:
    multi-select dropdown (结果1 / 结果2 / … plus 全选) when the last run produced several. Several
    selected results are written into **one `.xlsx` workbook**, one worksheet per result; other
    formats keep one file per result.
+   A **group query** is opened from a selected connection-tree group (its context menu or `New
+   Query` while the group is the only selection). It runs the same SQL on every connection of the
+   group, resolved again on each run, and shows **one result page per connection** (`信息` plus one
+   tag per connection) rather than merging rows; a connection that is not open is connected with its
+   stored password, and a missing password, connection failure or statement failure is reported **in
+   that connection's page**, never as a global dialog that blocks the other servers. No database is
+   selected: each connection runs in its own default context, so database-independent statements
+   work and `USE`/fully-qualified names address a database per server. Group tabs cannot be saved
+   yet (the toolbar disables Save with a tooltip).
 6. Right-clicking a table (in the object list or the connection tree) offers Open/Design plus Drop
    Table, Empty Table (`DELETE FROM`), Truncate Table and Rename; Drop/Empty/Truncate go through
    the shared confirm dialog, while Rename (or `F2` on the selection) edits the name **in place**

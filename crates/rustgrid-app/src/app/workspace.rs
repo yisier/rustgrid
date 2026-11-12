@@ -40,6 +40,7 @@ impl AppView {
                         .connection_index
                         .and_then(|index| self.connections.get(index))
                         .map(|node| node.profile.id.clone()),
+                    group_id: tab.batch.as_ref().map(|batch| batch.group_id),
                     database: tab.database.clone(),
                     schema: tab.schema.clone(),
                     name: tab.name.clone(),
@@ -122,6 +123,7 @@ impl AppView {
         for tab in &self.queries {
             (
                 tab.connection_index,
+                tab.batch.as_ref().map(|batch| batch.group_id),
                 &tab.database,
                 &tab.schema,
                 &tab.name,
@@ -196,12 +198,16 @@ impl AppView {
                     .iter()
                     .position(|node| &node.profile.id == id)
             });
-            self.open_query_with(
-                connection_index,
-                query.database.clone(),
-                query.schema.clone(),
-                cx,
-            );
+            if let Some(group_id) = query.group_id {
+                self.open_new_query_for_group(group_id, cx);
+            } else {
+                self.open_query_with(
+                    connection_index,
+                    query.database.clone(),
+                    query.schema.clone(),
+                    cx,
+                );
+            }
             let file_text = query
                 .saved_path
                 .as_ref()

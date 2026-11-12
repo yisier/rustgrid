@@ -228,6 +228,14 @@ impl AppView {
                 let menu_position = menu.position;
                 items = items
                     .child(self.context_item(
+                        "group-new-query",
+                        t!("main.new_query").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.open_new_query_for_group(id, cx);
+                        }),
+                    ))
+                    .child(self.context_item(
                         "group-new-connection",
                         t!("group.new_connection").to_string(),
                         cx.listener(move |this, _event, _window, cx| {
