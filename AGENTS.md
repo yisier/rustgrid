@@ -1241,8 +1241,10 @@ make more engines cheap later — do not build those features early.
     `SHOW FULL COLUMNS FROM <table>` / `SHOW TABLE STATUS`, never a prepared
     `information_schema.tables` query. UDAL rewrites that to `<db>.tables` (error 3013), so the
     prepared query must not be retried after the database is selected. Routine and event lists use
-    `SHOW FUNCTION STATUS` / `SHOW PROCEDURE STATUS` / `SHOW EVENTS`, and the database settings
-    read the text `information_schema.SCHEMATA` row (falling back to `SHOW CREATE DATABASE`);
+    `SHOW FUNCTION STATUS` / `SHOW PROCEDURE STATUS` / `SHOW EVENTS`, the database settings
+    read the text `information_schema.SCHEMATA` row (falling back to `SHOW CREATE DATABASE`), and
+    the table designer's columns/indexes/foreign keys/triggers/checks/partitions all run through
+    the text protocol with its options from unqualified `SHOW TABLE STATUS`;
   - page queries and DML are rendered with `text_statement` (string values become
     `_utf8mb4 0x…` hex literals, which neither quotes nor `sql_mode` can break), and statements
     without parameters use `raw_sql` so they never prepare either.

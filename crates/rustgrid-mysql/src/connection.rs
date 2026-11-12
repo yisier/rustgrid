@@ -150,6 +150,27 @@ impl MysqlConnection {
         rows.map_err(map_query_error)
     }
 
+    /// Run one metadata query with the protocol the session has settled on. A MySQL-protocol
+    /// proxy (UDAL) accepts text statements after the database is selected but rewrites some
+    /// prepared catalog queries; Navicat and DBX read all table metadata over the text protocol.
+    async fn metadata_rows(
+        &self,
+        connection: &mut MySqlConnection,
+        database: &str,
+        sql: &str,
+        binds: &[&str],
+    ) -> Result<Vec<MySqlRow>> {
+        if self.needs_database() || self.text_protocol() {
+            let values: Vec<BoundValue> = binds.iter().map(|bind| BoundValue::Text(bind)).collect();
+            let sql = text_statement(sql, &values);
+            self.text_rows(connection, database, sql).await
+        } else {
+            self.prepared_rows(connection, database, sql, binds, true)
+                .await
+                .map_err(map_query_error)
+        }
+    }
+
     /// The `INFORMATION_SCHEMA.COLUMNS` rows of one table, ordered by position. `with_generation`
     /// adds `generation_expression`, which only MySQL 5.7.6+ and MariaDB 10.2+ report.
     async fn schema_column_rows(
@@ -158,7 +179,7 @@ impl MysqlConnection {
         database: &str,
         table: &str,
         with_generation: bool,
-    ) -> std::result::Result<Vec<MySqlRow>, sqlx::Error> {
+    ) -> Result<Vec<MySqlRow>> {
         let expression = if with_generation {
             ", generation_expression"
         } else {
@@ -172,7 +193,7 @@ impl MysqlConnection {
              WHERE table_schema = ? AND table_name = ? \
              ORDER BY ordinal_position"
         );
-        self.prepared_rows(connection, database, &sql, &[database, table], true)
+        self.metadata_rows(connection, database, &sql, &[database, table])
             .await
     }
 
@@ -1565,17 +1586,17 @@ impl Connection for MysqlConnection {
     async fn table_schema(&self, database: &str, table: &str) -> Result<TableSchema> {
         let mut connection = self.database_connection(database).await?;
         let mut with_generation = self.generation_expression.load(Ordering::Relaxed);
-        let column_rows = match self
-            .schema_column_rows(&mut connection, database, table, with_generation)
-            .await
-        {
-            Ok(rows) => rows,
-            // MySQL before 5.7.6, MariaDB before 10.2 and a few MySQL-compatible servers have no
-            // `GENERATION_EXPRESSION` column and reject the whole statement with `1054`. Those
-            // servers have no generated columns either, so retry without it — failing the designer
-            // (and structure sync) over an optional metadata column is worse than not reporting it.
-            Err(error) if with_generation && is_unknown_column_error(&error) => {
-                match self
+        let column_rows =
+            match self
+                .schema_column_rows(&mut connection, database, table, with_generation)
+                .await
+            {
+                Ok(rows) => rows,
+                // MySQL before 5.7.6, MariaDB before 10.2 and a few MySQL-compatible servers have no
+                // `GENERATION_EXPRESSION` column and reject the whole statement with `1054`. Those
+                // servers have no generated columns either, so retry without it — failing the designer
+                // (and structure sync) over an optional metadata column is worse than not reporting it.
+                Err(error) if with_generation && is_unknown_column_text_error(&error) => match self
                     .schema_column_rows(&mut connection, database, table, false)
                     .await
                 {
@@ -1584,11 +1605,10 @@ impl Connection for MysqlConnection {
                         self.generation_expression.store(false, Ordering::Relaxed);
                         rows
                     }
-                    Err(_) => return Err(map_query_error(error)),
-                }
-            }
-            Err(error) => return Err(map_query_error(error)),
-        };
+                    Err(_) => return Err(error),
+                },
+                Err(error) => return Err(error),
+            };
 
         let mut columns = Vec::with_capacity(column_rows.len());
         for row in &column_rows {
@@ -1682,17 +1702,17 @@ impl Connection for MysqlConnection {
             });
         }
 
-        let index_rows = sqlx::query(
-            "SELECT index_name, non_unique, index_type, column_name, comment, collation, sub_part \
-             FROM information_schema.statistics \
-             WHERE table_schema = ? AND table_name = ? \
-             ORDER BY index_name, seq_in_index",
-        )
-        .bind(database)
-        .bind(table)
-        .fetch_all(&mut *connection)
-        .await
-        .map_err(map_query_error)?;
+        let index_rows = self
+            .metadata_rows(
+                &mut connection,
+                database,
+                "SELECT index_name, non_unique, index_type, column_name, comment, collation, sub_part \
+                 FROM information_schema.statistics \
+                 WHERE table_schema = ? AND table_name = ? \
+                 ORDER BY index_name, seq_in_index",
+                &[database, table],
+            )
+            .await?;
 
         let mut indexes: Vec<IndexDef> = Vec::new();
         for row in &index_rows {
@@ -1729,23 +1749,23 @@ impl Connection for MysqlConnection {
             }
         }
 
-        let fk_rows = sqlx::query(
-            "SELECT k.constraint_name, k.column_name, k.referenced_table_schema, \
-                    k.referenced_table_name, k.referenced_column_name, r.update_rule, \
-                    r.delete_rule \
-             FROM information_schema.key_column_usage AS k \
-             JOIN information_schema.referential_constraints AS r \
-               ON r.constraint_schema = k.constraint_schema \
-              AND r.constraint_name = k.constraint_name \
-             WHERE k.table_schema = ? AND k.table_name = ? \
-               AND k.referenced_table_name IS NOT NULL \
-             ORDER BY k.constraint_name, k.ordinal_position",
-        )
-        .bind(database)
-        .bind(table)
-        .fetch_all(&mut *connection)
-        .await
-        .map_err(map_query_error)?;
+        let fk_rows = self
+            .metadata_rows(
+                &mut connection,
+                database,
+                "SELECT k.constraint_name, k.column_name, k.referenced_table_schema, \
+                        k.referenced_table_name, k.referenced_column_name, r.update_rule, \
+                        r.delete_rule \
+                 FROM information_schema.key_column_usage AS k \
+                 JOIN information_schema.referential_constraints AS r \
+                   ON r.constraint_schema = k.constraint_schema \
+                  AND r.constraint_name = k.constraint_name \
+                 WHERE k.table_schema = ? AND k.table_name = ? \
+                   AND k.referenced_table_name IS NOT NULL \
+                 ORDER BY k.constraint_name, k.ordinal_position",
+                &[database, table],
+            )
+            .await?;
 
         let mut foreign_keys: Vec<ForeignKeyDef> = Vec::new();
         for row in &fk_rows {
@@ -1780,17 +1800,17 @@ impl Connection for MysqlConnection {
             }
         }
 
-        let trigger_rows = sqlx::query(
-            "SELECT trigger_name, action_timing, event_manipulation, action_statement \
-             FROM information_schema.triggers \
-             WHERE event_object_schema = ? AND event_object_table = ? \
-             ORDER BY trigger_name",
-        )
-        .bind(database)
-        .bind(table)
-        .fetch_all(&mut *connection)
-        .await
-        .map_err(map_query_error)?;
+        let trigger_rows = self
+            .metadata_rows(
+                &mut connection,
+                database,
+                "SELECT trigger_name, action_timing, event_manipulation, action_statement \
+                 FROM information_schema.triggers \
+                 WHERE event_object_schema = ? AND event_object_table = ? \
+                 ORDER BY trigger_name",
+                &[database, table],
+            )
+            .await?;
 
         let mut triggers = Vec::with_capacity(trigger_rows.len());
         for row in &trigger_rows {
@@ -1872,21 +1892,22 @@ impl Connection for MysqlConnection {
         // MySQL 8.0.16+/MariaDB report CHECK constraints in `information_schema`; an older server
         // (or one without the view) simply has none, so the query failure is treated as an empty
         // list rather than failing the whole designer load.
-        let check_rows = sqlx::query(
-            "SELECT tc.constraint_name, cc.check_clause \
-             FROM information_schema.table_constraints AS tc \
-             JOIN information_schema.check_constraints AS cc \
-               ON cc.constraint_schema = tc.constraint_schema \
-              AND cc.constraint_name = tc.constraint_name \
-             WHERE tc.table_schema = ? AND tc.table_name = ? \
-               AND tc.constraint_type = 'CHECK' \
-             ORDER BY tc.constraint_name",
-        )
-        .bind(database)
-        .bind(table)
-        .fetch_all(&mut *connection)
-        .await
-        .unwrap_or_default();
+        let check_rows = self
+            .metadata_rows(
+                &mut connection,
+                database,
+                "SELECT tc.constraint_name, cc.check_clause \
+                 FROM information_schema.table_constraints AS tc \
+                 JOIN information_schema.check_constraints AS cc \
+                   ON cc.constraint_schema = tc.constraint_schema \
+                  AND cc.constraint_name = tc.constraint_name \
+                 WHERE tc.table_schema = ? AND tc.table_name = ? \
+                   AND tc.constraint_type = 'CHECK' \
+                 ORDER BY tc.constraint_name",
+                &[database, table],
+            )
+            .await
+            .unwrap_or_default();
         let checks = check_rows
             .iter()
             .map(|row| CheckDef {
@@ -1895,19 +1916,20 @@ impl Connection for MysqlConnection {
             })
             .collect();
 
-        let partition_rows = sqlx::query(
-            "SELECT partition_name, partition_method, partition_expression, \
-                    partition_description, subpartition_name, subpartition_method, \
-                    subpartition_expression \
-             FROM information_schema.partitions \
-             WHERE table_schema = ? AND table_name = ? AND partition_name IS NOT NULL \
-             ORDER BY partition_ordinal_position, subpartition_ordinal_position",
-        )
-        .bind(database)
-        .bind(table)
-        .fetch_all(&mut *connection)
-        .await
-        .unwrap_or_default();
+        let partition_rows = self
+            .metadata_rows(
+                &mut connection,
+                database,
+                "SELECT partition_name, partition_method, partition_expression, \
+                        partition_description, subpartition_name, subpartition_method, \
+                        subpartition_expression \
+                 FROM information_schema.partitions \
+                 WHERE table_schema = ? AND table_name = ? AND partition_name IS NOT NULL \
+                 ORDER BY partition_ordinal_position, subpartition_ordinal_position",
+                &[database, table],
+            )
+            .await
+            .unwrap_or_default();
         let partitioning = partition_clause(&partition_rows);
 
         Ok(TableSchema {
@@ -3390,15 +3412,10 @@ pub(crate) fn map_query_error(error: sqlx::Error) -> Error {
     Error::Query(error.to_string())
 }
 
-/// Whether the server rejected a statement because it names a column the server does not have
-/// (MySQL error 1054).
-fn is_unknown_column_error(error: &sqlx::Error) -> bool {
-    let sqlx::Error::Database(database_error) = error else {
-        return false;
-    };
-    database_error
-        .try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
-        .is_some_and(|mysql_error| mysql_error.number() == 1054)
+/// Whether a text-protocol query failed because it names a column the server does not have
+/// (MySQL error 1054, already rendered as `"1054 - ..."` by [`map_query_error`]).
+fn is_unknown_column_text_error(error: &Error) -> bool {
+    error.to_string().starts_with("1054 -")
 }
 
 /// Whether a MySQL-protocol middleware rejected the statement with
