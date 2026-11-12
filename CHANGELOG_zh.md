@@ -6,6 +6,14 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.1.13] - 2026-11-12
+
+### 修复
+
+- 通过 UDAL/TeleDB DBProxy 打开数据库时，列出表不再报 `3013`
+  （[#56](https://github.com/yisier/rustgrid/issues/56)）。
+- 通过代理查询时，`varchar` 列的结果不再报 `buffer exhausted`。
+
 ## [0.1.12] - 2026-11-11
 
 ### 新增
