@@ -10,14 +10,6 @@ UI labels are quoted as the app shows them, so this file quotes the English stri
 [`CHANGELOG_zh.md`](CHANGELOG_zh.md) and [`CHANGELOG_ru.md`](CHANGELOG_ru.md) quote the 简体中文 and
 Russian ones.
 
-## [0.1.13] - 2026-11-12
-
-### Fixed
-
-- Opening a database through UDAL/TeleDB's DBProxy no longer reports `3013` while listing tables
-  ([#56](https://github.com/yisier/rustgrid/issues/56)).
-- Query results through the proxy no longer fail with `buffer exhausted` on a `varchar` column.
-
 ## [0.1.12] - 2026-11-11
 
 ### Added
