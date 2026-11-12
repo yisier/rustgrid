@@ -379,6 +379,20 @@ async fn live_text_query_rows_survive_the_proxy_metadata() {
         .list_tables(database)
         .await
         .expect("list tables through the proxy");
+    // The info pane and the Functions/Backup lists must use the text metadata commands too.
+    let options = connection
+        .database_options(database)
+        .await
+        .expect("database options through the proxy");
+    assert!(!options.charset.is_empty());
+    connection
+        .list_routines(database)
+        .await
+        .expect("routines through the proxy");
+    connection
+        .list_events(database)
+        .await
+        .expect("events through the proxy");
     let table = "rustgrid_text_proxy";
     let _ = connection.drop_table(database, table).await;
     connection

@@ -325,6 +325,22 @@ fn respond(stream: &mut TcpStream, sql: &str, deprecate_eof: bool) {
             ]],
             deprecate_eof,
         );
+    } else if sql.starts_with("SHOW FUNCTION STATUS") {
+        write_result_set(
+            stream,
+            &["Db", "Name"],
+            &[vec![Some("shop"), Some("calc_total")]],
+            deprecate_eof,
+        );
+    } else if sql.starts_with("SHOW PROCEDURE STATUS") {
+        write_result_set(stream, &["Db", "Name"], &[], deprecate_eof);
+    } else if sql.starts_with("SHOW EVENTS") {
+        write_result_set(
+            stream,
+            &["Db", "Name"],
+            &[vec![Some("shop"), Some("nightly_cleanup")]],
+            deprecate_eof,
+        );
     } else if sql.starts_with("SELECT routine_name FROM information_schema.routines") {
         write_result_set(
             stream,
@@ -709,15 +725,21 @@ async fn backup_object_lists_use_the_text_protocol() {
 
     let queries = proxy.stop();
     assert!(
-        queries.iter().any(|sql| sql
-            == "SELECT routine_name FROM information_schema.routines \
-                WHERE routine_schema = _utf8mb4 0x73686f70"),
+        queries
+            .iter()
+            .any(|sql| sql == "SHOW FUNCTION STATUS WHERE Db = 'shop'"),
         "{queries:#?}"
     );
     assert!(
-        queries.iter().any(|sql| sql
-            == "SELECT event_name FROM information_schema.events \
-                WHERE event_schema = _utf8mb4 0x73686f70"),
+        queries
+            .iter()
+            .any(|sql| sql == "SHOW PROCEDURE STATUS WHERE Db = 'shop'"),
+        "{queries:#?}"
+    );
+    assert!(
+        queries
+            .iter()
+            .any(|sql| sql == "SHOW EVENTS WHERE Db = 'shop'"),
         "{queries:#?}"
     );
     assert_eq!(

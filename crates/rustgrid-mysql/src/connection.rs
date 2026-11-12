@@ -481,6 +481,65 @@ impl MysqlConnection {
         }
         Ok(names)
     }
+
+    /// The `Name` column of a `SHOW FUNCTION STATUS` / `SHOW PROCEDURE STATUS` / `SHOW EVENTS`
+    /// result.
+    async fn show_status_names(&self, sql: &str, database: &str) -> Result<Vec<String>> {
+        let mut connection = self.database_connection(database).await?;
+        let rows = self
+            .text_rows(&mut connection, database, sql.to_string())
+            .await?;
+        let Some(first) = rows.first() else {
+            return Ok(Vec::new());
+        };
+        let index = first
+            .columns()
+            .iter()
+            .position(|column| {
+                column.name().eq_ignore_ascii_case("Name")
+                    || column.name().eq_ignore_ascii_case("Event")
+            })
+            .unwrap_or(1);
+        Ok(rows
+            .iter()
+            .filter_map(|row| row.try_get::<Option<String>, _>(index).ok().flatten())
+            .collect())
+    }
+
+    /// The text-only database settings metadata a proxy understands. Navicat reads the
+    /// `information_schema.SCHEMATA` row; a proxy that rewrites catalog names falls back to
+    /// `SHOW CREATE DATABASE`, whose DDL names both settings.
+    async fn database_options_via_text(
+        &self,
+        connection: &mut MySqlConnection,
+        name: &str,
+    ) -> Result<DatabaseOptions> {
+        let sql = text_statement(
+            "SELECT default_character_set_name, default_collation_name \
+             FROM information_schema.schemata \
+             WHERE schema_name = ?",
+            &[BoundValue::Text(name)],
+        );
+        if let Ok(rows) = self.text_rows(connection, name, sql).await
+            && let Some(row) = rows.first()
+        {
+            let charset: String = row.try_get(0).map_err(map_query_error)?;
+            let collation: String = row.try_get(1).map_err(map_query_error)?;
+            return Ok(DatabaseOptions {
+                charset,
+                collation,
+                ..Default::default()
+            });
+        }
+
+        let sql = format!("SHOW CREATE DATABASE {}", quote_identifier(name));
+        let rows = self.text_rows(connection, name, sql).await?;
+        let Some(row) = rows.first() else {
+            return Err(Error::Query(format!("database {name} does not exist")));
+        };
+        let ddl = column_text(row, &["Create Database", "Create database"]).unwrap_or_default();
+        Ok(database_options_from_ddl(&ddl))
+    }
 }
 
 /// A pinned MySQL session for running a script statement by statement (see
@@ -1129,6 +1188,9 @@ impl Connection for MysqlConnection {
 
     async fn database_options(&self, name: &str) -> Result<DatabaseOptions> {
         let mut connection = self.database_connection(name).await?;
+        if self.needs_database() {
+            return self.database_options_via_text(&mut connection, name).await;
+        }
         let row = if self.text_protocol() {
             let sql = text_statement(
                 "SELECT default_character_set_name, default_collation_name \
@@ -1136,22 +1198,27 @@ impl Connection for MysqlConnection {
                  WHERE schema_name = ?",
                 &[BoundValue::Text(name)],
             );
-            sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
-                .fetch_all(&mut *connection)
-                .await
-                .map_err(map_query_error)?
+            self.text_rows(&mut connection, name, sql).await?
         } else {
-            self.prepared_rows(
-                &mut connection,
-                name,
-                "SELECT default_character_set_name, default_collation_name \
-                 FROM information_schema.schemata \
-                 WHERE schema_name = ?",
-                &[name],
-                true,
-            )
-            .await
-            .map_err(map_query_error)?
+            match self
+                .prepared_rows(
+                    &mut connection,
+                    name,
+                    "SELECT default_character_set_name, default_collation_name \
+                     FROM information_schema.schemata \
+                     WHERE schema_name = ?",
+                    &[name],
+                    false,
+                )
+                .await
+            {
+                Ok(rows) => rows,
+                Err(error) if is_unknown_command_error(&error) || is_no_database_error(&error) => {
+                    self.mark_text_protocol();
+                    return self.database_options_via_text(&mut connection, name).await;
+                }
+                Err(error) => return Err(map_query_error(error)),
+            }
         }
         .into_iter()
         .next()
@@ -1337,6 +1404,32 @@ impl Connection for MysqlConnection {
     }
 
     async fn list_routines(&self, database: &str) -> Result<Vec<String>> {
+        if self.needs_database() {
+            // Navicat's identifier cache uses the status commands for routines on a proxy; the
+            // `information_schema` path can be rewritten to `<database>.routines` (3013).
+            let mut names = self
+                .show_status_names(
+                    &format!(
+                        "SHOW FUNCTION STATUS WHERE Db = {}",
+                        quote_literal(database)
+                    ),
+                    database,
+                )
+                .await?;
+            names.extend(
+                self.show_status_names(
+                    &format!(
+                        "SHOW PROCEDURE STATUS WHERE Db = {}",
+                        quote_literal(database)
+                    ),
+                    database,
+                )
+                .await?,
+            );
+            names.sort_by_key(|name| name.to_lowercase());
+            names.dedup();
+            return Ok(names);
+        }
         self.catalog_names(
             "SELECT routine_name FROM information_schema.routines WHERE routine_schema = ?",
             "routine_name",
@@ -1346,6 +1439,14 @@ impl Connection for MysqlConnection {
     }
 
     async fn list_events(&self, database: &str) -> Result<Vec<String>> {
+        if self.needs_database() {
+            return self
+                .show_status_names(
+                    &format!("SHOW EVENTS WHERE Db = {}", quote_literal(database)),
+                    database,
+                )
+                .await;
+        }
         self.catalog_names(
             "SELECT event_name FROM information_schema.events WHERE event_schema = ?",
             "event_name",
@@ -3363,6 +3464,26 @@ fn returns_result_set(sql: &str) -> bool {
             | "CHECK"
             | "HELP"
     )
+}
+
+/// The charset and collation named by a `SHOW CREATE DATABASE` DDL.
+fn database_options_from_ddl(ddl: &str) -> DatabaseOptions {
+    let mut options = DatabaseOptions::default();
+    let upper = ddl.to_ascii_uppercase();
+    if let Some(index) = upper.find("CHARACTER SET") {
+        options.charset = ddl_option_value(&ddl[index + "CHARACTER SET".len()..]);
+    }
+    if let Some(index) = upper.find("COLLATE") {
+        options.collation = ddl_option_value(&ddl[index + "COLLATE".len()..]);
+    }
+    options
+}
+
+fn ddl_option_value(rest: &str) -> String {
+    rest.trim_start_matches(|character: char| character.is_whitespace() || character == '=')
+        .chars()
+        .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
+        .collect()
 }
 
 /// Run `sql` (one statement or a script) and decode every result set it returns, pairing each with
