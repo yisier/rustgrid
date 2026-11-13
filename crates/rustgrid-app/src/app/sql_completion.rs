@@ -1000,6 +1000,19 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_statement_leads_with_select() {
+        // The issue #58 report: typing `se` in an empty editor must lead with SELECT, not the
+        // functions and keywords that merely share the prefix.
+        let source = empty_catalog_source();
+        let labels = labels_for(&source, "se");
+        assert_eq!(
+            labels.first().map(String::as_str),
+            Some("SELECT"),
+            "{labels:?}"
+        );
+    }
+
+    #[test]
     fn a_table_is_found_by_any_part_of_its_name() {
         let source = catalog_source(&["wms_asn", "users"], &[]);
         // `as` is inside `wms_asn`, so the table is offered rather than filtered away...
