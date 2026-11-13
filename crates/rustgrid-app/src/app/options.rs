@@ -661,6 +661,11 @@ impl AppView {
         self.set_language(language, cx);
         self.persist_settings();
         cx.notify();
+    }
+
+    /// 确定: apply the staged settings and close the Options window.
+    fn apply_options_and_close(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.apply_options(window, cx);
         self.close_options(window, cx);
     }
 
@@ -1622,13 +1627,21 @@ impl AppView {
                         "options-ok",
                         t!("form.ok").to_string(),
                         true,
-                        cx.listener(|this, _event, window, cx| this.apply_options(window, cx)),
+                        cx.listener(|this, _event, window, cx| {
+                            this.apply_options_and_close(window, cx)
+                        }),
                     ))
                     .child(self.dialog_button(
                         "options-cancel",
                         t!("form.cancel").to_string(),
                         false,
                         cx.listener(|this, _event, window, cx| this.close_options(window, cx)),
+                    ))
+                    .child(self.dialog_button(
+                        "options-apply",
+                        t!("form.apply").to_string(),
+                        false,
+                        cx.listener(|this, _event, window, cx| this.apply_options(window, cx)),
                     )),
             )
             .text_color(rgb(theme.text))
