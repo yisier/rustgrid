@@ -15,7 +15,8 @@ use rustgrid_core::{
 };
 use sqlx::mysql::{MySqlColumn, MySqlRow};
 use sqlx::{
-    Acquire, AssertSqlSafe, Column, Either, Executor, Row, SqlSafeStr, Statement, ValueRef,
+    Acquire, AssertSqlSafe, Column, Either, Executor, Row, SqlSafeStr, Statement, TypeInfo,
+    ValueRef,
 };
 use sqlx::{MySql, MySqlConnection, MySqlPool, pool::PoolConnection};
 
@@ -961,11 +962,16 @@ impl Connection for MysqlConnection {
                 .map_err(map_query_error)?
         };
 
+        let kinds = rows.first().map(cell_kinds).unwrap_or_default();
         let mut decoded = Vec::with_capacity(rows.len());
         for row in &rows {
             let mut values = Vec::with_capacity(columns.len());
             for index in 0..columns.len() {
-                values.push(decode_cell(row, index));
+                values.push(decode_cell_typed(
+                    row,
+                    index,
+                    kinds.get(index).copied().unwrap_or(CellKind::Raw),
+                ));
             }
             decoded.push(values);
         }
@@ -3749,6 +3755,7 @@ async fn fetch_results(connection: &mut MySqlConnection, sql: &str) -> Result<Ve
         sqlx::raw_sql(sqlx::AssertSqlSafe(sql.to_string())).fetch_many(&mut *connection);
     let mut results: Vec<QueryResult> = Vec::new();
     let mut columns: Vec<ColumnInfo> = Vec::new();
+    let mut kinds: Vec<CellKind> = Vec::new();
     let mut rows: Vec<Vec<CellValue>> = Vec::new();
     while let Some(item) = stream.try_next().await.map_err(map_query_error)? {
         match item {
@@ -3762,14 +3769,20 @@ async fn fetch_results(connection: &mut MySqlConnection, sql: &str) -> Result<Ve
                     has_result_set,
                     last_insert_id: Some(done.last_insert_id()).filter(|id| *id != 0),
                 });
+                kinds.clear();
             }
             Either::Right(row) => {
                 if columns.is_empty() && rows.is_empty() {
                     columns = columns_from_row(&row);
+                    kinds = cell_kinds(&row);
                 }
                 let mut values = Vec::with_capacity(columns.len());
                 for index in 0..columns.len() {
-                    values.push(decode_cell(&row, index));
+                    values.push(decode_cell_typed(
+                        &row,
+                        index,
+                        kinds.get(index).copied().unwrap_or(CellKind::Raw),
+                    ));
                 }
                 rows.push(values);
             }
@@ -3816,11 +3829,16 @@ async fn execute_one(connection: &mut MySqlConnection, sql: &str) -> Result<Quer
             None => describe_columns(connection, sql).await.unwrap_or_default(),
         };
 
+        let kinds = rows.first().map(cell_kinds).unwrap_or_default();
         let mut decoded = Vec::with_capacity(rows.len());
         for row in &rows {
             let mut values = Vec::with_capacity(columns.len());
             for index in 0..columns.len() {
-                values.push(decode_cell(row, index));
+                values.push(decode_cell_typed(
+                    row,
+                    index,
+                    kinds.get(index).copied().unwrap_or(CellKind::Raw),
+                ));
             }
             decoded.push(values);
         }
@@ -3951,7 +3969,147 @@ fn has_sql_content(fragment: &str) -> bool {
     false
 }
 
+/// The decode path a result column needs, chosen once per result set instead of trying every
+/// `CellValue` variant on every cell. A failed `try_get` builds an error (and its boxed source), so
+/// the old every-type probe cost several allocations per text cell — seconds on a million-row
+/// query, where Navicat (a C client that decodes per column type) stays around two.
+#[derive(Clone, Copy)]
+enum CellKind {
+    Int,
+    Uint,
+    Float,
+    DateTime,
+    Date,
+    Time,
+    Text,
+    /// DECIMAL, JSON, YEAR, BIT, SET, BLOB and the other binary/encoded types: read the raw value
+    /// and keep it as UTF-8 text when it is valid, exactly like the old fallback did.
+    Raw,
+}
+
+impl CellKind {
+    fn from_type_name(name: &str) -> Self {
+        let is = |candidates: &[&str]| {
+            candidates
+                .iter()
+                .any(|candidate| name.eq_ignore_ascii_case(candidate))
+        };
+        if is(&[
+            "TINYINT UNSIGNED",
+            "SMALLINT UNSIGNED",
+            "MEDIUMINT UNSIGNED",
+            "INT UNSIGNED",
+            "BIGINT UNSIGNED",
+        ]) {
+            Self::Uint
+        } else if is(&[
+            "BOOLEAN",
+            "TINYINT",
+            "SMALLINT",
+            "MEDIUMINT",
+            "INT",
+            "BIGINT",
+        ]) {
+            Self::Int
+        } else if is(&["FLOAT", "DOUBLE"]) {
+            Self::Float
+        } else if is(&["DATETIME", "TIMESTAMP"]) {
+            Self::DateTime
+        } else if is(&["DATE"]) {
+            Self::Date
+        } else if is(&["TIME"]) {
+            Self::Time
+        } else if is(&[
+            "CHAR",
+            "VARCHAR",
+            "TINYTEXT",
+            "TEXT",
+            "MEDIUMTEXT",
+            "LONGTEXT",
+            "ENUM",
+        ]) {
+            Self::Text
+        } else {
+            Self::Raw
+        }
+    }
+}
+
+/// The decoder each column of `row` needs, in column order.
+fn cell_kinds(row: &MySqlRow) -> Vec<CellKind> {
+    row.columns()
+        .iter()
+        .map(|column| CellKind::from_type_name(column.type_info().name()))
+        .collect()
+}
+
 fn decode_cell(row: &MySqlRow, index: usize) -> CellValue {
+    let kind = row
+        .columns()
+        .get(index)
+        .map(|column| CellKind::from_type_name(column.type_info().name()))
+        .unwrap_or(CellKind::Raw);
+    decode_cell_typed(row, index, kind)
+}
+
+/// Decode one cell through its column's own path. A value the chosen decoder rejects falls back to
+/// the full probe, so an unusual server/type combination keeps the old result.
+fn decode_cell_typed(row: &MySqlRow, index: usize, kind: CellKind) -> CellValue {
+    match kind {
+        CellKind::Int => match row.try_get::<Option<i64>, _>(index) {
+            Ok(Some(value)) => return CellValue::Int(value),
+            Ok(None) => return CellValue::Null,
+            Err(_) => {}
+        },
+        CellKind::Uint => match row.try_get::<Option<u64>, _>(index) {
+            Ok(Some(value)) => return CellValue::Uint(value),
+            Ok(None) => return CellValue::Null,
+            Err(_) => {}
+        },
+        CellKind::Float => match row.try_get::<Option<f64>, _>(index) {
+            Ok(Some(value)) => return CellValue::Float(value),
+            Ok(None) => return CellValue::Null,
+            Err(_) => {}
+        },
+        CellKind::DateTime => match row.try_get::<Option<DateTime<Utc>>, _>(index) {
+            Ok(Some(value)) => return CellValue::Text(value.naive_utc().to_string()),
+            Ok(None) => return CellValue::Null,
+            Err(_) => {}
+        },
+        CellKind::Date => match row.try_get::<Option<NaiveDate>, _>(index) {
+            Ok(Some(value)) => return CellValue::Text(value.to_string()),
+            Ok(None) => return CellValue::Null,
+            Err(_) => {}
+        },
+        CellKind::Time => match row.try_get::<Option<NaiveTime>, _>(index) {
+            Ok(Some(value)) => return CellValue::Text(value.to_string()),
+            Ok(None) => return CellValue::Null,
+            Err(_) => {}
+        },
+        CellKind::Text => match row.try_get::<Option<String>, _>(index) {
+            Ok(Some(value)) => return CellValue::Text(value),
+            Ok(None) => return CellValue::Null,
+            Err(_) => {}
+        },
+        CellKind::Raw => {
+            return match row.try_get_unchecked::<Option<&str>, _>(index) {
+                Ok(Some(value)) => CellValue::Text(value.to_string()),
+                Ok(None) => CellValue::Null,
+                Err(_) => match row.try_get_unchecked::<Option<Vec<u8>>, _>(index) {
+                    Ok(Some(bytes)) => match String::from_utf8(bytes) {
+                        Ok(text) => CellValue::Text(text),
+                        Err(error) => CellValue::Bytes(error.into_bytes()),
+                    },
+                    Ok(None) => CellValue::Null,
+                    Err(_) => CellValue::Null,
+                },
+            };
+        }
+    }
+    decode_cell_fallback(row, index)
+}
+
+fn decode_cell_fallback(row: &MySqlRow, index: usize) -> CellValue {
     let is_null = row
         .try_get_raw(index)
         .map(|raw| raw.is_null())
@@ -4006,7 +4164,7 @@ fn decode_cell(row: &MySqlRow, index: usize) -> CellValue {
 #[cfg(test)]
 mod tests {
     use super::{
-        Engine, column_sql, filter_clause, format_default, index_sql, order_clause,
+        CellKind, Engine, column_sql, filter_clause, format_default, index_sql, order_clause,
         returns_result_set, schema_sql, split_statements, table_options_sql, trigger_sql,
     };
     use rustgrid_core::{
@@ -4014,6 +4172,41 @@ mod tests {
         FilterOperator, IndexColumnDef, IndexDef, PageRequest, SortColumn, TableOptions,
         TableSchema, TriggerDef,
     };
+
+    #[test]
+    fn chooses_one_decoder_from_each_column_type() {
+        // The million-row query must not probe every `CellValue` variant per cell: the column's
+        // reported type picks its own decoder once per result set.
+        assert!(matches!(CellKind::from_type_name("BOOLEAN"), CellKind::Int));
+        assert!(matches!(
+            CellKind::from_type_name("BIGINT UNSIGNED"),
+            CellKind::Uint
+        ));
+        assert!(matches!(
+            CellKind::from_type_name("DOUBLE"),
+            CellKind::Float
+        ));
+        assert!(matches!(
+            CellKind::from_type_name("DATETIME"),
+            CellKind::DateTime
+        ));
+        assert!(matches!(
+            CellKind::from_type_name("TIMESTAMP"),
+            CellKind::DateTime
+        ));
+        assert!(matches!(CellKind::from_type_name("DATE"), CellKind::Date));
+        assert!(matches!(CellKind::from_type_name("TIME"), CellKind::Time));
+        assert!(matches!(
+            CellKind::from_type_name("VARCHAR"),
+            CellKind::Text
+        ));
+        assert!(matches!(CellKind::from_type_name("TEXT"), CellKind::Text));
+        // Decimal/JSON/bit/blob values keep the raw path (exact text when it is UTF-8).
+        assert!(matches!(CellKind::from_type_name("DECIMAL"), CellKind::Raw));
+        assert!(matches!(CellKind::from_type_name("JSON"), CellKind::Raw));
+        assert!(matches!(CellKind::from_type_name("BLOB"), CellKind::Raw));
+        assert!(matches!(CellKind::from_type_name("YEAR"), CellKind::Raw));
+    }
 
     #[test]
     fn renders_index_columns_with_their_own_options() {

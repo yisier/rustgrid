@@ -2,10 +2,10 @@
 
 use futures_util::TryStreamExt;
 use rustgrid_core::{BackupObjectKind, Error, ObjectDump, Result, RoutineKind};
-use sqlx::{AssertSqlSafe, Row};
+use sqlx::{AssertSqlSafe, Column, Row, TypeInfo};
 
 use crate::connection::{PostgresConnection, map_query_error};
-use crate::helpers::{qualify, quote_identifier, render_literal};
+use crate::helpers::{decode_text_cell_with_type, qualify, quote_identifier, render_literal};
 use rustgrid_core::Connection;
 
 /// Rows per `INSERT` while restoring a table.
@@ -99,17 +99,25 @@ pub(crate) async fn stream_table_rows(
         sqlx::raw_sql(AssertSqlSafe(format!("SELECT * FROM {qualified}"))).fetch(&mut *pinned);
     let mut count = 0u64;
     let mut column_count = 0usize;
+    let mut types: Vec<String> = Vec::new();
     while let Some(item) = stream.try_next().await.map_err(map_query_error)? {
         if column_count == 0 {
             column_count = item.columns().len();
+            types = item
+                .columns()
+                .iter()
+                .map(|column| column.type_info().name().to_ascii_uppercase())
+                .collect();
         }
         let mut tuple = String::from("(");
         for index in 0..column_count {
             if index > 0 {
                 tuple.push_str(", ");
             }
-            tuple.push_str(&render_literal(&crate::helpers::decode_text_cell(
-                &item, index,
+            tuple.push_str(&render_literal(&decode_text_cell_with_type(
+                &item,
+                index,
+                types.get(index).map(String::as_str).unwrap_or(""),
             )));
         }
         tuple.push(')');

@@ -10,7 +10,9 @@ use rustgrid_core::{
 };
 use sqlx::error::DatabaseError;
 use sqlx::sqlite::{SqliteColumn, SqliteRow};
-use sqlx::{AssertSqlSafe, Column, Executor, Row, SqlSafeStr, SqlitePool, Statement, ValueRef};
+use sqlx::{
+    AssertSqlSafe, Column, Executor, Row, SqlSafeStr, SqlitePool, Statement, TypeInfo, ValueRef,
+};
 use sqlx::{Sqlite, pool::PoolConnection};
 
 /// Rows fetched into one `INSERT` batch while restoring a backup. Kept moderate so a statement
@@ -1337,6 +1339,41 @@ fn optional_text(row: &SqliteRow, name: &str) -> Option<String> {
 }
 
 fn decode_cell(row: &SqliteRow, index: usize) -> CellValue {
+    let Ok(raw) = row.try_get_raw(index) else {
+        return CellValue::Null;
+    };
+    if raw.is_null() {
+        return CellValue::Null;
+    }
+
+    // SQLite is dynamically typed, so the value's storage class (not the column's declared type)
+    // decides how it decodes. Reading it once and dispatching replaces the old try-every-class
+    // probe, whose failed `try_get`s each build an error — the same cost MySQL's million-row query
+    // paid per cell.
+    let type_info = raw.type_info();
+    match type_info.name() {
+        "INTEGER" => row
+            .try_get::<i64, _>(index)
+            .map_or(CellValue::Null, CellValue::Int),
+        "REAL" => row
+            .try_get::<f64, _>(index)
+            .map_or(CellValue::Null, CellValue::Float),
+        "TEXT" => row
+            .try_get::<String, _>(index)
+            .map_or(CellValue::Null, CellValue::Text),
+        "BLOB" => match row.try_get::<Vec<u8>, _>(index) {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(text) => CellValue::Text(text),
+                Err(error) => CellValue::Bytes(error.into_bytes()),
+            },
+            Err(_) => CellValue::Null,
+        },
+        // Declared-type extensions (`BOOLEAN`/`DATE`/…) and unexpected classes keep the old probe.
+        _ => decode_cell_fallback(row, index),
+    }
+}
+
+fn decode_cell_fallback(row: &SqliteRow, index: usize) -> CellValue {
     let is_null = row
         .try_get_raw(index)
         .map(|value| value.is_null())
@@ -1345,9 +1382,6 @@ fn decode_cell(row: &SqliteRow, index: usize) -> CellValue {
         return CellValue::Null;
     }
 
-    // SQLite is dynamically typed, so the storage class of the value (not the column's declared
-    // type) decides how it decodes. Compatibility checks make each `try_get` fail fast when the
-    // value is a different class.
     if let Ok(value) = row.try_get::<i64, _>(index) {
         return CellValue::Int(value);
     }

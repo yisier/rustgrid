@@ -6,7 +6,7 @@ use rustgrid_core::{
     CellValue, ColumnInfo, FilterCondition, FilterConjunction, FilterNode, FilterOperator,
     PageRequest,
 };
-use sqlx::{Column, Row, TypeInfo, ValueRef};
+use sqlx::{Row, ValueRef};
 
 /// Quote an identifier with double quotes, escaping an embedded `"` as `""`.
 pub(crate) fn quote_identifier(identifier: &str) -> String {
@@ -503,8 +503,13 @@ fn condition_piece(
 }
 
 /// Map a text-format cell (raw SQL protocol, where every value arrives as text) to a
-/// [`CellValue`], using the wire type name.
-pub(crate) fn decode_text_cell(row: &sqlx::postgres::PgRow, index: usize) -> CellValue {
+/// [`CellValue`], using the column's upper-cased wire type name. The million-row query path
+/// computes the names once per result set instead of allocating one per cell.
+pub(crate) fn decode_text_cell_with_type(
+    row: &sqlx::postgres::PgRow,
+    index: usize,
+    type_name: &str,
+) -> CellValue {
     let is_null = row
         .try_get_raw(index)
         .map(|raw| raw.is_null())
@@ -512,13 +517,8 @@ pub(crate) fn decode_text_cell(row: &sqlx::postgres::PgRow, index: usize) -> Cel
     if is_null {
         return CellValue::Null;
     }
-    let type_name = row
-        .columns()
-        .get(index)
-        .map(|column| column.type_info().name().to_ascii_uppercase())
-        .unwrap_or_default();
     match row.try_get_unchecked::<String, _>(index) {
-        Ok(text) => cell_from_text(&type_name, text),
+        Ok(text) => cell_from_text(type_name, text),
         Err(_) => match row.try_get_unchecked::<Vec<u8>, _>(index) {
             Ok(bytes) => CellValue::Bytes(bytes),
             Err(_) => CellValue::Null,

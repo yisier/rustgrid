@@ -16,8 +16,8 @@ use sqlx::{AssertSqlSafe, Column, Either, Executor, Row, SqlSafeStr, Statement, 
 use sqlx::{Postgres, pool::PoolConnection};
 
 use crate::helpers::{
-    build_fetch_page_sql, cell_from_format_type, decode_text_cell, filter_clause, qualify,
-    quote_identifier, split_qualified, split_statements,
+    build_fetch_page_sql, cell_from_format_type, decode_text_cell_with_type, filter_clause,
+    qualify, quote_identifier, split_qualified, split_statements,
 };
 
 /// The largest number of lazily-created (non-default) per-database pools kept alive at once.
@@ -1266,6 +1266,7 @@ async fn collect_results(
     let mut stream = sqlx::raw_sql(AssertSqlSafe(sql.to_string())).fetch_many(&mut *connection);
     let mut results: Vec<QueryResult> = Vec::new();
     let mut columns: Vec<ColumnInfo> = Vec::new();
+    let mut types: Vec<String> = Vec::new();
     let mut rows: Vec<Vec<CellValue>> = Vec::new();
     while let Some(item) = stream.try_next().await.map_err(map_query_error)? {
         match item {
@@ -1279,13 +1280,25 @@ async fn collect_results(
                     has_result_set,
                     last_insert_id: None,
                 });
+                types.clear();
             }
             Either::Right(row) => {
                 if columns.is_empty() && rows.is_empty() {
                     columns = row.columns().iter().map(column_info).collect();
+                    types = row
+                        .columns()
+                        .iter()
+                        .map(|column| column.type_info().name().to_ascii_uppercase())
+                        .collect();
                 }
                 let values = (0..columns.len())
-                    .map(|index| decode_text_cell(&row, index))
+                    .map(|index| {
+                        decode_text_cell_with_type(
+                            &row,
+                            index,
+                            types.get(index).map(String::as_str).unwrap_or(""),
+                        )
+                    })
                     .collect();
                 rows.push(values);
             }

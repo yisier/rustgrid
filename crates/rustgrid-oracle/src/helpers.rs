@@ -704,51 +704,53 @@ pub(crate) fn metadata_column(metadata: &Metadata) -> ColumnInfo {
 pub(crate) fn decode_cell(row: &Row, index: usize) -> CellValue {
     let metadata = row.columns().get(index);
     if let Some(metadata) = metadata {
+        // `Option<T>` reports `None` for SQL NULL without converting the value, so a known type
+        // returns Null here instead of falling through the common-representation probes below.
+        macro_rules! typed {
+            ($ty:ty, $map:expr) => {
+                match row.get::<Option<$ty>>(index) {
+                    Ok(Some(value)) => return $map(value),
+                    Ok(None) => return CellValue::Null,
+                    Err(_) => {}
+                }
+            };
+        }
         let db_type = metadata.db_type();
         if db_type == oracledb::DB_TYPE_NUMBER {
-            if let Ok(Some(number)) = row.get::<Option<OracleNumber>>(index) {
-                return number_cell(number, metadata.scale());
-            }
+            typed!(OracleNumber, |number: OracleNumber| number_cell(
+                number,
+                metadata.scale()
+            ));
         } else if db_type == oracledb::DB_TYPE_BINARY_FLOAT {
-            if let Ok(Some(value)) = row.get::<Option<f32>>(index) {
-                return CellValue::Float(f64::from(value));
-            }
+            typed!(f32, |value: f32| CellValue::Float(f64::from(value)));
         } else if db_type == oracledb::DB_TYPE_BINARY_DOUBLE {
-            if let Ok(Some(value)) = row.get::<Option<f64>>(index) {
-                return CellValue::Float(value);
-            }
+            typed!(f64, CellValue::Float);
         } else if db_type == oracledb::DB_TYPE_BOOLEAN {
-            if let Ok(Some(value)) = row.get::<Option<bool>>(index) {
-                return CellValue::Bool(value);
-            }
+            typed!(bool, CellValue::Bool);
         } else if db_type.is_binary_type() {
-            if let Ok(Some(value)) = row.get::<Option<Vec<u8>>>(index) {
-                return CellValue::Bytes(value);
-            }
+            typed!(Vec<u8>, CellValue::Bytes);
         } else if db_type.is_date_type() {
-            if let Ok(Some(value)) = row.get::<Option<OracleTimestamp>>(index) {
-                return CellValue::Text(value.to_string());
-            }
+            typed!(OracleTimestamp, |value: OracleTimestamp| CellValue::Text(
+                value.to_string()
+            ));
         } else if db_type == oracledb::DB_TYPE_INTERVAL_DS {
-            if let Ok(Some(value)) = row.get::<Option<OracleIntervalDS>>(index) {
-                return CellValue::Text(value.to_string());
-            }
+            typed!(OracleIntervalDS, |value: OracleIntervalDS| CellValue::Text(
+                value.to_string()
+            ));
         } else if db_type == oracledb::DB_TYPE_INTERVAL_YM {
-            if let Ok(Some(value)) = row.get::<Option<OracleIntervalYM>>(index) {
-                return CellValue::Text(value.to_string());
-            }
-        } else if db_type == oracledb::DB_TYPE_JSON
-            && let Ok(Some(value)) = row.get::<Option<JsonValue>>(index)
-        {
-            return CellValue::Text(format!("{value:?}"));
-        } else if db_type == oracledb::DB_TYPE_VECTOR
-            && let Ok(Some(value)) = row.get::<Option<Vector>>(index)
-        {
-            return CellValue::Text(format!("{value:?}"));
-        } else if db_type.is_string_type()
-            && let Ok(Some(value)) = row.get::<Option<String>>(index)
-        {
-            return CellValue::Text(value);
+            typed!(OracleIntervalYM, |value: OracleIntervalYM| CellValue::Text(
+                value.to_string()
+            ));
+        } else if db_type == oracledb::DB_TYPE_JSON {
+            typed!(JsonValue, |value: JsonValue| CellValue::Text(format!(
+                "{value:?}"
+            )));
+        } else if db_type == oracledb::DB_TYPE_VECTOR {
+            typed!(Vector, |value: Vector| CellValue::Text(format!(
+                "{value:?}"
+            )));
+        } else if db_type.is_string_type() {
+            typed!(String, CellValue::Text);
         }
     }
 
