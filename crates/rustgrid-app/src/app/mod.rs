@@ -2285,6 +2285,8 @@ pub(super) const QUERY_RESULT_MAX_HEIGHT: f32 = 1000.0;
 /// The query editor keeps at least this height when the result splitter is dragged up.
 pub(super) const QUERY_EDITOR_MIN_HEIGHT: f32 = 80.0;
 const GRID_ROW_HEIGHT: f32 = 24.0;
+/// The panel font sizes offered by the 常规 / 数据 pages, and the ladder Ctrl + wheel steps along.
+pub(super) const UI_FONT_SIZES: &[f32] = &[10.0, 11.0, 12.0, 12.5, 13.0, 14.0, 15.0, 16.0];
 const GRID_COLUMN_WIDTH: f32 = 120.0;
 /// Filter-builder metrics, a compact take on the reference design: 24px controls, a 66px left
 /// rail for the in-group conjunction control, 22px row actions, and a 24px between-groups bar
@@ -2731,6 +2733,20 @@ pub struct AppView {
     /// The SQL editor font family; empty means the built-in default.
     editor_font_family: String,
     editor_font_size: u32,
+    /// The navigation panel's font family; empty means the system default.
+    nav_font_family: String,
+    /// The navigation panel's font size in px.
+    nav_font_size: f32,
+    /// The main panel's font family; empty means the system default.
+    main_font_family: String,
+    /// The main panel's font size in px.
+    main_font_size: f32,
+    /// The table grid's font family; empty means the system default.
+    grid_font_family: String,
+    /// The table grid's font size in px.
+    grid_font_size: f32,
+    /// Ctrl/⌘ + mouse wheel over a panel resizes its font.
+    ui_ctrl_wheel_zoom: bool,
     editor_line_numbers: bool,
     editor_word_wrap: bool,
     /// Whether Ctrl + mouse wheel resizes the SQL editor's font (Options → 编辑器).
@@ -2740,6 +2756,17 @@ pub struct AppView {
     /// Staged editor settings, applied on OK so Cancel discards them.
     options_editor_font_family: String,
     options_editor_font_size: u32,
+    /// The staged 常规 page navigation-panel font family and size, applied on OK.
+    options_nav_font_family: String,
+    options_nav_font_size: f32,
+    /// The staged 常规 page main-panel font family and size, applied on OK.
+    options_main_font_family: String,
+    options_main_font_size: f32,
+    /// The staged 数据 page table font family and size, applied on OK.
+    options_grid_font_family: String,
+    options_grid_font_size: f32,
+    /// The staged 快捷键 page Ctrl + wheel zoom toggle, applied on OK.
+    options_ui_ctrl_wheel_zoom: bool,
     options_editor_line_numbers: bool,
     options_editor_word_wrap: bool,
     /// The staged 编辑器 page toggle (Ctrl + wheel zooms the editor font), applied on OK.
@@ -2777,6 +2804,13 @@ pub struct AppView {
     options_shortcut_filter: String,
     editor_font_combo: Option<Entity<ComboBox>>,
     editor_size_combo: Option<Entity<ComboBox>>,
+    /// The 常规 / 数据 pages' panel font family and size dropdowns.
+    nav_font_combo: Option<Entity<ComboBox>>,
+    nav_size_combo: Option<Entity<ComboBox>>,
+    main_font_combo: Option<Entity<ComboBox>>,
+    main_size_combo: Option<Entity<ComboBox>>,
+    grid_font_combo: Option<Entity<ComboBox>>,
+    grid_size_combo: Option<Entity<ComboBox>>,
     /// The OS window hosting the Options dialog, if open.
     options_window: Option<WindowHandle<gpui_kit::component::Root>>,
     /// Focus target for the Options window, so ESC works before any control is focused.
@@ -3607,12 +3641,26 @@ impl AppView {
             language_combo: None,
             editor_font_family: settings.editor_font_family.clone(),
             editor_font_size: settings.editor_font_size,
+            nav_font_family: settings.nav_font_family.clone(),
+            nav_font_size: settings.nav_font_size.clamp(9.0, 24.0),
+            main_font_family: settings.main_font_family.clone(),
+            main_font_size: settings.main_font_size.clamp(9.0, 24.0),
+            grid_font_family: settings.grid_font_family.clone(),
+            grid_font_size: settings.grid_font_size.clamp(9.0, 24.0),
+            ui_ctrl_wheel_zoom: settings.ui_ctrl_wheel_zoom,
             editor_line_numbers: settings.editor_line_numbers,
             editor_word_wrap: settings.editor_word_wrap,
             editor_ctrl_wheel_zoom: settings.editor_ctrl_wheel_zoom,
             options_section: OptionsSection::General,
             options_editor_font_family: settings.editor_font_family.clone(),
             options_editor_font_size: settings.editor_font_size,
+            options_nav_font_family: settings.nav_font_family.clone(),
+            options_nav_font_size: settings.nav_font_size,
+            options_main_font_family: settings.main_font_family.clone(),
+            options_main_font_size: settings.main_font_size,
+            options_grid_font_family: settings.grid_font_family.clone(),
+            options_grid_font_size: settings.grid_font_size,
+            options_ui_ctrl_wheel_zoom: settings.ui_ctrl_wheel_zoom,
             options_editor_line_numbers: settings.editor_line_numbers,
             options_editor_word_wrap: settings.editor_word_wrap,
             options_editor_ctrl_wheel_zoom: settings.editor_ctrl_wheel_zoom,
@@ -3635,6 +3683,12 @@ impl AppView {
             options_shortcut_filter: String::new(),
             editor_font_combo: None,
             editor_size_combo: None,
+            nav_font_combo: None,
+            nav_size_combo: None,
+            main_font_combo: None,
+            main_size_combo: None,
+            grid_font_combo: None,
+            grid_size_combo: None,
             options_window: None,
             options_focus: cx.focus_handle(),
             update_status: update::UpdateStatus::Idle,
@@ -3982,6 +4036,13 @@ impl AppView {
             view_modes: self.view_modes.clone(),
             editor_font_family: self.editor_font_family.clone(),
             editor_font_size: self.editor_font_size,
+            nav_font_family: self.nav_font_family.clone(),
+            nav_font_size: self.nav_font_size,
+            main_font_family: self.main_font_family.clone(),
+            main_font_size: self.main_font_size,
+            grid_font_family: self.grid_font_family.clone(),
+            grid_font_size: self.grid_font_size,
+            ui_ctrl_wheel_zoom: self.ui_ctrl_wheel_zoom,
             editor_line_numbers: self.editor_line_numbers,
             editor_word_wrap: self.editor_word_wrap,
             editor_ctrl_wheel_zoom: self.editor_ctrl_wheel_zoom,
@@ -4082,6 +4143,85 @@ impl AppView {
     /// The SQL editor's font size in px, clamped to a usable range.
     pub(super) fn editor_font_size(&self) -> f32 {
         self.editor_font_size.clamp(8, 48) as f32
+    }
+
+    /// A panel's font family, or `None` for the system default.
+    fn panel_font(family: &str) -> Option<SharedString> {
+        (!family.is_empty()).then(|| SharedString::from(family))
+    }
+
+    pub(super) fn nav_font(&self) -> Option<SharedString> {
+        Self::panel_font(&self.nav_font_family)
+    }
+
+    pub(super) fn main_font(&self) -> Option<SharedString> {
+        Self::panel_font(&self.main_font_family)
+    }
+
+    pub(super) fn grid_font(&self) -> Option<SharedString> {
+        Self::panel_font(&self.grid_font_family)
+    }
+
+    pub(super) fn nav_font_size(&self) -> f32 {
+        self.nav_font_size.clamp(9.0, 24.0)
+    }
+
+    pub(super) fn main_font_size(&self) -> f32 {
+        self.main_font_size.clamp(9.0, 24.0)
+    }
+
+    pub(super) fn grid_font_size(&self) -> f32 {
+        self.grid_font_size.clamp(9.0, 24.0)
+    }
+
+    /// Ctrl + wheel over the navigation panel: step its font size and remember it. Returns whether
+    /// the gesture was consumed (an unconsumed wheel still scrolls the tree).
+    pub(super) fn zoom_nav_font(&mut self, step: f32, cx: &mut Context<'_, Self>) -> bool {
+        if !self.ui_ctrl_wheel_zoom || step == 0.0 {
+            return false;
+        }
+        let Some(next) = next_ui_font_size(self.nav_font_size, step) else {
+            return false;
+        };
+        self.nav_font_size = next;
+        self.options_nav_font_size = next;
+        self.tree_pane.update(cx, |_, cx| cx.notify());
+        self.persist_settings();
+        cx.notify();
+        true
+    }
+
+    /// Ctrl + wheel over the main panel: step its font size and remember it.
+    pub(super) fn zoom_main_font(&mut self, step: f32, cx: &mut Context<'_, Self>) -> bool {
+        if !self.ui_ctrl_wheel_zoom || step == 0.0 {
+            return false;
+        }
+        let Some(next) = next_ui_font_size(self.main_font_size, step) else {
+            return false;
+        };
+        self.main_font_size = next;
+        self.options_main_font_size = next;
+        self.persist_settings();
+        cx.notify();
+        true
+    }
+
+    /// Ctrl + wheel over a table grid: step its font size and remember it.
+    pub(super) fn zoom_grid_font(&mut self, step: f32, cx: &mut Context<'_, Self>) -> bool {
+        if !self.ui_ctrl_wheel_zoom || step == 0.0 {
+            return false;
+        }
+        let Some(next) = next_ui_font_size(self.grid_font_size, step) else {
+            return false;
+        };
+        self.grid_font_size = next;
+        self.options_grid_font_size = next;
+        for grid in &self.grids {
+            grid.update(cx, |_, cx| cx.notify());
+        }
+        self.persist_settings();
+        cx.notify();
+        true
     }
 
     /// Ctrl + wheel over a SQL editor: step the font size to the next/previous size the 编辑器
@@ -5327,6 +5467,19 @@ fn tree_driver_icon(
         .into_any_element()
 }
 
+/// The next panel size on [`UI_FONT_SIZES`] in the zoom direction, if any.
+fn next_ui_font_size(current: f32, step: f32) -> Option<f32> {
+    if step > 0.0 {
+        UI_FONT_SIZES.iter().copied().find(|size| *size > current)
+    } else {
+        UI_FONT_SIZES
+            .iter()
+            .rev()
+            .copied()
+            .find(|size| *size < current)
+    }
+}
+
 /// A compact human-readable byte size for list columns, e.g. `512 B`, `2 KB`, `1.5 MB`.
 pub(super) fn human_size(bytes: u64) -> String {
     const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
@@ -5429,6 +5582,15 @@ fn parse_datetime(value: &str) -> Option<NaiveDateTime> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_panel_font_ladder_steps_between_offered_sizes() {
+        assert_eq!(next_ui_font_size(12.5, 1.0), Some(13.0));
+        assert_eq!(next_ui_font_size(12.5, -1.0), Some(12.0));
+        assert_eq!(next_ui_font_size(16.0, 1.0), None);
+        assert_eq!(next_ui_font_size(10.0, -1.0), None);
+        assert_eq!(next_ui_font_size(9.0, 1.0), Some(10.0));
+    }
 
     #[test]
     fn multi_range_selection_unions_cells() {

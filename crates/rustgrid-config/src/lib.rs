@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 const CURRENT_VERSION: u32 = 2;
 const PROFILES_FILE: &str = "connections.json";
-const SETTINGS_VERSION: u32 = 16;
+const SETTINGS_VERSION: u32 = 18;
 const SETTINGS_FILE: &str = "settings.json";
 /// The settings version that introduced 保留对象搜索 as a deliberate choice. Files written before
 /// it kept the old `false` default, so loading turns the switch on once; a file that version or
@@ -239,6 +239,27 @@ struct SettingsFile {
     /// The SQL editor font size in px.
     #[serde(default = "default_editor_font_size")]
     editor_font_size: u32,
+    /// The navigation panel's (connection tree) font family; empty means the system default.
+    #[serde(default)]
+    nav_font_family: String,
+    /// The navigation panel's font size in px.
+    #[serde(default = "default_nav_font_size", alias = "tree_font_size")]
+    nav_font_size: f32,
+    /// The main panel's (content pane) font family; empty means the system default.
+    #[serde(default)]
+    main_font_family: String,
+    /// The main panel's font size in px.
+    #[serde(default = "default_nav_font_size")]
+    main_font_size: f32,
+    /// The table grid's font family; empty means the system default.
+    #[serde(default)]
+    grid_font_family: String,
+    /// The table grid's font size in px.
+    #[serde(default = "default_grid_font_size")]
+    grid_font_size: f32,
+    /// Ctrl/⌘ + mouse wheel over the navigation panel, main panel or table grid resizes its font.
+    #[serde(default = "default_true")]
+    ui_ctrl_wheel_zoom: bool,
     #[serde(default = "default_true")]
     editor_line_numbers: bool,
     #[serde(default = "default_true")]
@@ -307,6 +328,20 @@ struct SettingsFile {
 /// The default SQL editor font size, in px (VS Code's default `editor.fontSize`).
 pub const DEFAULT_EDITOR_FONT_SIZE: u32 = 14;
 
+/// The default font size of the navigation and main panels, in px (the app's own UI text size).
+pub const DEFAULT_NAV_FONT_SIZE: f32 = 12.5;
+
+/// The default font size of the table grid, in px.
+pub const DEFAULT_GRID_FONT_SIZE: f32 = 12.5;
+
+fn default_nav_font_size() -> f32 {
+    DEFAULT_NAV_FONT_SIZE
+}
+
+fn default_grid_font_size() -> f32 {
+    DEFAULT_GRID_FONT_SIZE
+}
+
 /// The keymap command ids the version-11 `run_shortcut` / `run_selected_shortcut` settings map
 /// onto, and their built-in keystrokes then (Navicat's Ctrl+R / Ctrl+Shift+R).
 const LEGACY_RUN_COMMAND: &str = "query.run";
@@ -371,6 +406,20 @@ pub struct AppSettings {
     pub editor_font_family: String,
     /// The SQL editor font size in px.
     pub editor_font_size: u32,
+    /// The navigation panel's font family; empty means the system default.
+    pub nav_font_family: String,
+    /// The navigation panel's font size in px.
+    pub nav_font_size: f32,
+    /// The main panel's font family; empty means the system default.
+    pub main_font_family: String,
+    /// The main panel's font size in px.
+    pub main_font_size: f32,
+    /// The table grid's font family; empty means the system default.
+    pub grid_font_family: String,
+    /// The table grid's font size in px.
+    pub grid_font_size: f32,
+    /// Ctrl/⌘ + mouse wheel over a panel resizes its font.
+    pub ui_ctrl_wheel_zoom: bool,
     pub editor_line_numbers: bool,
     pub editor_word_wrap: bool,
     /// Whether Ctrl + mouse wheel resizes the SQL editor's font in place.
@@ -420,6 +469,13 @@ impl Default for AppSettings {
             view_modes: BTreeMap::new(),
             editor_font_family: String::new(),
             editor_font_size: DEFAULT_EDITOR_FONT_SIZE,
+            nav_font_family: String::new(),
+            nav_font_size: DEFAULT_NAV_FONT_SIZE,
+            main_font_family: String::new(),
+            main_font_size: DEFAULT_NAV_FONT_SIZE,
+            grid_font_family: String::new(),
+            grid_font_size: DEFAULT_GRID_FONT_SIZE,
+            ui_ctrl_wheel_zoom: true,
             editor_line_numbers: true,
             editor_word_wrap: true,
             editor_ctrl_wheel_zoom: true,
@@ -683,6 +739,13 @@ impl ConfigStore {
             view_modes: file.view_modes,
             editor_font_family: file.editor_font_family,
             editor_font_size: file.editor_font_size,
+            nav_font_family: file.nav_font_family,
+            nav_font_size: file.nav_font_size,
+            main_font_family: file.main_font_family,
+            main_font_size: file.main_font_size,
+            grid_font_family: file.grid_font_family,
+            grid_font_size: file.grid_font_size,
+            ui_ctrl_wheel_zoom: file.ui_ctrl_wheel_zoom,
             editor_line_numbers: file.editor_line_numbers,
             editor_word_wrap: file.editor_word_wrap,
             editor_ctrl_wheel_zoom: file.editor_ctrl_wheel_zoom,
@@ -718,6 +781,13 @@ impl ConfigStore {
             view_modes: settings.view_modes.clone(),
             editor_font_family: settings.editor_font_family.clone(),
             editor_font_size: settings.editor_font_size,
+            nav_font_family: settings.nav_font_family.clone(),
+            nav_font_size: settings.nav_font_size,
+            main_font_family: settings.main_font_family.clone(),
+            main_font_size: settings.main_font_size,
+            grid_font_family: settings.grid_font_family.clone(),
+            grid_font_size: settings.grid_font_size,
+            ui_ctrl_wheel_zoom: settings.ui_ctrl_wheel_zoom,
             editor_line_numbers: settings.editor_line_numbers,
             editor_word_wrap: settings.editor_word_wrap,
             editor_ctrl_wheel_zoom: settings.editor_ctrl_wheel_zoom,

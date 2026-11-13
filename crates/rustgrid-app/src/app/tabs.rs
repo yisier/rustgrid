@@ -1,4 +1,5 @@
 use super::*;
+use gpui::HitboxBehavior;
 
 /// A table/design tab row: `(index, id, title, is_view, is_key, environment colour)`.
 type ObjectTabRow = (usize, u64, String, bool, bool, Option<ConnectionColor>);
@@ -36,6 +37,12 @@ impl AppView {
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let theme = self.theme;
+        let main_font = self.main_font();
+        let main_font_size = self.main_font_size();
+        let ui_zoom = self.ui_ctrl_wheel_zoom;
+        // Whether the active page is a list (where Ctrl + wheel zooms the main panel). Grids and
+        // editors own their own zoom gesture, so they are left out.
+        let mut main_zoom = false;
 
         let body: AnyElement =
             if let Some(design) = self.active_design.and_then(|index| self.designs.get(index)) {
@@ -54,8 +61,10 @@ impl AppView {
                     }))
                     .into_any_element()
             } else if self.main_tab == MainTab::Users {
+                main_zoom = true;
                 self.render_users(cx).into_any_element()
             } else if self.main_tab == MainTab::Queries {
+                main_zoom = true;
                 div()
                     .flex()
                     .flex_col()
@@ -65,14 +74,18 @@ impl AppView {
                     .child(self.render_saved_queries(cx))
                     .into_any_element()
             } else if self.main_tab == MainTab::Backups {
+                main_zoom = true;
                 self.render_backups(cx).into_any_element()
             } else if self.main_tab == MainTab::Sync {
+                main_zoom = true;
                 self.render_sync(cx)
             } else if matches!(self.main_tab, MainTab::Functions | MainTab::Views)
                 && self.object_pane.is_none()
             {
+                main_zoom = true;
                 div().flex_1().into_any_element()
             } else if let Some(pane) = self.object_pane.clone() {
+                main_zoom = true;
                 div()
                     .flex()
                     .flex_col()
@@ -94,26 +107,69 @@ impl AppView {
             || self.main_tab == MainTab::Queries
             || self.main_tab == MainTab::Users;
         let mut content = div()
+            .relative()
             .flex()
             .flex_col()
             .flex_1()
             .h_full()
             .overflow_hidden()
             .key_context(PAGE_CONTEXT)
-            .bg(rgb(theme.editor_bg));
+            .bg(rgb(theme.editor_bg))
+            .text_size(px(main_font_size));
+        if let Some(font) = main_font {
+            content = content.font_family(font);
+        }
         if has_tabs {
             content = content.child(self.tab_bar.clone().cached(cached_style(|d| {
                 d.flex().flex_row().h(px(30.0)).flex_none().w_full()
             })));
         }
-        content.child(
-            div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .overflow_hidden()
-                .child(body),
-        )
+        let mut body_frame = div()
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .overflow_hidden();
+        if main_zoom && ui_zoom {
+            let app = cx.weak_entity();
+            body_frame = body_frame.child(
+                canvas(
+                    |bounds, window, _cx| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+                    move |_bounds, hitbox, window, _cx| {
+                        let app = app.clone();
+                        window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
+                            if phase != DispatchPhase::Capture
+                                || !hitbox.should_handle_scroll(window)
+                            {
+                                return;
+                            }
+                            if !(event.modifiers.control || event.modifiers.platform) {
+                                return;
+                            }
+                            let dy = match event.delta {
+                                ScrollDelta::Lines(delta) => delta.y,
+                                ScrollDelta::Pixels(delta) => f32::from(delta.y),
+                            };
+                            if dy == 0.0 {
+                                return;
+                            }
+                            let app = app.clone();
+                            let consumed = app
+                                .update(cx, |app, cx| {
+                                    app.zoom_main_font(if dy > 0.0 { 1.0 } else { -1.0 }, cx)
+                                })
+                                .unwrap_or(false);
+                            if consumed {
+                                cx.stop_propagation();
+                            }
+                        });
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            );
+        }
+        content.child(body_frame.child(body))
     }
 
     /// F5 / the Shortcuts command: refresh whatever the page is showing. A focused grid keeps its

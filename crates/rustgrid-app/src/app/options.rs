@@ -106,6 +106,98 @@ fn editor_size_options() -> Vec<ComboOption> {
         .collect()
 }
 
+/// The UI font families offered by the 常规 / 数据 pages, the built-in system default first.
+const PANEL_FONTS: &[&str] = &[
+    "Segoe UI",
+    "Microsoft YaHei UI",
+    "Microsoft YaHei",
+    "PingFang SC",
+    "Noto Sans CJK SC",
+    "Arial",
+    "Helvetica Neue",
+    "Verdana",
+    "Consolas",
+    "Cascadia Code",
+    "JetBrains Mono",
+    "DejaVu Sans Mono",
+    "Ubuntu Mono",
+];
+
+fn panel_font_options() -> Vec<ComboOption> {
+    let mut options = vec![ComboOption::new(
+        DEFAULT_FONT_VALUE,
+        t!("options.font.default").to_string(),
+    )];
+    options.extend(
+        PANEL_FONTS
+            .iter()
+            .map(|family| ComboOption::new(*family, *family)),
+    );
+    options
+}
+
+/// The combo value for a panel font size: the shortest exact spelling (`12`, not `12.0`).
+fn panel_size_value(size: f32) -> String {
+    if size.fract() == 0.0 {
+        format!("{size:.0}")
+    } else {
+        size.to_string()
+    }
+}
+
+fn panel_size_options() -> Vec<ComboOption> {
+    super::UI_FONT_SIZES
+        .iter()
+        .map(|size| ComboOption::new(panel_size_value(*size), format!("{size}px")))
+        .collect()
+}
+
+/// A panel font-family dropdown whose selection stages `set`.
+fn panel_font_combo(
+    cx: &mut Context<'_, AppView>,
+    theme: Theme,
+    selected: &str,
+    set: impl Fn(&mut AppView, String) + 'static,
+) -> Entity<ComboBox> {
+    let weak = cx.weak_entity();
+    let selected = font_option_value(selected);
+    cx.new(|cx| {
+        ComboBox::new(theme, panel_font_options(), selected, 200.0, cx)
+            .full_width()
+            .on_select(Rc::new(move |value, _window, cx| {
+                let family = font_from_value(value);
+                let _ = weak.update(cx, |app, cx| {
+                    set(app, family);
+                    cx.notify();
+                });
+            }))
+    })
+}
+
+/// A panel font-size dropdown whose selection stages `set`.
+fn panel_size_combo(
+    cx: &mut Context<'_, AppView>,
+    theme: Theme,
+    selected: f32,
+    set: impl Fn(&mut AppView, f32) + 'static,
+) -> Entity<ComboBox> {
+    let weak = cx.weak_entity();
+    let selected = panel_size_value(selected);
+    cx.new(|cx| {
+        ComboBox::new(theme, panel_size_options(), selected, 120.0, cx).on_select(Rc::new(
+            move |value, _window, cx| {
+                let size = value
+                    .parse()
+                    .unwrap_or(rustgrid_config::DEFAULT_NAV_FONT_SIZE);
+                let _ = weak.update(cx, |app, cx| {
+                    set(app, size);
+                    cx.notify();
+                });
+            },
+        ))
+    })
+}
+
 fn resolve_editor_font(family: &str) -> String {
     if family.is_empty() {
         super::default_editor_font().to_string()
@@ -136,6 +228,37 @@ fn field_label(theme: Theme, label: String, control: AnyElement) -> impl IntoEle
                 .child(label),
         )
         .child(control)
+}
+
+/// A panel's font family and size, under a section heading.
+fn panel_font_row(
+    theme: Theme,
+    title: String,
+    font: AnyElement,
+    size: AnyElement,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(section_label(theme, title))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .gap_4()
+                .w_full()
+                .child(div().flex_1().min_w(px(0.0)).child(field_label(
+                    theme,
+                    t!("options.editor.font").to_string(),
+                    font,
+                )))
+                .child(div().w(px(120.0)).flex_none().child(field_label(
+                    theme,
+                    t!("options.editor.size").to_string(),
+                    size,
+                ))),
+        )
 }
 
 /// A clickable settings row: a label on the left, a switch on the right. The row owns the click
@@ -206,6 +329,13 @@ impl AppView {
         self.options_section = OptionsSection::General;
         self.options_editor_font_family = self.editor_font_family.clone();
         self.options_editor_font_size = self.editor_font_size;
+        self.options_nav_font_family = self.nav_font_family.clone();
+        self.options_nav_font_size = self.nav_font_size;
+        self.options_main_font_family = self.main_font_family.clone();
+        self.options_main_font_size = self.main_font_size;
+        self.options_grid_font_family = self.grid_font_family.clone();
+        self.options_grid_font_size = self.grid_font_size;
+        self.options_ui_ctrl_wheel_zoom = self.ui_ctrl_wheel_zoom;
         self.options_editor_line_numbers = self.editor_line_numbers;
         self.options_editor_word_wrap = self.editor_word_wrap;
         self.options_editor_ctrl_wheel_zoom = self.editor_ctrl_wheel_zoom;
@@ -335,7 +465,8 @@ impl AppView {
         self.options_shortcut_search = Some(search);
     }
 
-    /// Build the editor page's three dropdowns on the first open, mirroring `ensure_language_combo`.
+    /// Build the editor and panel font dropdowns on the first open, mirroring
+    /// `ensure_language_combo`.
     fn ensure_editor_combos(&mut self, cx: &mut Context<'_, Self>) {
         let theme = self.theme;
         if self.editor_font_combo.is_none() {
@@ -369,6 +500,54 @@ impl AppView {
             });
             self.editor_size_combo = Some(combo);
         }
+        if self.nav_font_combo.is_none() {
+            self.nav_font_combo = Some(panel_font_combo(
+                cx,
+                theme,
+                &self.options_nav_font_family,
+                |app, family| app.options_nav_font_family = family,
+            ));
+        }
+        if self.nav_size_combo.is_none() {
+            self.nav_size_combo = Some(panel_size_combo(
+                cx,
+                theme,
+                self.options_nav_font_size,
+                |app, size| app.options_nav_font_size = size,
+            ));
+        }
+        if self.main_font_combo.is_none() {
+            self.main_font_combo = Some(panel_font_combo(
+                cx,
+                theme,
+                &self.options_main_font_family,
+                |app, family| app.options_main_font_family = family,
+            ));
+        }
+        if self.main_size_combo.is_none() {
+            self.main_size_combo = Some(panel_size_combo(
+                cx,
+                theme,
+                self.options_main_font_size,
+                |app, size| app.options_main_font_size = size,
+            ));
+        }
+        if self.grid_font_combo.is_none() {
+            self.grid_font_combo = Some(panel_font_combo(
+                cx,
+                theme,
+                &self.options_grid_font_family,
+                |app, family| app.options_grid_font_family = family,
+            ));
+        }
+        if self.grid_size_combo.is_none() {
+            self.grid_size_combo = Some(panel_size_combo(
+                cx,
+                theme,
+                self.options_grid_font_size,
+                |app, size| app.options_grid_font_size = size,
+            ));
+        }
     }
 
     pub(super) fn sync_language_combo(&mut self, cx: &mut Context<'_, Self>) {
@@ -398,11 +577,64 @@ impl AppView {
                 combo.set_selected(selected, cx);
             });
         }
+        if let Some(combo) = self.nav_font_combo.clone() {
+            let selected = font_option_value(&self.options_nav_font_family);
+            combo.update(cx, |combo, cx| {
+                combo.set_options(panel_font_options(), cx);
+                combo.set_selected(selected, cx);
+            });
+        }
+        if let Some(combo) = self.nav_size_combo.clone() {
+            let selected = panel_size_value(self.options_nav_font_size);
+            combo.update(cx, |combo, cx| {
+                combo.set_options(panel_size_options(), cx);
+                combo.set_selected(selected, cx);
+            });
+        }
+        if let Some(combo) = self.main_font_combo.clone() {
+            let selected = font_option_value(&self.options_main_font_family);
+            combo.update(cx, |combo, cx| {
+                combo.set_options(panel_font_options(), cx);
+                combo.set_selected(selected, cx);
+            });
+        }
+        if let Some(combo) = self.main_size_combo.clone() {
+            let selected = panel_size_value(self.options_main_font_size);
+            combo.update(cx, |combo, cx| {
+                combo.set_options(panel_size_options(), cx);
+                combo.set_selected(selected, cx);
+            });
+        }
+        if let Some(combo) = self.grid_font_combo.clone() {
+            let selected = font_option_value(&self.options_grid_font_family);
+            combo.update(cx, |combo, cx| {
+                combo.set_options(panel_font_options(), cx);
+                combo.set_selected(selected, cx);
+            });
+        }
+        if let Some(combo) = self.grid_size_combo.clone() {
+            let selected = panel_size_value(self.options_grid_font_size);
+            combo.update(cx, |combo, cx| {
+                combo.set_options(panel_size_options(), cx);
+                combo.set_selected(selected, cx);
+            });
+        }
     }
 
     fn apply_options(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         self.editor_font_family = self.options_editor_font_family.clone();
         self.editor_font_size = self.options_editor_font_size;
+        self.nav_font_family = self.options_nav_font_family.clone();
+        self.nav_font_size = self.options_nav_font_size;
+        self.main_font_family = self.options_main_font_family.clone();
+        self.main_font_size = self.options_main_font_size;
+        self.grid_font_family = self.options_grid_font_family.clone();
+        self.grid_font_size = self.options_grid_font_size;
+        self.ui_ctrl_wheel_zoom = self.options_ui_ctrl_wheel_zoom;
+        self.tree_pane.update(cx, |_, cx| cx.notify());
+        for grid in &self.grids {
+            grid.update(cx, |_, cx| cx.notify());
+        }
         self.editor_line_numbers = self.options_editor_line_numbers;
         self.editor_word_wrap = self.options_editor_word_wrap;
         self.editor_ctrl_wheel_zoom = self.options_editor_ctrl_wheel_zoom;
@@ -428,6 +660,7 @@ impl AppView {
         let language = self.options_language;
         self.set_language(language, cx);
         self.persist_settings();
+        cx.notify();
         self.close_options(window, cx);
     }
 
@@ -482,6 +715,13 @@ impl AppView {
 
     fn editor_size_combo(&self) -> AnyElement {
         match self.editor_size_combo.clone() {
+            Some(combo) => combo.into_any_element(),
+            None => div().into_any_element(),
+        }
+    }
+
+    fn combo_element(combo: &Option<Entity<ComboBox>>) -> AnyElement {
+        match combo.clone() {
             Some(combo) => combo.into_any_element(),
             None => div().into_any_element(),
         }
@@ -721,9 +961,10 @@ impl AppView {
         }
     }
 
-    /// The 快捷键 page: every keymap command, grouped and filtered by the search box. Clicking a
-    /// command's field starts recording and the next keystroke replaces its shortcuts; the row's
-    /// reset button restores the built-in ones, its clear button unbinds it, and 默认 resets all.
+    /// The 快捷键 page: every keymap command, grouped and filtered by the search box, plus the
+    /// Ctrl + wheel zoom toggle. Clicking a command's field starts recording and the next keystroke
+    /// replaces its shortcuts; the row's reset button restores the built-in ones, its clear button
+    /// unbinds it, and 默认 resets all.
     fn options_shortcuts_body(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
         let os = cx.platform_info().os;
@@ -798,6 +1039,25 @@ impl AppView {
                 self.options_shortcut_search
                     .clone()
                     .map(|search| div().flex_none().w(px(260.0)).child(search)),
+            )
+            .child(
+                toggle_row(
+                    theme,
+                    "options-ui-ctrl-wheel-zoom",
+                    t!("options.shortcuts.ctrl_wheel_zoom").to_string(),
+                    self.options_ui_ctrl_wheel_zoom,
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    self.copy_label_menu(t!("options.shortcuts.ctrl_wheel_zoom").to_string(), cx),
+                )
+                .tooltip(ui::text_tooltip(
+                    t!("options.shortcuts.ctrl_wheel_zoom_hint").to_string(),
+                ))
+                .on_click(cx.listener(|this, _event, _window, cx| {
+                    this.options_ui_ctrl_wheel_zoom = !this.options_ui_ctrl_wheel_zoom;
+                    cx.notify();
+                })),
             )
             .child(list)
     }
@@ -964,6 +1224,12 @@ impl AppView {
             .flex_col()
             .gap_3()
             .w_full()
+            .child(panel_font_row(
+                theme,
+                t!("options.data.grid").to_string(),
+                Self::combo_element(&self.grid_font_combo),
+                Self::combo_element(&self.grid_size_combo),
+            ))
             .child(
                 toggle_row(
                     theme,
@@ -998,7 +1264,7 @@ impl AppView {
             )
     }
 
-    /// The 常规 page: just the language selector.
+    /// The 常规 page: the language, the navigation/main panel fonts, and the start-up behaviour.
     fn options_general_body(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         div()
             .flex()
@@ -1019,6 +1285,18 @@ impl AppView {
                     )
                     .child(self.language_combo(cx)),
             )
+            .child(panel_font_row(
+                self.theme,
+                t!("options.general.nav_panel").to_string(),
+                Self::combo_element(&self.nav_font_combo),
+                Self::combo_element(&self.nav_size_combo),
+            ))
+            .child(panel_font_row(
+                self.theme,
+                t!("options.general.main_panel").to_string(),
+                Self::combo_element(&self.main_font_combo),
+                Self::combo_element(&self.main_size_combo),
+            ))
             .child(
                 toggle_row(
                     self.theme,

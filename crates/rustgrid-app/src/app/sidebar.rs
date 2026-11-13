@@ -1,4 +1,5 @@
 use super::*;
+use gpui::HitboxBehavior;
 use gpui_kit::component::Sizable;
 use gpui_kit::component::spinner::Spinner;
 
@@ -3082,6 +3083,9 @@ impl Render for TreePane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let (
             theme,
+            nav_font,
+            nav_font_size,
+            ui_zoom,
             connections,
             layout,
             rename,
@@ -3097,6 +3101,9 @@ impl Render for TreePane {
             let search_query = tree_search_query(&app.tree_search);
             (
                 app.theme,
+                app.nav_font(),
+                app.nav_font_size(),
+                app.ui_ctrl_wheel_zoom,
                 snapshot_connections(app, search_query.as_deref()),
                 app.tree_layout.clone(),
                 app.rename_row(RowPane::Tree),
@@ -3175,6 +3182,43 @@ impl Render for TreePane {
             app.update(cx, |app, _| app.clear_tree_row_rects());
         }
 
+        let zoom_overlay = ui_zoom.then(|| {
+            let app = self.app.clone();
+            canvas(
+                |bounds, window, _cx| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+                move |_bounds, hitbox, window, _cx| {
+                    let app = app.clone();
+                    window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
+                        if phase != DispatchPhase::Capture || !hitbox.should_handle_scroll(window) {
+                            return;
+                        }
+                        if !(event.modifiers.control || event.modifiers.platform) {
+                            return;
+                        }
+                        let dy = match event.delta {
+                            ScrollDelta::Lines(delta) => delta.y,
+                            ScrollDelta::Pixels(delta) => f32::from(delta.y),
+                        };
+                        if dy == 0.0 {
+                            return;
+                        }
+                        let app = app.clone();
+                        let consumed = app
+                            .update(cx, |app, cx| {
+                                app.zoom_nav_font(if dy > 0.0 { 1.0 } else { -1.0 }, cx)
+                            })
+                            .unwrap_or(false);
+                        if consumed {
+                            cx.stop_propagation();
+                        }
+                    });
+                },
+            )
+            .absolute()
+            .inset_0()
+            .into_any_element()
+        });
+
         let container = div()
             .relative()
             .flex()
@@ -3182,6 +3226,7 @@ impl Render for TreePane {
             .w_full()
             .h_full()
             .min_h(px(0.0))
+            .when_some(zoom_overlay, |container, overlay| container.child(overlay))
             .child(
                 div()
                     .id("sidebar-scroll")
@@ -3192,6 +3237,8 @@ impl Render for TreePane {
                     .flex_1()
                     .min_h(px(0.0))
                     .py_1()
+                    .when_some(nav_font, |el, font| el.font_family(font))
+                    .text_size(px(nav_font_size))
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
                     .track_focus(&self.focus)

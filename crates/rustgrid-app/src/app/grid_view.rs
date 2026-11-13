@@ -192,6 +192,17 @@ impl GridView {
         }
     }
 
+    /// The table grid's font family and size, from the 数据 page's 表格 font setting.
+    pub(super) fn grid_font(&self, cx: &Context<'_, Self>) -> (Option<SharedString>, f32) {
+        self.app
+            .upgrade()
+            .map(|app| {
+                let app = app.read(cx);
+                (app.grid_font(), app.grid_font_size())
+            })
+            .unwrap_or((None, 12.5))
+    }
+
     /// Whether the grid header paints each field's comment under its name: the 数据 option is on
     /// *and* this grid actually has a commented column, so a table without comments keeps the
     /// compact single-line header.
@@ -988,6 +999,11 @@ impl Render for GridView {
             );
 
         let mut root = div().relative().flex().flex_col().size_full();
+        let (font, font_size) = self.grid_font(cx);
+        root = root.text_size(px(font_size));
+        if let Some(font) = font {
+            root = root.font_family(font);
+        }
         if key_page {
             root = root.child(self.render_key_page_bar(theme, cx));
         } else if self.state.key_status.is_some() {
@@ -1229,6 +1245,7 @@ impl Render for GridView {
                 .child({
                     let weak = wheel_weak.clone();
                     let grid_focus = wheel_focus.clone();
+                    let zoom_app = self.app.clone();
                     // The wheel handler must ignore events aimed at an overlay above the grid —
                     // the combobox popup covers the window with `.occlude()`. A plain rectangle
                     // test on the grid bounds cannot see that, so insert a hitbox and use gpui's
@@ -1241,6 +1258,27 @@ impl Render for GridView {
                                 if phase != DispatchPhase::Capture
                                     || !hitbox.should_handle_scroll(window)
                                 {
+                                    return;
+                                }
+                                if event.modifiers.control || event.modifiers.platform {
+                                    let dy = match event.delta {
+                                        ScrollDelta::Lines(delta) => delta.y,
+                                        ScrollDelta::Pixels(delta) => f32::from(delta.y),
+                                    };
+                                    if dy != 0.0 {
+                                        let app = zoom_app.clone();
+                                        let consumed = app
+                                            .update(cx, |app, cx| {
+                                                app.zoom_grid_font(
+                                                    if dy > 0.0 { 1.0 } else { -1.0 },
+                                                    cx,
+                                                )
+                                            })
+                                            .unwrap_or(false);
+                                        if consumed {
+                                            cx.stop_propagation();
+                                        }
+                                    }
                                     return;
                                 }
                                 let (dx, dy) = match event.delta {
