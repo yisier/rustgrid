@@ -10,6 +10,18 @@ UI labels are quoted as the app shows them, so this file quotes the English stri
 [`CHANGELOG_zh.md`](CHANGELOG_zh.md) and [`CHANGELOG_ru.md`](CHANGELOG_ru.md) quote the 简体中文 and
 Russian ones.
 
+## [0.1.14] - 2026-11-13
+
+### Added
+
+- Options adds navigation-panel, main-panel and table-grid fonts with Ctrl + mouse wheel zoom, an
+  Apply button and a rebuilt layout ([#58](https://github.com/yisier/rustgrid/issues/58)).
+
+### Changed
+
+- Large result sets decode much faster, so a 1M-row query returns in a fraction of the time
+  ([#58](https://github.com/yisier/rustgrid/issues/58)).
+
 ## [0.1.13] - 2026-11-12
 
 ### Added
