@@ -11,6 +11,7 @@
 //! app bundle rather than a bare executable, so installing one picks between `self_update`'s two
 //! layouts — see [`configure_macos_layout`].
 
+use super::options::{section_label, settings_card};
 use super::*;
 use gpui_kit::base::SelectableText;
 use std::io::Read as _;
@@ -524,7 +525,7 @@ impl AppView {
             .flex()
             .flex_row()
             .items_center()
-            .gap_3()
+            .gap_2()
             .child(self.dialog_button(
                 "about-check",
                 t!("about.check").to_string(),
@@ -543,62 +544,67 @@ impl AppView {
             ));
         }
 
-        div()
+        let mut update_box = div()
             .flex()
             .flex_col()
-            .gap_4()
-            .w_full()
-            // The changelog panel takes the height the page's own controls leave, so the page
-            // reads as a filled box instead of an empty one under the status line.
-            .h_full()
-            .min_h(px(0.0))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_3()
-                    .child(
-                        img(ImageSource::Resource(Resource::Embedded("logo.png".into())))
-                            .w(px(48.0))
-                            .h(px(48.0))
-                            .flex_none(),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_size(px(16.0))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(t!("app.title").to_string()),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .text_color(rgb(theme.text_muted))
-                                    .child(t!("about.version", version = APP_VERSION).to_string()),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .text_size(px(12.0))
-                    .text_color(rgb(theme.text_muted))
-                    .child(t!("about.description").to_string()),
-            )
+            .items_center()
+            .gap_2()
+            .mt(px(16.0))
             .child(row)
             .child(
                 div()
                     .text_size(px(12.0))
                     .text_color(rgb(status_color))
                     .child(self.update_status_text()),
-            )
-            .when_some(
-                self.download_progress_element(theme),
-                |element, progress| element.child(progress),
+            );
+        if let Some(progress) = self.download_progress_element(theme) {
+            update_box = update_box.child(div().w_full().max_w(px(320.0)).child(progress));
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .w_full()
+            .child(
+                settings_card(theme)
+                    .items_center()
+                    .px(px(24.0))
+                    .py(px(28.0))
+                    .child(
+                        img(ImageSource::Resource(Resource::Embedded("logo.png".into())))
+                            .w(px(56.0))
+                            .h(px(56.0))
+                            .rounded(px(14.0))
+                            .flex_none(),
+                    )
+                    .child(
+                        div()
+                            .mt(px(14.0))
+                            .text_size(px(18.0))
+                            .font_weight(FontWeight::BOLD)
+                            .child(t!("app.title").to_string()),
+                    )
+                    .child(
+                        div()
+                            .mt(px(4.0))
+                            .px(px(8.0))
+                            .py(px(2.0))
+                            .rounded_full()
+                            .bg(rgb(theme.header_bg))
+                            .text_size(px(11.5))
+                            .text_color(rgb(theme.text_muted))
+                            .child(t!("about.version", version = APP_VERSION).to_string()),
+                    )
+                    .child(
+                        div()
+                            .mt(px(12.0))
+                            .max_w(px(420.0))
+                            .text_size(px(12.5))
+                            .text_color(rgb(theme.text_muted))
+                            .child(t!("about.description").to_string()),
+                    )
+                    .child(update_box),
             )
             // The newer release's changelog — and only while there is one to describe (see
             // `changelog_panel`).
@@ -685,8 +691,6 @@ impl AppView {
                 .flex()
                 .flex_col()
                 .gap_2()
-                .flex_1()
-                .min_h(px(0.0))
                 .w_full()
                 .child(
                     div()
@@ -695,13 +699,7 @@ impl AppView {
                         .items_center()
                         .justify_between()
                         .w_full()
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(rgb(theme.text_muted))
-                                .child(t!("about.changelog").to_string()),
-                        )
+                        .child(section_label(theme, t!("about.changelog").to_string()))
                         .child(ui::popup_button(
                             "about-changelog-copy",
                             t!("about.copy_changelog").to_string(),
@@ -717,11 +715,10 @@ impl AppView {
                         .id("about-changelog")
                         .flex()
                         .flex_col()
-                        .flex_1()
-                        .min_h(px(0.0))
                         .w_full()
+                        .max_h(px(280.0))
                         .p_3()
-                        .rounded(px(6.0))
+                        .rounded(px(8.0))
                         .border_1()
                         .border_color(rgb(theme.border))
                         .bg(rgb(theme.dialog_face))

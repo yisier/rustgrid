@@ -184,8 +184,9 @@ fn panel_size_combo(
     let weak = cx.weak_entity();
     let selected = panel_size_value(selected);
     cx.new(|cx| {
-        ComboBox::new(theme, panel_size_options(), selected, 120.0, cx).on_select(Rc::new(
-            move |value, _window, cx| {
+        ComboBox::new(theme, panel_size_options(), selected, 120.0, cx)
+            .field_width(88.0)
+            .on_select(Rc::new(move |value, _window, cx| {
                 let size = value
                     .parse()
                     .unwrap_or(rustgrid_config::DEFAULT_NAV_FONT_SIZE);
@@ -193,8 +194,7 @@ fn panel_size_combo(
                     set(app, size);
                     cx.notify();
                 });
-            },
-        ))
+            }))
     })
 }
 
@@ -206,87 +206,127 @@ fn resolve_editor_font(family: &str) -> String {
     }
 }
 
-/// A small section heading inside the editor page.
-fn section_label(theme: Theme, label: String) -> impl IntoElement {
+/// The widest the settings column grows on a wide window. The reference layout keeps the
+/// controls in one readable column instead of stretching them across the whole pane.
+const OPTIONS_CONTENT_WIDTH: f32 = 620.0;
+
+/// A small, muted section heading above a settings card.
+pub(super) fn section_label(theme: Theme, label: String) -> impl IntoElement {
     div()
-        .text_size(px(12.5))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(rgb(theme.text))
+        .flex_none()
+        .text_size(px(11.5))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgb(theme.text_muted))
         .child(label)
 }
 
-/// A label above a control.
-fn field_label(theme: Theme, label: String, control: AnyElement) -> impl IntoElement {
+/// The bordered card that groups related setting rows. A row's own bottom divider supplies the
+/// separation inside; `overflow_hidden` keeps that divider inside the rounded corners.
+pub(super) fn settings_card(theme: Theme) -> Div {
     div()
         .flex()
         .flex_col()
-        .gap_2()
-        .child(
-            div()
-                .text_size(px(12.0))
-                .text_color(rgb(theme.text_muted))
-                .child(label),
-        )
-        .child(control)
+        .flex_none()
+        .w_full()
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(rgb(theme.border))
+        .bg(rgb(theme.dialog_face))
+        .overflow_hidden()
 }
 
-/// A panel's font family and size, under a section heading.
-fn panel_font_row(
+/// One setting row: the title (and an optional one-line hint) on the left, its control on the
+/// right. `divider` draws the hairline to the next row; the last row of a card passes `false`.
+fn setting_row(
+    id: &'static str,
     theme: Theme,
     title: String,
-    font: AnyElement,
-    size: AnyElement,
-) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .child(section_label(theme, title))
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .gap_4()
-                .w_full()
-                .child(div().flex_1().min_w(px(0.0)).child(field_label(
-                    theme,
-                    t!("options.editor.font").to_string(),
-                    font,
-                )))
-                .child(div().w(px(120.0)).flex_none().child(field_label(
-                    theme,
-                    t!("options.editor.size").to_string(),
-                    size,
-                ))),
-        )
-}
-
-/// A clickable settings row: a label on the left, a switch on the right. The row owns the click
-/// (the switch is an inert indicator), so the whole line toggles and the control only reflects the
-/// state.
-fn toggle_row(theme: Theme, id: &'static str, label: String, checked: bool) -> Stateful<Div> {
+    hint: Option<String>,
+    control: AnyElement,
+    divider: bool,
+) -> Stateful<Div> {
     div()
         .id(id)
         .flex()
         .flex_row()
         .items_center()
         .justify_between()
+        .gap_4()
         .w_full()
-        .h(px(28.0))
-        .rounded(px(4.0))
-        .cursor_pointer()
+        .px(px(14.0))
+        .py(px(11.0))
+        .when(divider, move |row| {
+            row.border_b_1().border_color(rgb(theme.border))
+        })
         .child(
             div()
-                .text_size(px(12.0))
-                .text_color(rgb(theme.text))
-                .child(label),
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .flex_1()
+                .min_w(px(0.0))
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(theme.text))
+                        .child(title),
+                )
+                .children(hint.map(|hint| {
+                    div()
+                        .text_size(px(11.5))
+                        .line_height(px(16.0))
+                        .text_color(rgb(theme.text_muted))
+                        .child(hint)
+                })),
         )
         .child(
-            Switch::new(SharedString::from(format!("{id}-switch")))
-                .checked(checked)
-                .with_size(gpui_kit::component::Size::Small)
-                .tab_stop(false),
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .flex_none()
+                .child(control),
         )
+}
+
+/// A setting row whose control is a switch. The row owns the click (the switch is an inert
+/// indicator), so the whole line toggles and the control only reflects the state.
+fn toggle_row(
+    theme: Theme,
+    id: &'static str,
+    title: String,
+    hint: Option<String>,
+    checked: bool,
+    divider: bool,
+) -> Stateful<Div> {
+    setting_row(
+        id,
+        theme,
+        title,
+        hint,
+        Switch::new(SharedString::from(format!("{id}-switch")))
+            .checked(checked)
+            .with_size(gpui_kit::component::Size::Small)
+            .tab_stop(false)
+            .into_any_element(),
+        divider,
+    )
+    .cursor_pointer()
+}
+
+/// A row's font family and size dropdowns, kept at the same widths on every page.
+fn font_controls(font: AnyElement, size: AnyElement) -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .flex_none()
+        .child(div().w(px(190.0)).flex_none().child(font))
+        .child(div().w(px(88.0)).flex_none().child(size))
+        .into_any_element()
 }
 
 /// The root view of the Options OS window. It re-renders whenever `AppView` changes.
@@ -359,11 +399,13 @@ impl AppView {
             let Some(app) = weak.upgrade() else {
                 return;
             };
-            let bounds = Bounds::centered(None, size(px(620.0), px(500.0)), cx);
+            let bounds = Bounds::centered(None, size(px(860.0), px(620.0)), cx);
             let view_weak = weak.clone();
             let opened = cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    // Below this the font controls no longer fit beside their labels.
+                    window_min_size: Some(size(px(720.0), px(480.0))),
                     ..ui::window_options(title)
                 },
                 move |window, cx| {
@@ -421,6 +463,7 @@ impl AppView {
                 // The language picker is the only setting on this page whose value is a full
                 // sentence-like label; give it a slightly taller field than the compact 20px
                 // default so the selected name is comfortable to read.
+                .field_width(170.0)
                 .height(28.0)
                 .text_size(12.5)
                 .on_select(Rc::new(move |value, _window, cx| {
@@ -488,15 +531,15 @@ impl AppView {
             let weak = cx.weak_entity();
             let selected = self.options_editor_font_size.to_string();
             let combo = cx.new(|cx| {
-                ComboBox::new(theme, editor_size_options(), selected, 120.0, cx).on_select(Rc::new(
-                    move |value, _window, cx| {
+                ComboBox::new(theme, editor_size_options(), selected, 120.0, cx)
+                    .field_width(88.0)
+                    .on_select(Rc::new(move |value, _window, cx| {
                         let size = value.parse().unwrap_or(DEFAULT_EDITOR_FONT_SIZE);
                         let _ = weak.update(cx, |app, cx| {
                             app.options_editor_font_size = size;
                             cx.notify();
                         });
-                    },
-                ))
+                    }))
             });
             self.editor_size_combo = Some(combo);
         }
@@ -669,38 +712,47 @@ impl AppView {
         self.close_options(window, cx);
     }
 
-    fn options_category_row(
+    /// One entry of the left navigation: an icon and the page name in a rounded pill. The active
+    /// page keeps a filled pill, exactly like the reference layout; the others only tint on hover.
+    fn options_nav_item(
         &self,
         id: &'static str,
+        icon: &'static str,
         label: String,
         active: bool,
-        enabled: bool,
     ) -> Stateful<Div> {
         let theme = self.theme;
-        let text = if enabled {
-            theme.text
-        } else {
-            theme.text_muted
-        };
+        let text = if active { theme.text } else { theme.text_muted };
         div()
             .id(id)
             .flex()
+            .flex_row()
             .items_center()
-            .h(px(24.0))
-            .px_3()
+            .gap_2()
+            .h(px(30.0))
+            .px(px(10.0))
+            .rounded(px(6.0))
             .flex_none()
-            .text_size(px(12.0))
+            .cursor_pointer()
+            .text_size(px(12.5))
+            .font_weight(if active {
+                FontWeight::SEMIBOLD
+            } else {
+                FontWeight::MEDIUM
+            })
             .text_color(rgb(text))
-            .when(active, move |style| {
-                style
-                    .bg(rgb(theme.tree_selected_bg))
-                    .text_color(rgb(theme.tree_selected_text))
+            .when(active, move |style| style.bg(rgb(theme.button_hover_bg)))
+            .when(!active, move |style| {
+                style.hover(move |style| style.bg(rgba((theme.text << 8) | 0x0d)))
             })
-            .when(enabled && !active, move |style| {
-                style
-                    .cursor_pointer()
-                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-            })
+            .child(
+                svg()
+                    .path(icon)
+                    .w(px(15.0))
+                    .h(px(15.0))
+                    .flex_none()
+                    .text_color(rgb(if active { theme.text } else { theme.text_muted })),
+            )
             .child(label)
     }
 
@@ -735,6 +787,33 @@ impl AppView {
     /// The Options window's contents: a titlebar, the left nav, the active page and the footer.
     pub(super) fn options_window_contents(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
+        // The shortcuts page keeps its search box fixed and scrolls only the command list, so it
+        // owns its scrolling; every other page scrolls as one column.
+        let pane = if self.options_section == OptionsSection::Shortcuts {
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w(px(0.0))
+                .min_h(px(0.0))
+                .h_full()
+                .bg(rgb(theme.dialog_bg))
+                .child(self.options_page(cx))
+                .into_any_element()
+        } else {
+            div()
+                .id("options-scroll")
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w(px(0.0))
+                .min_h(px(0.0))
+                .h_full()
+                .overflow_y_scroll()
+                .bg(rgb(theme.dialog_bg))
+                .child(self.options_page(cx))
+                .into_any_element()
+        };
 
         div()
             .relative()
@@ -762,38 +841,108 @@ impl AppView {
                     .min_h(px(0.0))
                     .w_full()
                     .child(self.options_nav(cx))
-                    .child(
-                        div()
-                            .id("options-scroll")
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .h_full()
-                            .p_4()
-                            // The content pane sits on the dialog's own background while the nav
-                            // keeps the tinted face, so the two sides read as separate surfaces.
-                            .bg(rgb(theme.dialog_bg))
-                            // The shortcuts page scrolls its own list under a fixed search box.
-                            .when(self.options_section != OptionsSection::Shortcuts, |pane| {
-                                pane.overflow_y_scroll()
-                            })
-                            .child(self.options_body(cx)),
-                    ),
+                    .child(pane),
             )
             .child(
                 div()
                     .flex_none()
+                    .flex()
+                    .flex_row()
+                    .items_center()
                     .w_full()
-                    .px_4()
-                    .py_4()
-                    .bg(rgb(theme.dialog_bg))
+                    .h(px(52.0))
+                    .px(px(20.0))
+                    .bg(rgb(theme.header_bg))
                     .border_t_1()
                     .border_color(rgb(theme.border))
                     .child(self.options_footer(cx)),
             )
             .children(self.options_copy_menu_element(cx))
             .into_any_element()
+    }
+
+    /// The centred settings column: the page title (and its one-line description) above the
+    /// section cards. Its width is capped so the rows stay readable on a maximised window.
+    fn options_page(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let (title, description) = match self.options_section {
+            OptionsSection::General => (
+                t!("options.general").to_string(),
+                Some(t!("options.general.description").to_string()),
+            ),
+            OptionsSection::Editor => (
+                t!("options.editor").to_string(),
+                Some(t!("options.editor.description").to_string()),
+            ),
+            OptionsSection::Shortcuts => (
+                t!("options.shortcuts").to_string(),
+                Some(t!("options.shortcuts.description").to_string()),
+            ),
+            OptionsSection::Data => (
+                t!("options.data").to_string(),
+                Some(t!("options.data.description").to_string()),
+            ),
+            OptionsSection::About => (
+                t!("options.about").to_string(),
+                Some(t!("options.about.description").to_string()),
+            ),
+        };
+        let header = div()
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .mb(px(18.0))
+            .child(
+                div()
+                    .text_size(px(15.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(theme.text))
+                    .child(title),
+            )
+            .children(description.map(|description| {
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(description)
+            }));
+
+        let column = div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .max_w(px(OPTIONS_CONTENT_WIDTH))
+            .px(px(28.0))
+            .py(px(22.0));
+        // 快捷键 scrolls its own list under a fixed search box; every other page lets the whole
+        // column scroll in the pane.
+        if self.options_section == OptionsSection::Shortcuts {
+            div()
+                .flex()
+                .flex_row()
+                .justify_center()
+                .w_full()
+                .h_full()
+                .min_h(px(0.0))
+                .child(
+                    column.h_full().min_h(px(0.0)).child(header).child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_h(px(0.0))
+                            .child(self.options_body(cx)),
+                    ),
+                )
+                .into_any_element()
+        } else {
+            div()
+                .flex()
+                .flex_row()
+                .justify_center()
+                .w_full()
+                .child(column.child(header).child(self.options_body(cx)))
+                .into_any_element()
+        }
     }
 
     /// A right-click handler for a setting's row: offers to copy its name, or its path for sharing
@@ -880,24 +1029,27 @@ impl AppView {
         .detach();
     }
 
-    /// The left navigation: 常规, 编辑器 and 关于.
+    /// The left navigation: 常规, 编辑器, 快捷键, 表格 and 关于.
     fn options_nav(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
         div()
             .flex()
             .flex_col()
-            .w(px(150.0))
+            .w(px(184.0))
             .flex_none()
-            .py_2()
-            .bg(rgb(theme.dialog_face))
+            .h_full()
+            .gap(px(2.0))
+            .px(px(8.0))
+            .py(px(12.0))
+            .bg(rgb(theme.header_bg))
             .border_r_1()
             .border_color(rgb(theme.border))
             .child(
-                self.options_category_row(
+                self.options_nav_item(
                     "options-general",
+                    "icons/settings.svg",
                     t!("options.general").to_string(),
                     self.options_section == OptionsSection::General,
-                    true,
                 )
                 .on_click(cx.listener(|this, _event, _window, cx| {
                     this.options_section = OptionsSection::General;
@@ -905,11 +1057,11 @@ impl AppView {
                 })),
             )
             .child(
-                self.options_category_row(
+                self.options_nav_item(
                     "options-editor",
+                    "icons/code.svg",
                     t!("options.editor").to_string(),
                     self.options_section == OptionsSection::Editor,
-                    true,
                 )
                 .on_click(cx.listener(|this, _event, _window, cx| {
                     this.options_section = OptionsSection::Editor;
@@ -917,11 +1069,11 @@ impl AppView {
                 })),
             )
             .child(
-                self.options_category_row(
+                self.options_nav_item(
                     "options-shortcuts",
+                    "icons/keyboard.svg",
                     t!("options.shortcuts").to_string(),
                     self.options_section == OptionsSection::Shortcuts,
-                    true,
                 )
                 .on_click(cx.listener(|this, _event, _window, cx| {
                     this.options_section = OptionsSection::Shortcuts;
@@ -930,11 +1082,11 @@ impl AppView {
                 })),
             )
             .child(
-                self.options_category_row(
+                self.options_nav_item(
                     "options-data",
+                    "icons/table.svg",
                     t!("options.data").to_string(),
                     self.options_section == OptionsSection::Data,
-                    true,
                 )
                 .on_click(cx.listener(|this, _event, _window, cx| {
                     this.options_section = OptionsSection::Data;
@@ -943,11 +1095,11 @@ impl AppView {
                 })),
             )
             .child(
-                self.options_category_row(
+                self.options_nav_item(
                     "options-about",
+                    "icons/info.svg",
                     t!("options.about").to_string(),
                     self.options_section == OptionsSection::About,
-                    true,
                 )
                 .on_click(cx.listener(|this, _event, _window, cx| {
                     this.options_section = OptionsSection::About;
@@ -987,59 +1139,57 @@ impl AppView {
             .id("options-shortcut-list")
             .flex()
             .flex_col()
+            .gap_3()
             .w_full()
             .flex_1()
             .min_h(px(0.0))
-            .pr_2()
             .overflow_y_scroll()
+            .child(section_label(
+                theme,
+                t!("options.shortcuts.mouse").to_string(),
+            ))
             .child(
-                toggle_row(
-                    theme,
-                    "options-ui-ctrl-wheel-zoom",
-                    t!("options.shortcuts.ctrl_wheel_zoom").to_string(),
-                    self.options_ui_ctrl_wheel_zoom,
-                )
-                .on_mouse_down(
-                    MouseButton::Right,
-                    self.copy_label_menu(t!("options.shortcuts.ctrl_wheel_zoom").to_string(), cx),
-                )
-                .tooltip(ui::text_tooltip(
-                    t!("options.shortcuts.ctrl_wheel_zoom_hint").to_string(),
-                ))
-                .on_click(cx.listener(|this, _event, _window, cx| {
-                    this.options_ui_ctrl_wheel_zoom = !this.options_ui_ctrl_wheel_zoom;
-                    cx.notify();
-                })),
-            )
-            .child(
-                div()
-                    .pb_1()
-                    .text_size(px(11.5))
-                    .text_color(rgb(theme.text_muted))
-                    .child(t!("options.shortcuts.hint").to_string()),
+                settings_card(theme).child(
+                    toggle_row(
+                        theme,
+                        "options-ui-ctrl-wheel-zoom",
+                        t!("options.shortcuts.ctrl_wheel_zoom").to_string(),
+                        Some(t!("options.shortcuts.ctrl_wheel_zoom_hint").to_string()),
+                        self.options_ui_ctrl_wheel_zoom,
+                        false,
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        self.copy_label_menu(
+                            t!("options.shortcuts.ctrl_wheel_zoom").to_string(),
+                            cx,
+                        ),
+                    )
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.options_ui_ctrl_wheel_zoom = !this.options_ui_ctrl_wheel_zoom;
+                        cx.notify();
+                    })),
+                ),
             );
         let mut any = false;
         for group in keymap::CommandGroup::ALL {
-            let rows: Vec<AnyElement> = keymap::COMMANDS
+            let commands: Vec<(usize, &'static keymap::Command)> = keymap::COMMANDS
                 .iter()
                 .enumerate()
                 .filter(|(_, command)| command.group == group && matches(command))
-                .map(|(index, command)| self.shortcut_row(index, command, theme, cx))
                 .collect();
-            if rows.is_empty() {
+            if commands.is_empty() {
                 continue;
             }
             any = true;
+            let last = commands.len() - 1;
+            let mut card = settings_card(theme);
+            for (position, (index, command)) in commands.into_iter().enumerate() {
+                card = card.child(self.shortcut_row(index, command, theme, cx, position != last));
+            }
             list = list
-                .child(
-                    div()
-                        .pt_2()
-                        .pb_1()
-                        .text_size(px(11.5))
-                        .text_color(rgb(theme.text_muted))
-                        .child(t!(group.label_key()).to_string()),
-                )
-                .children(rows);
+                .child(section_label(theme, t!(group.label_key()).to_string()))
+                .child(card);
         }
         if !any {
             list = list.child(
@@ -1051,8 +1201,8 @@ impl AppView {
             );
         }
 
-        // Only the search box stays put; the zoom toggle, the hint and the commands scroll
-        // together beneath it.
+        // Only the search box stays put; the hint and the command cards scroll together
+        // beneath it.
         div()
             .flex()
             .flex_col()
@@ -1063,7 +1213,14 @@ impl AppView {
             .children(
                 self.options_shortcut_search
                     .clone()
-                    .map(|search| div().flex_none().w(px(260.0)).child(search)),
+                    .map(|search| div().flex_none().w_full().child(search)),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(11.5))
+                    .text_color(rgb(theme.text_muted))
+                    .child(t!("options.shortcuts.hint").to_string()),
             )
             .child(list)
     }
@@ -1076,6 +1233,7 @@ impl AppView {
         command: &'static keymap::Command,
         theme: Theme,
         cx: &mut Context<'_, Self>,
+        divider: bool,
     ) -> AnyElement {
         let id = command.id;
         let recording = self.recording_shortcut == Some(id);
@@ -1096,13 +1254,20 @@ impl AppView {
                 .join(", ")
         };
 
-        let mut label = div().flex().flex_col().flex_1().min_w(px(0.0)).child(
-            div()
-                .text_size(px(12.0))
-                .text_color(rgb(theme.text))
-                .truncate()
-                .child(t!(command.label_key).to_string()),
-        );
+        let mut label = div()
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .flex_1()
+            .min_w(px(0.0))
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(theme.text))
+                    .truncate()
+                    .child(t!(command.label_key).to_string()),
+            );
         if !conflicts.is_empty() {
             let names = conflicts
                 .iter()
@@ -1148,7 +1313,13 @@ impl AppView {
             .items_center()
             .gap_2()
             .w_full()
-            .min_h(px(30.0))
+            .min_h(px(36.0))
+            .px(px(14.0))
+            .py(px(8.0))
+            .when(divider, move |row| {
+                row.border_b_1().border_color(rgb(theme.border))
+            })
+            .hover(move |style| style.bg(rgb(theme.header_bg)))
             .child(label)
             .child(
                 div()
@@ -1158,13 +1329,17 @@ impl AppView {
                     .justify_center()
                     .w(px(180.0))
                     .h(px(24.0))
-                    .px_1()
+                    .px_2()
                     .flex_none()
-                    .rounded(px(4.0))
+                    .rounded(px(5.0))
                     .border_1()
-                    .border_color(rgb(if recording { theme.brand } else { theme.border }))
-                    .bg(rgb(theme.input_bg))
-                    .text_size(px(12.0))
+                    .border_color(rgb(if recording {
+                        theme.brand
+                    } else {
+                        theme.button_border
+                    }))
+                    .bg(rgb(theme.button_bg))
+                    .text_size(px(11.5))
                     .text_color(rgb(if recording || keys.is_empty() {
                         theme.text_muted
                     } else {
@@ -1225,204 +1400,254 @@ impl AppView {
     /// The 表格 page: how the grid presents a table's data.
     fn options_data_body(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
+        div().flex().flex_col().gap_3().w_full().child(
+            settings_card(theme)
+                .child(
+                    setting_row(
+                        "options-grid-font",
+                        theme,
+                        t!("options.data.grid").to_string(),
+                        Some(t!("options.data.grid_hint").to_string()),
+                        font_controls(
+                            Self::combo_element(&self.grid_font_combo),
+                            Self::combo_element(&self.grid_size_combo),
+                        ),
+                        true,
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        self.copy_label_menu(t!("options.data.grid").to_string(), cx),
+                    ),
+                )
+                .child(
+                    toggle_row(
+                        theme,
+                        "options-grid-show-comments",
+                        t!("options.data.show_comments").to_string(),
+                        Some(t!("options.data.show_comments_hint").to_string()),
+                        self.options_grid_show_comments,
+                        true,
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        self.copy_label_menu(t!("options.data.show_comments").to_string(), cx),
+                    )
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.options_grid_show_comments = !this.options_grid_show_comments;
+                        cx.notify();
+                    })),
+                )
+                .child(
+                    toggle_row(
+                        theme,
+                        "options-grid-show-types",
+                        t!("options.data.show_types").to_string(),
+                        Some(t!("options.data.show_types_hint").to_string()),
+                        self.options_grid_show_types,
+                        false,
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        self.copy_label_menu(t!("options.data.show_types").to_string(), cx),
+                    )
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.options_grid_show_types = !this.options_grid_show_types;
+                        cx.notify();
+                    })),
+                ),
+        )
+    }
+
+    /// The 常规 page: the language, the navigation/main panel fonts, and the start-up behaviour.
+    fn options_general_body(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let theme = self.theme;
+        let max_statements_row = setting_row(
+            OPTIONS_MAX_STATEMENTS,
+            theme,
+            t!("options.general.max_statements").to_string(),
+            Some(t!("options.general.max_statements_hint").to_string()),
+            div()
+                .w(px(80.0))
+                .flex_none()
+                .children(self.options_max_statements_input.clone())
+                .into_any_element(),
+            true,
+        )
+        .on_mouse_down(
+            MouseButton::Right,
+            self.copy_label_menu(t!("options.general.max_statements").to_string(), cx),
+        )
+        // Pointed out (from the query's statement-limit notice): an accent frame.
+        .when(
+            self.options_highlight == Some(OPTIONS_MAX_STATEMENTS),
+            |row| {
+                row.rounded(px(6.0))
+                    .border_1()
+                    .border_color(rgb(theme.primary))
+                    .bg(rgba(theme.primary << 8 | 0x1f))
+            },
+        );
+
         div()
             .flex()
             .flex_col()
             .gap_3()
             .w_full()
-            .child(panel_font_row(
+            .child(section_label(
                 theme,
-                t!("options.data.grid").to_string(),
-                Self::combo_element(&self.grid_font_combo),
-                Self::combo_element(&self.grid_size_combo),
+                t!("options.general.appearance").to_string(),
             ))
             .child(
-                toggle_row(
-                    theme,
-                    "options-grid-show-comments",
-                    t!("options.data.show_comments").to_string(),
-                    self.options_grid_show_comments,
-                )
-                .on_mouse_down(
-                    MouseButton::Right,
-                    self.copy_label_menu(t!("options.data.show_comments").to_string(), cx),
-                )
-                .on_click(cx.listener(|this, _event, _window, cx| {
-                    this.options_grid_show_comments = !this.options_grid_show_comments;
-                    cx.notify();
-                })),
-            )
-            .child(
-                toggle_row(
-                    theme,
-                    "options-grid-show-types",
-                    t!("options.data.show_types").to_string(),
-                    self.options_grid_show_types,
-                )
-                .on_mouse_down(
-                    MouseButton::Right,
-                    self.copy_label_menu(t!("options.data.show_types").to_string(), cx),
-                )
-                .on_click(cx.listener(|this, _event, _window, cx| {
-                    this.options_grid_show_types = !this.options_grid_show_types;
-                    cx.notify();
-                })),
-            )
-    }
-
-    /// The 常规 page: the language, the navigation/main panel fonts, and the start-up behaviour.
-    fn options_general_body(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_3()
+                settings_card(theme)
                     .child(
-                        div()
-                            .w(px(80.0))
-                            .flex_none()
-                            .text_size(px(12.0))
-                            .child(t!("options.language").to_string()),
+                        setting_row(
+                            "options-language",
+                            theme,
+                            t!("options.language_label").to_string(),
+                            Some(t!("options.language_hint").to_string()),
+                            self.language_combo(cx),
+                            true,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            self.copy_label_menu(t!("options.language_label").to_string(), cx),
+                        ),
                     )
-                    .child(self.language_combo(cx)),
-            )
-            .child(panel_font_row(
-                self.theme,
-                t!("options.general.nav_panel").to_string(),
-                Self::combo_element(&self.nav_font_combo),
-                Self::combo_element(&self.nav_size_combo),
-            ))
-            .child(panel_font_row(
-                self.theme,
-                t!("options.general.main_panel").to_string(),
-                Self::combo_element(&self.main_font_combo),
-                Self::combo_element(&self.main_size_combo),
-            ))
-            .child(
-                toggle_row(
-                    self.theme,
-                    "options-restore-session",
-                    t!("options.general.restore_session").to_string(),
-                    self.options_restore_session,
-                )
-                .on_mouse_down(
-                    MouseButton::Right,
-                    self.copy_label_menu(t!("options.general.restore_session").to_string(), cx),
-                )
-                .tooltip(ui::text_tooltip(
-                    t!("options.general.restore_session_hint").to_string(),
-                ))
-                .on_click(cx.listener(|this, _event, _window, cx| {
-                    this.options_restore_session = !this.options_restore_session;
-                    cx.notify();
-                })),
-            )
-            .child(
-                toggle_row(
-                    self.theme,
-                    "options-single-click-open",
-                    t!("options.general.single_click_open").to_string(),
-                    self.options_single_click_open,
-                )
-                .on_mouse_down(
-                    MouseButton::Right,
-                    self.copy_label_menu(t!("options.general.single_click_open").to_string(), cx),
-                )
-                .tooltip(ui::text_tooltip(
-                    t!("options.general.single_click_open_hint").to_string(),
-                ))
-                .on_click(cx.listener(|this, _event, _window, cx| {
-                    this.options_single_click_open = !this.options_single_click_open;
-                    cx.notify();
-                })),
-            )
-            .child(
-                toggle_row(
-                    self.theme,
-                    "options-preserve-object-search",
-                    t!("options.general.preserve_object_search").to_string(),
-                    self.options_preserve_object_search,
-                )
-                .on_mouse_down(
-                    MouseButton::Right,
-                    self.copy_label_menu(
-                        t!("options.general.preserve_object_search").to_string(),
-                        cx,
+                    .child(
+                        setting_row(
+                            "options-nav-font",
+                            theme,
+                            t!("options.general.nav_panel").to_string(),
+                            Some(t!("options.general.nav_panel_hint").to_string()),
+                            font_controls(
+                                Self::combo_element(&self.nav_font_combo),
+                                Self::combo_element(&self.nav_size_combo),
+                            ),
+                            true,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            self.copy_label_menu(t!("options.general.nav_panel").to_string(), cx),
+                        ),
+                    )
+                    .child(
+                        setting_row(
+                            "options-main-font",
+                            theme,
+                            t!("options.general.main_panel").to_string(),
+                            Some(t!("options.general.main_panel_hint").to_string()),
+                            font_controls(
+                                Self::combo_element(&self.main_font_combo),
+                                Self::combo_element(&self.main_size_combo),
+                            ),
+                            false,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            self.copy_label_menu(t!("options.general.main_panel").to_string(), cx),
+                        ),
                     ),
-                )
-                .tooltip(ui::text_tooltip(
-                    t!("options.general.preserve_object_search_hint").to_string(),
-                ))
-                .on_click(cx.listener(|this, _event, _window, cx| {
-                    this.options_preserve_object_search = !this.options_preserve_object_search;
-                    cx.notify();
-                })),
             )
+            .child(section_label(
+                theme,
+                t!("options.general.workspace").to_string(),
+            ))
             .child(
-                div()
-                    .id(OPTIONS_MAX_STATEMENTS)
-                    .flex()
-                    .flex_row()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_3()
-                    .p_1()
-                    .rounded(px(4.0))
-                    .border_1()
-                    .border_color(rgba(0))
-                    // Pointed out (from the query's statement-limit notice): an accent frame.
-                    .when(
-                        self.options_highlight == Some(OPTIONS_MAX_STATEMENTS),
-                        |row| {
-                            row.border_color(rgb(self.theme.primary))
-                                .bg(rgba(self.theme.primary << 8 | 0x1f))
-                        },
+                settings_card(theme)
+                    .child(
+                        toggle_row(
+                            theme,
+                            "options-restore-session",
+                            t!("options.general.restore_session").to_string(),
+                            Some(t!("options.general.restore_session_hint").to_string()),
+                            self.options_restore_session,
+                            true,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            self.copy_label_menu(
+                                t!("options.general.restore_session").to_string(),
+                                cx,
+                            ),
+                        )
+                        .on_click(cx.listener(
+                            |this, _event, _window, cx| {
+                                this.options_restore_session = !this.options_restore_session;
+                                cx.notify();
+                            },
+                        )),
+                    )
+                    .child(
+                        toggle_row(
+                            theme,
+                            "options-single-click-open",
+                            t!("options.general.single_click_open").to_string(),
+                            Some(t!("options.general.single_click_open_hint").to_string()),
+                            self.options_single_click_open,
+                            true,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            self.copy_label_menu(
+                                t!("options.general.single_click_open").to_string(),
+                                cx,
+                            ),
+                        )
+                        .on_click(cx.listener(
+                            |this, _event, _window, cx| {
+                                this.options_single_click_open = !this.options_single_click_open;
+                                cx.notify();
+                            },
+                        )),
+                    )
+                    .child(
+                        toggle_row(
+                            theme,
+                            "options-preserve-object-search",
+                            t!("options.general.preserve_object_search").to_string(),
+                            Some(t!("options.general.preserve_object_search_hint").to_string()),
+                            self.options_preserve_object_search,
+                            false,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            self.copy_label_menu(
+                                t!("options.general.preserve_object_search").to_string(),
+                                cx,
+                            ),
+                        )
+                        .on_click(cx.listener(
+                            |this, _event, _window, cx| {
+                                this.options_preserve_object_search =
+                                    !this.options_preserve_object_search;
+                                cx.notify();
+                            },
+                        )),
+                    ),
+            )
+            .child(section_label(
+                theme,
+                t!("options.general.execution").to_string(),
+            ))
+            .child(
+                settings_card(theme).child(max_statements_row).child(
+                    toggle_row(
+                        theme,
+                        "options-stop-on-error",
+                        t!("options.general.stop_on_error").to_string(),
+                        Some(t!("options.general.stop_on_error_hint").to_string()),
+                        self.options_stop_on_error,
+                        false,
                     )
                     .on_mouse_down(
                         MouseButton::Right,
-                        self.copy_label_menu(t!("options.general.max_statements").to_string(), cx),
+                        self.copy_label_menu(t!("options.general.stop_on_error").to_string(), cx),
                     )
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .child(t!("options.general.max_statements").to_string()),
-                    )
-                    .children(
-                        self.options_max_statements_input
-                            .clone()
-                            .map(|input| div().w(px(80.0)).flex_none().child(input)),
-                    )
-                    .child(
-                        div()
-                            // The hint takes a line of its own, so it wraps inside the dialog
-                            // instead of running past its edge.
-                            .w_full()
-                            .min_w(px(0.0))
-                            .text_size(px(11.5))
-                            .text_color(rgb(self.theme.text_muted))
-                            .child(t!("options.general.max_statements_hint").to_string()),
-                    ),
-            )
-            .child(
-                toggle_row(
-                    self.theme,
-                    "options-stop-on-error",
-                    t!("options.general.stop_on_error").to_string(),
-                    self.options_stop_on_error,
-                )
-                .on_mouse_down(
-                    MouseButton::Right,
-                    self.copy_label_menu(t!("options.general.stop_on_error").to_string(), cx),
-                )
-                .on_click(cx.listener(|this, _event, _window, cx| {
-                    this.options_stop_on_error = !this.options_stop_on_error;
-                    cx.notify();
-                })),
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.options_stop_on_error = !this.options_stop_on_error;
+                        cx.notify();
+                    })),
+                ),
             )
     }
 
@@ -1453,83 +1678,128 @@ impl AppView {
     /// The 编辑器 page: a live preview plus the editor settings.
     fn options_editor_body(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
+        let preview_meta = format!(
+            "{} · {}px",
+            resolve_editor_font(&self.options_editor_font_family),
+            self.options_editor_font_size
+        );
         div()
             .flex()
             .flex_col()
-            .gap_4()
+            .gap_3()
             .w_full()
-            .child(section_label(
-                theme,
-                t!("options.editor.preview").to_string(),
-            ))
-            .child(self.editor_preview())
             .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap_4()
-                    .w_full()
-                    .child(div().flex_1().min_w(px(0.0)).child(field_label(
-                        theme,
-                        t!("options.editor.font").to_string(),
-                        self.editor_font_combo(),
-                    )))
-                    .child(div().w(px(130.0)).flex_none().child(field_label(
-                        theme,
-                        t!("options.editor.size").to_string(),
-                        self.editor_size_combo(),
-                    ))),
+                settings_card(theme)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .w_full()
+                            .px(px(12.0))
+                            .py(px(6.0))
+                            .bg(rgb(theme.header_bg))
+                            .border_b_1()
+                            .border_color(rgb(theme.border))
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(theme.text_muted))
+                                    .child(t!("options.editor.preview").to_string()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(theme.text_muted))
+                                    .truncate()
+                                    .child(preview_meta),
+                            ),
+                    )
+                    .child(self.editor_preview()),
             )
             .child(
-                toggle_row(
-                    theme,
-                    "options-editor-line-numbers",
-                    t!("options.editor.line_numbers").to_string(),
-                    self.options_editor_line_numbers,
-                )
-                .on_mouse_down(
-                    MouseButton::Right,
-                    self.copy_label_menu(t!("options.editor.line_numbers").to_string(), cx),
-                )
-                .on_click(cx.listener(|this, _event, _window, cx| {
-                    this.options_editor_line_numbers = !this.options_editor_line_numbers;
-                    cx.notify();
-                })),
-            )
-            .child(
-                toggle_row(
-                    theme,
-                    "options-editor-word-wrap",
-                    t!("options.editor.word_wrap").to_string(),
-                    self.options_editor_word_wrap,
-                )
-                .on_mouse_down(
-                    MouseButton::Right,
-                    self.copy_label_menu(t!("options.editor.word_wrap").to_string(), cx),
-                )
-                .on_click(cx.listener(|this, _event, _window, cx| {
-                    this.options_editor_word_wrap = !this.options_editor_word_wrap;
-                    cx.notify();
-                })),
-            )
-            .child(
-                toggle_row(
-                    theme,
-                    "options-editor-ctrl-wheel-zoom",
-                    t!("options.editor.ctrl_wheel_zoom").to_string(),
-                    self.options_editor_ctrl_wheel_zoom,
-                )
-                .on_mouse_down(
-                    MouseButton::Right,
-                    self.copy_label_menu(t!("options.editor.ctrl_wheel_zoom").to_string(), cx),
-                )
-                .tooltip(ui::text_tooltip(
-                    t!("options.editor.ctrl_wheel_zoom_hint").to_string(),
-                ))
-                .on_click(cx.listener(|this, _event, _window, cx| {
-                    this.options_editor_ctrl_wheel_zoom = !this.options_editor_ctrl_wheel_zoom;
-                    cx.notify();
-                })),
+                settings_card(theme)
+                    .child(
+                        setting_row(
+                            "options-editor-font",
+                            theme,
+                            t!("options.editor.font").to_string(),
+                            Some(t!("options.editor.font_hint").to_string()),
+                            font_controls(self.editor_font_combo(), self.editor_size_combo()),
+                            true,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            self.copy_label_menu(t!("options.editor.font").to_string(), cx),
+                        ),
+                    )
+                    .child(
+                        toggle_row(
+                            theme,
+                            "options-editor-line-numbers",
+                            t!("options.editor.line_numbers").to_string(),
+                            Some(t!("options.editor.line_numbers_hint").to_string()),
+                            self.options_editor_line_numbers,
+                            true,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            self.copy_label_menu(t!("options.editor.line_numbers").to_string(), cx),
+                        )
+                        .on_click(cx.listener(
+                            |this, _event, _window, cx| {
+                                this.options_editor_line_numbers =
+                                    !this.options_editor_line_numbers;
+                                cx.notify();
+                            },
+                        )),
+                    )
+                    .child(
+                        toggle_row(
+                            theme,
+                            "options-editor-word-wrap",
+                            t!("options.editor.word_wrap").to_string(),
+                            Some(t!("options.editor.word_wrap_hint").to_string()),
+                            self.options_editor_word_wrap,
+                            true,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            self.copy_label_menu(t!("options.editor.word_wrap").to_string(), cx),
+                        )
+                        .on_click(cx.listener(
+                            |this, _event, _window, cx| {
+                                this.options_editor_word_wrap = !this.options_editor_word_wrap;
+                                cx.notify();
+                            },
+                        )),
+                    )
+                    .child(
+                        toggle_row(
+                            theme,
+                            "options-editor-ctrl-wheel-zoom",
+                            t!("options.editor.ctrl_wheel_zoom").to_string(),
+                            Some(t!("options.editor.ctrl_wheel_zoom_hint").to_string()),
+                            self.options_editor_ctrl_wheel_zoom,
+                            false,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            self.copy_label_menu(
+                                t!("options.editor.ctrl_wheel_zoom").to_string(),
+                                cx,
+                            ),
+                        )
+                        .on_click(cx.listener(
+                            |this, _event, _window, cx| {
+                                this.options_editor_ctrl_wheel_zoom =
+                                    !this.options_editor_ctrl_wheel_zoom;
+                                cx.notify();
+                            },
+                        )),
+                    ),
             )
     }
 
@@ -1559,12 +1829,10 @@ impl AppView {
             .id("options-editor-preview")
             .w_full()
             .h(px(140.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(rgb(theme.border))
             .bg(rgb(theme.editor_bg))
             .overflow_hidden()
-            .p_3()
+            .px(px(14.0))
+            .py(px(12.0))
             .font_family(resolve_editor_font(&self.options_editor_font_family))
             .text_size(px(size))
             .line_height(px((size * 1.5).max(16.0)))
