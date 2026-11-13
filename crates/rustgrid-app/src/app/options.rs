@@ -988,6 +988,25 @@ impl AppView {
             .pr_2()
             .overflow_y_scroll()
             .child(
+                toggle_row(
+                    theme,
+                    "options-ui-ctrl-wheel-zoom",
+                    t!("options.shortcuts.ctrl_wheel_zoom").to_string(),
+                    self.options_ui_ctrl_wheel_zoom,
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    self.copy_label_menu(t!("options.shortcuts.ctrl_wheel_zoom").to_string(), cx),
+                )
+                .tooltip(ui::text_tooltip(
+                    t!("options.shortcuts.ctrl_wheel_zoom_hint").to_string(),
+                ))
+                .on_click(cx.listener(|this, _event, _window, cx| {
+                    this.options_ui_ctrl_wheel_zoom = !this.options_ui_ctrl_wheel_zoom;
+                    cx.notify();
+                })),
+            )
+            .child(
                 div()
                     .pb_1()
                     .text_size(px(11.5))
@@ -1027,7 +1046,8 @@ impl AppView {
             );
         }
 
-        // Only the search box stays put; the hint and the commands scroll together beneath it.
+        // Only the search box stays put; the zoom toggle, the hint and the commands scroll
+        // together beneath it.
         div()
             .flex()
             .flex_col()
@@ -1039,25 +1059,6 @@ impl AppView {
                 self.options_shortcut_search
                     .clone()
                     .map(|search| div().flex_none().w(px(260.0)).child(search)),
-            )
-            .child(
-                toggle_row(
-                    theme,
-                    "options-ui-ctrl-wheel-zoom",
-                    t!("options.shortcuts.ctrl_wheel_zoom").to_string(),
-                    self.options_ui_ctrl_wheel_zoom,
-                )
-                .on_mouse_down(
-                    MouseButton::Right,
-                    self.copy_label_menu(t!("options.shortcuts.ctrl_wheel_zoom").to_string(), cx),
-                )
-                .tooltip(ui::text_tooltip(
-                    t!("options.shortcuts.ctrl_wheel_zoom_hint").to_string(),
-                ))
-                .on_click(cx.listener(|this, _event, _window, cx| {
-                    this.options_ui_ctrl_wheel_zoom = !this.options_ui_ctrl_wheel_zoom;
-                    cx.notify();
-                })),
             )
             .child(list)
     }
@@ -1587,6 +1588,13 @@ impl AppView {
                     this.options_editor_line_numbers = true;
                     this.options_editor_word_wrap = true;
                     this.options_editor_ctrl_wheel_zoom = true;
+                    this.options_nav_font_family.clear();
+                    this.options_nav_font_size = rustgrid_config::DEFAULT_NAV_FONT_SIZE;
+                    this.options_main_font_family.clear();
+                    this.options_main_font_size = rustgrid_config::DEFAULT_NAV_FONT_SIZE;
+                    this.options_grid_font_family.clear();
+                    this.options_grid_font_size = rustgrid_config::DEFAULT_GRID_FONT_SIZE;
+                    this.options_ui_ctrl_wheel_zoom = true;
                     this.options_grid_show_comments = false;
                     this.options_grid_show_types = false;
                     this.options_shortcuts.clear();
@@ -1599,6 +1607,8 @@ impl AppView {
                         cx,
                     );
                     this.recording_shortcut = None;
+                    this.sync_language_combo(cx);
+                    this.sync_editor_combos(cx);
                     cx.notify();
                 }),
             ))
