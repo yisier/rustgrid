@@ -485,14 +485,22 @@ pub(crate) fn prepare_for_server(sql: &str, mysql: bool) -> String {
 }
 
 /// Whether `sql` holds anything but whitespace and comments (a comment-only fragment is not a
-/// statement: MySQL would answer it with "Query was empty").
+/// statement: MySQL would answer it with "Query was empty"). On MySQL / MariaDB a conditional
+/// comment (`/*!40101 SET ... */`) is executed by the server, so it counts as code.
 pub(crate) fn has_code(sql: &str, mysql: bool) -> bool {
     let mut comments: Vec<Range<usize>> = Vec::new();
+    let mut executable = false;
     scan(sql, mysql, |range, token| {
         if matches!(token, Token::Comment(_) | Token::DelimiterCommand) {
+            if mysql && sql[range.clone()].starts_with("/*!") {
+                executable = true;
+            }
             comments.push(range);
         }
     });
+    if executable {
+        return true;
+    }
     let mut from = 0;
     for range in comments {
         if !sql[from..range.start].trim().is_empty() {
@@ -684,6 +692,18 @@ mod tests {
             ]
         );
         assert!(split("-- nothing\n;").is_empty());
+    }
+
+    #[test]
+    fn mysql_conditional_comments_are_statements() {
+        // A mysqldump's session settings live in `/*!nnnnn ... */`, which the server executes.
+        assert_eq!(
+            split("/*!40101 SET NAMES utf8 */;\n-- note\nSELECT 1;"),
+            ["/*!40101 SET NAMES utf8 */", "-- note\nSELECT 1"]
+        );
+        assert!(has_code("/*!40101 SET NAMES utf8 */", true));
+        assert!(!has_code("/*!40101 SET NAMES utf8 */", false));
+        assert!(!has_code("/* plain comment */", true));
     }
 
     #[test]

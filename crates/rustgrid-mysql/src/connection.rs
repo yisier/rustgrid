@@ -3957,6 +3957,12 @@ fn has_sql_content(fragment: &str) -> bool {
                 }
             }
             b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                // `/*! ... */` is a MySQL conditional comment: the server executes what it
+                // wraps (a mysqldump's session settings, `ALTER TABLE … DISABLE KEYS`, …), so
+                // the fragment is a statement, not a comment.
+                if bytes.get(i + 2) == Some(&b'!') {
+                    return true;
+                }
                 i += 2;
                 while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
                     i += 1;
@@ -4839,6 +4845,17 @@ mod tests {
         assert_eq!(
             split_statements("SELECT 1; -- trailing\n"),
             vec!["SELECT 1"]
+        );
+        // MySQL's conditional comments are executed by the server, so they are statements.
+        assert_eq!(
+            split_statements(
+                "/*!40014 SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0 */;\n\
+                 /*!40000 ALTER TABLE `t` DISABLE KEYS */;"
+            ),
+            vec![
+                "/*!40014 SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0 */",
+                "/*!40000 ALTER TABLE `t` DISABLE KEYS */",
+            ]
         );
     }
 

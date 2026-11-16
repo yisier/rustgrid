@@ -8,7 +8,9 @@
 //! - MySQL-style backtick identifiers (`` `...` ``, with ` `` `),
 //! - SQL Server bracket identifiers (`[...]`, with `]]`),
 //! - PostgreSQL dollar-quoted strings (`$tag$ ... $tag$`),
-//! - line comments (`-- ...`, `# ...`) and block comments (`/* ... */`).
+//! - line comments (`-- ...`, `# ...`) and block comments (`/* ... */`). A MySQL conditional
+//!   comment (`/*!40014 SET ... */`) is *not* a comment to the server — it executes what it
+//!   wraps — so a fragment holding one is kept as a statement.
 //!
 //! It deliberately does **not** track `BEGIN … END` block depth: dialects with block bodies
 //! (Oracle PL/SQL, SQL Server T-SQL, PostgreSQL functions) and engines whose own scanner is tuned
@@ -187,6 +189,11 @@ fn has_sql_content(fragment: &str) -> bool {
             b'-' if bytes.get(i + 1) == Some(&b'-') => i = skip_line_comment(bytes, i + 2),
             b'#' => i = skip_line_comment(bytes, i + 1),
             b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                // MySQL executes the SQL inside a conditional comment, so a fragment that holds
+                // one is a statement rather than a comment-only fragment.
+                if bytes.get(i + 2) == Some(&b'!') {
+                    return true;
+                }
                 let mut balanced = true;
                 i = skip_block_comment(bytes, i, &mut balanced);
             }
@@ -246,5 +253,21 @@ mod tests {
         assert!(split_statements("-- just a comment\n").is_empty());
         assert!(split_statements("").is_empty());
         assert!(split_statements("/* only */").is_empty());
+    }
+
+    #[test]
+    fn keeps_mysql_conditional_comments() {
+        // A mysqldump wraps its session settings in `/*!nnnnn ... */`, which the server executes.
+        assert_eq!(
+            split_statements(
+                "/*!40014 SET @OLD_UNIQUE_CHECKS=@@UNIQUE_CHECKS, UNIQUE_CHECKS=0 */;\n\
+                 /*!40000 ALTER TABLE `t` DISABLE KEYS */;\nSELECT 1;"
+            ),
+            vec![
+                "/*!40014 SET @OLD_UNIQUE_CHECKS=@@UNIQUE_CHECKS, UNIQUE_CHECKS=0 */",
+                "/*!40000 ALTER TABLE `t` DISABLE KEYS */",
+                "SELECT 1",
+            ]
+        );
     }
 }
