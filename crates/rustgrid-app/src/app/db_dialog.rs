@@ -1,4 +1,5 @@
 use super::*;
+use gpui_kit::base::SelectableText;
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::dialog::DialogButtonProps;
 
@@ -229,9 +230,26 @@ impl AppView {
                         None => div().into_any_element(),
                     }
                 } else {
+                    // Editing: the name is fixed, but it stays selectable and copyable. A plain
+                    // text run only participates in the window selection, so Ctrl+C would never
+                    // reach the `Root` copy action without something focused; the focus handle (and
+                    // the press that acquires it) is what makes the copied text land on the
+                    // clipboard.
                     div()
+                        .id("db-name")
+                        .track_focus(&self.db_name_focus)
+                        .cursor_text()
+                        .h(px(24.0))
+                        .flex()
+                        .items_center()
                         .text_size(px(12.0))
-                        .child(form.name.clone())
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _event, window, cx| {
+                                window.focus(&this.db_name_focus, cx);
+                            }),
+                        )
+                        .child(SelectableText::new("db-name-text", form.name.clone()))
                         .into_any_element()
                 };
 
