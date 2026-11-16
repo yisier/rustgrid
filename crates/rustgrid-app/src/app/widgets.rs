@@ -507,7 +507,7 @@ impl AppView {
                                     this.open_run_sql_file(ci, di, cx);
                                 }),
                             ))
-                            .child(self.dump_sql_submenu_item(ci, di, cx));
+                            .child(self.dump_sql_submenu_item(ci, di, None, false, cx));
                     }
                     items = items.child(self.context_item(
                         "db-refresh",
@@ -643,6 +643,7 @@ impl AppView {
                 let rename_name = name.clone();
                 let export_name = name.clone();
                 let import_target = name.clone();
+                let info_name = name.clone();
                 let key_value = self.driver_supports(ci, DriverCapability::KeyValue);
                 let documents = self.driver_supports(ci, DriverCapability::Documents);
 
@@ -953,6 +954,18 @@ impl AppView {
                             ),
                         );
                 }
+                // A SQL table/view dumps its own script: the database menu's 转储 SQL 文件 narrowed
+                // to the right-clicked object. A document store speaks no SQL and a Redis key has
+                // neither a DDL nor a data script, so neither offers it.
+                if !key_value && !documents {
+                    items = items.child(self.dump_sql_submenu_item(
+                        ci,
+                        di,
+                        Some(name.clone()),
+                        is_view,
+                        cx,
+                    ));
+                }
                 items = items
                     .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
                     .child(self.context_item(
@@ -968,6 +981,19 @@ impl AppView {
                             this.refresh_object_category(category, ci, di, cx);
                         }),
                     ));
+                // 对象信息 opens the right-hand details pane for this table/view/collection. A
+                // Redis key has no catalog entry to describe (no status and no DDL), so it is not
+                // offered there.
+                if !key_value {
+                    items = items.child(self.context_item(
+                        "table-info",
+                        t!("object.object_info").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.open_table_info(ci, di, info_name.clone(), cx);
+                        }),
+                    ));
+                }
             }
             ContextTarget::TableCategory {
                 connection_index,
@@ -1968,19 +1994,29 @@ impl AppView {
             .child(label)
     }
 
-    /// The database context menu's 转储 SQL 文件 row: a submenu trigger that reveals a right-hand
-    /// flyout with the three dump modes (结构和数据 / 仅结构 / 仅数据). The flyout is a child of
-    /// this row, positioned just past the menu's right edge, so it reads like Navicat's submenu.
+    /// The 转储 SQL 文件 row: a submenu trigger that reveals a right-hand flyout with the dump
+    /// modes. The database menu dumps the whole database (`table: None`); a table/view menu dumps
+    /// just that object (a view offers 仅结构 only, since it has no rows of its own). The flyout is
+    /// a child of this row, positioned just past the menu's right edge, so it reads like
+    /// Navicat's submenu.
     fn dump_sql_submenu_item(
         &self,
         connection_index: usize,
         database_index: usize,
+        table: Option<String>,
+        is_view: bool,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let theme = self.theme;
-        let open = self.dump_submenu == Some((connection_index, database_index));
+        let key = (connection_index, database_index, table.clone());
+        let open = self.dump_submenu == Some(key.clone());
         let zone = self.dump_zone.clone();
         let bounds_slot = self.dump_zone.clone();
+        let trigger_id = if table.is_some() {
+            "table-dump-sql"
+        } else {
+            "db-dump-sql"
+        };
         let mut base = div()
             .relative()
             .flex()
@@ -2000,8 +2036,10 @@ impl AppView {
             // Drop the stale flyout rectangle so a later outside click closes the menu normally.
             bounds_slot.borrow_mut().flyout = None;
         }
+        let hover_key = key.clone();
+        let click_key = key.clone();
         let row = base
-            .id("db-dump-sql")
+            .id(trigger_id)
             .cursor_pointer()
             .hover(move |style| {
                 style
@@ -2012,17 +2050,17 @@ impl AppView {
                 // Open the flyout when the row is hovered (Navicat's submenu behaviour), and close
                 // it again once the pointer leaves the row and the flyout beside it.
                 if zone.borrow().stays_open(*hovered, window) {
-                    if this.dump_submenu != Some((connection_index, database_index)) {
-                        this.dump_submenu = Some((connection_index, database_index));
+                    if this.dump_submenu.as_ref() != Some(&hover_key) {
+                        this.dump_submenu = Some(hover_key.clone());
                         cx.notify();
                     }
-                } else if this.dump_submenu == Some((connection_index, database_index)) {
+                } else if this.dump_submenu.as_ref() == Some(&hover_key) {
                     this.dump_submenu = None;
                     cx.notify();
                 }
             }))
             .on_click(cx.listener(move |this, _event, _window, cx| {
-                this.dump_submenu = Some((connection_index, database_index));
+                this.dump_submenu = Some(click_key.clone());
                 cx.notify();
             }))
             .child(
@@ -2044,6 +2082,8 @@ impl AppView {
             row.child(dump_sql_flyout(
                 connection_index,
                 database_index,
+                table,
+                is_view,
                 theme,
                 self.dump_zone.clone(),
                 cx,
@@ -2400,47 +2440,76 @@ impl AppView {
     }
 }
 
-/// The 转储 SQL 文件 flyout: the three dump modes, each starting a whole-database `.sql` dump.
+/// The 转储 SQL 文件 flyout: the dump modes, each starting a `.sql` dump of the database or of the
+/// table/view the menu was opened on.
 fn dump_sql_flyout(
     connection_index: usize,
     database_index: usize,
+    table: Option<String>,
+    is_view: bool,
     theme: Theme,
     zone: Rc<RefCell<SubmenuZone>>,
     cx: &mut Context<'_, AppView>,
 ) -> AnyElement {
-    let modes = [
-        (
+    let key = (connection_index, database_index, table.clone());
+    let mut modes: Vec<(&'static str, String, DumpMode)> = Vec::new();
+    if table.is_none() {
+        modes.push((
             "db-dump-all",
             t!("database.dump_structure_and_data").to_string(),
             DumpMode::StructureAndData,
-        ),
-        (
+        ));
+        modes.push((
             "db-dump-structure",
             t!("database.dump_structure").to_string(),
             DumpMode::Structure,
-        ),
-        (
+        ));
+        modes.push((
             "db-dump-data",
             t!("database.dump_data").to_string(),
             DumpMode::Data,
-        ),
-    ];
+        ));
+    } else if is_view {
+        // A view has no rows of its own, so only its script can be dumped.
+        modes.push((
+            "view-dump-structure",
+            t!("database.dump_structure").to_string(),
+            DumpMode::Structure,
+        ));
+    } else {
+        modes.push((
+            "tbl-dump-all",
+            t!("database.dump_structure_and_data").to_string(),
+            DumpMode::StructureAndData,
+        ));
+        modes.push((
+            "tbl-dump-structure",
+            t!("database.dump_structure").to_string(),
+            DumpMode::Structure,
+        ));
+        modes.push((
+            "tbl-dump-data",
+            t!("database.dump_data").to_string(),
+            DumpMode::Data,
+        ));
+    }
     let mut flyout = ui::popup_panel(theme)
         // Abut the trigger row so the pointer never crosses a gap on its way to the flyout.
         .left(relative(1.0))
         .top(px(0.0))
         .w(px(150.0))
         .p_0p5()
-        .id("db-dump-sql-flyout")
+        .id("dump-sql-flyout")
         .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
             if !zone.borrow().stays_open(*hovered, window)
-                && this.dump_submenu == Some((connection_index, database_index))
+                && this.dump_submenu.as_ref() == Some(&key)
             {
                 this.dump_submenu = None;
                 cx.notify();
             }
         }));
     for (id, label, mode) in modes {
+        let target = table.clone();
         flyout = flyout.child(
             div()
                 .id(id)
@@ -2459,7 +2528,17 @@ fn dump_sql_flyout(
                 .on_click(cx.listener(move |this, _event, _window, cx| {
                     this.context_menu = None;
                     this.dump_submenu = None;
-                    this.request_dump(connection_index, database_index, mode, cx);
+                    match &target {
+                        Some(name) => this.request_dump_table(
+                            connection_index,
+                            database_index,
+                            name.clone(),
+                            is_view,
+                            mode,
+                            cx,
+                        ),
+                        None => this.request_dump(connection_index, database_index, mode, cx),
+                    }
                 }))
                 .child(label),
         );

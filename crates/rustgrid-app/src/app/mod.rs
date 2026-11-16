@@ -723,11 +723,14 @@ impl DumpMode {
     }
 }
 
-/// State of the "Dump SQL File" dialog: a whole-database `CREATE`+data dump written straight to a
-/// `.sql` file, with the same async log/progress view as the backup dialogs.
+/// State of the "Dump SQL File" dialog: a `CREATE`+data dump written straight to a `.sql` file
+/// (the whole database from the database menu, or a single table/view from its context menu), with
+/// the same async log/progress view as the backup dialogs.
 struct DumpSqlDialog {
     connection_index: usize,
     database_index: usize,
+    /// The single object a table menu's dump writes. `None` dumps the whole database.
+    object: Option<(BackupObjectKind, String)>,
     mode: DumpMode,
     /// The `.sql` file the dump writes to, chosen through the system save dialog.
     output_path: Option<std::path::PathBuf>,
@@ -2471,8 +2474,9 @@ pub struct AppView {
     dump_dialog: Option<DumpSqlDialog>,
     /// The open "Run SQL File" dialog, if any.
     run_sql_dialog: Option<RunSqlDialog>,
-    /// The database context menu's 转储 SQL 文件 flyout target `(connection, database)`, while open.
-    dump_submenu: Option<(usize, usize)>,
+    /// The 转储 SQL 文件 flyout target while open: the connection and database, plus the table the
+    /// dump covers (`None` for the database menu's whole-database dump).
+    dump_submenu: Option<(usize, usize, Option<String>)>,
     /// The 转储 SQL 文件 flyout's zone while it is shown. The flyout overflows past the menu
     /// panel, so the panel's `on_mouse_down_out` would otherwise close the menu on a click that
     /// actually lands on the flyout (before the item's click can complete); it also keeps the

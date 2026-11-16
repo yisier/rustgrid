@@ -1427,6 +1427,21 @@ impl AppView {
         self.info_routine_selected = None;
     }
 
+    /// Open the right-hand object-info pane describing a table, view or collection. This is the
+    /// table context menu's 对象信息: it also selects the object, so the pane describes the row that
+    /// was right-clicked even when the click did not move the selection.
+    pub(super) fn open_table_info(
+        &mut self,
+        connection_index: usize,
+        database_index: usize,
+        name: String,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.set_info_table(connection_index, database_index, name);
+        self.set_info_open(true, cx);
+        cx.notify();
+    }
+
     /// Record the stored routine the info pane should describe. Called by the object list and the
     /// connection tree.
     pub(super) fn set_info_routine(
