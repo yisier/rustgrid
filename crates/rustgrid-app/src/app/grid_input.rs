@@ -43,6 +43,15 @@ impl GridView {
         let column_count = self.state.visible_columns;
         self.cell_dragged = false;
         let ctrl = event.modifiers.control || event.modifiers.platform;
+        // A click that lands on a cell and moves the selection also tells the row form which field
+        // to focus. The marker is only set when the selection actually changes, so the second
+        // click on an already selected cell (which opens its in-place editor) leaves the form
+        // alone instead of pulling the caret out of the editor.
+        let selected_before = self
+            .state
+            .selection
+            .as_ref()
+            .map(CellSelection::active_cursor);
         match hit {
             GridHit::Gutter(row) => {
                 self.cell_press = None;
@@ -97,6 +106,17 @@ impl GridView {
         // would otherwise extend the active range again and undo the cell just removed.
         self.selecting_cells = !ctrl || event.modifiers.shift;
         self.select_pointer = self.selecting_cells.then_some(event.position);
+        if let GridHit::Cell(row, col) = hit {
+            let selected_after = self
+                .state
+                .selection
+                .as_ref()
+                .map(CellSelection::active_cursor);
+            if selected_after != selected_before {
+                self.cell_click_serial = self.cell_click_serial.wrapping_add(1);
+                self.cell_click_cell = Some((row, col));
+            }
+        }
         window.focus(&self.focus, cx);
         cx.notify();
     }

@@ -245,13 +245,20 @@ impl GridView {
 
     pub(super) fn render_sort_panel(&mut self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
+        // The sort panel shares the filter builder's chrome: the same panel background, list
+        // padding/height, one bordered card, 66px rail, 24px/6px controls and per-row actions.
+        // Its capabilities (enable, direction, reorder, add/remove, apply) are unchanged; they now
+        // all live on each row instead of in a selected-row + footer-arrow scheme.
         let mut list = div()
             .id("sort-rule-list")
             .flex()
             .flex_col()
+            .gap_1()
             .flex_none()
-            .min_h(px(48.0))
-            .max_h(px(150.0))
+            .min_h(px(40.0))
+            .max_h(px(260.0))
+            .px_3()
+            .py_1()
             .overflow_y_scroll();
 
         if self.state.sort_draft.is_empty() {
@@ -261,15 +268,18 @@ impl GridView {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_1()
-                    .px_2()
-                    .h(px(24.0))
+                    .gap_2()
+                    .px_3()
+                    .h(px(30.0))
                     .w_full()
                     .flex_none()
-                    .bg(rgb(theme.tree_hover_bg))
+                    .rounded(px(8.0))
+                    .bg(rgb(theme.dialog_bg))
+                    .border_1()
+                    .border_color(rgb(theme.border))
                     .cursor_pointer()
-                    .hover(move |style| style.bg(rgb(theme.tree_selected_bg)))
-                    .on_click(cx.listener(|this, _event, _window, cx| this.sort_add_rule(cx)))
+                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                    .on_click(cx.listener(|this, _event, _window, cx| this.sort_add_rule(None, cx)))
                     .child(sort_plus_badge(theme))
                     .child(
                         div()
@@ -280,50 +290,43 @@ impl GridView {
             );
         } else {
             let draft = self.state.sort_draft.clone();
+            // Every rule lives inside **one** card, exactly like the filter builder's condition
+            // card: the rows are compact entries on a single surface, not one card per rule.
+            let mut card = div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .w_full()
+                .max_w(px(FILTER_CONTENT_WIDTH_MAX))
+                .p_2()
+                .flex_none()
+                .rounded(px(10.0))
+                .bg(rgb(theme.dialog_bg))
+                .border_1()
+                .border_color(rgb(theme.border))
+                .shadow(ui::soft_shadow());
             for (index, rule) in draft.iter().enumerate() {
-                list = list.child(self.render_sort_rule(index, rule, cx));
+                card = card.child(self.render_sort_rule(index, rule, cx));
             }
-            list = list.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .px_1()
-                    .h(px(22.0))
-                    .flex_none()
-                    .child(ui::icon_button(
-                        "sort-add-row",
-                        "icons/plus.svg",
-                        theme.text,
-                        16.0,
-                        16.0,
-                        true,
-                        theme,
-                        cx.listener(|this, _event, _window, cx| this.sort_add_rule(cx)),
-                    )),
-            );
+            list = list.child(card);
         }
 
         let footer = div()
             .flex()
             .flex_row()
             .items_center()
-            .gap_1()
-            .px_1()
+            .gap_2()
+            .px_3()
             .h(px(26.0))
             .flex_none()
-            .border_t_1()
-            .border_color(rgb(theme.border))
-            .child(self.sort_arrow_button("sort-move-up", "icons/arrow-up.svg", -1, cx))
-            .child(self.sort_arrow_button("sort-move-down", "icons/arrow-down.svg", 1, cx))
-            .child(div().w(px(14.0)).flex_none())
-            .child(self.sort_apply_button(cx));
+            .child(self.sort_apply_button(cx))
+            .child(self.sort_clear_button(cx));
 
         div()
             .flex()
             .flex_col()
             .flex_none()
-            .bg(rgb(theme.editor_bg))
+            .bg(rgb(theme.header_bg))
             .border_b_1()
             .border_color(rgb(theme.border))
             .child(list)
@@ -338,113 +341,165 @@ impl GridView {
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let theme = self.theme;
-        let selected = self.state.sort_selected == Some(index);
         let rule = rule.clone();
+        let dragging = self.sort_drag.is_some_and(|drag| drag.current == index);
         let combo = self.sort_field_combo(index, cx);
         combo.update(cx, |combo, cx| combo.set_selected(rule.column.clone(), cx));
+        let direction = self.sort_direction_combo(index, cx);
+        direction.update(cx, |combo, cx| {
+            combo.set_selected(if rule.descending { "desc" } else { "asc" }, cx);
+        });
+        // A filter condition row's twin: the same 66px enable rail, the same 24px/6px controls
+        // and the same 22px outlined row actions, with no reserved empty slot in between. The row
+        // is not selectable; grabbing it anywhere outside the controls starts a reorder.
         div()
             .id(SharedString::from(format!("sort-rule-{index}")))
             .flex()
             .flex_row()
             .items_center()
-            .gap_1()
-            .px_1()
-            .h(px(24.0))
+            .gap_2()
+            .w_full()
             .flex_none()
-            .when(selected, move |style| style.bg(rgb(theme.tree_hover_bg)))
-            .cursor_pointer()
-            .on_click(
-                cx.listener(move |this, _event, _window, cx| this.sort_select_rule(index, cx)),
+            .rounded(px(6.0))
+            .cursor_grab()
+            .when(dragging, move |style| style.bg(rgb(theme.tree_selected_bg)))
+            // The row itself is the drag target: pressing it anywhere outside the controls starts
+            // the reorder, so the user does not have to aim at the small grip. The controls below
+            // stop the press so they keep their own clicks.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    this.sort_rule_press(index, f32::from(event.position.y), cx);
+                }),
             )
             .child(
                 div()
-                    .id(SharedString::from(format!("sort-enabled-{index}")))
-                    .flex()
-                    .items_center()
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        cx.stop_propagation();
-                        this.sort_toggle_enabled(index, cx)
-                    }))
-                    .child(checkbox_box(rule.enabled, theme)),
-            )
-            .child(combo)
-            .child(
-                div()
-                    .id(SharedString::from(format!("sort-direction-{index}")))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .h(px(20.0))
-                    .w(px(56.0))
+                    .w(px(FILTER_RAIL_WIDTH))
                     .flex_none()
-                    .bg(rgb(theme.button_bg))
-                    .border_1()
-                    .border_color(rgb(theme.border))
-                    .text_size(px(12.0))
-                    .cursor_pointer()
-                    .hover(move |style| style.bg(rgb(theme.button_hover_bg)))
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        cx.stop_propagation();
-                        this.sort_toggle_direction(index, cx)
-                    }))
-                    .child(if rule.descending {
-                        t!("grid.sort_desc").to_string()
-                    } else {
-                        t!("grid.sort_asc").to_string()
-                    }),
-            )
-            // The same flat outlined `−` as the filter builder's remove action: the two panels sit
-            // side by side, so a bare `✕` here read as a different control.
-            .child(
-                div()
-                    .id(SharedString::from(format!("sort-remove-{index}")))
                     .flex()
+                    .flex_row()
                     .items_center()
-                    .justify_center()
-                    .w(px(FILTER_ROW_ACTION_SIZE))
-                    .h(px(FILTER_ROW_ACTION_SIZE))
-                    .flex_none()
-                    .rounded(px(FILTER_ROW_ACTION_RADIUS))
-                    .border_1()
-                    .border_color(rgb(theme.border))
-                    .bg(rgb(theme.dialog_bg))
-                    .cursor_pointer()
-                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        cx.stop_propagation();
-                        this.sort_remove_rule(index, cx)
-                    }))
+                    .justify_between()
+                    .gap_1()
                     .child(
-                        svg()
-                            .path("icons/minus.svg")
-                            .w(px(FILTER_ROW_ACTION_SIZE * 0.5))
-                            .h(px(FILTER_ROW_ACTION_SIZE * 0.5))
+                        div()
+                            .id(SharedString::from(format!("sort-enabled-{index}")))
+                            .flex()
+                            .items_center()
+                            .cursor_pointer()
+                            .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
+                                cx.stop_propagation();
+                            })
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                cx.stop_propagation();
+                                this.sort_toggle_enabled(index, cx)
+                            }))
+                            .child(checkbox_box(rule.enabled, theme)),
+                    )
+                    .child(
+                        // The visible reorder affordance sits right before the field dropdown. The
+                        // row's own handler starts the drag, so this is only the icon.
+                        div()
+                            .id(SharedString::from(format!("sort-drag-{index}")))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .w(px(FILTER_ROW_ACTION_SIZE * 0.72))
+                            .h(px(FILTER_ROW_ACTION_SIZE))
                             .flex_none()
-                            .text_color(rgb(theme.text_null)),
+                            .cursor_grab()
+                            .child(
+                                svg()
+                                    .path("icons/drag_handle.svg")
+                                    .w(px(14.0))
+                                    .h(px(14.0))
+                                    .flex_none()
+                                    .text_color(rgb(theme.text_muted)),
+                            ),
                     ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(FILTER_FIELD_WIDTH))
+                    .max_w(px(SORT_FIELD_MAX_WIDTH))
+                    .cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
+                        cx.stop_propagation();
+                    })
+                    .child(combo),
+            )
+            .child(
+                div()
+                    .cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
+                        cx.stop_propagation();
+                    })
+                    .child(direction),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(4.0))
+                    .flex_none()
+                    .child(self.sort_rule_action(
+                        format!("sort-remove-{index}"),
+                        "icons/minus.svg",
+                        theme.text_null,
+                        cx,
+                        move |grid, cx| grid.sort_remove_rule(index, cx),
+                    ))
+                    .child(self.sort_rule_action(
+                        format!("sort-add-{index}"),
+                        "icons/plus.svg",
+                        theme.text_muted,
+                        cx,
+                        move |grid, cx| grid.sort_add_rule(Some(index), cx),
+                    )),
             )
             .into_any_element()
     }
 
-    pub(super) fn sort_arrow_button(
+    /// One 22px outlined action of a sort row, drawn exactly like the filter builder's `−` / `+`
+    /// row actions: same size, radius, border, dialog face, 11px glyph and hover tint. A press on
+    /// it stops before the row's drag handler, so the action keeps its click.
+    fn sort_rule_action(
         &self,
-        id: &'static str,
+        id: String,
         icon: &'static str,
-        delta: isize,
+        color: u32,
         cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
+        action: impl Fn(&mut Self, &mut Context<'_, Self>) + 'static,
+    ) -> Stateful<Div> {
         let theme = self.theme;
-        ui::icon_button(
-            id,
-            icon,
-            theme.text,
-            22.0,
-            20.0,
-            false,
-            theme,
-            cx.listener(move |this, _event, _window, cx| this.sort_move_rule(delta, cx)),
-        )
+        div()
+            .id(SharedString::from(id))
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(FILTER_ROW_ACTION_SIZE))
+            .h(px(FILTER_ROW_ACTION_SIZE))
+            .flex_none()
+            .rounded(px(FILTER_ROW_ACTION_RADIUS))
+            .border_1()
+            .border_color(rgb(theme.border))
+            .bg(rgb(theme.dialog_bg))
+            .cursor_pointer()
+            .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
+                cx.stop_propagation();
+            })
+            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            .on_click(cx.listener(move |this, _event, _window, cx| action(this, cx)))
+            .child(
+                svg()
+                    .path(icon)
+                    .w(px(FILTER_ROW_ACTION_SIZE * 0.5))
+                    .h(px(FILTER_ROW_ACTION_SIZE * 0.5))
+                    .flex_none()
+                    .text_color(rgb(color)),
+            )
     }
 
     pub(super) fn sort_apply_button(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
@@ -471,6 +526,34 @@ impl GridView {
                     .text_color(rgb(theme.text_muted)),
             )
             .child(t!("grid.apply").to_string())
+    }
+
+    /// The sort panel's 清空: drop every rule and apply the empty sort. Same control and label as
+    /// the filter builder's 清空.
+    fn sort_clear_button(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let theme = self.theme;
+        div()
+            .id("sort-clear")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .h(px(20.0))
+            .cursor_pointer()
+            .text_size(px(12.0))
+            .text_color(rgb(theme.text_muted))
+            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            .on_click(cx.listener(|this, _event, _window, cx| this.sort_clear(cx)))
+            .child(
+                svg()
+                    .path("icons/cross.svg")
+                    .w(px(12.0))
+                    .h(px(12.0))
+                    .flex_none()
+                    .text_color(rgb(theme.text_muted)),
+            )
+            .child(t!("grid.filter_clear").to_string())
     }
 
     pub(super) fn render_filter_panel(&mut self, cx: &mut Context<'_, Self>) -> AnyElement {

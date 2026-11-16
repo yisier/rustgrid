@@ -1021,7 +1021,14 @@ shadcn chrome described above. Implemented today:
     change of a run and the field's blur repaint, and the pane must never `set_text` a field that
     holds focus — its change callback is dispatched on the wrapper's next render, so the model can
     lag one keystroke and rewriting it would drop that keystroke and clear the input's undo
-    history.
+    history. **A mouse click on a grid cell focuses that column's field in the form** (the grid
+    bumps `cell_click_serial` only when the click moves the selection, so a repaint never steals
+    the caret back and the second click on the same cell still opens its in-place editor; the pane
+    consumes one click serial and reveals the field through the list's `scroll_to_item`). When the
+    last field is a multi-line editor (the JSON code block usually is), its bottom grip sits on the
+    window edge, so holding the drag there edge-auto-scrolls the field list and grows the editor by
+    the scrolled distance (`form_resize_autoscroll_tick`); the pointer never needs to travel past
+    the window.
 
 21. Connection-tree search (`app/sidebar.rs` + `app/tree.rs`): a search box at the top of the
     connection tree filters what the tree already holds — groups, connections, databases, schemas
@@ -1080,7 +1087,16 @@ make more engines cheap later — do not build those features early.
   join, so its control stays hidden until hovered; condition-row actions are always visible. The
   condition block fills the pane (responsive) up to 700px; the hover-only
   divider on its right edge (so it does not read as a scrollbar) drags a manual width (min 520,
-  max 700) and double-clicking it restores auto-fit (`filter_resize_drag`).
+  max 700) and double-clicking it restores auto-fit (`filter_resize_drag`). The 排序 panel
+  (`render_sort_panel`) is chrome-matched to the filter builder — the same panel background, list
+  padding and height, **one bordered card holding every rule**, the same 66px enable rail, 24px/6px
+  controls (the 升序/降序 control is the filter operator's `ComboBox`; the field dropdown is the same
+  `ComboBox`, stretched over the row's free width up to `SORT_FIELD_MAX_WIDTH` so the row does not
+  end in a blank stretch) and the same per-row 22px outlined actions (`−` remove, `+` add), with a
+  drag grip just before the field dropdown — a rule is reordered by **dragging the row anywhere
+  outside its controls** (the grip is the visible affordance, and every control stops the press so
+  it keeps its own click), not by ↑/↓ or a selected row. It has **no selected-row state**: every
+  action belongs to its own row, and the footer is 应用 / 清空, the same pair the filter panel uses.
 
 - **A key-down listener must never claim a printable keystroke to "use" its character.** On
   Windows `WM_GPUI_KEYDOWN` runs `TranslateMessage` only while the event propagates, so calling

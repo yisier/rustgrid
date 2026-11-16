@@ -114,6 +114,10 @@ impl GridView {
             column_resize: None,
             sort_hover: None,
             sort_field_combos: BTreeMap::new(),
+            sort_direction_combos: BTreeMap::new(),
+            sort_drag: None,
+            cell_click_serial: 0,
+            cell_click_cell: None,
             clipboard,
             refresh_feedback: false,
             counted_filter: None,
@@ -171,6 +175,7 @@ impl GridView {
                     .values()
                     .chain(self.filter_operator_combos.values())
                     .chain(self.sort_field_combos.values())
+                    .chain(self.sort_direction_combos.values())
                     .cloned()
                     .collect();
                 for combo in combos {
@@ -1139,6 +1144,39 @@ impl Render for GridView {
                                 return;
                             }
                             let _ = up_weak.update(cx, |grid, cx| grid.grid_select_end_drag(cx));
+                        });
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            );
+        }
+        // A sort rule drag can leave the compact panel (up over the toolbar or down over the
+        // table): a window-level listener keeps following the pointer and ends the drag on
+        // release, so the row never stays stuck in its dragged state.
+        if self.sort_drag.is_some() {
+            let drag_weak = self.self_weak.clone();
+            root = root.child(
+                canvas(
+                    |_bounds, _window, _cx| {},
+                    move |_bounds, _hitbox, window, _cx| {
+                        let move_weak = drag_weak.clone();
+                        window.on_mouse_event(move |event: &MouseMoveEvent, phase, _window, cx| {
+                            if phase != DispatchPhase::Capture {
+                                return;
+                            }
+                            let pressed = event.pressed_button == Some(MouseButton::Left);
+                            let y = f32::from(event.position.y);
+                            let _ = move_weak.update(cx, |grid, cx| {
+                                grid.sort_rule_pointer_moved(y, pressed, cx)
+                            });
+                        });
+                        let up_weak = drag_weak.clone();
+                        window.on_mouse_event(move |_event: &MouseUpEvent, phase, _window, cx| {
+                            if phase != DispatchPhase::Capture {
+                                return;
+                            }
+                            let _ = up_weak.update(cx, |grid, cx| grid.sort_rule_drag_end(cx));
                         });
                     },
                 )

@@ -910,14 +910,14 @@ impl GridView {
         }
         if self.state.sort_open {
             self.state.sort_open = false;
-            self.state.sort_selected = None;
             self.state.sort_draft.clear();
-            self.sort_field_combos.clear();
+            self.sort_drag = None;
+            self.clear_sort_combos();
         } else {
             self.state.sort_open = true;
             self.state.sort_draft = self.state.sort_rules.clone();
-            self.state.sort_selected = (!self.state.sort_draft.is_empty()).then_some(0);
-            self.sort_field_combos.clear();
+            self.sort_drag = None;
+            self.clear_sort_combos();
         }
         cx.notify();
     }
@@ -942,7 +942,9 @@ impl GridView {
         }
     }
 
-    pub(super) fn sort_add_rule(&mut self, cx: &mut Context<'_, Self>) {
+    /// Add a sort rule. `after` is the row whose `+` was pressed (the rule lands right after it,
+    /// like the filter builder's per-condition `+`); `None` appends (the empty panel's hint).
+    pub(super) fn sort_add_rule(&mut self, after: Option<usize>, cx: &mut Context<'_, Self>) {
         let column = self
             .state
             .columns
@@ -958,15 +960,13 @@ impl GridView {
         let Some(column) = column else {
             return;
         };
-        let position = self.state.sort_draft.len();
-        self.state.sort_draft.push(SortRule::new(column));
-        self.state.sort_selected = Some(position);
-        self.sort_field_combos.clear();
-        cx.notify();
-    }
-
-    pub(super) fn sort_select_rule(&mut self, index: usize, cx: &mut Context<'_, Self>) {
-        self.state.sort_selected = Some(index);
+        let position = after
+            .map(|index| (index + 1).min(self.state.sort_draft.len()))
+            .unwrap_or(self.state.sort_draft.len());
+        self.state
+            .sort_draft
+            .insert(position, SortRule::new(column));
+        self.clear_sort_combos();
         cx.notify();
     }
 
@@ -977,11 +977,11 @@ impl GridView {
         cx.notify();
     }
 
-    pub(super) fn sort_toggle_direction(&mut self, index: usize, cx: &mut Context<'_, Self>) {
-        if let Some(rule) = self.state.sort_draft.get_mut(index) {
-            rule.descending = !rule.descending;
-        }
-        cx.notify();
+    /// Drop every cached sort dropdown (field and direction). A structural change — add, remove,
+    /// move, or closing the panel — re-keys them by row, so a stale combo must not survive.
+    fn clear_sort_combos(&mut self) {
+        self.sort_field_combos.clear();
+        self.sort_direction_combos.clear();
     }
 
     /// The shared drop-down for a sort rule's column, created lazily per rule index.
@@ -1007,19 +1007,84 @@ impl GridView {
             .get(index)
             .map(|rule| rule.column.clone())
             .unwrap_or_default();
-        // The popup menu is widened to fit the longest column name; the trigger sizes to content.
+        // The popup menu is widened to fit the longest column name; the trigger stretches over the
+        // row's free width (like the filter's value field), so the row does not end in a large
+        // blank stretch.
         let menu_width = self.field_menu_width();
         let entity = cx.new(move |cx| {
-            ComboBox::new(theme, options, selected, menu_width, cx).on_select(Rc::new(
-                move |value, _window, cx| {
+            ComboBox::new(theme, options, selected, menu_width, cx)
+                .full_width()
+                .height(FILTER_CONTROL_HEIGHT)
+                .text_size(FILTER_CONTROL_TEXT_SIZE)
+                .radius(FILTER_CONTROL_RADIUS)
+                .on_select(Rc::new(move |value, _window, cx| {
                     let _ = weak.update(cx, |grid, cx| {
                         grid.sort_choose_column(index, value.to_string(), cx);
                     });
-                },
-            ))
+                }))
         });
         self.sort_field_combos.insert(index, entity.clone());
         entity
+    }
+
+    /// The shared 升序/降序 dropdown of a sort rule, created lazily per rule index. It is the same
+    /// [`ComboBox`] control, with the same trigger metrics, as the filter builder's operator
+    /// dropdown, so the two panels render the same row.
+    pub(super) fn sort_direction_combo(
+        &mut self,
+        index: usize,
+        cx: &mut Context<'_, Self>,
+    ) -> Entity<ComboBox> {
+        if let Some(entity) = self.sort_direction_combos.get(&index) {
+            return entity.clone();
+        }
+        let theme = self.theme;
+        let weak = self.self_weak.clone();
+        let asc = t!("grid.sort_asc").to_string();
+        let desc = t!("grid.sort_desc").to_string();
+        // Like the operator dropdown, only the popup grows to fit a long localized label; the
+        // trigger stays at the compact operator width.
+        let menu_width = (ui::approx_text_width(&asc).max(ui::approx_text_width(&desc)) + 56.0)
+            .clamp(FILTER_OPERATOR_WIDTH, FILTER_OPERATOR_MAX_WIDTH);
+        let options = vec![ComboOption::new("asc", asc), ComboOption::new("desc", desc)];
+        let selected = if self
+            .state
+            .sort_draft
+            .get(index)
+            .is_some_and(|rule| rule.descending)
+        {
+            "desc"
+        } else {
+            "asc"
+        };
+        let entity = cx.new(move |cx| {
+            ComboBox::new(theme, options, selected, menu_width, cx)
+                .field_width(FILTER_OPERATOR_WIDTH)
+                .height(FILTER_CONTROL_HEIGHT)
+                .text_size(FILTER_CONTROL_TEXT_SIZE)
+                .radius(FILTER_CONTROL_RADIUS)
+                .on_select(Rc::new(move |value, _window, cx| {
+                    let descending = value == "desc";
+                    let _ = weak.update(cx, |grid, cx| {
+                        grid.sort_set_direction(index, descending, cx);
+                    });
+                }))
+        });
+        self.sort_direction_combos.insert(index, entity.clone());
+        entity
+    }
+
+    /// Commit a choice made in a rule's 升序/降序 dropdown.
+    pub(super) fn sort_set_direction(
+        &mut self,
+        index: usize,
+        descending: bool,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(rule) = self.state.sort_draft.get_mut(index) {
+            rule.descending = descending;
+        }
+        cx.notify();
     }
 
     /// Commit a column choice made in a sort rule's dropdown.
@@ -1039,29 +1104,82 @@ impl GridView {
         if index < self.state.sort_draft.len() {
             self.state.sort_draft.remove(index);
         }
-        self.sort_field_combos.clear();
-        let len = self.state.sort_draft.len();
-        self.state.sort_selected = match self.state.sort_selected {
-            Some(selected) if selected >= len => len.checked_sub(1),
-            Some(selected) if selected > index => Some(selected - 1),
-            other => other,
-        };
+        self.clear_sort_combos();
         cx.notify();
     }
 
-    pub(super) fn sort_move_rule(&mut self, delta: isize, cx: &mut Context<'_, Self>) {
-        let len = self.state.sort_draft.len();
-        if len > 1
-            && let Some(selected) = self.state.sort_selected
-        {
-            let target = (selected as isize + delta).clamp(0, len as isize - 1) as usize;
-            if target != selected {
-                self.state.sort_draft.swap(selected, target);
-                self.state.sort_selected = Some(target);
-                self.sort_field_combos.clear();
-            }
+    /// Start dragging a sort rule row. The grip (and the row's empty middle) is the only place a
+    /// press starts a reorder, so the dropdowns and the other actions keep their own clicks.
+    pub(super) fn sort_rule_press(
+        &mut self,
+        index: usize,
+        position_y: f32,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if index >= self.state.sort_draft.len() {
+            return;
         }
+        self.sort_drag = Some(SortRuleDrag {
+            from: index,
+            current: index,
+            start_y: position_y,
+        });
         cx.notify();
+    }
+
+    /// Reorder the dragged rule as the pointer crosses row boundaries — in the draft only; the
+    /// grid picks the new order up when 应用 is pressed. Rows are a fixed pitch apart, so the
+    /// target position is how far the pointer has travelled from the press.
+    /// The pointer half of a sort rule drag, called from the grid's window-level listener so a
+    /// drag held past the panel still follows the pointer.
+    pub(super) fn sort_rule_pointer_moved(
+        &mut self,
+        position_y: f32,
+        pressed: bool,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(drag) = self.sort_drag else {
+            return;
+        };
+        if !pressed {
+            self.sort_drag = None;
+            cx.notify();
+            return;
+        }
+        let len = self.state.sort_draft.len();
+        if len == 0 {
+            return;
+        }
+        let steps = ((position_y - drag.start_y) / SORT_RULE_ROW_PITCH).round() as isize;
+        let target = (drag.from as isize + steps).clamp(0, len as isize - 1) as usize;
+        if target == drag.current {
+            return;
+        }
+        let rule = self.state.sort_draft.remove(drag.current);
+        self.state.sort_draft.insert(target, rule);
+        self.sort_drag = Some(SortRuleDrag {
+            current: target,
+            ..drag
+        });
+        // The field/direction dropdowns are corrected on the next render (`render_sort_rule` sets
+        // each row's values), so a drag step does not have to rebuild their entities.
+        cx.notify();
+    }
+
+    /// Finish a rule drag.
+    pub(super) fn sort_rule_drag_end(&mut self, cx: &mut Context<'_, Self>) {
+        if self.sort_drag.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// 清空: drop every rule and apply the empty sort, exactly like the filter panel's 清空 applies
+    /// the empty filter.
+    pub(super) fn sort_clear(&mut self, cx: &mut Context<'_, Self>) {
+        self.state.sort_draft.clear();
+        self.sort_drag = None;
+        self.clear_sort_combos();
+        self.sort_apply(cx);
     }
 
     pub(super) fn sort_apply(&mut self, cx: &mut Context<'_, Self>) {
@@ -1123,7 +1241,6 @@ impl GridView {
         self.state.sort_rules = vec![rule];
         if self.state.sort_open {
             self.state.sort_draft = self.state.sort_rules.clone();
-            self.state.sort_selected = Some(0);
         }
         self.state.page_index = 0;
         self.sync_page_input(cx);
@@ -1988,7 +2105,6 @@ impl GridView {
                 self.state.sort_rules = vec![rule];
                 if self.state.sort_open {
                     self.state.sort_draft = self.state.sort_rules.clone();
-                    self.state.sort_selected = Some(0);
                 }
                 self.state.page_index = 0;
                 self.sync_page_input(cx);

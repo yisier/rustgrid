@@ -1141,8 +1141,6 @@ pub struct GridState {
     pub sort_open: bool,
     /// The panel's working copy of the rules while it is open; applied on `Apply`.
     pub sort_draft: Vec<SortRule>,
-    /// The draft rule highlighted for reordering, if any.
-    pub sort_selected: Option<usize>,
     /// The `WHERE` tree applied to the table when pages are fetched.
     pub filters: Vec<FilterNode>,
     /// Whether the filter builder panel is expanded below the toolbar.

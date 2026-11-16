@@ -215,6 +215,19 @@ struct FormPicker {
     time_field: Option<Entity<TimeFieldState>>,
 }
 
+/// An in-progress drag of one multi-line form editor's bottom grip.
+struct FormResize {
+    /// The display column of the field whose editor is being resized.
+    col: usize,
+    /// Pointer y and the editor height when the drag began.
+    start_y: f32,
+    start_height: f32,
+    /// Height gained by holding the pointer past the field list's bottom edge, where the pointer
+    /// itself cannot travel any further (the last field sits on the window's edge). The edge
+    /// auto-scroll adds to this on every tick, so the editor keeps growing while the list scrolls.
+    extra: f32,
+}
+
 // ----- Left sidebar ---------------------------------------------------------------------------
 
 /// The connection-tree pane: the cached tree plus a drag handle on its right edge.
@@ -396,8 +409,14 @@ pub(super) struct InfoPane {
     form_json_loaded: Option<String>,
     /// The form field whose inline date/time picker is open, if any.
     form_picker: Option<FormPicker>,
-    /// The form's multi-line editor being resized: `(col, pointer y at start, height at start)`.
-    form_resize: Option<(usize, f32, f32)>,
+    /// The form's multi-line editor being resized.
+    form_resize: Option<FormResize>,
+    /// Timer-based edge auto-scroll for a grip drag held at the field list's bottom edge, so the
+    /// last field's editor keeps growing even when the pointer has reached the window edge.
+    form_resize_scroll: gpui_kit::base::AutoScroll,
+    /// The grid cell click already mirrored into the form, as `(grid id, click serial)`, so a
+    /// repaint never steals the caret again.
+    form_click_seen: Option<(u64, u64)>,
     /// The field list's scroll state; gpui paints no scrollbar for an overflow container, so the
     /// form draws its own from this handle.
     form_scroll: ScrollHandle,
@@ -429,6 +448,8 @@ impl InfoPane {
             form_json_loaded: None,
             form_picker: None,
             form_resize: None,
+            form_resize_scroll: gpui_kit::base::AutoScroll::default(),
+            form_click_seen: None,
             form_scroll: ScrollHandle::new(),
         }
     }
@@ -483,6 +504,7 @@ impl InfoPane {
             self.form = None;
             self.form_picker = None;
             self.form_resize = None;
+            self.form_resize_scroll.stop();
             if let Some(app) = self.app.upgrade() {
                 // Leave the update for after this frame: the pane is being rendered and the grids
                 // may still be busy drawing.
@@ -503,6 +525,7 @@ impl InfoPane {
         self.form = None;
         self.form_picker = None;
         self.form_resize = None;
+        self.form_resize_scroll.stop();
         let app = app_entity.read(cx);
         let weak = self.app.clone();
         (app.info_body(&weak, cx), false)
@@ -519,6 +542,7 @@ impl InfoPane {
         self.form = None;
         self.form_picker = None;
         self.form_resize = None;
+        self.form_resize_scroll.stop();
         self.form_json_loaded = None;
         if let Some(grid) = grid {
             // A document-store grid opens on the JSON view (the row is a document); other
@@ -534,6 +558,10 @@ impl InfoPane {
             (grid.id, subscription)
         });
         self.form_grid_entity = grid.map(|grid| grid.entity.downgrade());
+        // A click that happened before the form opened must not move the caret into a field: only
+        // clicks made while the form is showing should. The click that opens the form is therefore
+        // already accounted for.
+        self.form_click_seen = grid.map(|grid| (grid.id, grid.entity.read(cx).cell_click_serial));
     }
 
     /// Build the editable form for the selected row, or `None` when there is nothing to show yet
@@ -640,6 +668,7 @@ impl InfoPane {
             // The picker belonged to the previous row/field layout.
             self.form_picker = None;
             self.form_resize = None;
+            self.form_resize_scroll.stop();
         }
         let form = self.form.as_mut()?;
         // Mirror the model into the editors. Typing already staged the same value, so this only
@@ -673,6 +702,31 @@ impl InfoPane {
                 }
             }
             input.set_theme(theme, cx);
+        }
+
+        // Clicking a cell in the table focuses the matching field here, so the form follows the
+        // table's column selection. The click serial makes it once per click: a re-render (typing,
+        // staging, a reload) must never pull the caret back out of whichever field has it.
+        let click_target = {
+            let view = grid.entity.read(cx);
+            view.cell_click_cell.and_then(|(display_row, col)| {
+                let data = match view.row_at(display_row) {
+                    Some(GridRow::Data(data)) => data,
+                    _ => return None,
+                };
+                (data == row).then_some((view.cell_click_serial, col))
+            })
+        };
+        if let Some((serial, col)) = click_target
+            && self.form_click_seen != Some((grid.id, serial))
+        {
+            self.form_click_seen = Some((grid.id, serial));
+            if let Some(input) = form.inputs.get(col).cloned() {
+                // Reveal the field first (its block is a direct child of the field list, so the
+                // scroll handle can target it) and then hand it the caret.
+                self.form_scroll.scroll_to_item(col);
+                input.focus_state(window, cx);
+            }
         }
 
         let style = FormStyle {
@@ -944,31 +998,86 @@ impl InfoPane {
         else {
             return;
         };
-        self.form_resize = Some((col, y, height));
+        self.form_resize_scroll.stop();
+        self.form_resize = Some(FormResize {
+            col,
+            start_y: y,
+            start_height: height,
+            extra: 0.0,
+        });
         cx.notify();
     }
 
-    /// Follow the pointer while a field grip is being dragged, clamped to a usable range.
+    /// Follow the pointer while a field grip is being dragged, clamped to a usable range. When the
+    /// grip nears the field list's bottom edge, the form auto-scrolls so the drag keeps growing
+    /// even though the pointer cannot travel any further (the last field sits on the window edge).
     fn form_resize_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<'_, Self>) {
-        let Some((col, start_y, start_height)) = self.form_resize else {
+        let Some(resize) = self.form_resize.as_ref() else {
             return;
         };
         if event.pressed_button != Some(MouseButton::Left) {
             self.form_resize = None;
+            self.form_resize_scroll.stop();
             cx.notify();
             return;
         }
-        let delta = f32::from(event.position.y) - start_y;
-        let height = (start_height + delta).clamp(FORM_INPUT_HEIGHT, 600.0);
+        let col = resize.col;
+        let delta = f32::from(event.position.y) - resize.start_y + resize.extra;
+        let height = (resize.start_height + delta).clamp(FORM_INPUT_HEIGHT, 600.0);
         if let Some(form) = self.form.as_mut()
             && let Some(slot) = form.heights.get_mut(col)
         {
             *slot = height;
         }
+        // Only the downward edge needs help: the grip sits below the editor, so growing down is
+        // the direction that runs out of pointer travel at the bottom of the window.
+        let viewport = self.form_scroll.bounds();
+        let scroll_delta = (viewport.size.height > px(0.0))
+            .then(|| gpui_kit::base::AutoScroll::compute_delta(event.position.y, viewport))
+            .flatten()
+            .filter(|delta| *delta > px(0.0));
+        self.form_resize_scroll.last_drag_position = Some(event.position);
+        self.form_resize_scroll
+            .set(scroll_delta, cx, |delta, pane, cx| {
+                pane.form_resize_autoscroll_tick(delta, cx)
+            });
+        cx.notify();
+    }
+
+    /// One tick of the grip drag's edge auto-scroll: keep the grip under the pointer while the
+    /// field list scrolls down, so the editor keeps growing by the distance the list scrolled.
+    fn form_resize_autoscroll_tick(&mut self, delta: Pixels, cx: &mut Context<'_, Self>) {
+        let Some(pointer) = self.form_resize_scroll.last_drag_position else {
+            self.form_resize_scroll.stop();
+            return;
+        };
+        let Some(resize) = self.form_resize.as_mut() else {
+            self.form_resize_scroll.stop();
+            return;
+        };
+        let col = resize.col;
+        resize.extra += f32::from(delta);
+        let height = (resize.start_height + (f32::from(pointer.y) - resize.start_y) + resize.extra)
+            .clamp(FORM_INPUT_HEIGHT, 600.0);
+        let reached_max = height >= 600.0;
+        if let Some(form) = self.form.as_mut()
+            && let Some(slot) = form.heights.get_mut(col)
+        {
+            *slot = height;
+        }
+        // Scroll by the same distance the editor grew. The content grows with the field, so the
+        // list's new maximum covers it; the grip therefore stays exactly under the pointer.
+        let offset = self.form_scroll.offset();
+        self.form_scroll
+            .set_offset(Point::new(offset.x, offset.y - delta));
+        if reached_max {
+            self.form_resize_scroll.stop();
+        }
         cx.notify();
     }
 
     fn form_resize_end(&mut self, cx: &mut Context<'_, Self>) {
+        self.form_resize_scroll.stop();
         if self.form_resize.take().is_some() {
             cx.notify();
         }
@@ -2522,7 +2631,17 @@ fn render_row_form(
             form,
             picker,
         } => {
-            let mut list = div().flex().flex_col().w_full();
+            // Each field block is a direct child of the scrolling list, so the pane can reveal one
+            // by index (`ScrollHandle::scroll_to_item`) when a grid click focuses it.
+            let mut list = div()
+                .id("info-form-fields-scroll")
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h(px(0.0))
+                .w_full()
+                .overflow_y_scroll()
+                .track_scroll(style.scroll);
             for (index, field) in fields.iter().enumerate() {
                 list = list.child(render_form_field(
                     style,
@@ -2547,18 +2666,7 @@ fn render_row_form(
                 .min_h(px(0.0))
                 .w_full()
                 .overflow_hidden()
-                .child(
-                    div()
-                        .id("info-form-fields-scroll")
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .min_h(px(0.0))
-                        .w_full()
-                        .overflow_y_scroll()
-                        .track_scroll(style.scroll)
-                        .child(div().flex().flex_col().w_full().px_3().child(list)),
-                )
+                .child(list)
                 // gpui paints no scrollbar for an overflow container, so the form draws its own.
                 .child(
                     Scrollbar::vertical(style.scroll)
@@ -2749,6 +2857,7 @@ fn render_form_field(
         .flex_col()
         .gap_1()
         .w_full()
+        .px_3()
         .py_2()
         .border_b_1()
         .border_color(rgb(theme.grid_line))
