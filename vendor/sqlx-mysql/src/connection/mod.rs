@@ -50,6 +50,11 @@ pub(crate) struct MySqlConnectionInner {
     cache_statement: StatementCache<(u32, MySqlStatementMetadata)>,
 
     log_settings: LogSettings,
+
+    /// Whether the server rejected the optional `SET` the login sends (the SQL mode and time
+    /// zone). OceanBase 3.x does; it also refuses server-side prepares, so the driver uses the
+    /// text protocol for it (issue #62).
+    pub(crate) session_settings_rejected: bool,
 }
 
 impl MySqlConnection {
@@ -63,6 +68,14 @@ impl MySqlConnection {
     /// including the vendor suffix that [`MySqlConnection::server_version`] drops.
     pub fn server_version_string(&self) -> &str {
         &self.inner.stream.server_version_string
+    }
+
+    /// Whether the server rejected the optional session settings sent right after login (the
+    /// SQL mode and time zone) with a server-side error. Such a server may not support what those
+    /// settings assume — OceanBase 3.x, for one, also refuses server-side prepares — so a driver
+    /// can fall back to the text protocol instead of failing its first catalog query (issue #62).
+    pub fn session_settings_rejected(&self) -> bool {
+        self.inner.session_settings_rejected
     }
 
     /// Select the connection's current database with `COM_INIT_DB`, the command

@@ -303,6 +303,12 @@ async fn connect(config: &ConnectionConfig, engine: Engine) -> Result<Box<dyn Co
             if is_prepare_sticky_proxy(connection.server_version_string()) {
                 text_protocol.store(true, Ordering::Relaxed);
                 needs_database.store(true, Ordering::Relaxed);
+            } else if connection.session_settings_rejected() {
+                // A server that rejects the login's optional session settings (OceanBase 3.x)
+                // may not support prepared statements either: OceanBase disables them and
+                // answers the first COM_STMT_PREPARE with 1235. Use the text protocol for the
+                // whole pool, without the proxy's database-requirement rules (issue #62).
+                text_protocol.store(true, Ordering::Relaxed);
             }
             if !init_sql.is_empty() {
                 sqlx::raw_sql(sqlx::AssertSqlSafe(init_sql))

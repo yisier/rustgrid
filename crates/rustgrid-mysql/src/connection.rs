@@ -69,11 +69,16 @@ impl MysqlConnection {
         self.text_protocol.load(Ordering::Relaxed)
     }
 
-    fn mark_text_protocol(&self) {
+    /// Mark the pool for the text protocol after a prepared catalog query failed. A proxy that
+    /// rejects server-side prepares also insists on a current database before it routes a catalog
+    /// statement, so it gets the current-database treatment too; a server that only lacks
+    /// prepared statements (OceanBase with `_ob_enable_prepared_statement` off) keeps normal
+    /// qualified names.
+    fn mark_text_protocol_for(&self, error: &sqlx::Error) {
         self.text_protocol.store(true, Ordering::Relaxed);
-        // Every proxy that rejects server-side prepares also insists on a current database
-        // before it routes a catalog statement; select it on each database-scoped session.
-        self.mark_needs_database();
+        if !is_prepare_unsupported_error(error) {
+            self.mark_needs_database();
+        }
     }
 
     /// Whether this session already met a middleware that rejects statements while it has no
@@ -317,9 +322,22 @@ impl MysqlConnection {
             let sql = text_statement(sql, &values);
             self.text_rows(connection, database, sql).await
         } else {
-            self.prepared_rows(connection, database, sql, binds, true)
-                .await
-                .map_err(map_query_error)
+            let rows = self
+                .prepared_rows(connection, database, sql, binds, true)
+                .await;
+            match rows {
+                Err(error) if is_prepare_unsupported_error(&error) => {
+                    // A server that only lacks server-side prepares (OceanBase 3.x) keeps normal
+                    // qualified names; retry this catalog read over the text protocol and use it
+                    // for the rest of the pool (issue #62).
+                    self.text_protocol.store(true, Ordering::Relaxed);
+                    let values: Vec<BoundValue> =
+                        binds.iter().map(|bind| BoundValue::Text(bind)).collect();
+                    let sql = text_statement(sql, &values);
+                    self.text_rows(connection, database, sql).await
+                }
+                rows => rows.map_err(map_query_error),
+            }
         }
     }
 
@@ -790,8 +808,8 @@ impl Connection for MysqlConnection {
             .await;
         let rows = match rows {
             Ok(rows) => rows,
-            Err(error) if is_unknown_command_error(&error) || is_no_database_error(&error) => {
-                self.mark_text_protocol();
+            Err(error) if is_prepare_fallback_error(&error) => {
+                self.mark_text_protocol_for(&error);
                 connection
                     .select_database(database)
                     .await
@@ -847,8 +865,8 @@ impl Connection for MysqlConnection {
             .await;
         let rows = match rows {
             Ok(rows) => rows,
-            Err(error) if is_unknown_command_error(&error) || is_no_database_error(&error) => {
-                self.mark_text_protocol();
+            Err(error) if is_prepare_fallback_error(&error) => {
+                self.mark_text_protocol_for(&error);
                 connection
                     .select_database(database)
                     .await
@@ -1377,8 +1395,8 @@ impl Connection for MysqlConnection {
                 .await
             {
                 Ok(rows) => rows,
-                Err(error) if is_unknown_command_error(&error) || is_no_database_error(&error) => {
-                    self.mark_text_protocol();
+                Err(error) if is_prepare_fallback_error(&error) => {
+                    self.mark_text_protocol_for(&error);
                     return self.database_options_via_text(&mut connection, name).await;
                 }
                 Err(error) => return Err(map_query_error(error)),
@@ -1444,8 +1462,8 @@ impl Connection for MysqlConnection {
                 .await
             {
                 Ok(statuses) => statuses,
-                Err(error) if is_unknown_command_error(&error) || is_no_database_error(&error) => {
-                    self.mark_text_protocol();
+                Err(error) if is_prepare_fallback_error(&error) => {
+                    self.mark_text_protocol_for(&error);
                     connection
                         .select_database(database)
                         .await
@@ -3624,6 +3642,29 @@ fn is_unknown_command_error(error: &sqlx::Error) -> bool {
     mysql_error_number(error) == Some(1047)
 }
 
+/// Whether a prepared statement failed because the server does not offer server-side prepares.
+/// OceanBase 3.x keeps the MySQL wire protocol but disables `COM_STMT_PREPARE` by default and
+/// answers `1235 ... while parameter _ob_enable_prepared_statement is disabled, prepared
+/// statement not supported`; the catalog then reads over the text protocol, as it does for
+/// proxies that reject prepares (issue #62).
+fn is_prepare_unsupported_error(error: &sqlx::Error) -> bool {
+    let sqlx::Error::Database(database_error) = error else {
+        return false;
+    };
+    let message = database_error.message().to_ascii_lowercase();
+    message.contains("prepared statement")
+        && (message.contains("not supported") || message.contains("disabled"))
+}
+
+/// The catalog fallbacks run when a server cannot answer the prepared catalog query: a proxy
+/// that rejects prepares or demands a current database first, or OceanBase with server-side
+/// prepares disabled.
+fn is_prepare_fallback_error(error: &sqlx::Error) -> bool {
+    is_unknown_command_error(error)
+        || is_no_database_error(error)
+        || is_prepare_unsupported_error(error)
+}
+
 /// Whether the server (a middleware that routes each statement itself, such as UDAL/TeleDB's
 /// DBProxy) refused the statement with `1046 ER_NO_DB_ERROR` because its session has no current
 /// database. It answers that even for a fully qualified `information_schema` query, so the
@@ -4868,5 +4909,51 @@ mod tests {
         assert!(!super::is_prepare_sticky_proxy("8.0.36"));
         assert!(!super::is_prepare_sticky_proxy("10.11.6-MariaDB"));
         assert!(!super::is_prepare_sticky_proxy("5.7.44-log"));
+    }
+
+    #[test]
+    fn recognises_oceanbase_with_server_side_prepares_disabled() {
+        #[derive(Debug)]
+        struct FakeDatabaseError(&'static str);
+
+        impl std::fmt::Display for FakeDatabaseError {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str(self.0)
+            }
+        }
+
+        impl std::error::Error for FakeDatabaseError {}
+
+        impl sqlx::error::DatabaseError for FakeDatabaseError {
+            fn message(&self) -> &str {
+                self.0
+            }
+
+            fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+                self
+            }
+
+            fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+                self
+            }
+
+            fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+                self
+            }
+
+            fn kind(&self) -> sqlx::error::ErrorKind {
+                sqlx::error::ErrorKind::Other
+            }
+        }
+
+        let oceanbase = sqlx::Error::Database(Box::new(FakeDatabaseError(
+            "1235 - while parameter _ob_enable_prepared_statement is disabled, \
+             prepared statement not supported",
+        )));
+        assert!(super::is_prepare_unsupported_error(&oceanbase));
+        assert!(super::is_prepare_fallback_error(&oceanbase));
+
+        let syntax = sqlx::Error::Database(Box::new(FakeDatabaseError("1064 - syntax error")));
+        assert!(!super::is_prepare_unsupported_error(&syntax));
     }
 }

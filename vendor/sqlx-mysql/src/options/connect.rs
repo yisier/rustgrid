@@ -69,6 +69,26 @@ impl ConnectOptions for MySqlConnectOptions {
             options.push(format!(r#"time_zone='{}'"#, timezone));
         }
 
+        if !options.is_empty() {
+            // These session preferences are optional. A MySQL-compatible server may reject
+            // them: OceanBase 3.x accepts neither a subquery in `SET` nor the
+            // `NO_ENGINE_SUBSTITUTION` SQL mode and answers `1235`/`1064` (issue #62).
+            // Connecting without the preferences is better than refusing the server, so a
+            // server-side rejection is logged and skipped; transport errors still fail.
+            let statement = format!(r#"SET {};"#, options.join(","));
+            if let Err(error) = conn.execute(AssertSqlSafe(statement)).await {
+                if matches!(&error, Error::Database(_)) {
+                    log::warn!("the server rejected the optional login session settings: {error}");
+                    conn.inner.session_settings_rejected = true;
+                } else {
+                    return Err(error);
+                }
+            }
+        }
+
+        // `SET NAMES` is sent as its own statement: some MySQL-compatible servers only accept
+        // it as a whole statement, not as one option of a multi-assignment `SET`. OceanBase
+        // 3.2.4 rejects the combined form with `1064 ... near 'utf8mb4;'` (issue #62).
         if self.set_names {
             // `utf8mb4` (the default) only exists from MySQL 5.5; older servers reject it
             // with "Unknown character set". Use their widest Unicode charset instead. An
@@ -102,11 +122,7 @@ impl ConnectOptions for MySqlConnectOptions {
                 format!("NAMES {charset}")
             };
 
-            options.push(set_names);
-        }
-
-        if !options.is_empty() {
-            conn.execute(AssertSqlSafe(format!(r#"SET {};"#, options.join(","))))
+            conn.execute(AssertSqlSafe(format!("SET {set_names};")))
                 .await?;
         }
 

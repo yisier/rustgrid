@@ -46,6 +46,18 @@ it verbatim; every change since is listed here. Licence: MIT OR Apache-2.0 (the 
    statement: the DBProxy never clears its session-wide `prepared` flag, and after one
    `COM_STMT_PREPARE` every later text query comes back as binary rows (`buffer exhausted ...`,
    issue #56). Not negotiating `CLIENT_DEPRECATE_EOF` (change 6) is necessary but not sufficient.
+9. **`SET NAMES` in a statement of its own** (`src/options/connect.rs`). OceanBase 3.2.4's
+   parser accepts `SET NAMES ...` only as a whole statement, not as one item of the login's
+   comma-separated `SET sql_mode=...,NAMES utf8mb4`, and rejects it with
+   `1064 (42000) ... near 'utf8mb4;'` (issue #62). The other session options keep their combined
+   statement; the login is one round trip longer.
+10. **Optional login settings may be rejected without failing the connection** (same file, plus
+    `src/connection/{mod,establish}.rs`). OceanBase 3.x also rejects the `sql_mode` item itself —
+    no subquery and no `NO_ENGINE_SUBSTITUTION` mode — with `1235`/`1064`. A server-side error from
+    that statement is now logged and skipped; the `SET NAMES` statement that follows is still
+    required, so a dead connection still fails the login. `MySqlConnection::session_settings_rejected`
+    exposes the rejection, and RustGrid uses it to put the pool on the text protocol: such a server
+    (OceanBase 3.x) also disables `COM_STMT_PREPARE` (issue #62).
 
 ## Removing it
 

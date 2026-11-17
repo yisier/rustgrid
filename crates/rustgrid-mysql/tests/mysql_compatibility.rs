@@ -33,7 +33,7 @@ fn write_packet(stream: &mut TcpStream, sequence: u8, payload: &[u8]) {
 const OK: &[u8] = &[0, 0, 0, 2, 0, 0, 0];
 const EOF: &[u8] = &[0xfe, 0, 0, 2, 0];
 
-fn serve(listener: TcpListener, reject_sql_mode: bool) -> Vec<String> {
+fn serve(listener: TcpListener, reject_sql_mode: bool, oceanbase: bool) -> Vec<String> {
     let (mut stream, _) = listener.accept().unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
@@ -67,7 +67,31 @@ fn serve(listener: TcpListener, reject_sql_mode: bool) -> Vec<String> {
                 if reject_sql_mode {
                     assert!(!sql.contains("sql_mode"), "incompatible login SQL: {sql}");
                 }
-                if sql == "SHOW DATABASES" {
+                if oceanbase && sql.contains("NAMES") && sql.contains("sql_mode") {
+                    // OceanBase 3.2.4's parser only accepts `SET NAMES` as a whole statement.
+                    write_packet(
+                        &mut stream,
+                        1,
+                        &error_packet(
+                            1064,
+                            "42000",
+                            "You have an error in your SQL syntax; check the manual that \
+                             corresponds to your OceanBase version for the right syntax to use \
+                             near 'utf8mb4;' at line 1",
+                        ),
+                    );
+                } else if oceanbase && sql.contains("sql_mode") {
+                    // OceanBase 3.1.4 rejects the subquery and the NO_ENGINE_SUBSTITUTION mode.
+                    write_packet(
+                        &mut stream,
+                        1,
+                        &error_packet(
+                            1235,
+                            "0A000",
+                            "subqueries or stored function calls here not supported",
+                        ),
+                    );
+                } else if sql == "SHOW DATABASES" {
                     write_packet(&mut stream, 1, &[1]);
                     // One VAR_STRING column, followed by one text row.
                     let mut column = b"\x03def\x00\x00\x00\x08Database\x00\x0c".to_vec();
@@ -88,10 +112,15 @@ fn serve(listener: TcpListener, reject_sql_mode: bool) -> Vec<String> {
     queries
 }
 
-async fn commands(driver: &dyn Driver, mode: Option<&str>, reject_sql_mode: bool) -> Vec<String> {
+async fn commands(
+    driver: &dyn Driver,
+    mode: Option<&str>,
+    reject_sql_mode: bool,
+    oceanbase: bool,
+) -> Vec<String> {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
-    let server = thread::spawn(move || serve(listener, reject_sql_mode));
+    let server = thread::spawn(move || serve(listener, reject_sql_mode, oceanbase));
     let mut options = BTreeMap::new();
     if let Some(mode) = mode {
         options.insert("mysql.compatibility".to_string(), mode.to_string());
@@ -119,25 +148,40 @@ async fn commands(driver: &dyn Driver, mode: Option<&str>, reject_sql_mode: bool
 
 #[tokio::test]
 async fn starrocks_skips_sql_mode_but_keeps_other_initialization() {
-    let queries = commands(&MysqlDriver::new(), Some("starrocks"), true).await;
-    assert!(queries[0].contains("NAMES utf8mb4"));
+    let queries = commands(&MysqlDriver::new(), Some("starrocks"), true, false).await;
+    assert_eq!(queries[0], "SET NAMES utf8mb4;");
     assert_eq!(queries[1], "SET @rustgrid_probe = 1");
     assert_eq!(queries[2], "SHOW DATABASES");
 }
 
 #[tokio::test]
-async fn mysql_defaults_keep_both_sql_modes() {
+async fn mysql_defaults_keep_both_sql_modes_and_send_names_alone() {
     for mode in [None, Some("default"), Some("unknown")] {
-        let queries = commands(&MysqlDriver::new(), mode, false).await;
+        let queries = commands(&MysqlDriver::new(), mode, false, false).await;
         assert!(queries[0].contains("sql_mode=(SELECT CONCAT(@@sql_mode"));
         assert!(queries[0].contains("PIPES_AS_CONCAT,NO_ENGINE_SUBSTITUTION"));
+        assert!(!queries[0].contains("NAMES"));
+        assert_eq!(queries[1], "SET NAMES utf8mb4;");
     }
 }
 
 #[tokio::test]
+async fn oceanbase_accepts_the_login_statements() {
+    // OceanBase 3.2.4 rejects `NAMES` inside the combined `SET` with error 1064, and 3.1.4
+    // rejects the optional `sql_mode` item with 1235; both must still allow the login (issue #62).
+    let queries = commands(&MysqlDriver::new(), None, false, true).await;
+    assert!(queries[0].contains("sql_mode=(SELECT CONCAT(@@sql_mode"));
+    assert!(!queries[0].contains("NAMES"));
+    assert_eq!(queries[1], "SET NAMES utf8mb4;");
+    assert_eq!(queries[2], "SET @rustgrid_probe = 1");
+    assert_eq!(queries[3], "SHOW DATABASES");
+}
+
+#[tokio::test]
 async fn mariadb_ignores_mysql_compatibility_option() {
-    let queries = commands(&MariaDbDriver::new(), Some("starrocks"), false).await;
+    let queries = commands(&MariaDbDriver::new(), Some("starrocks"), false, false).await;
     assert!(queries[0].contains("PIPES_AS_CONCAT,NO_ENGINE_SUBSTITUTION"));
+    assert_eq!(queries[1], "SET NAMES utf8mb4;");
     assert!(
         MariaDbDriver::new()
             .descriptor()
