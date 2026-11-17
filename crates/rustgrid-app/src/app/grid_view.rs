@@ -100,6 +100,12 @@ impl GridView {
             cell_editor: None,
             cell_editor_blur_subscription: None,
             cell_editor_focus_pending: false,
+            auto_save: true,
+            saving: false,
+            new_row_columns: None,
+            new_row_columns_loading: false,
+            open_row_after_save: None,
+            enum_menu: None,
             date_picker: None,
             key_string_format: KeyStringFormat::Raw,
             key_string_editor: None,
@@ -164,7 +170,11 @@ impl GridView {
     /// any pending focus requests. Called at the top of `render`.
     fn prepare_frame(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         if let Some(app) = self.app.upgrade() {
-            let theme = app.read(cx).theme;
+            let (theme, auto_save) = {
+                let app = app.read(cx);
+                (app.theme, app.grid_auto_save())
+            };
+            self.auto_save = auto_save;
             if theme != self.theme {
                 self.theme = theme;
                 if let Some(input) = self.cell_editor.as_ref().map(|editor| editor.input.clone()) {
@@ -327,7 +337,13 @@ impl Render for GridView {
             .flex()
             .flex_row()
             .flex_none()
-            .bg(rgb(theme.header_bg))
+            // While a new row is pending the header is amber too: the table has a row that is not
+            // saved yet.
+            .bg(rgb(if self.inserts.is_empty() {
+                theme.header_bg
+            } else {
+                theme.cell_edit_bg
+            }))
             .border_b_1()
             .border_color(rgb(theme.border));
         if gutter_width > 0.0 {
@@ -527,6 +543,7 @@ impl Render for GridView {
         // Display column -> the row's own (engine-order) cell index.
         let column_order = Arc::new(self.state.column_order.clone());
         let inserts = self.inserts.clone();
+        let new_row_hints = self.new_row_columns.clone();
         let data_rows = rows.len();
         let column_count = widths.len();
         // The fill handle sits on the active selection's bottom-right cell (Excel's 自动填充).
@@ -562,6 +579,14 @@ impl Render for GridView {
                     .is_some_and(|column| is_temporal_type(&column.data_type)))
             .then_some((editor.row, editor.col))
         });
+        // The cell being edited when its column is an `ENUM`: it carries a "▾" button that opens
+        // the members list (Alt+Down or F4 do the same from the keyboard).
+        let editing_enum = self
+            .cell_editor
+            .as_ref()
+            .filter(|editor| editing_temporal.is_none() && !editor.readonly)
+            .filter(|editor| !self.column_members(editor.col).is_empty())
+            .map(|editor| (editor.row, editor.col));
         // The cell being edited, with its live input entity. The editor is rendered *inside* that
         // cell (below) rather than as an overlay, so it scrolls with the rows and can never be left
         // floating at a stale offset; the cell's own text is replaced by it.
@@ -628,6 +653,8 @@ impl Render for GridView {
                                         .flex_none()
                                         .bg(rgb(if row_selected {
                                             theme.grid_selection_bg
+                                        } else if insert.is_some() {
+                                            theme.cell_edit_bg
                                         } else {
                                             base_background
                                         }))
@@ -693,7 +720,12 @@ impl Render for GridView {
                             {
                                 // The range a running fill-handle drag would write, before release.
                                 theme.cell_edit_bg
-                            } else if edited.is_some() || staged.is_some() || previewed.is_some() {
+                            } else if edited.is_some()
+                                || staged.is_some()
+                                || previewed.is_some()
+                                || insert.is_some()
+                            {
+                                // A new row is amber as a whole, typed into or not.
                                 theme.cell_edit_bg
                             } else {
                                 base_background
@@ -713,7 +745,14 @@ impl Render for GridView {
                             let display = if insert.is_some() {
                                 match staged {
                                     Some(Some(value)) => value.clone(),
-                                    _ => "(Null)".to_string(),
+                                    Some(None) => "(Null)".to_string(),
+                                    // Untouched: what the server will store (the default,
+                                    // (Auto)...), muted like NULL until something is typed.
+                                    None => new_row_hints
+                                        .as_ref()
+                                        .and_then(|hints| hints.get(index))
+                                        .map(|column| column.hint.clone())
+                                        .unwrap_or_else(|| "(Null)".to_string()),
                                 }
                             } else if let Some(value) = previewed {
                                 value
@@ -792,6 +831,56 @@ impl Render for GridView {
                                             });
                                         })
                                         .child("…"),
+                                );
+                            }
+                            if editing_enum == Some((row_index, index)) {
+                                let toggle_weak = action_weak.clone();
+                                cell_element = cell_element.relative().pr(px(22.0)).child(
+                                    div()
+                                        .id(SharedString::from(format!(
+                                            "enum-toggle-{row_index}-{index}"
+                                        )))
+                                        .absolute()
+                                        .right(px(1.0))
+                                        .top(px(1.0))
+                                        .bottom(px(1.0))
+                                        .w(px(18.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .cursor_pointer()
+                                        .hover(move |style| style.bg(rgb(theme.button_hover_bg)))
+                                        .border_1()
+                                        .border_color(rgb(theme.button_border))
+                                        .bg(rgb(theme.button_bg))
+                                        .text_size(px(10.0))
+                                        .text_color(rgb(theme.text))
+                                        // Keep the editor focused: a blur would end the edit.
+                                        .on_mouse_down(MouseButton::Left, |_event, window, _cx| {
+                                            window.prevent_default();
+                                        })
+                                        .on_click(move |_event, _window, cx| {
+                                            let _ = toggle_weak.update(cx, |grid, cx| {
+                                                grid.toggle_enum_menu(cx);
+                                            });
+                                        })
+                                        .child("▾"),
+                                );
+                                let key_weak = action_weak.clone();
+                                cell_element = cell_element.on_key_down(
+                                    move |event: &KeyDownEvent, _window, cx| {
+                                        let keystroke = &event.keystroke;
+                                        let opens = keystroke.key == "f4"
+                                            || (keystroke.modifiers.alt
+                                                && (keystroke.key == "down"
+                                                    || keystroke.key == "up"));
+                                        if opens {
+                                            let _ = key_weak.update(cx, |grid, cx| {
+                                                grid.toggle_enum_menu(cx);
+                                            });
+                                            cx.stop_propagation();
+                                        }
+                                    },
                                 );
                             }
                             if editing_here || pressing_here {
@@ -1002,7 +1091,8 @@ impl Render for GridView {
                     )
                     .child(header)
                     .child(list)
-                    .child(self.render_date_picker(cx)),
+                    .child(self.render_date_picker(cx))
+                    .child(self.render_enum_menu(cx)),
             );
 
         let mut root = div().relative().flex().flex_col().size_full();

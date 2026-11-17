@@ -58,6 +58,26 @@ impl TableDesignView {
                 cx.listener(|this, _: &DesignerCopy, _window, cx| this.copy_field_selection(cx)),
             )
             .on_action(cx.listener(|this, _: &DesignerPaste, _window, cx| this.paste_fields(cx)))
+            .on_action(
+                cx.listener(|this, _: &DesignerFind, window, cx| this.open_field_find(window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &DesignerInsertRow, window, cx| {
+                this.insert_design_row(window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &DesignerDeleteRows, _window, cx| {
+                    this.delete_design_rows(cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &DesignerMoveUp, _window, cx| this.move_design_rows(-1, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &DesignerMoveDown, _window, cx| this.move_design_rows(1, cx)),
+            )
+            .on_action(cx.listener(|this, _: &DesignerDetails, window, cx| {
+                this.focus_design_details(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &NextDesignerCell, window, cx| {
                 this.tab_designer_cell(false, window, cx)
             }))
@@ -549,6 +569,17 @@ impl TableDesignView {
         let combo_anchor = self.combo_anchor.clone();
         let row_widths = widths.clone();
         let last_column = self.field_column_count().saturating_sub(1);
+        // A new, still empty field is not flagged until the caret has left it.
+        let mut invalid_names = self.invalid_field_names();
+        if let Some(row) = self.selected_field
+            && self
+                .schema
+                .columns
+                .get(row)
+                .is_some_and(|column| column.name.trim().is_empty())
+        {
+            invalid_names.remove(&row);
+        }
 
         let list = div()
             .relative()
@@ -654,17 +685,40 @@ impl TableDesignView {
                                                 )
                                             }),
                                     )
-                                    .child(design_edit_cell(
-                                        SharedString::from(format!("design-name-{row}")),
-                                        FIELD_NAME_WIDTH,
-                                        column.name.clone(),
-                                        theme,
-                                        0,
-                                        cell_selected(0),
-                                        &weak,
-                                        row,
-                                        editor_for(FieldColumn::Name),
-                                    ))
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "design-name-wrap-{row}"
+                                            )))
+                                            .relative()
+                                            .flex_none()
+                                            .child(design_edit_cell(
+                                                SharedString::from(format!("design-name-{row}")),
+                                                FIELD_NAME_WIDTH,
+                                                column.name.clone(),
+                                                theme,
+                                                0,
+                                                cell_selected(0),
+                                                &weak,
+                                                row,
+                                                editor_for(FieldColumn::Name),
+                                            ))
+                                            .when_some(
+                                                invalid_names.get(&row).cloned(),
+                                                |cell, message| {
+                                                    cell.child(
+                                                        div()
+                                                            .absolute()
+                                                            .left_0()
+                                                            .right_0()
+                                                            .bottom_0()
+                                                            .h(px(2.0))
+                                                            .bg(rgb(theme.danger)),
+                                                    )
+                                                    .tooltip(ui::text_tooltip(message))
+                                                },
+                                            ),
+                                    )
                                     .child(design_type_cell(
                                         SharedString::from(format!("design-type-{row}")),
                                         FIELD_TYPE_WIDTH,
@@ -708,9 +762,69 @@ impl TableDesignView {
             .flex_col()
             .flex_1()
             .min_h(px(0.0))
+            .children(self.render_field_find(cx))
             .child(grid)
             .child(self.render_detail())
             .into_any_element()
+    }
+
+    /// The Ctrl+F field search: the search box, "2 of 5" (or "No match"), and a close button.
+    fn render_field_find(&self, cx: &mut Context<'_, Self>) -> Option<AnyElement> {
+        let input = self.field_find.clone()?;
+        let theme = self.theme;
+        let matches = self.field_find_matches();
+        let status = if self.field_find_query.trim().is_empty() {
+            String::new()
+        } else if matches.is_empty() {
+            t!("design.find_none").to_string()
+        } else {
+            let current = self
+                .selected_field
+                .and_then(|row| matches.iter().position(|candidate| *candidate == row))
+                .map(|index| index + 1)
+                .unwrap_or(0);
+            t!(
+                "design.find_count",
+                current = current,
+                total = matches.len()
+            )
+            .to_string()
+        };
+        let none = !self.field_find_query.trim().is_empty() && matches.is_empty();
+        Some(
+            div()
+                .flex()
+                .flex_row()
+                .flex_none()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .py_1()
+                .border_b_1()
+                .border_color(rgb(theme.border))
+                .bg(rgb(theme.header_bg))
+                .child(div().w(px(240.0)).child(input))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(rgb(if none { theme.danger } else { theme.text_muted }))
+                        .child(status),
+                )
+                .child(div().flex_1())
+                .child(
+                    div()
+                        .id("design-find-close")
+                        .px_1()
+                        .cursor_pointer()
+                        .text_color(rgb(theme.text_muted))
+                        .hover(move |style| style.bg(rgb(theme.button_hover_bg)))
+                        .on_click(cx.listener(|this, _event, window, cx| {
+                            this.close_field_find(window, cx);
+                        }))
+                        .child("✕"),
+                )
+                .into_any_element(),
+        )
     }
 
     fn render_field_header(&self, theme: Theme, widths: &[f32]) -> Div {

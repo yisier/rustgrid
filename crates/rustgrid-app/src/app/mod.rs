@@ -209,7 +209,13 @@ gpui::actions!(
         DesignerRowDown,
         DesignerSelectAll,
         DesignerCopy,
-        DesignerPaste
+        DesignerPaste,
+        DesignerFind,
+        DesignerInsertRow,
+        DesignerDeleteRows,
+        DesignerMoveUp,
+        DesignerMoveDown,
+        DesignerDetails
     ]
 );
 
@@ -1843,6 +1849,21 @@ struct GridView {
     cell_editor: Option<CellEditor>,
     cell_editor_blur_subscription: Option<Subscription>,
     cell_editor_focus_pending: bool,
+    /// The Options "save cell changes automatically" setting, copied from `AppView` every frame
+    /// so the save path never has to read the app (which may be mid-update).
+    auto_save: bool,
+    /// `true` while a save is being written. The saved edits stay staged until the page reloads,
+    /// so without this a second trigger (a click right after Enter) would write them again.
+    saving: bool,
+    /// What a new row needs to know about each display column (its default, whether it must be
+    /// filled), from the table's schema. Loaded the first time a new row is opened.
+    new_row_columns: Option<std::sync::Arc<Vec<grid::NewRowColumn>>>,
+    new_row_columns_loading: bool,
+    /// Down on the last row while its changes were being saved: open a new row in this column
+    /// once the saved page has reloaded (the reload drops pending rows).
+    open_row_after_save: Option<usize>,
+    /// The open drop-down of an `ENUM` cell being edited: `(row, col, highlighted member)`.
+    enum_menu: Option<(usize, usize, usize)>,
     date_picker: Option<DatePicker>,
 
     /// The dedicated key page's string editor (RAW), the pretty-printed JSON preview, and their
@@ -2276,6 +2297,8 @@ enum GridNav {
     Refresh,
     /// The page size to apply once the user confirms discarding pending edits.
     PageSize(u64),
+    /// Discard the pending edits themselves (the Discard button or Esc).
+    Discard,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -2677,6 +2700,9 @@ pub struct AppView {
     /// Whether the grid header shows each column's data type between its name and comment. Set from
     /// the 数据 page of the Options window; off by default.
     grid_show_types: bool,
+    /// Whether a single changed cell saves itself when its edit is left. Set from the 数据 page
+    /// of the Options window; on by default.
+    grid_auto_save: bool,
     /// The remembered field layout (字段筛选) per table grid, keyed by connection/database/table,
     /// persisted in settings.
     grid_field_layouts: BTreeMap<String, FieldLayout>,
@@ -2815,6 +2841,8 @@ pub struct AppView {
     options_grid_show_comments: bool,
     /// The staged 数据 page toggle (grid field types), applied on OK.
     options_grid_show_types: bool,
+    /// The staged 数据 page toggle (save a changed cell on leaving it), applied on OK.
+    options_grid_auto_save: bool,
     /// The staged 常规 page toggle (keep the object search across tab switches), applied on OK.
     options_preserve_object_search: bool,
     /// The staged 常规 page toggle (restore the session at the next start), applied on OK.
@@ -3561,6 +3589,7 @@ impl AppView {
             limit_records: true,
             grid_show_comments: settings.grid_show_comments,
             grid_show_types: settings.grid_show_types,
+            grid_auto_save: settings.grid_auto_save,
             grid_field_layouts: settings.grid_field_layouts.clone(),
             shortcuts: settings.shortcuts.clone(),
             preserve_object_search: settings.preserve_object_search,
@@ -3707,6 +3736,7 @@ impl AppView {
             options_editor_ctrl_wheel_zoom: settings.editor_ctrl_wheel_zoom,
             options_grid_show_comments: settings.grid_show_comments,
             options_grid_show_types: settings.grid_show_types,
+            options_grid_auto_save: settings.grid_auto_save,
             options_preserve_object_search: settings.preserve_object_search,
             options_restore_session: settings.restore_session,
             options_single_click_open: settings.single_click_open,
@@ -4094,6 +4124,7 @@ impl AppView {
             grid_field_layouts: self.grid_field_layouts.clone(),
             grid_show_comments: self.grid_show_comments,
             grid_show_types: self.grid_show_types,
+            grid_auto_save: self.grid_auto_save,
             sync_hide_same: self.sync.hide_same,
             shortcuts: self.shortcuts.clone(),
             preserve_object_search: self.preserve_object_search,
@@ -4134,6 +4165,11 @@ impl AppView {
     /// Whether the grid header shows each column's data type between its name and comment.
     pub(super) fn show_column_types(&self) -> bool {
         self.grid_show_types
+    }
+
+    /// Whether a single changed cell saves itself when its edit is left.
+    pub(super) fn grid_auto_save(&self) -> bool {
+        self.grid_auto_save
     }
 
     /// The persisted field layout for one table grid, if the user has configured one.

@@ -30,6 +30,10 @@ pub struct MysqlConnection {
     /// 10.2+). Older servers reject the whole column query with `1054`, so the first failure flips
     /// this off and later schema loads leave the column out instead of failing again.
     generation_expression: AtomicBool,
+    /// Whether `INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS` exists (MySQL 5.1.10+). Older servers
+    /// reject the foreign-key query with `1109`, so the first failure flips this off and later
+    /// schema loads read the keys from `KEY_COLUMN_USAGE` and their rules from the DDL.
+    referential_constraints: AtomicBool,
     /// `true` once a catalog query was rejected with `1047 ER_UNKNOWN_COM_ERROR`. MySQL-protocol
     /// middlewares (UDAL/TeleDB DBProxy, MyCAT, ...) run their own SQL parser and can refuse
     /// server-side prepares altogether, so this session then runs every generated statement
@@ -57,6 +61,7 @@ impl MysqlConnection {
             pool,
             engine,
             generation_expression: AtomicBool::new(true),
+            referential_constraints: AtomicBool::new(true),
             text_protocol,
             needs_database,
             _tunnel: tunnel,
@@ -1786,7 +1791,12 @@ impl Connection for MysqlConnection {
             // for `text`, 16777215 for `mediumtext`). That is not a definition length: rendering it
             // back as `text(65535)` makes MySQL pick the smallest type that fits 65535 *characters*,
             // which under utf8mb4 is `mediumtext` — so the column could never converge after a sync.
-            let length = if type_ignores_length(&data_type) {
+            // `ENUM`/`SET` report the longest member's length as `character_maximum_length`, but
+            // their definition is the member list (`'a','b'`), which only `column_type` carries.
+            // Keeping the number would render the column back as `enum(6)` on save.
+            let length = if is_member_list_type(&data_type) {
+                parse_show_column_type(&column_type).1
+            } else if type_ignores_length(&data_type) {
                 "0".to_string()
             } else if let Some(length) = char_length {
                 length.to_string()
@@ -1898,23 +1908,46 @@ impl Connection for MysqlConnection {
             }
         }
 
-        let fk_rows = self
-            .metadata_rows(
+        // `REFERENTIAL_CONSTRAINTS` (the ON UPDATE / ON DELETE rules) only exists from MySQL
+        // 5.1.10 on; older servers answer `1109` (Unknown table). Their keys are still in
+        // `KEY_COLUMN_USAGE`, and the rules are read from `SHOW CREATE TABLE` below.
+        let mut rules_from_ddl = !self.referential_constraints.load(Ordering::Relaxed);
+        let fk_rows = if rules_from_ddl {
+            self.metadata_rows(
                 &mut connection,
                 database,
-                "SELECT k.constraint_name, k.column_name, k.referenced_table_schema, \
-                        k.referenced_table_name, k.referenced_column_name, r.update_rule, \
-                        r.delete_rule \
-                 FROM information_schema.key_column_usage AS k \
-                 JOIN information_schema.referential_constraints AS r \
-                   ON r.constraint_schema = k.constraint_schema \
-                  AND r.constraint_name = k.constraint_name \
-                 WHERE k.table_schema = ? AND k.table_name = ? \
-                   AND k.referenced_table_name IS NOT NULL \
-                 ORDER BY k.constraint_name, k.ordinal_position",
+                FOREIGN_KEYS_WITHOUT_RULES,
                 &[database, table],
             )
-            .await?;
+            .await?
+        } else {
+            match self
+                .metadata_rows(
+                    &mut connection,
+                    database,
+                    FOREIGN_KEYS_WITH_RULES,
+                    &[database, table],
+                )
+                .await
+            {
+                Ok(rows) => rows,
+                Err(error) if is_unknown_table_text_error(&error) => {
+                    let rows = self
+                        .metadata_rows(
+                            &mut connection,
+                            database,
+                            FOREIGN_KEYS_WITHOUT_RULES,
+                            &[database, table],
+                        )
+                        .await
+                        .map_err(|_| error)?;
+                    self.referential_constraints.store(false, Ordering::Relaxed);
+                    rules_from_ddl = true;
+                    rows
+                }
+                Err(error) => return Err(error),
+            }
+        };
 
         let mut foreign_keys: Vec<ForeignKeyDef> = Vec::new();
         for row in &fk_rows {
@@ -1946,6 +1979,16 @@ impl Connection for MysqlConnection {
                     on_delete: normalize_rule(&delete_rule),
                     on_update: normalize_rule(&update_rule),
                 });
+            }
+        }
+        if rules_from_ddl && !foreign_keys.is_empty() {
+            // Without the rules the designer would show every key as the default action and a
+            // save would silently drop an existing CASCADE / SET NULL.
+            let ddl = self.show_create(database, table, "TABLE").await?;
+            for key in &mut foreign_keys {
+                let (on_delete, on_update) = foreign_key_rules(&ddl, &key.name);
+                key.on_delete = normalize_rule(&on_delete);
+                key.on_update = normalize_rule(&on_update);
             }
         }
 
@@ -2648,6 +2691,76 @@ fn optional_u64(row: &MySqlRow, index: usize) -> Option<u64> {
     None
 }
 
+/// A table's foreign-key columns with their ON UPDATE / ON DELETE rules (MySQL 5.1.10+).
+const FOREIGN_KEYS_WITH_RULES: &str = "SELECT k.constraint_name, k.column_name, k.referenced_table_schema, \
+            k.referenced_table_name, k.referenced_column_name, r.update_rule, r.delete_rule \
+     FROM information_schema.key_column_usage AS k \
+     JOIN information_schema.referential_constraints AS r \
+       ON r.constraint_schema = k.constraint_schema \
+      AND r.constraint_name = k.constraint_name \
+     WHERE k.table_schema = ? AND k.table_name = ? \
+       AND k.referenced_table_name IS NOT NULL \
+     ORDER BY k.constraint_name, k.ordinal_position";
+
+/// The same columns for servers without `REFERENTIAL_CONSTRAINTS`; the rules come back empty and
+/// are filled in from `SHOW CREATE TABLE`.
+const FOREIGN_KEYS_WITHOUT_RULES: &str = "SELECT k.constraint_name, k.column_name, k.referenced_table_schema, \
+            k.referenced_table_name, k.referenced_column_name, '' AS update_rule, \
+            '' AS delete_rule \
+     FROM information_schema.key_column_usage AS k \
+     WHERE k.table_schema = ? AND k.table_name = ? \
+       AND k.referenced_table_name IS NOT NULL \
+     ORDER BY k.constraint_name, k.ordinal_position";
+
+/// A foreign key's `(ON DELETE, ON UPDATE)` rules as `SHOW CREATE TABLE` writes them; a rule the
+/// DDL leaves out (the default) is empty. Only the text after the key's `REFERENCES (...)` list
+/// is searched, so a column or table named like a rule cannot be mistaken for one.
+fn foreign_key_rules(ddl: &str, name: &str) -> (String, String) {
+    let marker = format!("CONSTRAINT {} FOREIGN KEY", quote_identifier(name));
+    let Some(start) = ddl.find(&marker) else {
+        return (String::new(), String::new());
+    };
+    let line = ddl[start..].lines().next().unwrap_or_default();
+    let Some(references) = line.find(" REFERENCES ") else {
+        return (String::new(), String::new());
+    };
+    // The referenced column list is the first parenthesised group after REFERENCES; identifiers
+    // are backquoted, so a `)` inside one is skipped.
+    let mut quoted = false;
+    let mut close = None;
+    for (index, ch) in line[references..].char_indices() {
+        match ch {
+            '`' => quoted = !quoted,
+            ')' if !quoted => {
+                close = Some(references + index + 1);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let tail = close
+        .map(|index| line[index..].to_ascii_uppercase())
+        .unwrap_or_default();
+    let rule = |keyword: &str| {
+        tail.find(keyword)
+            .and_then(|index| {
+                let rest = tail[index + keyword.len()..].trim_start();
+                [
+                    "SET NULL",
+                    "SET DEFAULT",
+                    "NO ACTION",
+                    "CASCADE",
+                    "RESTRICT",
+                ]
+                .into_iter()
+                .find(|rule| rest.starts_with(rule))
+            })
+            .unwrap_or_default()
+            .to_string()
+    };
+    (rule("ON DELETE"), rule("ON UPDATE"))
+}
+
 /// Normalize a referential action (`NO ACTION` becomes an empty, i.e. default, rule).
 fn normalize_rule(rule: &str) -> String {
     if rule.eq_ignore_ascii_case("NO ACTION") {
@@ -2736,6 +2849,14 @@ fn type_ignores_length(data_type: &str) -> bool {
             | "blob"
             | "mediumblob"
             | "longblob"
+    )
+}
+
+/// Whether a column type's "length" is its member list (`ENUM('a','b')`, `SET('x','y')`).
+fn is_member_list_type(data_type: &str) -> bool {
+    matches!(
+        data_type.trim().to_ascii_lowercase().as_str(),
+        "enum" | "set"
     )
 }
 
@@ -3616,6 +3737,12 @@ fn is_unknown_column_text_error(error: &Error) -> bool {
     error.to_string().starts_with("1054 -")
 }
 
+/// Whether a query failed with `1109 ER_UNKNOWN_TABLE` (an `information_schema` table the server
+/// predates), as `map_query_error` renders it.
+fn is_unknown_table_text_error(error: &Error) -> bool {
+    error.to_string().starts_with("1109 -")
+}
+
 /// Whether a MySQL-protocol middleware rejected the statement with
 /// `1047 ER_UNKNOWN_COM_ERROR` ("Unknown command"). Proxies such as UDAL/TeleDB's DBProxy answer
 /// statements their own parser cannot route with this generic error, which `map_query_error`
@@ -4164,6 +4291,45 @@ fn decode_cell_fallback(row: &MySqlRow, index: usize) -> CellValue {
             Err(error) => CellValue::Bytes(error.into_bytes()),
         },
         Err(_) => CellValue::Null,
+    }
+}
+
+#[cfg(test)]
+mod foreign_key_rule_tests {
+    use super::foreign_key_rules;
+
+    const DDL: &str = "CREATE TABLE `orders` (\n  `id` int(11) NOT NULL,\n  `customer` int(11) DEFAULT NULL,\n  `on delete cascade` int(11) DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  CONSTRAINT `fk_customer` FOREIGN KEY (`customer`) REFERENCES `customers` (`id`) ON DELETE SET NULL ON UPDATE CASCADE,\n  CONSTRAINT `fk_odd` FOREIGN KEY (`on delete cascade`) REFERENCES `x` (`on update cascade`),\n  CONSTRAINT `fk_del` FOREIGN KEY (`customer`) REFERENCES `customers` (`id`) ON DELETE RESTRICT\n) ENGINE=InnoDB";
+
+    #[test]
+    fn reads_both_rules() {
+        assert_eq!(
+            foreign_key_rules(DDL, "fk_customer"),
+            ("SET NULL".to_string(), "CASCADE".to_string())
+        );
+    }
+
+    #[test]
+    fn a_left_out_rule_is_empty() {
+        assert_eq!(
+            foreign_key_rules(DDL, "fk_del"),
+            ("RESTRICT".to_string(), String::new())
+        );
+    }
+
+    #[test]
+    fn rule_words_inside_identifiers_are_ignored() {
+        assert_eq!(
+            foreign_key_rules(DDL, "fk_odd"),
+            (String::new(), String::new())
+        );
+    }
+
+    #[test]
+    fn an_unknown_key_has_no_rules() {
+        assert_eq!(
+            foreign_key_rules(DDL, "missing"),
+            (String::new(), String::new())
+        );
     }
 }
 
@@ -4868,5 +5034,21 @@ mod tests {
         assert!(!super::is_prepare_sticky_proxy("8.0.36"));
         assert!(!super::is_prepare_sticky_proxy("10.11.6-MariaDB"));
         assert!(!super::is_prepare_sticky_proxy("5.7.44-log"));
+    }
+}
+
+#[cfg(test)]
+mod member_list_tests {
+    use super::{is_member_list_type, parse_show_column_type};
+
+    #[test]
+    fn enum_and_set_keep_their_member_list_as_the_length() {
+        assert!(is_member_list_type("ENUM"));
+        assert!(is_member_list_type("set"));
+        assert!(!is_member_list_type("varchar"));
+        assert_eq!(
+            parse_show_column_type("enum('active','it''s')").1,
+            "'active','it''s'"
+        );
     }
 }

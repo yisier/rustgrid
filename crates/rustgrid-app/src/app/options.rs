@@ -381,6 +381,7 @@ impl AppView {
         self.options_editor_ctrl_wheel_zoom = self.editor_ctrl_wheel_zoom;
         self.options_grid_show_comments = self.grid_show_comments;
         self.options_grid_show_types = self.grid_show_types;
+        self.options_grid_auto_save = self.grid_auto_save;
         self.options_shortcuts = self.shortcuts.clone();
         self.options_preserve_object_search = self.preserve_object_search;
         self.options_restore_session = self.restore_session;
@@ -683,6 +684,7 @@ impl AppView {
         self.editor_ctrl_wheel_zoom = self.options_editor_ctrl_wheel_zoom;
         self.grid_show_comments = self.options_grid_show_comments;
         self.grid_show_types = self.options_grid_show_types;
+        self.grid_auto_save = self.options_grid_auto_save;
         self.shortcuts = self.options_shortcuts.clone();
         self.preserve_object_search = self.options_preserve_object_search;
         self.restore_session = self.options_restore_session;
@@ -1444,7 +1446,7 @@ impl AppView {
                         t!("options.data.show_types").to_string(),
                         Some(t!("options.data.show_types_hint").to_string()),
                         self.options_grid_show_types,
-                        false,
+                        true,
                     )
                     .on_mouse_down(
                         MouseButton::Right,
@@ -1452,6 +1454,24 @@ impl AppView {
                     )
                     .on_click(cx.listener(|this, _event, _window, cx| {
                         this.options_grid_show_types = !this.options_grid_show_types;
+                        cx.notify();
+                    })),
+                )
+                .child(
+                    toggle_row(
+                        theme,
+                        "options-grid-auto-save",
+                        t!("options.data.auto_save").to_string(),
+                        Some(t!("options.data.auto_save_hint").to_string()),
+                        self.options_grid_auto_save,
+                        false,
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        self.copy_label_menu(t!("options.data.auto_save").to_string(), cx),
+                    )
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.options_grid_auto_save = !this.options_grid_auto_save;
                         cx.notify();
                     })),
                 ),
@@ -1870,6 +1890,7 @@ impl AppView {
                     this.options_ui_ctrl_wheel_zoom = true;
                     this.options_grid_show_comments = false;
                     this.options_grid_show_types = false;
+                    this.options_grid_auto_save = true;
                     this.options_shortcuts.clear();
                     this.options_preserve_object_search = true;
                     this.options_restore_session = true;
