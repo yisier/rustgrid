@@ -60,6 +60,7 @@ Click a screenshot to view it full size.
 | SQL Server             | Supported                                   |
 | PostgreSQL             | Supported                                   |
 | Oracle                 | Supported                                   |
+| ClickHouse             | Supported (HTTP; read-only grid)            |
 | Redis                  | Supported (standalone / Sentinel / Cluster) |
 | MongoDB                | Supported (collections, documents, JSON commands) |
 | StarRocks              | via MySQL compatibility mode                |
@@ -99,6 +100,9 @@ Click a screenshot to view it full size.
 - **Redis** — browse standalone, Sentinel and Cluster servers by namespace; every key opens on its
   own page (RAW / JSON for strings, editable tables for collections), the key list offers New Key,
   Set TTL, Rename and Delete, and the query editor completes Redis commands and keys.
+- **ClickHouse** — connect over HTTP (with TLS and tunnels), browse databases and MergeTree
+  tables/views, page / filter / sort / export a read-only grid (no unique row key), run SQL over a
+  pinned session, and import rows into an existing table.
 - **MongoDB** — browse databases and collections, page and edit documents in the normal grid and
   row form (embedded documents open as JSON), and run JSON commands (`find`, `aggregate`, `count`,
   any `runCommand`) in query tabs.
@@ -137,6 +141,8 @@ cargo run -p rustgrid-app
 - `crates/rustgrid-postgresql` — PostgreSQL driver.
 - `crates/rustgrid-oracle` — Oracle driver (Oracle's pure-Rust `oracledb` thin driver, no Instant
   Client).
+- `crates/rustgrid-clickhouse` — ClickHouse driver (HTTP interface, read-only data grid, SQL
+  editor); see `docs/clickhouse-driver.md`.
 - `crates/rustgrid-redis` — Redis driver (standalone / Sentinel / Cluster); see
   `docs/redis-driver.md`.
 - `crates/rustgrid-mongodb` — MongoDB driver (collections as tables, documents as rows, JSON

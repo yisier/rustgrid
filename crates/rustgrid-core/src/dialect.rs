@@ -16,17 +16,19 @@ pub enum DriverDialect {
     Postgres,
     /// Oracle Database.
     Oracle,
+    /// ClickHouse (the SQL dialect of its HTTP interface).
+    ClickHouse,
     /// A dialect we have no specific data for yet.
     #[default]
     Generic,
 }
 
 impl DriverDialect {
-    /// The characters this dialect wraps an identifier in: `` ` `` for MySQL/SQLite, `[`/`]` for
-    /// SQL Server, `"` for PostgreSQL/Oracle and the generic dialect.
+    /// The characters this dialect wraps an identifier in: `` ` `` for MySQL/SQLite/ClickHouse,
+    /// `[`/`]` for SQL Server, `"` for PostgreSQL/Oracle and the generic dialect.
     pub fn identifier_quote(self) -> (char, char) {
         match self {
-            DriverDialect::Mysql | DriverDialect::Sqlite => ('`', '`'),
+            DriverDialect::Mysql | DriverDialect::Sqlite | DriverDialect::ClickHouse => ('`', '`'),
             DriverDialect::SqlServer => ('[', ']'),
             DriverDialect::Postgres | DriverDialect::Oracle | DriverDialect::Generic => ('"', '"'),
         }
@@ -72,7 +74,10 @@ impl DriverDialect {
             DriverDialect::SqlServer | DriverDialect::Oracle => {
                 format!("OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY")
             }
-            DriverDialect::Sqlite | DriverDialect::Postgres | DriverDialect::Generic => {
+            DriverDialect::Sqlite
+            | DriverDialect::Postgres
+            | DriverDialect::ClickHouse
+            | DriverDialect::Generic => {
                 format!("LIMIT {limit} OFFSET {offset}")
             }
         }
@@ -88,6 +93,7 @@ impl DriverDialect {
             DriverDialect::Sqlite => SQLITE_FUNCTIONS,
             DriverDialect::Postgres => POSTGRES_FUNCTIONS,
             DriverDialect::Oracle => ORACLE_FUNCTIONS,
+            DriverDialect::ClickHouse => CLICKHOUSE_FUNCTIONS,
             DriverDialect::Generic => &[],
         }
     }
@@ -787,6 +793,115 @@ const ORACLE_FUNCTIONS: &[&str] = &[
     "UPPER",
 ];
 
+/// Common ClickHouse functions. Function names in ClickHouse are case-sensitive, so these keep
+/// their canonical spelling rather than an upper-cased one.
+const CLICKHOUSE_FUNCTIONS: &[&str] = &[
+    "abs",
+    "accurateCast",
+    "any",
+    "anyLast",
+    "argMax",
+    "argMin",
+    "arrayConcat",
+    "arrayElement",
+    "arrayFilter",
+    "arrayJoin",
+    "arrayMap",
+    "arrayStringConcat",
+    "assumeNotNull",
+    "avg",
+    "cast",
+    "cityHash64",
+    "coalesce",
+    "concat",
+    "count",
+    "countIf",
+    "currentDatabase",
+    "currentUser",
+    "dateAdd",
+    "dateDiff",
+    "dictGet",
+    "empty",
+    "endsWith",
+    "formatDateTime",
+    "formatReadableQuantity",
+    "formatReadableSize",
+    "fromUnixTimestamp",
+    "generateUUIDv4",
+    "groupArray",
+    "groupUniqArray",
+    "has",
+    "hostName",
+    "if",
+    "ifNull",
+    "indexOf",
+    "isFinite",
+    "isNaN",
+    "isNotNull",
+    "isNull",
+    "JSONExtract",
+    "JSONExtractInt",
+    "JSONExtractString",
+    "lag",
+    "lead",
+    "length",
+    "lower",
+    "map",
+    "mapContains",
+    "mapKeys",
+    "mapValues",
+    "max",
+    "median",
+    "min",
+    "neighbor",
+    "now",
+    "nullIf",
+    "position",
+    "quantile",
+    "rank",
+    "replaceAll",
+    "round",
+    "row_number",
+    "runningDifference",
+    "splitByChar",
+    "startsWith",
+    "stddevPop",
+    "substring",
+    "sum",
+    "sumIf",
+    "sipHash64",
+    "toDate",
+    "toDateTime",
+    "toDateTime64",
+    "toDecimal64",
+    "toFixedString",
+    "toFloat64",
+    "toInt64",
+    "toStartOfDay",
+    "toStartOfHour",
+    "toStartOfMonth",
+    "toStartOfWeek",
+    "toStartOfYear",
+    "toString",
+    "toUInt64",
+    "toUnixTimestamp",
+    "toYYYYMM",
+    "toYYYYMMDD",
+    "today",
+    "trimBoth",
+    "tuple",
+    "uniq",
+    "uniqExact",
+    "upper",
+    "uptime",
+    "varPop",
+    "version",
+    "visitParamExtractString",
+    "windowFunnel",
+    "xxHash64",
+    "yesterday",
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -813,6 +928,11 @@ mod tests {
             DriverDialect::Oracle
                 .builtin_functions()
                 .contains(&"SYSDATE")
+        );
+        assert!(
+            DriverDialect::ClickHouse
+                .builtin_functions()
+                .contains(&"toStartOfDay")
         );
         assert!(DriverDialect::Generic.builtin_functions().is_empty());
     }

@@ -1650,6 +1650,9 @@ sync.error.no_shared_columns: "The source and target tables share no column name
 sync.error.missing_key: "The target table lacks the comparison key column(s): %{columns}. Sync the structure first."
 sync.sql.missing_target: "-- The target table does not exist; Data Only does not create tables. Use All or Full Sync."
 
+# ClickHouse
+clickhouse.database: "Default Database"
+clickhouse.database.hint: "The database the tree and query tabs start in; leave blank for `default`."
 # Redis
 mongodb.database: "Default Database"
 mongodb.database.hint: "The database a query tab opens in; JSON commands can still address any database."

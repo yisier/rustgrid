@@ -1650,6 +1650,9 @@ sync.error.no_shared_columns: "源表与目标表没有同名字段，无法写�
 sync.error.missing_key: "目标表缺少用于比较的键字段：%{columns}。请先同步表结构。"
 sync.sql.missing_target: "-- 目标库中尚无此表；「仅数据」不会创建表，请改用「全部」或「全量同步」"
 
+# ClickHouse
+clickhouse.database: "默认数据库"
+clickhouse.database.hint: "连接树和查询页默认使用的数据库；留空表示 default。"
 # Redis
 mongodb.database: "默认数据库"
 mongodb.database.hint: "查询页默认使用的数据库；JSON 命令仍可访问任意数据库。"

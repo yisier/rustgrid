@@ -1252,7 +1252,8 @@ pub(crate) fn page_display_sql(
     page_size: u64,
 ) -> String {
     let relation = match dialect {
-        DriverDialect::Mysql => {
+        // ClickHouse and MySQL both qualify an object with its database, using backticks.
+        DriverDialect::Mysql | DriverDialect::ClickHouse => {
             if database.is_empty() {
                 dialect.quote_identifier(table)
             } else {
