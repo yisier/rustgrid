@@ -255,6 +255,13 @@ impl SidebarHost {
         }
     }
 
+    /// Whether the tree's divider is being dragged. `AppView` re-renders the tab bar while it is,
+    /// because the content pane's width (and with it the tab strip's) changes without `AppView`
+    /// itself re-rendering.
+    pub(super) fn resizing(&self) -> bool {
+        self.drag.is_some()
+    }
+
     pub(super) fn drag_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<'_, Self>) {
         let Some((start_x, start_width)) = self.drag else {
             return;
@@ -467,6 +474,11 @@ impl InfoPane {
         let delta = f32::from(event.position.x) - start_x;
         self.width = (start_width - delta).clamp(INFO_MIN_WIDTH, INFO_MAX_WIDTH);
         cx.notify();
+    }
+
+    /// Whether the info pane's divider is being dragged (see [`SidebarHost::resizing`]).
+    pub(super) fn resizing(&self) -> bool {
+        self.drag.is_some()
     }
 
     pub(super) fn end_drag(&mut self, cx: &mut Context<'_, Self>) {

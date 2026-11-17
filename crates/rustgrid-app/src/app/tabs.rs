@@ -21,13 +21,11 @@ type QueryTabRow = (
 /// The widest a tab grows; the full title is in the tab's tooltip.
 const TAB_MAX_WIDTH: f32 = 170.0;
 
-/// The narrowest a tab shrinks to while more tabs open. Past this the strip scrolls instead, so a
-/// tab always keeps room for its icon, a few title characters and its close button.
+/// The narrowest a tab shrinks to as more tabs open. The strip lays its tabs out as flexbox items
+/// (so it resizes them itself when a pane changes the strip's width), and past this minimum the
+/// tabs stop shrinking and the strip scrolls instead — keeping room for the icon, a few title
+/// characters and the close button.
 const TAB_MIN_WIDTH: f32 = 96.0;
-
-/// The gap between tabs (the strip's `gap_1`), accounted for when a tab's width is derived from
-/// the strip's width.
-const TAB_GAP: f32 = 4.0;
 
 /// How far the pointer must travel before a press on a tab becomes a drag (so a plain click still
 /// activates the tab).
@@ -37,8 +35,7 @@ const TAB_DRAG_THRESHOLD: f32 = 4.0;
 const TAB_DRAG_EDGE: f32 = 28.0;
 const TAB_DRAG_SCROLL_STEP: f32 = 14.0;
 
-/// The ◀ / ▶ pager's width; the strip's available width grows by one per arrow plus a gap when
-/// the arrows are hidden.
+/// The ◀ / ▶ pager's width.
 const TAB_SCROLL_ARROW_WIDTH: f32 = 18.0;
 
 /// The background fill of a tab (`0xRRGGBBAA`). Every tab of a connection with an environment
@@ -141,9 +138,10 @@ impl AppView {
             content = content.font_family(font);
         }
         if has_tabs {
-            content = content.child(self.tab_bar.clone().cached(cached_style(|d| {
-                d.flex().flex_row().h(px(30.0)).flex_none().w_full()
-            })));
+            // Not cached: the bar is cheap to rebuild, and it must re-evaluate its width-derived
+            // state (the pagers and the tabs' flex sizing) whenever a pane changes the content's
+            // width, which a cached child would miss.
+            content = content.child(self.tab_bar.clone());
         }
         let mut body_frame = div()
             .relative()
@@ -230,9 +228,8 @@ impl TabBar {
         Self {
             app,
             scroll: ScrollHandle::new(),
-            strip_width: Rc::new(Cell::new(0.0)),
+            overflow: Rc::new(Cell::new(false)),
             last_active_tab: None,
-            arrows_shown: false,
         }
     }
 
@@ -243,28 +240,6 @@ impl TabBar {
             .unwrap_or_else(Theme::dark)
     }
 
-    /// The width every tab gets: the strip is shared evenly, clamped to the min/max. Tabs are all
-    /// the same width once they start shrinking, so the strip stays regular like Chrome's. While
-    /// the arrows are shown they own part of the bar, so their width is added back here and the
-    /// decision uses the room the strip would have without them.
-    fn tab_width(&self, count: usize) -> f32 {
-        let available = self.available_width();
-        if count == 0 || available <= 0.0 {
-            return TAB_MAX_WIDTH;
-        }
-        let gaps = TAB_GAP * count.saturating_sub(1) as f32;
-        ((available - gaps) / count as f32).clamp(TAB_MIN_WIDTH, TAB_MAX_WIDTH)
-    }
-
-    fn available_width(&self) -> f32 {
-        let arrows = if self.arrows_shown {
-            2.0 * (TAB_SCROLL_ARROW_WIDTH + TAB_GAP)
-        } else {
-            0.0
-        };
-        self.strip_width.get() + arrows
-    }
-
     /// The center x of the tab at display position `index` in the last layout, if it was drawn.
     /// The strip's tracked scroll handle records one window-space rectangle per child, scroll
     /// offset included, so this is where the drag's midpoint test works.
@@ -272,17 +247,6 @@ impl TabBar {
         self.scroll
             .bounds_for_item(index)
             .map(|bounds| f32::from(bounds.origin.x) + f32::from(bounds.size.width) / 2.0)
-    }
-
-    /// Whether `count` tabs at the minimum width no longer fit the strip, i.e. the ◀ / ▶ arrows
-    /// and the horizontal scroll are needed.
-    fn overflows(&self, count: usize, width: f32) -> bool {
-        let available = self.available_width();
-        if available <= 0.0 || count == 0 {
-            return false;
-        }
-        let gaps = TAB_GAP * count.saturating_sub(1) as f32;
-        width * count as f32 + gaps > available + 0.5
     }
 
     fn scroll_tabs(&mut self, delta: f32, cx: &mut Context<'_, Self>) -> bool {
@@ -404,7 +368,6 @@ impl TabBar {
         icon_color: u32,
         active: bool,
         color: Option<ConnectionColor>,
-        width: f32,
         dragging: bool,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
@@ -432,8 +395,9 @@ impl TabBar {
             .gap_1()
             .h_full()
             .px_2()
-            .w(px(width))
-            .flex_none()
+            .flex_1()
+            .min_w(px(TAB_MIN_WIDTH))
+            .max_w(px(TAB_MAX_WIDTH))
             .overflow_hidden()
             .cursor_pointer()
             .text_size(px(12.0))
@@ -528,7 +492,6 @@ impl TabBar {
         is_key: bool,
         color: Option<ConnectionColor>,
         active: bool,
-        width: f32,
         dragging: bool,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
@@ -563,8 +526,9 @@ impl TabBar {
             .gap_1()
             .h_full()
             .px_2()
-            .w(px(width))
-            .flex_none()
+            .flex_1()
+            .min_w(px(TAB_MIN_WIDTH))
+            .max_w(px(TAB_MAX_WIDTH))
             .overflow_hidden()
             .cursor_pointer()
             .text_size(px(12.0))
@@ -658,7 +622,6 @@ impl TabBar {
         is_view: bool,
         color: Option<ConnectionColor>,
         active: bool,
-        width: f32,
         dragging: bool,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
@@ -691,8 +654,9 @@ impl TabBar {
             .gap_1()
             .h_full()
             .px_2()
-            .w(px(width))
-            .flex_none()
+            .flex_1()
+            .min_w(px(TAB_MIN_WIDTH))
+            .max_w(px(TAB_MAX_WIDTH))
             .overflow_hidden()
             .cursor_pointer()
             .text_size(px(12.0))
@@ -972,10 +936,10 @@ impl Render for TabBar {
             )
         };
 
-        let tab_count = grid_tabs.len() + design_tabs.len() + query_tabs.len();
-        let tab_width = self.tab_width(tab_count);
-        let needs_scroll = self.overflows(tab_count, tab_width);
-        self.arrows_shown = needs_scroll;
+        // The tabs are flex items (auto width up to `TAB_MAX_WIDTH`, shrinking to
+        // `TAB_MIN_WIDTH`), so the layout itself resizes them whenever a pane changes the strip's
+        // width. The ◀ / ▶ pagers are drawn from the previous frame's overflow measurement.
+        let needs_scroll = self.overflow.get();
 
         // Draw the tabs in their display order (the same order Ctrl+Tab walks): the opening order,
         // then whatever the user dragged them into.
@@ -999,7 +963,6 @@ impl Render for TabBar {
                     is_key,
                     color,
                     active_grid == Some(index),
-                    tab_width,
                     is_dragging(target),
                     cx,
                 )
@@ -1018,7 +981,6 @@ impl Render for TabBar {
                     is_view,
                     color,
                     active_design == Some(index),
-                    tab_width,
                     is_dragging(target),
                     cx,
                 )
@@ -1038,7 +1000,6 @@ impl Render for TabBar {
                     icon_color,
                     active_query == Some(index),
                     color,
-                    tab_width,
                     is_dragging(target),
                     cx,
                 )
@@ -1068,19 +1029,19 @@ impl Render for TabBar {
             .track_scroll(&self.scroll)
             .children(tabs.into_iter().map(|(_, tab)| tab));
 
-        // The strip's viewport width is only known after layout, and the tab width is derived from
-        // it. A paint-only canvas over the wrapper (the strip is its only flexible child, so the
-        // two widths match) records it and asks for one more frame when it changed (a resize, or
-        // the arrows appearing), so the tabs settle in a single extra frame instead of stretching
-        // until the next unrelated repaint.
-        let measured = self.strip_width.clone();
+        // Whether the tabs overflow is known only after layout, so a paint-only canvas over the
+        // wrapper (which the strip fills) compares the strip's scroll range with the last frame's
+        // state and asks for one more frame when it changed. The pagers are drawn from that
+        // previous measurement.
+        let overflow = self.overflow.clone();
+        let scroll = self.scroll.clone();
         let weak = cx.entity().downgrade();
         let measure = canvas(
             |_bounds, _window: &mut Window, _cx: &mut App| {},
-            move |bounds, _state, window: &mut Window, cx: &mut App| {
-                let width = f32::from(bounds.size.width);
-                if (measured.get() - width).abs() > 0.5 {
-                    measured.set(width);
+            move |_bounds, _state, window: &mut Window, cx: &mut App| {
+                let overflows = scroll.max_offset().x > px(0.0);
+                if overflow.get() != overflows {
+                    overflow.set(overflows);
                     window.request_animation_frame();
                     let _ = weak.update(cx, |_, cx| cx.notify());
                 }
@@ -1111,6 +1072,7 @@ impl Render for TabBar {
             .items_end()
             .gap_1()
             .h(px(30.0))
+            .w_full()
             .flex_none()
             .bg(rgb(theme.toolbar_bg));
         bar = bar.child(self.object_tab(
@@ -1189,7 +1151,7 @@ impl AppView {
         }
     }
 
-    fn notify_tab_bar(&self, cx: &mut Context<'_, Self>) {
+    pub(super) fn notify_tab_bar(&self, cx: &mut Context<'_, Self>) {
         self.tab_bar.update(cx, |_, cx| cx.notify());
     }
 
@@ -1370,5 +1332,175 @@ impl AppView {
             self.show_tab(keep, cx);
         }
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{Bounds, Point, TestAppContext, WindowBounds, WindowOptions, size};
+    use gpui_kit::TestSupportExt as _;
+    use gpui_kit::test::TestWindowExt as _;
+
+    /// The tab strip's layout contract: equal-width tabs that fill the strip, cap at
+    /// [`TAB_MAX_WIDTH`] and shrink together down to [`TAB_MIN_WIDTH`], after which the strip
+    /// scrolls (the ◀ / ▶ pagers' condition). Widths come from the flexbox, so widening the strip
+    /// (a pane closing, the sidebar narrowing) grows the tabs back without recomputing anything in
+    /// Rust.
+    struct StripHarness {
+        scroll: ScrollHandle,
+        count: usize,
+        width: f32,
+    }
+
+    fn tab_id(index: usize) -> SharedString {
+        SharedString::from(format!("test-tab-{index}"))
+    }
+
+    impl Render for StripHarness {
+        fn render(
+            &mut self,
+            _window: &mut Window,
+            _cx: &mut Context<'_, Self>,
+        ) -> impl IntoElement {
+            let tabs = (0..self.count).map(|index| {
+                div()
+                    .id(tab_id(index))
+                    .test_support()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .h_full()
+                    .px_2()
+                    .flex_1()
+                    .min_w(px(TAB_MIN_WIDTH))
+                    .max_w(px(TAB_MAX_WIDTH))
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .truncate()
+                            .child("a long tab title that is ellipsized"),
+                    )
+                    .into_any_element()
+            });
+            div().w(px(self.width)).h(px(30.0)).child(
+                div()
+                    .id("test-tab-strip")
+                    .flex()
+                    .flex_row()
+                    .items_end()
+                    .gap_1()
+                    .pt_1()
+                    .h_full()
+                    .w_full()
+                    .overflow_x_scroll()
+                    .track_scroll(&self.scroll)
+                    .children(tabs),
+            )
+        }
+    }
+
+    fn tab_widths(
+        handle: gpui::AnyWindowHandle,
+        count: usize,
+        cx: &mut TestAppContext,
+    ) -> Vec<f32> {
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            (0..count)
+                .map(|index| f32::from(window.find(tab_id(index)).bounds().size.width))
+                .collect()
+        })
+        .expect("window is alive")
+    }
+
+    #[gpui_kit::test]
+    fn tabs_fill_the_strip_then_shrink_and_overflow(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let scroll = ScrollHandle::new();
+        let (handle, harness) = cx.update(|cx| {
+            let harness = cx.new(|_| StripHarness {
+                scroll: scroll.clone(),
+                count: 5,
+                width: 800.0,
+            });
+            let (handle, _) = gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: Point::default(),
+                        size: size(px(1000.0), px(200.0)),
+                    })),
+                    ..Default::default()
+                },
+                cx,
+                |_, _| harness.clone(),
+            )
+            .expect("open test window");
+            (handle, harness)
+        });
+
+        // Five tabs share an 800px strip: (800 - 4 gaps) / 5 = 156.8 each, below the 170 cap.
+        let widths = tab_widths(handle, 5, cx);
+        for width in &widths {
+            assert!(
+                (*width - 156.8).abs() < 1.5,
+                "tabs should fill the strip evenly, measured {widths:?}"
+            );
+        }
+        assert_eq!(scroll.max_offset().x, px(0.0), "five tabs fit");
+
+        // Fewer tabs cap at TAB_MAX_WIDTH instead of stretching further.
+        harness.update(cx, |harness, cx| {
+            harness.count = 2;
+            cx.notify();
+        });
+        for width in tab_widths(handle, 2, cx) {
+            assert!(
+                (width - TAB_MAX_WIDTH).abs() < 1.0,
+                "tabs should stop at the maximum width, measured {width}"
+            );
+        }
+
+        // Ten tabs at 800px would need 76px each: they stop at the minimum and the strip scrolls.
+        harness.update(cx, |harness, cx| {
+            harness.count = 10;
+            cx.notify();
+        });
+        let widths = tab_widths(handle, 10, cx);
+        for width in &widths {
+            assert!(
+                (width - TAB_MIN_WIDTH).abs() < 1.0,
+                "tabs should stop at the minimum width, measured {widths:?}"
+            );
+        }
+        window_pump(handle, cx);
+        assert!(
+            scroll.max_offset().x > px(0.0),
+            "a strip of ten minimum-width tabs must overflow (the pagers' condition)"
+        );
+
+        // Widening the strip (a pane closes) grows them straight back, without any Rust-side
+        // width bookkeeping: the bug this guards is tabs staying tiny beside blank space.
+        harness.update(cx, |harness, cx| {
+            harness.width = 1600.0;
+            cx.notify();
+        });
+        let widths = tab_widths(handle, 10, cx);
+        for width in &widths {
+            assert!(
+                (width - 156.4).abs() < 1.5,
+                "tabs should grow back when the strip widens, measured {widths:?}"
+            );
+        }
+        window_pump(handle, cx);
+        assert_eq!(scroll.max_offset().x, px(0.0), "ten tabs fit 1600px");
+    }
+
+    fn window_pump(handle: gpui::AnyWindowHandle, cx: &mut TestAppContext) {
+        cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+            .expect("window is alive");
     }
 }
