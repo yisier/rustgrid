@@ -114,8 +114,12 @@ The export wizard works normally (it reads pages through `fetch_page`), as does 
   databases have no charset, collation or owner), so the dialog shows just the name.
 - Drop / rename / truncate go through `Connection` (`DROP TABLE`, `RENAME TABLE`, `TRUNCATE TABLE`);
   清空表 and 截断表 both truncate (ClickHouse has no `DELETE FROM` without a mutation).
-- No table designer (`supports_table_designer = false`): MergeTree needs its engine, `PARTITION BY`,
-  `ORDER BY`, `TTL`, sampling and settings modelled, which is a later phase.
+- The shared table designer edits columns (name, ClickHouse type, 不是 null, 默认, 备注) and the
+  table comment. 新建表 writes `CREATE TABLE … ENGINE = MergeTree ORDER BY tuple()`; 设计表 writes
+  `ALTER TABLE … ADD/DROP/MODIFY COLUMN` and `MODIFY COMMENT`, one statement per HTTP request. The
+  engine, `ORDER BY`, `PARTITION BY`, TTL, indexes and settings are not modelled yet, so changing
+  those stays in the SQL editor; renaming a column is an add plus a drop, as in the other drivers.
+  A read-only connection does not offer the designer.
 - No `.rgbak` backup (`supports_backup = false`).
 - No users/roles, routines or events (`system.users`/`system.grants` are queryable from the SQL
   editor; ClickHouse has no stored procedures).
@@ -137,6 +141,8 @@ The export wizard works normally (it reads pages through `fetch_page`), as does 
 RUSTGRID_CLICKHOUSE_PASSWORD=clickhouse cargo test -p rustgrid-clickhouse -- --ignored
 ```
 
-Optional: `RUSTGRID_CLICKHOUSE_HOST`/`PORT`/`USER`/`DATABASE`. The test creates and drops its own
-`rustgrid_live` database and exercises connect, catalog, columns, paging with a filter and a sort,
-`count()`, arbitrary SQL, multi-statement runs, DDL, rename/truncate/drop and the read-only refusals.
+Optional: `RUSTGRID_CLICKHOUSE_HOST`/`PORT`/`USER`/`DATABASE`. Each test creates and drops its own
+uniquely named `rustgrid_<label>_<pid>_<nanos>` database, so it never touches a developer's
+databases; they exercise connect, catalog, columns, paging with a filter and a sort, `count()`,
+arbitrary SQL, multi-statement runs, DDL, rename/truncate/drop, the read-only refusals and the table
+designer's create/alter path.

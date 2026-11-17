@@ -2,10 +2,11 @@
 
 use async_trait::async_trait;
 use rustgrid_core::{
-    AdvancedFields, Connection, ConnectionConfig, ConnectionFieldLabel, ConnectionFormSpec,
-    ConnectionHomePage, ConnectionPage, ConnectionStandardField, DatabaseEditorSpec, Driver,
-    DriverCapabilities, DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle,
-    DriverId, Result,
+    AdvancedFields, AutoIncrementRule, Connection, ConnectionConfig, ConnectionFieldLabel,
+    ConnectionFormSpec, ConnectionHomePage, ConnectionPage, ConnectionStandardField,
+    DatabaseEditorSpec, DefaultSuggestion, DesignerColumnOption, DesignerFieldColumn, DesignerTab,
+    Driver, DriverCapabilities, DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle,
+    DriverId, Result, TableDesignerSpec, TriggerDefinition,
 };
 
 use crate::connection::ClickHouseConnection;
@@ -44,6 +45,51 @@ impl Driver for ClickHouseDriver {
 
     fn descriptor(&self) -> DriverDescriptor {
         DriverDescriptor {
+            // ClickHouse has no secondary indexes, foreign keys or identity columns, and the
+            // designer does not edit MergeTree's engine/sorting key/partition clauses. It does
+            // cover the fields, their types/defaults/nullability/comments and the table comment.
+            table_designer: TableDesignerSpec {
+                tabs: vec![DesignerTab::Fields, DesignerTab::Comment, DesignerTab::Sql],
+                column_options: vec![DesignerColumnOption::Default],
+                field_columns: vec![DesignerFieldColumn::NotNull, DesignerFieldColumn::Comment],
+                option_fields: Vec::new(),
+                default_suggestions: vec![
+                    DefaultSuggestion::for_types("now()", &["DateTime", "DateTime64"]),
+                    DefaultSuggestion::for_types("today()", &["Date", "Date32"]),
+                    DefaultSuggestion::for_types("''", &["String", "FixedString"]),
+                    DefaultSuggestion::for_types(
+                        "0",
+                        &[
+                            "Int8",
+                            "Int16",
+                            "Int32",
+                            "Int64",
+                            "Int128",
+                            "Int256",
+                            "UInt8",
+                            "UInt16",
+                            "UInt32",
+                            "UInt64",
+                            "UInt128",
+                            "UInt256",
+                            "Float32",
+                            "Float64",
+                            "Decimal",
+                            "Decimal32",
+                            "Decimal64",
+                            "Decimal128",
+                            "Decimal256",
+                        ],
+                    ),
+                    DefaultSuggestion::for_types("false", &["Bool"]),
+                    DefaultSuggestion::every("NULL"),
+                ],
+                index_columns: Vec::new(),
+                index_kinds: Vec::new(),
+                index_comment: false,
+                auto_increment: AutoIncrementRule::default(),
+                trigger_definition: TriggerDefinition::Full,
+            },
             id: self.id(),
             display_name: self.display_name(),
             default_port: self.default_port(),
@@ -84,15 +130,15 @@ impl Driver for ClickHouseDriver {
                     init_sql: false,
                 },
             },
-            table_designer: Default::default(),
             order: 55,
         }
     }
 
-    /// The table designer would have to model MergeTree's engine, `PARTITION BY`, `ORDER BY`, `TTL`
-    /// and the sampling/settings clauses; it is a later phase.
-    fn supports_table_designer(&self, _profile: &rustgrid_core::ConnectionProfile) -> bool {
-        false
+    /// ClickHouse tables can be created and redesigned in the shared designer (columns, defaults
+    /// and comments). MergeTree's engine/sorting key/partition clauses are not editable yet, and a
+    /// read-only connection cannot change the structure at all.
+    fn supports_table_designer(&self, profile: &rustgrid_core::ConnectionProfile) -> bool {
+        !profile.settings.read_only
     }
 
     /// `.rgbak` stores SQL DDL and value tuples; ClickHouse tables are recreated from their

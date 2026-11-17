@@ -102,7 +102,8 @@ Click a screenshot to view it full size.
   Set TTL, Rename and Delete, and the query editor completes Redis commands and keys.
 - **ClickHouse** — connect over HTTP (with TLS and tunnels), browse databases and MergeTree
   tables/views, page / filter / sort / export a read-only grid (no unique row key), run SQL over a
-  pinned session, and import rows into an existing table.
+  pinned session, import rows into an existing table, and create/redesign a table's fields,
+  defaults and comments.
 - **MongoDB** — browse databases and collections, page and edit documents in the normal grid and
   row form (embedded documents open as JSON), and run JSON commands (`find`, `aggregate`, `count`,
   any `runCommand`) in query tabs.

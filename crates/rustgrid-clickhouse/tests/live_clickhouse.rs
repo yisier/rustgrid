@@ -17,11 +17,22 @@
 use rustgrid_clickhouse::ClickHouseDriver;
 use rustgrid_core::{
     ColumnDef, ConnectionConfig, DatabaseOptions, Driver, DriverId, FilterCondition, FilterNode,
-    FilterOperator, ObjectKind, PageRequest, RowInsert, RowUpdate, SortColumn, TableSchema,
+    FilterOperator, ObjectKind, PageRequest, RowInsert, RowUpdate, SortColumn, TableOptions,
+    TableSchema,
 };
 
 fn env(name: &str, fallback: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| fallback.to_string())
+}
+
+/// A throwaway database name that cannot collide with a developer's own `rustgrid_*` databases
+/// (the tests drop what they create, so they must never reuse a name someone may already use).
+fn test_database(label: &str) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!("rustgrid_{label}_{}_{:x}", std::process::id(), nanos)
 }
 
 fn config() -> ConnectionConfig {
@@ -54,7 +65,8 @@ async fn round_trips_a_live_clickhouse() {
         .connect(&config)
         .await
         .expect("connect");
-    let database = "rustgrid_live";
+    let database_name = test_database("live");
+    let database = database_name.as_str();
 
     connection
         .execute_query(None, &format!("DROP DATABASE IF EXISTS {database}"))
@@ -239,7 +251,8 @@ async fn exercises_catalog_views_sessions_and_the_import_path() {
         .connect(&config())
         .await
         .expect("connect");
-    let database = "rustgrid_live_extra";
+    let database_name = test_database("extra");
+    let database = database_name.as_str();
 
     connection
         .execute_query(None, &format!("DROP DATABASE IF EXISTS {database}"))
@@ -445,6 +458,109 @@ async fn exercises_catalog_views_sessions_and_the_import_path() {
         .unwrap();
     connection
         .execute_query(Some(database), "DROP TABLE events")
+        .await
+        .unwrap();
+    connection.drop_database(database).await.unwrap();
+    connection.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a live ClickHouse (RUSTGRID_CLICKHOUSE_*)"]
+async fn creates_and_redesigns_a_table() {
+    let connection = ClickHouseDriver::new()
+        .connect(&config())
+        .await
+        .expect("connect");
+    let database_name = test_database("designer");
+    let database = database_name.as_str();
+
+    connection
+        .execute_query(None, &format!("DROP DATABASE IF EXISTS {database}"))
+        .await
+        .expect("drop stale database");
+    connection
+        .create_database(database, &DatabaseOptions::default())
+        .await
+        .expect("create database");
+
+    let original = TableSchema {
+        columns: vec![
+            ColumnDef {
+                name: "id".to_string(),
+                data_type: "UInt64".to_string(),
+                nullable: false,
+                primary_key: true,
+                ..ColumnDef::default()
+            },
+            ColumnDef {
+                name: "name".to_string(),
+                data_type: "String".to_string(),
+                nullable: true,
+                default: "''".to_string(),
+                comment: "display".to_string(),
+                ..ColumnDef::default()
+            },
+        ],
+        options: TableOptions {
+            comment: "before".to_string(),
+            ..TableOptions::default()
+        },
+        ..TableSchema::default()
+    };
+    connection
+        .save_table_schema(database, "people", None, &original)
+        .await
+        .expect("create designed table");
+
+    let loaded = connection.table_schema(database, "people").await.unwrap();
+    assert_eq!(loaded.options.engine, "MergeTree");
+    assert_eq!(loaded.columns.len(), 2);
+    assert_eq!(loaded.columns[0].data_type, "UInt64");
+    assert!(loaded.columns[1].nullable);
+    assert_eq!(loaded.columns[1].default, "''");
+    assert_eq!(loaded.columns[1].comment, "display");
+    assert_eq!(loaded.options.comment, "before");
+
+    // One save adds a column, changes a type/default/comment and the table comment: the driver
+    // splits the statements for ClickHouse's one-statement-per-request HTTP interface.
+    let mut modified = loaded.clone();
+    modified.columns[1].data_type = "LowCardinality(String)".to_string();
+    modified.columns[1].default = "'n/a'".to_string();
+    modified.columns[1].comment = "shown name".to_string();
+    modified.columns.push(ColumnDef {
+        name: "amount".to_string(),
+        data_type: "Decimal(20, 6)".to_string(),
+        nullable: false,
+        ..ColumnDef::default()
+    });
+    modified.options.comment = "after".to_string();
+    connection
+        .save_table_schema(database, "people", Some(&loaded), &modified)
+        .await
+        .expect("alter designed table");
+
+    let reloaded = connection.table_schema(database, "people").await.unwrap();
+    assert_eq!(reloaded.columns.len(), 3);
+    assert_eq!(
+        reloaded.columns[1].data_type,
+        "LowCardinality(Nullable(String))"
+    );
+    assert_eq!(reloaded.columns[1].default, "'n/a'");
+    assert_eq!(reloaded.columns[1].comment, "shown name");
+    assert_eq!(reloaded.columns[2].data_type, "Decimal(20, 6)");
+    assert_eq!(reloaded.options.comment, "after");
+
+    let mut dropped = reloaded.clone();
+    dropped.columns.retain(|column| column.name != "amount");
+    connection
+        .save_table_schema(database, "people", Some(&reloaded), &dropped)
+        .await
+        .expect("drop designed column");
+    let reloaded = connection.table_schema(database, "people").await.unwrap();
+    assert_eq!(reloaded.columns.len(), 2);
+
+    connection
+        .execute_query(Some(database), "DROP TABLE people")
         .await
         .unwrap();
     connection.drop_database(database).await.unwrap();

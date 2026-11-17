@@ -151,7 +151,10 @@ not a later refactor.
   unique key, `system.tables.primary_key` is only the sorting-key expression, and
   `ALTER TABLE … UPDATE/DELETE` is an asynchronous mutation, so `update_rows`/`delete_rows` refuse
   and the UI hides the edit actions; `insert_rows` is implemented for the Import Wizard. The query
-  editor pins a ClickHouse `session_id` for `SET` and tracks `USE` client-side. No table designer,
+  editor pins a ClickHouse `session_id` for `SET` and tracks `USE` client-side. The shared table
+  designer edits fields, defaults and comments (`CREATE TABLE … ENGINE = MergeTree ORDER BY
+  tuple()`, then `ALTER TABLE … ADD/DROP/MODIFY COLUMN`/`MODIFY COMMENT`, split one statement per
+  request); the engine, sorting key, partitioning, indexes and TTL stay in the SQL editor. No
   users, routines/events or `.rgbak` backup. See `docs/clickhouse-driver.md`.
 - `crates/rustgrid-tunnel` — the shared **SSH / SOCKS5 / HTTP** tunnel (local port forwarding) used
   by the network drivers (`rustgrid-mysql`, `rustgrid-postgresql`, `rustgrid-oracle`,

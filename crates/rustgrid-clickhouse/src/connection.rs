@@ -25,9 +25,10 @@ use hyper_util::client::legacy::Client as HyperClient;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use rustgrid_core::{
-    BackupObjectKind, ColumnInfo, Connection, ConnectionOptions, DatabaseInfo, DatabaseOptions,
-    DriverId, Error, FilterNode, ObjectDump, ObjectKind, PageRequest, QueryResult, Result,
-    RowInsert, RowUpdate, ScriptSession, TableInfo, TablePage, TableSchema, TableStatus, TlsMode,
+    BackupObjectKind, ColumnDef, ColumnInfo, Connection, ConnectionOptions, DatabaseInfo,
+    DatabaseOptions, DriverId, Error, FilterNode, ObjectDump, ObjectKind, PageRequest, QueryResult,
+    Result, RowInsert, RowUpdate, ScriptSession, TableInfo, TableOptions, TablePage, TableSchema,
+    TableStatus, TlsMode,
 };
 use rustgrid_tunnel::Tunnel;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -673,17 +674,80 @@ impl Connection for ClickHouseConnection {
         ]
     }
 
-    /// The table designer is not offered for ClickHouse (MergeTree needs engine-specific clauses),
-    /// so its introspection path is not used.
-    async fn table_schema(&self, _database: &str, _table: &str) -> Result<TableSchema> {
-        Err(Error::Query(
-            "ClickHouse tables are managed through their CREATE statement in the SQL editor."
-                .into(),
-        ))
+    /// Read the table designer's working copy from `system.columns` and `system.tables`.
+    ///
+    /// `ColumnDef.data_type` keeps the complete ClickHouse type (`Nullable(String)`,
+    /// `Decimal(20, 6)`, `Array(UInt8)`); the designer's nullable check box is derived from it. A
+    /// MATERIALIZED / ALIAS / EPHEMERAL column keeps its expression in `generated` and its kind in
+    /// `extra`, so a save preserves it even though the designer does not edit generated columns.
+    async fn table_schema(&self, database: &str, table: &str) -> Result<TableSchema> {
+        let columns_sql = format!(
+            "SELECT name, type, default_kind, default_expression, comment FROM system.columns \
+             WHERE database = {} AND table = {} ORDER BY position",
+            helpers::quote_literal(database),
+            helpers::quote_literal(table)
+        );
+        let decoded = self.fetch_rows(&columns_sql).await?;
+        let mut columns = Vec::with_capacity(decoded.rows.len());
+        for row in &decoded.rows {
+            let Some(name) = text_at(&decoded.columns, row, "name") else {
+                continue;
+            };
+            let data_type = text_at(&decoded.columns, row, "type").unwrap_or_default();
+            let default_kind = text_at(&decoded.columns, row, "default_kind").unwrap_or_default();
+            let expression =
+                text_at(&decoded.columns, row, "default_expression").unwrap_or_default();
+            let generated = matches!(
+                default_kind.to_ascii_uppercase().as_str(),
+                "MATERIALIZED" | "ALIAS" | "EPHEMERAL"
+            );
+            columns.push(ColumnDef {
+                name,
+                nullable: helpers::is_nullable(&data_type),
+                data_type,
+                default: (!generated && default_kind.eq_ignore_ascii_case("DEFAULT"))
+                    .then_some(expression.clone())
+                    .unwrap_or_default(),
+                generated: generated.then_some(expression).unwrap_or_default(),
+                extra: if generated {
+                    default_kind.to_ascii_uppercase()
+                } else {
+                    String::new()
+                },
+                comment: text_at(&decoded.columns, row, "comment").unwrap_or_default(),
+                ..ColumnDef::default()
+            });
+        }
+
+        let info_sql = format!(
+            "SELECT engine, comment FROM system.tables WHERE database = {} AND name = {} LIMIT 1",
+            helpers::quote_literal(database),
+            helpers::quote_literal(table)
+        );
+        let info = self.fetch_rows(&info_sql).await?;
+        let engine = info
+            .rows
+            .first()
+            .and_then(|row| text_at(&info.columns, row, "engine"))
+            .unwrap_or_default();
+        let comment = info
+            .rows
+            .first()
+            .and_then(|row| text_at(&info.columns, row, "comment"))
+            .unwrap_or_default();
+        Ok(TableSchema {
+            columns,
+            options: TableOptions {
+                engine,
+                comment,
+                ..TableOptions::default()
+            },
+            ..TableSchema::default()
+        })
     }
 
-    /// The import wizard creates a table with a plain `MergeTree`; see
-    /// [`helpers::create_table_sql`].
+    /// A new table gets a plain `MergeTree` (see [`helpers::create_table_sql`]); an existing table
+    /// is changed with `ALTER TABLE … ADD/DROP/MODIFY COLUMN` and `MODIFY COMMENT`.
     fn table_schema_sql(
         &self,
         database: &str,
@@ -691,11 +755,29 @@ impl Connection for ClickHouseConnection {
         original: Option<&TableSchema>,
         modified: &TableSchema,
     ) -> String {
-        if original.is_some() {
-            // The designer is unavailable, so only `CREATE` is ever produced.
-            return String::new();
+        match original {
+            None => helpers::create_table_sql(database, table, modified),
+            Some(original) => helpers::alter_table_sql(database, table, original, modified),
         }
-        helpers::create_table_sql(database, table, modified)
+    }
+
+    /// ClickHouse's HTTP interface runs one statement per request, so the designer's multi-statement
+    /// script is split and sent one statement at a time (the trait's default would send it whole).
+    async fn save_table_schema(
+        &self,
+        database: &str,
+        table: &str,
+        original: Option<&TableSchema>,
+        modified: &TableSchema,
+    ) -> Result<()> {
+        self.ensure_writable()?;
+        let sql = self.table_schema_sql(database, table, original, modified);
+        for statement in rustgrid_core::split::split_statements(&sql) {
+            if !statement.trim().is_empty() {
+                self.execute_sql(statement.trim()).await?;
+            }
+        }
+        Ok(())
     }
 
     async fn close(&self) -> Result<()> {

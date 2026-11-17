@@ -5,6 +5,8 @@
 //! rendered as literals (the driver never uses the client's `?` binding, so a query's own `?`
 //! characters stay untouched).
 
+use std::collections::HashMap;
+
 use rustgrid_core::{
     CellValue, ColumnDef, ColumnInfo, Error, FilterCondition, FilterConjunction, FilterNode,
     FilterOperator, PageRequest, Result, RowInsert, TableSchema,
@@ -771,19 +773,24 @@ pub(crate) fn clickhouse_type(data_type: &str, length: &str, decimals: &str) -> 
     }
 }
 
-/// A whole column definition: the mapped type, `Nullable(…)` and a `DEFAULT` when the source
-/// carries a literal one.
+/// A whole column definition: the native (or imported) type, `Nullable(…)`, the `DEFAULT` or
+/// generated expression, and the column comment.
 fn column_definition(column: &ColumnDef) -> String {
     let mapped = clickhouse_type(&column.data_type, &column.length, &column.decimals);
-    let data_type = if column.nullable && !mapped.starts_with("Nullable(") {
-        format!("Nullable({mapped})")
-    } else {
-        mapped
-    };
+    let data_type = nullable_type(&mapped, column.nullable);
     let mut definition = format!("{} {data_type}", quote_identifier(&column.name));
-    let default = column.default.trim();
-    if !default.is_empty() {
-        definition.push_str(&format!(" DEFAULT {default}"));
+    let generated = column.generated.trim();
+    if !generated.is_empty() {
+        // MATERIALIZED / ALIAS / EPHEMERAL are stored in `generated` + `extra` when the schema is
+        // loaded, so a designer save preserves the column exactly as the engine reported it.
+        let kind = match column.extra.trim().to_ascii_uppercase().as_str() {
+            "ALIAS" => "ALIAS",
+            "EPHEMERAL" => "EPHEMERAL",
+            _ => "MATERIALIZED",
+        };
+        definition.push_str(&format!(" {kind} {generated}"));
+    } else if !column.default.trim().is_empty() {
+        definition.push_str(&format!(" DEFAULT {}", column.default.trim()));
     }
     if !column.comment.trim().is_empty() {
         definition.push_str(&format!(" COMMENT {}", quote_literal(&column.comment)));
@@ -791,8 +798,67 @@ fn column_definition(column: &ColumnDef) -> String {
     definition
 }
 
-/// The `CREATE TABLE` script the import wizard runs for a new ClickHouse table. ClickHouse needs a
-/// table engine, so a plain `MergeTree` ordered by `tuple()` is used (no column is an identity).
+/// Apply the designer's 不是 null flag to a ClickHouse type.
+///
+/// `Nullable` cannot wrap `Array`/`Map`/`Tuple`/`Nested`, and `LowCardinality` carries its
+/// nullability inside it (`LowCardinality(Nullable(String))`, never the reverse).
+fn nullable_type(data_type: &str, nullable: bool) -> String {
+    let trimmed = data_type.trim();
+    let trimmed = if trimmed.is_empty() {
+        "String"
+    } else {
+        trimmed
+    };
+    if let Some(inner) = nullable_inner(trimmed) {
+        return if nullable {
+            trimmed.to_string()
+        } else {
+            inner.to_string()
+        };
+    }
+    if let Some(inner) = low_cardinality_inner(trimmed) {
+        return format!("LowCardinality({})", nullable_type(inner, nullable));
+    }
+    if nullable && can_be_nullable(trimmed) {
+        format!("Nullable({trimmed})")
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn nullable_inner(data_type: &str) -> Option<&str> {
+    let trimmed = data_type.trim();
+    if trimmed
+        .get(..9)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("Nullable("))
+        && trimmed.ends_with(')')
+    {
+        Some(trimmed[9..trimmed.len() - 1].trim())
+    } else {
+        None
+    }
+}
+
+fn low_cardinality_inner(data_type: &str) -> Option<&str> {
+    let trimmed = data_type.trim();
+    if trimmed
+        .get(..15)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("LowCardinality("))
+        && trimmed.ends_with(')')
+    {
+        Some(trimmed[15..trimmed.len() - 1].trim())
+    } else {
+        None
+    }
+}
+
+fn can_be_nullable(data_type: &str) -> bool {
+    !matches!(base_type(data_type), "Array" | "Map" | "Tuple" | "Nested")
+}
+
+/// The `CREATE TABLE` script the import wizard and the table designer run for a new ClickHouse
+/// table. ClickHouse needs a table engine, so a plain `MergeTree` ordered by `tuple()` is used (no
+/// column is an identity).
 pub(crate) fn create_table_sql(database: &str, table: &str, schema: &TableSchema) -> String {
     if schema.columns.is_empty() {
         return String::new();
@@ -814,6 +880,90 @@ pub(crate) fn create_table_sql(database: &str, table: &str, schema: &TableSchema
         ));
     }
     sql
+}
+
+/// The `ALTER TABLE` script that turns `original` into `modified`.
+///
+/// ClickHouse alters columns in place, so a type, nullability, default or comment change is a
+/// `MODIFY COLUMN` rather than a table rebuild. A renamed column is not detected as a rename and
+/// becomes an added column plus a dropped one, exactly like the other drivers' designers. Engine,
+/// sorting-key and partition changes are not part of the designer yet.
+pub(crate) fn alter_table_sql(
+    database: &str,
+    table: &str,
+    original: &TableSchema,
+    modified: &TableSchema,
+) -> String {
+    let reference = table_ref(database, table);
+    let original_columns: HashMap<&str, &ColumnDef> = original
+        .columns
+        .iter()
+        .map(|column| (column.name.as_str(), column))
+        .collect();
+    let modified_columns: HashMap<&str, &ColumnDef> = modified
+        .columns
+        .iter()
+        .map(|column| (column.name.as_str(), column))
+        .collect();
+    let mut statements = Vec::new();
+
+    for (index, column) in modified.columns.iter().enumerate() {
+        if original_columns.contains_key(column.name.as_str()) || column.name.trim().is_empty() {
+            continue;
+        }
+        let position = column_position(&modified.columns, index);
+        statements.push(format!(
+            "ALTER TABLE {reference} ADD COLUMN {}{position}",
+            column_definition(column)
+        ));
+    }
+    for column in &original.columns {
+        if !modified_columns.contains_key(column.name.as_str()) {
+            statements.push(format!(
+                "ALTER TABLE {reference} DROP COLUMN {}",
+                quote_identifier(&column.name)
+            ));
+        }
+    }
+    for column in &modified.columns {
+        if let Some(previous) = original_columns.get(column.name.as_str())
+            && column_changed(previous, column)
+        {
+            statements.push(format!(
+                "ALTER TABLE {reference} MODIFY COLUMN {}",
+                column_definition(column)
+            ));
+        }
+    }
+    if original.options.comment.trim() != modified.options.comment.trim() {
+        statements.push(format!(
+            "ALTER TABLE {reference} MODIFY COMMENT {}",
+            quote_literal(&modified.options.comment)
+        ));
+    }
+    statements.join(";\n")
+}
+
+/// The `FIRST` / `AFTER` position of an added column, so a new field stays where the designer shows
+/// it instead of always landing at the end of the table.
+fn column_position(columns: &[ColumnDef], index: usize) -> String {
+    match columns[..index]
+        .iter()
+        .rev()
+        .find(|column| !column.name.trim().is_empty())
+    {
+        Some(previous) => format!(" AFTER {}", quote_identifier(&previous.name)),
+        None => " FIRST".to_string(),
+    }
+}
+
+fn column_changed(previous: &ColumnDef, modified: &ColumnDef) -> bool {
+    previous.data_type.trim() != modified.data_type.trim()
+        || previous.nullable != modified.nullable
+        || previous.default.trim() != modified.default.trim()
+        || previous.generated.trim() != modified.generated.trim()
+        || previous.extra.trim() != modified.extra.trim()
+        || previous.comment.trim() != modified.comment.trim()
 }
 
 /// One `INSERT` statement for a batch of rows.
@@ -1078,6 +1228,78 @@ mod tests {
             create_table_sql("db", "people", &schema),
             "CREATE TABLE `db`.`people` (`id` Int64, `name` Nullable(String)) ENGINE = \
              MergeTree ORDER BY tuple()"
+        );
+    }
+
+    #[test]
+    fn designer_ddl_creates_and_alters_clickhouse_tables() {
+        assert_eq!(
+            nullable_type("LowCardinality(String)", true),
+            "LowCardinality(Nullable(String))"
+        );
+        assert_eq!(
+            nullable_type("LowCardinality(Nullable(String))", false),
+            "LowCardinality(String)"
+        );
+        assert_eq!(nullable_type("Array(String)", true), "Array(String)");
+
+        let schema = TableSchema {
+            columns: vec![
+                ColumnDef {
+                    name: "id".to_string(),
+                    data_type: "UInt64".to_string(),
+                    nullable: false,
+                    ..ColumnDef::default()
+                },
+                ColumnDef {
+                    name: "name".to_string(),
+                    data_type: "String".to_string(),
+                    nullable: true,
+                    default: "''".to_string(),
+                    comment: "display".to_string(),
+                    ..ColumnDef::default()
+                },
+                ColumnDef {
+                    name: "tags".to_string(),
+                    data_type: "Array(String)".to_string(),
+                    nullable: true,
+                    ..ColumnDef::default()
+                },
+                ColumnDef {
+                    name: "created".to_string(),
+                    data_type: "DateTime64(3)".to_string(),
+                    nullable: false,
+                    ..ColumnDef::default()
+                },
+            ],
+            ..TableSchema::default()
+        };
+        assert_eq!(
+            create_table_sql("db", "people", &schema),
+            "CREATE TABLE `db`.`people` (`id` UInt64, `name` Nullable(String) DEFAULT '' COMMENT \
+             'display', `tags` Array(String), `created` DateTime64(3)) ENGINE = MergeTree ORDER BY \
+             tuple()"
+        );
+
+        let mut modified = schema.clone();
+        modified.columns.retain(|column| column.name != "tags");
+        modified.columns[1].data_type = "LowCardinality(String)".to_string();
+        modified.columns[1].default = "'n/a'".to_string();
+        modified.columns[1].comment = "shown name".to_string();
+        modified.columns.push(ColumnDef {
+            name: "note".to_string(),
+            data_type: "String".to_string(),
+            nullable: true,
+            ..ColumnDef::default()
+        });
+        modified.options.comment = "people table".to_string();
+        assert_eq!(
+            alter_table_sql("db", "people", &schema, &modified),
+            "ALTER TABLE `db`.`people` ADD COLUMN `note` Nullable(String) AFTER `created`;\n\
+             ALTER TABLE `db`.`people` DROP COLUMN `tags`;\n\
+             ALTER TABLE `db`.`people` MODIFY COLUMN `name` \
+             LowCardinality(Nullable(String)) DEFAULT 'n/a' COMMENT 'shown name';\n\
+             ALTER TABLE `db`.`people` MODIFY COMMENT 'people table'"
         );
     }
 

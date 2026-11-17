@@ -432,11 +432,11 @@ mod tests {
         assert!(!driver.supports_backup(&profile));
     }
 
-    /// ClickHouse is an OLAP engine whose grid is read-only: the registration must say so and keep
-    /// the relational-only surfaces (designer, `.rgbak` backup, users, routines) off.
+    /// ClickHouse is an OLAP engine whose grid is read-only: the registration must say so, offer
+    /// the table designer for structure changes, and keep `.rgbak` backups, users and routines off.
     #[test]
     fn clickhouse_is_registered_with_a_read_only_grid() {
-        use rustgrid_core::{ConnectionProfile, DriverCapability, DriverId};
+        use rustgrid_core::{ConnectionProfile, DesignerTab, DriverCapability, DriverId};
 
         let registry = builtin_registry();
         let driver = registry
@@ -476,7 +476,20 @@ mod tests {
             options: Default::default(),
             settings: Default::default(),
         };
-        assert!(!driver.supports_table_designer(&profile));
+        assert!(
+            descriptor
+                .table_designer
+                .tabs
+                .contains(&DesignerTab::Fields),
+            "ClickHouse's designer must offer the fields tab"
+        );
+        assert!(driver.supports_table_designer(&profile));
+        let mut read_only = profile.clone();
+        read_only.settings.read_only = true;
+        assert!(
+            !driver.supports_table_designer(&read_only),
+            "a read-only connection cannot redesign tables"
+        );
         assert!(!driver.supports_backup(&profile));
     }
 }
