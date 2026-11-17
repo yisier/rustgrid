@@ -261,32 +261,13 @@ impl ConnectionForm {
     }
 
     /// Whether an option field is currently visible. A field with a `visible_when` condition is
-    /// shown while its controlling option has the matching value. An unset controlling
-    /// `Select`/`Radio` counts as its first choice (its implicit default). A legacy profile whose
-    /// controlling option is unset still shows a field that already holds a value, so an old
-    /// profile never loses the option it was configured with.
+    /// shown while its controlling option has the matching value — or whenever the field itself
+    /// already holds a value, so a legacy profile can never hide an active option.
     pub fn option_visible(&self, field: &ConnectionFieldSpec) -> bool {
         match field.visible_when {
             None => true,
             Some((key, value)) => {
-                let current = self.option_value(key);
-                let effective = if current.is_empty() {
-                    self.option_fields
-                        .iter()
-                        .find(|spec| spec.key == key)
-                        .and_then(|spec| match &spec.kind {
-                            ConnectionFieldKind::Select(choices)
-                            | ConnectionFieldKind::Radio(choices) => {
-                                choices.first().map(|choice| choice.value)
-                            }
-                            _ => None,
-                        })
-                        .unwrap_or("")
-                } else {
-                    current
-                };
-                effective == value
-                    || (current.is_empty() && !self.option_value(field.key).is_empty())
+                self.option_value(key) == value || !self.option_value(field.key).is_empty()
             }
         }
     }
@@ -309,9 +290,7 @@ impl ConnectionForm {
             .iter()
             .find(|spec| spec.key == key)
             .and_then(|spec| match &spec.kind {
-                ConnectionFieldKind::Select(choices) | ConnectionFieldKind::Radio(choices) => {
-                    choices.first().map(|choice| choice.value)
-                }
+                ConnectionFieldKind::Select(choices) => choices.first().map(|choice| choice.value),
                 _ => None,
             });
         let effective = if current.is_empty() {
@@ -363,6 +342,9 @@ impl ConnectionForm {
         self.extra.insert(key.to_string(), value);
     }
 
+    /// The required general-page fields that are currently empty. A network engine needs alias,
+    /// host, port and username; a file-based engine (SQLite) needs the alias and its file path.
+    /// Password and default database stay optional.
     /// Whether a standard field is required by this engine. Fields the driver lists in
     /// [`ConnectionFormSpec::optional_fields`](rustgrid_core::ConnectionFormSpec::optional_fields)
     /// are optional even when another engine requires them (Redis user names).
@@ -370,22 +352,6 @@ impl ConnectionForm {
         !self.optional_fields.contains(&field)
     }
 
-    /// Whether a standard field is required **when it is visible**. The default is the app's
-    /// historical behaviour for the address/identity fields; a driver can make its renamed
-    /// database field required (Oracle's service/SID target) through the label.
-    pub fn standard_field_required(&self, field: ConnectionStandardField) -> bool {
-        match field {
-            ConnectionStandardField::Database => self
-                .label_override(field)
-                .map(|label| label.required)
-                .unwrap_or(false),
-            _ => self.field_required(field),
-        }
-    }
-
-    /// The required general-page fields that are currently empty. A field the selected engine mode
-    /// hides is not required: Oracle's host/port and service/SID fields disappear in TNS / 高级
-    /// mode, and requiring them behind the user's back was exactly the old form's problem.
     pub fn missing_required(&self) -> Vec<FormField> {
         let mut missing = Vec::new();
         if self.name.trim().is_empty() {
@@ -407,40 +373,19 @@ impl ConnectionForm {
                 }
             }
         } else {
-            if self.standard_field_visible(ConnectionStandardField::Host)
-                && self.host.trim().is_empty()
-            {
+            if self.host.trim().is_empty() {
                 missing.push(FormField::Host);
             }
-            if self.standard_field_visible(ConnectionStandardField::Port)
-                && self.port.trim().is_empty()
-            {
+            if self.port.trim().is_empty() {
                 missing.push(FormField::Port);
             }
-            if self.standard_field_visible(ConnectionStandardField::Username)
-                && self.standard_field_required(ConnectionStandardField::Username)
+            if self.field_required(ConnectionStandardField::Username)
                 && self.username.trim().is_empty()
             {
                 missing.push(FormField::Username);
             }
-            if self.standard_field_visible(ConnectionStandardField::Database)
-                && self.standard_field_required(ConnectionStandardField::Database)
-                && self.database.trim().is_empty()
-            {
-                missing.push(FormField::Database);
-            }
         }
         missing
-    }
-
-    /// The first required engine option that is visible but empty. The form shows it inline on the
-    /// option's own label; `None` means every required option has a value.
-    pub fn missing_required_option(&self) -> Option<&ConnectionFieldSpec> {
-        self.option_fields.iter().find(|field| {
-            field.required
-                && self.option_visible(field)
-                && self.option_value(field.key).trim().is_empty()
-        })
     }
 
     pub fn to_profile(&self) -> ConnectionProfile {
@@ -629,77 +574,6 @@ mod tests {
         assert!(form.missing_required().is_empty());
     }
 
-    /// Oracle's redesigned form: 基本 shows the address and the service/SID target, TNS swaps to
-    /// the alias and directory, and 高级 exposes the descriptor on its own tab.
-    #[test]
-    fn oracle_modes_switch_the_visible_and_required_fields() {
-        use rustgrid_core::Driver;
-        use rustgrid_oracle::OracleDriver;
-
-        let driver = OracleDriver::new();
-        let spec = driver.descriptor().connection_form;
-        let mut form = ConnectionForm::for_driver(DriverId::new("oracle"), 1521, "");
-        form.apply_spec(&spec);
-        driver.normalize_connection_options(&mut form.extra);
-
-        let option = |form: &ConnectionForm, key: &str| {
-            form.option_fields
-                .iter()
-                .find(|field| field.key == key)
-                .cloned()
-                .expect(key)
-        };
-        let alias = option(&form, "oracle.tns_alias");
-        let directory = option(&form, "oracle.config_dir");
-        let descriptor = option(&form, "oracle.connect_string");
-        let service_type = option(&form, "oracle.service_name_type");
-
-        // 基本 is the default: address + service/SID + database, no TNS/advanced fields.
-        assert!(form.standard_field_visible(ConnectionStandardField::Host));
-        assert!(form.standard_field_visible(ConnectionStandardField::Port));
-        assert!(form.standard_field_visible(ConnectionStandardField::Database));
-        assert!(form.standard_field_required(ConnectionStandardField::Database));
-        assert!(form.option_visible(&service_type));
-        assert!(!form.option_visible(&alias));
-        assert!(!form.option_visible(&directory));
-        assert!(!form.option_visible(&descriptor));
-
-        form.name = "oracle".to_string();
-        form.host = "db.example.com".to_string();
-        form.port = "1521".to_string();
-        form.database = "FREEPDB1".to_string();
-        form.username = "scott".to_string();
-        assert!(form.missing_required().is_empty());
-        assert!(form.missing_required_option().is_none());
-
-        // TNS: the address and database disappear, the alias becomes required.
-        form.set_option("oracle.connect_type", "tns".to_string());
-        assert!(!form.standard_field_visible(ConnectionStandardField::Host));
-        assert!(!form.standard_field_visible(ConnectionStandardField::Port));
-        assert!(!form.standard_field_visible(ConnectionStandardField::Database));
-        assert!(form.option_visible(&alias));
-        assert!(form.option_visible(&directory));
-        assert!(!form.option_visible(&descriptor));
-        assert!(form.missing_required().is_empty());
-        assert_eq!(
-            form.missing_required_option().map(|field| field.key),
-            Some("oracle.tns_alias")
-        );
-        form.set_option("oracle.tns_alias", "RGDB".to_string());
-        assert!(form.missing_required_option().is_none());
-
-        // 高级: the descriptor is the required field and lives on its own tab.
-        form.set_option("oracle.connect_type", "advanced".to_string());
-        assert!(!form.option_visible(&alias));
-        assert!(!form.option_visible(&directory));
-        assert!(form.option_visible(&descriptor));
-        assert_eq!(descriptor.page, ConnectionPage::Advanced);
-        assert_eq!(
-            form.missing_required_option().map(|field| field.key),
-            Some("oracle.connect_string")
-        );
-    }
-
     /// A driver can make a standard field optional (Redis: the ACL user name may be blank).
     #[test]
     fn optional_fields_are_not_required() {
@@ -881,25 +755,19 @@ mod tests {
             .collect();
         assert_eq!(tls, vec!["test.gated"]);
 
-        // `visible_when`: an unset control counts as the select's first choice (here "on"), a
-        // non-matching value hides the field, and a legacy value keeps it visible.
+        // `visible_when`: hidden until the control matches — but never hidden once it holds a value.
         let gated = form
             .option_fields
             .iter()
             .find(|field| field.key == "test.gated")
             .cloned()
             .expect("gated field");
-        assert!(form.option_visible(&gated));
+        assert!(!form.option_visible(&gated));
         form.set_option("test.mode", "on".to_string());
         assert!(form.option_visible(&gated));
         form.set_option("test.mode", "off".to_string());
         assert!(!form.option_visible(&gated));
-        // An explicit non-matching control keeps the field hidden even if it still holds a value
-        // (switching Oracle from TNS to Basic must not leave the old alias on screen) ...
         form.set_option("test.gated", "/tmp/x".to_string());
-        assert!(!form.option_visible(&gated));
-        // ... while an unset control (a legacy profile) still shows the value it already has.
-        form.set_option("test.mode", String::new());
         assert!(form.option_visible(&gated));
     }
 }

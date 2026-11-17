@@ -174,12 +174,14 @@ impl AppView {
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
+        let descriptor = self
+            .registry
+            .get(&form.driver)
+            .map(|driver| driver.descriptor());
         // The driver's spec decides the tabs, the 常规 page's shape, the standard-field renames and
-        // where the engine's own option fields go. Normalization runs first, so a legacy profile's
-        // option values match the current select choices and the right fields are visible.
-        if let Some(driver) = self.registry.get(&form.driver) {
-            driver.normalize_connection_options(&mut form.extra);
-            form.apply_spec(&driver.descriptor().connection_form);
+        // where the engine's own option fields go.
+        if let Some(descriptor) = descriptor.as_ref() {
+            form.apply_spec(&descriptor.connection_form);
         }
         let weak = cx.weak_entity();
         let theme = self.theme;

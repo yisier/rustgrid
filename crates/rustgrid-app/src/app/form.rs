@@ -22,7 +22,6 @@ impl AppView {
         if let Some(form) = self.form.as_mut() {
             form.set_option(key, text.to_string());
         }
-        self.form_option_errors.remove(key);
         cx.notify();
     }
 
@@ -58,30 +57,19 @@ impl AppView {
             .as_ref()
             .map(missing_tunnel_fields)
             .unwrap_or_default();
-        let missing_option = self.form.as_ref().and_then(|form| {
-            form.missing_required_option()
-                .map(|field| (field.key.to_string(), field.page))
-        });
-        if missing.is_empty() && tunnel_missing.is_empty() && missing_option.is_none() {
+        if missing.is_empty() && tunnel_missing.is_empty() {
             self.form_errors.clear();
             self.form_tunnel_errors.clear();
-            self.form_option_errors.clear();
             return false;
         }
         self.test_status = TestStatus::Idle;
         let general_has_error = !missing.is_empty();
         let tunnel_has_error = !tunnel_missing.is_empty();
-        let option_page = missing_option.as_ref().map(|(_, page)| *page);
-        let option_has_error = option_page.is_some();
         self.form_errors = missing.into_iter().collect();
         self.form_tunnel_errors = tunnel_missing;
-        self.form_option_errors.clear();
-        if let Some((key, _)) = missing_option {
-            self.form_option_errors.insert(key);
-        }
         // Validate the page the user is looking at first: stay on it when it is the one with the
-        // error, and only jump to the first page that has one (常规, then the option's page, then
-        // 隧道) when the current page is fine.
+        // error, and only jump to the first page that has one (常规 before 隧道) when the current
+        // page is fine.
         let current = self
             .form
             .as_ref()
@@ -89,10 +77,8 @@ impl AppView {
             .unwrap_or(ConnectionPage::General);
         let target = match current {
             ConnectionPage::General if general_has_error => ConnectionPage::General,
-            page if option_has_error && Some(page) == option_page => page,
             ConnectionPage::Tunnel if tunnel_has_error => ConnectionPage::Tunnel,
             _ if general_has_error => ConnectionPage::General,
-            _ if option_has_error => option_page.unwrap_or(ConnectionPage::General),
             _ if tunnel_has_error => ConnectionPage::Tunnel,
             _ => current,
         };

@@ -22,16 +22,16 @@ use rustgrid_config::{
 };
 use rustgrid_core::{
     AccountKind, BackupObjectKind, CellValue, CollectionDefinition, ColumnInfo, Connection,
-    ConnectionConfig, ConnectionFieldChoice, ConnectionFieldKind, ConnectionFieldPlacement,
-    ConnectionFieldSpec, ConnectionHomePage, ConnectionPage, ConnectionStandardField,
-    DatabaseEditorSpec, DatabaseEditorTab, DatabaseOptions, DefaultObjectType, DefaultPrivilege,
-    DriverCapability, DriverDialect, DriverIconStyle, DriverId, DriverRegistry, Error,
-    FilterCondition, FilterConjunction, FilterGroup, FilterNode, FilterOperator, ObjectGrant,
-    ObjectPrivilegeRow, PageRequest, PrivilegeCatalog, PrivilegeId, PrivilegePreset,
-    PrivilegeScope, QueryResult, RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind, RowInsert,
-    RowUpdate, SavedBackup, SavedQuery, SavedTransfer, ServerSecurableGrant, TableStatus, TlsMode,
-    TunnelAuth, TunnelKind, TunnelLayer, UserAccount, UserDetails, UserEdit, UserEditSection,
-    UserEditorSpec, UserMapping, ViewEdit,
+    ConnectionConfig, ConnectionFieldChoice, ConnectionFieldKind, ConnectionFieldSpec,
+    ConnectionHomePage, ConnectionPage, ConnectionStandardField, DatabaseEditorSpec,
+    DatabaseEditorTab, DatabaseOptions, DefaultObjectType, DefaultPrivilege, DriverCapability,
+    DriverDialect, DriverIconStyle, DriverId, DriverRegistry, Error, FilterCondition,
+    FilterConjunction, FilterGroup, FilterNode, FilterOperator, ObjectGrant, ObjectPrivilegeRow,
+    PageRequest, PrivilegeCatalog, PrivilegeId, PrivilegePreset, PrivilegeScope, QueryResult,
+    RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind, RowInsert, RowUpdate, SavedBackup,
+    SavedQuery, SavedTransfer, ServerSecurableGrant, TableStatus, TlsMode, TunnelAuth, TunnelKind,
+    TunnelLayer, UserAccount, UserDetails, UserEdit, UserEditSection, UserEditorSpec, UserMapping,
+    ViewEdit,
 };
 use rustgrid_export::ExportFormat;
 
@@ -60,8 +60,8 @@ use gpui_kit::component::time_field::{TimeField, TimeFieldState, TimePrecision};
 
 use ui::{
     ButtonKind, ColumnGrid, ComboBox, ComboOption, DetailColumns, DetailScroll, DetailSort,
-    SortKey, TextArea, TextAreaOptions, TextInput, TextInputOptions, ViewMode, checkbox_box,
-    main_separator, radio_box, scrollbar_fractions, scrollbar_thumb, toolbar_separator,
+    SortKey, TextInput, TextInputOptions, ViewMode, checkbox_box, main_separator,
+    scrollbar_fractions, scrollbar_thumb, toolbar_separator,
 };
 
 // Cell-navigation actions for the in-place grid editor. gpui-kit's `Root` binds `tab`/`shift-tab`
@@ -1716,17 +1716,13 @@ struct ObjectPane {
 struct TabBar {
     app: WeakEntity<AppView>,
     scroll: ScrollHandle,
-    /// The strip's measured viewport width (`0.0` before the first layout). Every tab is as wide
-    /// as the strip allows, clamped to [`TAB_MIN_WIDTH`]..[`TAB_MAX_WIDTH`], so opening more tabs
-    /// shrinks them all down to the minimum before the strip starts scrolling (with ◀ / ▶ arrows).
-    strip_width: Rc<Cell<f32>>,
+    /// Whether the strip currently scrolls (the tabs no longer fit at their minimum width). Written
+    /// by the strip's measurement canvas after each layout and read on the next render, which is
+    /// when the ◀ / ▶ pagers are drawn.
+    overflow: Rc<Cell<bool>>,
     /// The active tab on the last frame, so switching tabs (or opening one at the far end) scrolls
     /// the strip to reveal it.
     last_active_tab: Option<TabTarget>,
-    /// Whether the last frame showed the ◀ / ▶ pagers. While they are shown they take width from
-    /// the strip, so the tab-width calculation adds it back and the arrows disappear again as soon
-    /// as the tabs would fit without them.
-    arrows_shown: bool,
 }
 
 /// The left connection tree (connections -> databases -> categories -> tables). Owns the tree
@@ -2662,17 +2658,12 @@ pub struct AppView {
     /// The required general-page fields that were empty the last time 测试连接 / 保存并连接 ran, so
     /// the form can flag them inline. Cleared as soon as the user edits the offending field.
     form_errors: BTreeSet<FormField>,
-    /// The required engine option fields (TNS alias, advanced descriptor) flagged by the same
-    /// validation pass, keyed by their `ConnectionProfile::options` key.
-    form_option_errors: BTreeSet<String>,
     /// The tunnel-layer fields flagged as required by the same validation pass.
     form_tunnel_errors: BTreeSet<connection_form::TunnelField>,
     /// The TLS / advanced text inputs of the connection window, keyed by field.
     form_extra_inputs: BTreeMap<connection_form::FormExtra, Entity<TextInput>>,
     /// The engine-specific connection inputs, keyed by their `ConnectionProfile::options` key.
     form_engine_inputs: BTreeMap<String, Entity<TextInput>>,
-    /// The engine-specific multi-line fields (Oracle's advanced connect descriptor).
-    form_engine_areas: BTreeMap<String, Entity<TextArea>>,
     /// The engine-specific `Select` field whose dropdown is open, keyed by its option key.
     form_engine_select_open: Option<String>,
     /// Where the open engine `Select`'s trigger sits, so its menu can be positioned.
@@ -2903,7 +2894,6 @@ pub struct AppView {
     /// what they read from `AppView` actually changed (they are embedded with `.cached`, which
     /// otherwise freezes them until they are explicitly notified).
     tree_revision: u64,
-    tab_revision: u64,
     /// The connection tree's layout: nested groups holding connections (by profile id), in display
     /// order. Persisted in settings; the `connections` vector holds the live nodes themselves.
     tree_layout: Vec<GroupEntry>,
@@ -3569,11 +3559,9 @@ impl AppView {
             form_inputs: None,
             form_odbc_driver: None,
             form_errors: BTreeSet::new(),
-            form_option_errors: BTreeSet::new(),
             form_tunnel_errors: BTreeSet::new(),
             form_extra_inputs: BTreeMap::new(),
             form_engine_inputs: BTreeMap::new(),
-            form_engine_areas: BTreeMap::new(),
             form_engine_select_open: None,
             form_engine_select_anchor: Rc::new(RefCell::new(Point::default())),
             form_tunnel_inputs: Vec::new(),
@@ -3771,7 +3759,6 @@ impl AppView {
             update_progress: None,
             update_checked: false,
             tree_revision: 0,
-            tab_revision: 0,
             tree_layout,
             connection_colors: settings.connection_colors.clone(),
             group_rename: None,
@@ -4698,62 +4685,12 @@ impl AppView {
         hasher.finish()
     }
 
-    /// A cheap revision of everything [`TabBar`] reads from `AppView`.
-    fn tab_revision(&self, window: &Window, cx: &App) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        self.theme.is_dark().hash(&mut hasher);
-        // The tab widths are derived from the strip's width, which follows the window: a resize
-        // must re-render the bar even though nothing else it reads changed.
-        f32::from(window.viewport_size().width)
-            .to_bits()
-            .hash(&mut hasher);
-        // A drag reorder only mutates the order, so it is part of the revision too.
-        self.tab_sequence.borrow().hash(&mut hasher);
-        self.connection_colors.hash(&mut hasher);
-        self.active_grid.hash(&mut hasher);
-        self.active_design.hash(&mut hasher);
-        self.active_query.hash(&mut hasher);
-        self.grids.len().hash(&mut hasher);
-        for grid in &self.grids {
-            let grid = grid.read(cx);
-            grid.state.id.hash(&mut hasher);
-            grid.state.sql.is_some().hash(&mut hasher);
-        }
-        self.designs.len().hash(&mut hasher);
-        for design in &self.designs {
-            let design = design.read(cx);
-            design.id.hash(&mut hasher);
-            design.dirty.hash(&mut hasher);
-            design.is_view.hash(&mut hasher);
-        }
-        self.queries.len().hash(&mut hasher);
-        for query in &self.queries {
-            query.id.hash(&mut hasher);
-            query.name.hash(&mut hasher);
-            if let Some(routine) = &query.routine {
-                routine.name.hash(&mut hasher);
-                routine.kind.hash(&mut hasher);
-            }
-            if let Some(view) = &query.view {
-                view.name.hash(&mut hasher);
-                view.original_name.hash(&mut hasher);
-            }
-        }
-        hasher.finish()
-    }
-
     /// Re-render the cached long-lived children only when their inputs changed.
-    fn sync_cached_children(&mut self, window: &Window, cx: &mut Context<'_, Self>) {
+    fn sync_cached_children(&mut self, cx: &mut Context<'_, Self>) {
         let tree_revision = self.tree_revision();
         if tree_revision != self.tree_revision {
             self.tree_revision = tree_revision;
             self.tree_pane.update(cx, |_, cx| cx.notify());
-        }
-        let tab_revision = self.tab_revision(window, cx);
-        if tab_revision != self.tab_revision {
-            self.tab_revision = tab_revision;
-            self.tab_bar.update(cx, |_, cx| cx.notify());
         }
     }
 
@@ -5207,7 +5144,7 @@ impl Render for AppView {
             install_editor_highlight_theme(self.theme, cx);
             self.synced_input_theme = Some(self.theme);
         }
-        self.sync_cached_children(window, cx);
+        self.sync_cached_children(cx);
         // The one search box is shared by 表 / 视图 / 函数 / 查询: swap in the shown page's own text
         // before the content pane renders its toolbar.
         self.sync_object_search(cx);
@@ -5420,9 +5357,20 @@ impl Render for AppView {
             // update only the pane entities, so the whole app does not re-render per mouse move.
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
                 let host = this.sidebar_host.clone();
-                host.update(cx, |host, cx| host.drag_move(event, cx));
+                let sidebar_resizing = host.update(cx, |host, cx| {
+                    host.drag_move(event, cx);
+                    host.resizing()
+                });
                 let pane = this.info_pane.clone();
-                pane.update(cx, |pane, cx| pane.drag_move(event, cx));
+                let pane_resizing = pane.update(cx, |pane, cx| {
+                    pane.drag_move(event, cx);
+                    pane.resizing()
+                });
+                if sidebar_resizing || pane_resizing {
+                    // The panes resize without `AppView` re-rendering, but the content pane's
+                    // width (and with it the tab strip's) changes along with them.
+                    this.notify_tab_bar(cx);
+                }
                 this.drag_query_split(event, cx);
                 this.tree_drag_move(event, cx);
                 this.tab_drag_move(event, cx);
@@ -5437,9 +5385,20 @@ impl Render for AppView {
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
                     let host = this.sidebar_host.clone();
-                    host.update(cx, |host, cx| host.end_drag(cx));
+                    let sidebar_resizing = host.update(cx, |host, cx| {
+                        let resizing = host.resizing();
+                        host.end_drag(cx);
+                        resizing
+                    });
                     let pane = this.info_pane.clone();
-                    pane.update(cx, |pane, cx| pane.end_drag(cx));
+                    let pane_resizing = pane.update(cx, |pane, cx| {
+                        let resizing = pane.resizing();
+                        pane.end_drag(cx);
+                        resizing
+                    });
+                    if sidebar_resizing || pane_resizing {
+                        this.notify_tab_bar(cx);
+                    }
                     this.end_query_split_drag(cx);
                     this.tree_drag_end(cx);
                     this.tab_drag_end(cx);

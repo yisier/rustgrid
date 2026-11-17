@@ -149,11 +149,9 @@ impl AppView {
         self.form_inputs = None;
         self.form_odbc_driver = None;
         self.form_errors.clear();
-        self.form_option_errors.clear();
         self.form_tunnel_errors.clear();
         self.form_extra_inputs.clear();
         self.form_engine_inputs.clear();
-        self.form_engine_areas.clear();
         self.form_tunnel_inputs.clear();
         self.form_select_open = false;
         self.form_tunnel_select_open = false;
@@ -582,132 +580,84 @@ impl AppView {
                         theme,
                     ));
             }
-            // A network engine: the driver's mode select, the address, the mode's target, the
-            // credentials and (for engines that still use it) the optional default database. The
-            // blocks are ordered by the driver's `ConnectionFieldPlacement`, so Oracle opens with
-            // 连接类型 and a 基本 form that looks like Navicat instead of ending with a raw field.
+            // A network engine: alias + address/port + credentials + default database.
             ConnectionHomePage::Network => {
-                let host_visible = form.standard_field_visible(ConnectionStandardField::Host);
-                let port_visible = form.standard_field_visible(ConnectionStandardField::Port);
-                let database_visible =
-                    form.standard_field_visible(ConnectionStandardField::Database);
-                let leading = self.page_option_elements(
-                    form,
-                    ConnectionPage::General,
-                    Some(ConnectionFieldPlacement::Leading),
-                    cx,
-                );
-                let target = self.page_option_elements(
-                    form,
-                    ConnectionPage::General,
-                    Some(ConnectionFieldPlacement::Target),
-                    cx,
-                );
-                let trailing = self.page_option_elements(
-                    form,
-                    ConnectionPage::General,
-                    Some(ConnectionFieldPlacement::Trailing),
-                    cx,
-                );
-                let has_target = !target.is_empty();
-
-                let mut network = div().flex().flex_col().gap_4().child(form_field(
-                    label(ConnectionStandardField::Name, "form.alias"),
-                    true,
-                    error_hint(FormField::Name),
-                    input(FormField::Name),
-                    theme,
-                ));
-                for option in leading {
-                    network = network.child(option);
-                }
-                if host_visible || port_visible {
-                    let mut address = div().flex().flex_row().gap_3();
-                    if host_visible {
-                        address = address.child(div().flex_1().min_w(px(0.0)).child(form_field(
-                            label(ConnectionStandardField::Host, "form.network"),
-                            form.standard_field_required(ConnectionStandardField::Host),
-                            error_hint(FormField::Host),
-                            input(FormField::Host),
-                            theme,
-                        )));
-                    }
-                    if port_visible {
-                        address = address.child(div().w(px(150.0)).flex_none().child(form_field(
-                            label(ConnectionStandardField::Port, "form.port"),
-                            form.standard_field_required(ConnectionStandardField::Port),
-                            error_hint(FormField::Port),
-                            input(FormField::Port),
-                            theme,
-                        )));
-                    }
-                    network = network.child(address);
-                }
-                let database_field = || {
-                    form_field(
-                        label(ConnectionStandardField::Database, "form.database_optional"),
-                        form.standard_field_required(ConnectionStandardField::Database),
-                        error_hint(FormField::Database)
-                            .or_else(|| label_hint(ConnectionStandardField::Database)),
-                        input(FormField::Database),
-                        theme,
-                    )
-                    .into_any_element()
-                };
-                let credentials = div()
-                    .flex()
-                    .flex_row()
-                    .gap_4()
+                page = page
                     .child(form_field(
-                        label(ConnectionStandardField::Username, "form.username"),
-                        form.standard_field_required(ConnectionStandardField::Username),
-                        error_hint(FormField::Username)
-                            .or_else(|| label_hint(ConnectionStandardField::Username)),
-                        input(FormField::Username),
+                        label(ConnectionStandardField::Name, "form.alias"),
+                        true,
+                        error_hint(FormField::Name),
+                        input(FormField::Name),
                         theme,
                     ))
-                    .child(form_field(
-                        label(ConnectionStandardField::Password, "form.password"),
-                        false,
-                        error_hint(FormField::Password),
-                        input(FormField::Password),
-                        theme,
-                    ));
-                if has_target {
-                    // The database value (服务名/SID) comes first, then the target's own controls
-                    // (the 服务名/SID radio or the TNS alias), then the credentials — the same
-                    // order as Navicat's Basic form.
-                    if database_visible {
-                        network = network.child(database_field());
-                    }
-                    for option in target {
-                        network = network.child(option);
-                    }
-                    network = network.child(credentials);
-                    for option in trailing {
-                        network = network.child(option);
-                    }
-                } else {
-                    // Engines without a target block keep the historical order: credentials,
-                    // engine options, then the optional database.
-                    network = network.child(credentials);
-                    for option in trailing {
-                        network = network.child(option);
-                    }
-                    if database_visible {
-                        network = network.child(database_field());
-                    }
-                }
-                page = page.child(network);
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_3()
+                            .child(
+                                div().flex_1().min_w(px(0.0)).child(form_field(
+                                    label(ConnectionStandardField::Host, "form.network"),
+                                    true,
+                                    error_hint(FormField::Host),
+                                    match self
+                                        .form_inputs
+                                        .as_ref()
+                                        .map(|inputs| inputs.get(FormField::Host).clone())
+                                    {
+                                        Some(input) => input.into_any_element(),
+                                        None => div().into_any_element(),
+                                    },
+                                    theme,
+                                )),
+                            )
+                            .child(
+                                div().w(px(150.0)).flex_none().child(form_field(
+                                    label(ConnectionStandardField::Port, "form.port"),
+                                    true,
+                                    error_hint(FormField::Port),
+                                    match self
+                                        .form_inputs
+                                        .as_ref()
+                                        .map(|inputs| inputs.get(FormField::Port).clone())
+                                    {
+                                        Some(input) => input.into_any_element(),
+                                        None => div().into_any_element(),
+                                    },
+                                    theme,
+                                )),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_4()
+                            .child(form_field(
+                                label(ConnectionStandardField::Username, "form.username"),
+                                form.field_required(ConnectionStandardField::Username),
+                                error_hint(FormField::Username)
+                                    .or_else(|| label_hint(ConnectionStandardField::Username)),
+                                input(FormField::Username),
+                                theme,
+                            ))
+                            .child(form_field(
+                                label(ConnectionStandardField::Password, "form.password"),
+                                false,
+                                error_hint(FormField::Password),
+                                input(FormField::Password),
+                                theme,
+                            )),
+                    );
             }
         }
 
-        // File-based / ODBC engines have no placement blocks; their options keep the historical
-        // position before the optional SQLCipher password and the default database.
-        if form.home != ConnectionHomePage::Network {
-            for option in self.page_option_elements(form, ConnectionPage::General, None, cx) {
-                page = page.child(option);
-            }
+        // The engine's own fields for this page, in declaration order. They render **before** the
+        // standard "default database" field so that a controlling field (Oracle's 连接类型) sits
+        // directly above the target field it controls and keeps the same position no matter which
+        // target is shown (服务名/SID, TNS 别名, 连接串, ...).
+        for option in self.page_option_elements(form, ConnectionPage::General, cx) {
+            page = page.child(option);
         }
 
         // A file-based engine normally has no credentials, but one that encrypts its file (SQLite
@@ -722,6 +672,22 @@ impl AppView {
                 error_hint(FormField::Password)
                     .or_else(|| label_hint(ConnectionStandardField::Password)),
                 input(FormField::Password),
+                theme,
+            ));
+        }
+
+        // A network engine's default database (Oracle's 服务名/SID, SQL Server's 初始数据库)
+        // follows the engine fields and hides when the engine declares it unused (Oracle's TNS /
+        // connect-string types).
+        if form.home == ConnectionHomePage::Network
+            && form.standard_field_visible(ConnectionStandardField::Database)
+        {
+            page = page.child(form_field(
+                label(ConnectionStandardField::Database, "form.database_optional"),
+                false,
+                error_hint(FormField::Database)
+                    .or_else(|| label_hint(ConnectionStandardField::Database)),
+                input(FormField::Database),
                 theme,
             ));
         }
@@ -879,96 +845,47 @@ impl AppView {
     }
 
     /// The engine option rows shown on `page`, in declaration order, honouring each field's
-    /// `visible_when` condition and — when `placement` is given — its block on the 常规 page.
-    /// Empty for a page the engine declares no options on.
+    /// `visible_when` condition. Empty for a page the engine declares no options on.
     fn page_option_elements(
         &self,
         form: &ConnectionForm,
         page: ConnectionPage,
-        placement: Option<ConnectionFieldPlacement>,
         cx: &mut Context<'_, Self>,
     ) -> Vec<AnyElement> {
         let theme = self.theme;
         let mut rows = Vec::new();
         for field in form.page_option_fields(page) {
-            if placement.is_some_and(|placement| field.placement != placement) {
-                continue;
-            }
             if !form.option_visible(field) {
                 continue;
             }
-            let hint = if self.form_option_errors.contains(field.key) {
-                Some(
-                    div()
-                        .text_size(px(11.5))
-                        .text_color(rgb(theme.danger))
-                        .child(t!("form.required").to_string())
-                        .into_any_element(),
-                )
-            } else {
-                field.hint_key.map(|key| {
-                    div()
-                        .text_size(px(11.5))
-                        .text_color(rgb(theme.text_muted))
-                        .child(t!(key).to_string())
-                        .into_any_element()
-                })
-            };
+            let hint = field.hint_key.map(|key| {
+                div()
+                    .text_size(px(11.5))
+                    .text_color(rgb(theme.text_muted))
+                    .child(t!(key).to_string())
+                    .into_any_element()
+            });
             let control = match &field.kind {
                 ConnectionFieldKind::Select(choices) => {
                     self.engine_select_trigger(field.key, choices, form, theme, cx)
-                }
-                ConnectionFieldKind::Radio(choices) => {
-                    let selected = engine_select_value(form, field.key, choices);
-                    let mut group = div().flex().flex_row().items_center().gap_4();
-                    for choice in choices {
-                        let is_selected = choice.value == selected;
-                        let key = field.key;
-                        let value = choice.value;
-                        group = group.child(
-                            div()
-                                .id(SharedString::from(format!("{key}-radio-{value}")))
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap_2()
-                                .cursor_pointer()
-                                .on_click(cx.listener(move |this, _event, _window, cx| {
-                                    this.set_engine_option(key, value, cx);
-                                }))
-                                .child(radio_box(is_selected, theme))
-                                .child(
-                                    div()
-                                        .text_size(px(12.5))
-                                        .child(t!(choice.label_key).to_string()),
-                                ),
-                        );
-                    }
-                    group.into_any_element()
                 }
                 ConnectionFieldKind::Folder => {
                     engine_folder_row(field.key, theme, self.engine_input(field.key), cx)
                         .into_any_element()
                 }
-                ConnectionFieldKind::Multiline => div()
-                    .w_full()
-                    .h(px(120.0))
-                    .child(self.engine_area(field.key))
-                    .into_any_element(),
                 ConnectionFieldKind::Text | ConnectionFieldKind::Secret => div()
                     .w_full()
                     .child(self.engine_input(field.key))
                     .into_any_element(),
+                // Not used by the restored Oracle form; the spec keeps the variants for future
+                // engines, but this renderer has no control for them.
+                ConnectionFieldKind::Radio(_) | ConnectionFieldKind::Multiline => {
+                    div().into_any_element()
+                }
             };
             rows.push(
-                form_field(
-                    t!(field.label_key).to_string(),
-                    field.required,
-                    hint,
-                    control,
-                    theme,
-                )
-                .into_any_element(),
+                form_field(t!(field.label_key).to_string(), false, hint, control, theme)
+                    .into_any_element(),
             );
         }
         rows
@@ -977,14 +894,6 @@ impl AppView {
     /// The input element of one engine-specific text/secret/folder field.
     fn engine_input(&self, key: &str) -> AnyElement {
         match self.form_engine_inputs.get(key).cloned() {
-            Some(input) => input.into_any_element(),
-            None => div().into_any_element(),
-        }
-    }
-
-    /// The multi-line editor of one engine-specific field.
-    fn engine_area(&self, key: &str) -> AnyElement {
-        match self.form_engine_areas.get(key).cloned() {
             Some(input) => input.into_any_element(),
             None => div().into_any_element(),
         }
@@ -1209,7 +1118,7 @@ impl AppView {
                 )
             });
         // The engine's own TLS-page fields (e.g. Oracle's TCPS wallet).
-        for option in self.page_option_elements(form, ConnectionPage::Tls, None, cx) {
+        for option in self.page_option_elements(form, ConnectionPage::Tls, cx) {
             page = page.child(option);
         }
 
@@ -1900,12 +1809,6 @@ impl AppView {
         };
         let mut page = div().flex().flex_col().gap_3();
 
-        // The engine's own 高级 fields come first: Oracle's advanced descriptor / TCPS wallet are
-        // the reason a user opens this page, while the timeout controls below are generic.
-        for option in self.page_option_elements(form, ConnectionPage::Advanced, None, cx) {
-            page = page.child(option);
-        }
-
         // 超时与重试: only the timeout / keep-alive controls this engine actually honors.
         if advanced.connect_timeout || advanced.query_timeout || advanced.keepalive {
             page = page.child(
@@ -2049,6 +1952,12 @@ impl AppView {
                 theme,
             ));
         }
+        // The engine's own 高级 fields (e.g. SQL Server's named instance / application name, Oracle's
+        // TCPS wallet and tnsnames.ora directory).
+        for option in self.page_option_elements(form, ConnectionPage::Advanced, cx) {
+            page = page.child(option);
+        }
+
         page
     }
 
@@ -2153,7 +2062,6 @@ impl AppView {
         self.form = Some(initial);
         self.test_status = TestStatus::Idle;
         self.form_errors.clear();
-        self.form_option_errors.clear();
         self.form_tunnel_errors.clear();
         self.form_select_open = false;
         self.form_tunnel_select_open = false;
@@ -2251,7 +2159,6 @@ impl AppView {
     /// form session, so this runs when the form opens or resets.
     pub(super) fn rebuild_form_engine_inputs(&mut self, cx: &mut Context<'_, Self>) {
         self.form_engine_inputs.clear();
-        self.form_engine_areas.clear();
         let Some(form) = self.form.as_ref() else {
             return;
         };
@@ -2268,16 +2175,8 @@ impl AppView {
             })
             .collect();
         for (field, value) in entries {
-            // A `Select` / `Radio` is drawn from its choices, not a text input.
-            if matches!(
-                &field.kind,
-                ConnectionFieldKind::Select(_) | ConnectionFieldKind::Radio(_)
-            ) {
-                continue;
-            }
-            if matches!(&field.kind, ConnectionFieldKind::Multiline) {
-                let area = make_option_area(theme, value, field.key, &weak, cx);
-                self.form_engine_areas.insert(field.key.to_string(), area);
+            // A `Select` is drawn from its choices, not a text input.
+            if matches!(&field.kind, ConnectionFieldKind::Select(_)) {
                 continue;
             }
             let masked = field.kind == ConnectionFieldKind::Secret;
@@ -2893,35 +2792,6 @@ fn make_option_input(
                 size: Some(gpui_kit::component::Size::Medium),
                 text_size: Some(13.0),
                 ..Default::default()
-            },
-            cx,
-        )
-        .on_change(Rc::new(move |text, _window, cx| {
-            let _ = change.update(cx, |app, cx| app.set_form_option(key, text, cx));
-        }))
-    })
-}
-
-/// Build one engine-specific multi-line field (Oracle's advanced connect descriptor). The
-/// descriptor keeps its line breaks, so a parse error names a real line instead of a flattened
-/// 148-character one.
-fn make_option_area(
-    theme: Theme,
-    value: String,
-    key: &'static str,
-    app: &WeakEntity<AppView>,
-    cx: &mut Context<'_, AppView>,
-) -> Entity<TextArea> {
-    let change = app.clone();
-    cx.new(move |cx| {
-        TextArea::new(
-            theme,
-            value,
-            TextAreaOptions {
-                json: false,
-                line_numbers: false,
-                placeholder: SharedString::default(),
-                text_size: 12.0,
             },
             cx,
         )
