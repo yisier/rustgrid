@@ -1574,6 +1574,115 @@ impl GridView {
         let selection_info = self.selection_info_text();
         let sum = self.selection_sum();
 
+        // A read-only grid (a query result with no single table, a ClickHouse table, a permissive
+        // key page) has no row actions at all: showing them disabled made them look like broken
+        // buttons. The footer keeps 刷新 and says 只读 instead.
+        let mut actions = div().flex().flex_row().items_center().gap_1();
+        if self.state.editable {
+            actions = actions
+                .child(self.grid_icon_button(
+                    "grid-add",
+                    "icons/plus.svg",
+                    theme.icon_connection,
+                    !scalar_key && !self.state.loading && self.state.visible_columns > 0,
+                    t!("grid.add_row").to_string(),
+                    Some(&GridInsertRow),
+                    cx.listener(|this, _event, window, cx| this.add_insert_row(window, cx)),
+                ))
+                .child(self.grid_icon_button(
+                    "grid-duplicate",
+                    "icons/copy.svg",
+                    theme.icon_connection,
+                    !scalar_key
+                        && !self.state.loading
+                        && self.state.visible_columns > 0
+                        && self.state.selection.is_some()
+                        && !self.state.rows.is_empty(),
+                    t!("grid.duplicate_row").to_string(),
+                    Some(&GridDuplicateRow),
+                    cx.listener(|this, _event, window, cx| this.duplicate_row(window, cx)),
+                ))
+                .child(self.grid_icon_button(
+                    "grid-delete",
+                    "icons/minus.svg",
+                    theme.danger,
+                    !scalar_key && self.state.selection.is_some() && !self.state.rows.is_empty(),
+                    t!("grid.delete_row").to_string(),
+                    None,
+                    cx.listener(|this, _event, _window, cx| this.open_delete_confirm(cx)),
+                ))
+                .child(
+                    self.grid_icon_button(
+                        "grid-commit",
+                        "icons/check.svg",
+                        theme.icon_connection,
+                        self.cell_editor
+                            .as_ref()
+                            .is_some_and(|editor| !editor.readonly)
+                            || !self.state.edits.is_empty()
+                            || !self.inserts.is_empty(),
+                        t!("grid.save_changes").to_string(),
+                        None,
+                        cx.listener(|this, _event, _window, cx| this.save_grid(cx)),
+                    ),
+                )
+                .child(
+                    self.grid_icon_button(
+                        "grid-rollback",
+                        "icons/cross.svg",
+                        theme.danger,
+                        self.cell_editor
+                            .as_ref()
+                            .is_some_and(|editor| !editor.readonly)
+                            || !self.state.edits.is_empty()
+                            || !self.inserts.is_empty(),
+                        t!("grid.cancel_changes").to_string(),
+                        None,
+                        cx.listener(|this, _event, _window, cx| this.cancel_edits(cx)),
+                    ),
+                );
+        } else {
+            actions = actions.child(
+                div()
+                    .flex_none()
+                    .text_size(px(11.0))
+                    .text_color(rgb(muted))
+                    .whitespace_nowrap()
+                    .child(t!("grid.read_only").to_string()),
+            );
+        }
+        actions = actions
+            .child(self.grid_icon_button(
+                "grid-refresh",
+                "icons/refresh.svg",
+                active,
+                true,
+                t!("grid.refresh").to_string(),
+                Some(&GridRefresh),
+                cx.listener(|this, _event, _window, cx| this.refresh(cx)),
+            ))
+            .when_some(selection_info, |row, text| {
+                row.child(
+                    div()
+                        .flex_none()
+                        .ml_2()
+                        .text_size(px(11.0))
+                        .text_color(rgb(muted))
+                        .whitespace_nowrap()
+                        .child(text),
+                )
+            })
+            .when_some(sum, |row, sum| {
+                row.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(11.0))
+                        .text_color(rgb(theme.danger))
+                        .whitespace_nowrap()
+                        .child(t!("grid.selection_sum", sum = sum).to_string()),
+                )
+            });
+
         let mut controls = div()
             .flex()
             .flex_row()
@@ -1585,111 +1694,7 @@ impl GridView {
             .bg(rgb(theme.toolbar_bg))
             .border_t_1()
             .border_color(rgb(theme.border))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_1()
-                    .child(self.grid_icon_button(
-                        "grid-add",
-                        "icons/plus.svg",
-                        theme.icon_connection,
-                        self.state.editable
-                            && !scalar_key
-                            && !self.state.loading
-                            && self.state.visible_columns > 0,
-                        t!("grid.add_row").to_string(),
-                        Some(&GridInsertRow),
-                        cx.listener(|this, _event, window, cx| this.add_insert_row(window, cx)),
-                    ))
-                    .child(self.grid_icon_button(
-                        "grid-duplicate",
-                        "icons/copy.svg",
-                        theme.icon_connection,
-                        self.state.editable
-                            && !scalar_key
-                            && !self.state.loading
-                            && self.state.visible_columns > 0
-                            && self.state.selection.is_some()
-                            && !self.state.rows.is_empty(),
-                        t!("grid.duplicate_row").to_string(),
-                        Some(&GridDuplicateRow),
-                        cx.listener(|this, _event, window, cx| this.duplicate_row(window, cx)),
-                    ))
-                    .child(self.grid_icon_button(
-                        "grid-delete",
-                        "icons/minus.svg",
-                        theme.danger,
-                        self.state.editable
-                            && !scalar_key
-                            && self.state.selection.is_some()
-                            && !self.state.rows.is_empty(),
-                        t!("grid.delete_row").to_string(),
-                        None,
-                        cx.listener(|this, _event, _window, cx| this.open_delete_confirm(cx)),
-                    ))
-                    .child(
-                        self.grid_icon_button(
-                            "grid-commit",
-                            "icons/check.svg",
-                            theme.icon_connection,
-                            self.cell_editor
-                                .as_ref()
-                                .is_some_and(|editor| !editor.readonly)
-                                || !self.state.edits.is_empty()
-                                || !self.inserts.is_empty(),
-                            t!("grid.save_changes").to_string(),
-                            None,
-                            cx.listener(|this, _event, _window, cx| this.save_grid(cx)),
-                        ),
-                    )
-                    .child(
-                        self.grid_icon_button(
-                            "grid-rollback",
-                            "icons/cross.svg",
-                            theme.danger,
-                            self.cell_editor
-                                .as_ref()
-                                .is_some_and(|editor| !editor.readonly)
-                                || !self.state.edits.is_empty()
-                                || !self.inserts.is_empty(),
-                            t!("grid.cancel_changes").to_string(),
-                            None,
-                            cx.listener(|this, _event, _window, cx| this.cancel_edits(cx)),
-                        ),
-                    )
-                    .child(self.grid_icon_button(
-                        "grid-refresh",
-                        "icons/refresh.svg",
-                        active,
-                        true,
-                        t!("grid.refresh").to_string(),
-                        Some(&GridRefresh),
-                        cx.listener(|this, _event, _window, cx| this.refresh(cx)),
-                    ))
-                    .when_some(selection_info, |row, text| {
-                        row.child(
-                            div()
-                                .flex_none()
-                                .ml_2()
-                                .text_size(px(11.0))
-                                .text_color(rgb(muted))
-                                .whitespace_nowrap()
-                                .child(text),
-                        )
-                    })
-                    .when_some(sum, |row, sum| {
-                        row.child(
-                            div()
-                                .flex_none()
-                                .text_size(px(11.0))
-                                .text_color(rgb(theme.danger))
-                                .whitespace_nowrap()
-                                .child(t!("grid.selection_sum", sum = sum).to_string()),
-                        )
-                    }),
-            );
+            .child(actions);
 
         let pager = self.state.sql.is_none().then(|| {
             div()
