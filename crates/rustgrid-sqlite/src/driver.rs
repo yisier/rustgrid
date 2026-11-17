@@ -3,11 +3,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 use rustgrid_core::{
     AdvancedFields, AutoIncrementRule, Connection, ConnectionConfig, ConnectionFieldChoice,
-    ConnectionFieldKind, ConnectionFieldLabel, ConnectionFieldSpec, ConnectionFormSpec,
-    ConnectionHomePage, ConnectionPage, ConnectionStandardField, DatabaseEditorSpec,
-    DefaultSuggestion, DesignerColumnOption, DesignerFieldColumn, DesignerIndexColumn,
-    DesignerIndexKind, DesignerTab, Driver, DriverCapabilities, DriverDescriptor, DriverDialect,
-    DriverIconStyle, DriverId, Error, Result, TableDesignerSpec,
+    ConnectionFieldKind, ConnectionFieldLabel, ConnectionFieldPlacement, ConnectionFieldSpec,
+    ConnectionFormSpec, ConnectionHomePage, ConnectionPage, ConnectionStandardField,
+    DatabaseEditorSpec, DefaultSuggestion, DesignerColumnOption, DesignerFieldColumn,
+    DesignerIndexColumn, DesignerIndexKind, DesignerTab, Driver, DriverCapabilities,
+    DriverDescriptor, DriverDialect, DriverIconStyle, DriverId, Error, Result, TableDesignerSpec,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
@@ -157,6 +157,7 @@ impl Driver for SqliteDriver {
                         label_key: "form.advanced.busy_timeout",
                         hint_key: Some("form.advanced.busy_timeout_hint"),
                         visible_when: None,
+                        required: false,
                     },
                     ConnectionFieldLabel {
                         field: ConnectionStandardField::Password,
@@ -166,6 +167,7 @@ impl Driver for SqliteDriver {
                             OPTION_ENCRYPTION,
                             &[ENCRYPTION_SQLCIPHER4, ENCRYPTION_SQLCIPHER3],
                         )),
+                        required: false,
                     },
                 ],
                 options: vec![ConnectionFieldSpec {
@@ -188,6 +190,8 @@ impl Driver for SqliteDriver {
                     ]),
                     page: ConnectionPage::General,
                     visible_when: None,
+                    placement: ConnectionFieldPlacement::Trailing,
+                    required: false,
                 }],
                 // SQLite reads the connect timeout (as a busy timeout), the read-only flag and the
                 // init SQL; it has no query timeout or keep-alive.

@@ -138,10 +138,29 @@ not a later refactor.
   replaces the SQL table designer with a collection dialog (name + validator + validation
   level/action) wired to `collection_definition`/`create_collection`/`alter_collection`; there is
   no `.rgbak` backup, users/roles, routines or Views category. See `docs/mongodb-driver.md`.
+- `crates/rustgrid-clickhouse` — the **ClickHouse** driver, built on the official **`clickhouse`
+  0.15** client over the **HTTP interface** (8123, or 8443 with TLS; there is no Rust native-protocol
+  client and Cloud is HTTPS-only), with rustls TLS and the shared tunnel. There is no pool: each
+  request is independent and `clickhouse::Client` is `Clone + Send + Sync`. The driver builds its own
+  hyper client so the standard TLS page (CA, client certificate/key, verify/require/prefer) is
+  honoured. Results are read as `JSONCompactEachRowWithNamesAndTypes`, which reports the column names
+  and ClickHouse types together with the rows; `Int128`/`Decimal`/wide values stay text so they never
+  round through `f64`, and `Array`/`Map`/`Tuple` show as compact JSON. Catalog data comes from
+  `system.databases`/`system.tables`/`system.columns`; view engines (`View`, `MaterializedView`, …)
+  are the app's views. The grid is **read-only** (`DriverCapability::ReadOnlyGrid`): MergeTree has no
+  unique key, `system.tables.primary_key` is only the sorting-key expression, and
+  `ALTER TABLE … UPDATE/DELETE` is an asynchronous mutation, so `update_rows`/`delete_rows` refuse
+  and the UI hides the edit actions; `insert_rows` is implemented for the Import Wizard. The query
+  editor pins a ClickHouse `session_id` for `SET` and tracks `USE` client-side. The shared table
+  designer edits fields, defaults and comments (`CREATE TABLE … ENGINE = MergeTree ORDER BY
+  tuple()`, then `ALTER TABLE … ADD/DROP/MODIFY COLUMN`/`MODIFY COMMENT`, split one statement per
+  request); the engine, sorting key, partitioning, indexes and TTL stay in the SQL editor. No
+  users, routines/events or `.rgbak` backup. See `docs/clickhouse-driver.md`.
 - `crates/rustgrid-tunnel` — the shared **SSH / SOCKS5 / HTTP** tunnel (local port forwarding) used
   by the network drivers (`rustgrid-mysql`, `rustgrid-postgresql`, `rustgrid-oracle`,
-  `rustgrid-sqlserver`, `rustgrid-redis` in standalone mode, `rustgrid-mongodb`). Migrated out of
-  `rustgrid-mysql` so PostgreSQL reuses it; `rustgrid-mysql` re-exports `Tunnel`.
+  `rustgrid-sqlserver`, `rustgrid-clickhouse`, `rustgrid-redis` in standalone mode,
+  `rustgrid-mongodb`). Migrated out of `rustgrid-mysql` so PostgreSQL reuses it; `rustgrid-mysql`
+  re-exports `Tunnel`.
 - `crates/rustgrid-odbc` — the **generic ODBC driver** (app feature `driver-odbc`, on by default).
   It connects through a user-installed ODBC driver or a raw connection string and speaks the engine's
   SQL, as the fallback for engines without a native Rust driver (DB2, 达梦, ...). The ODBC
@@ -233,6 +252,12 @@ not a later refactor.
   **bb8 0.9** and **tokio-util** (`compat`). tiberius is not sqlx-based, uses rustls (so no OpenSSL),
   and its `Client` is `Send` but not `Sync`, so every operation checks out a pooled client. tokio's
   `net` feature is enabled for `TcpStream`.
+- ClickHouse: the official **`clickhouse` 0.15** client (`default-features = false`,
+  `rustls-tls`), which speaks the **HTTP interface** over hyper 1 — there is no Rust native-protocol
+  client, and ClickHouse Cloud is HTTPS-only. The driver supplies its own hyper client
+  (**hyper-util**, **hyper-rustls** with the ring provider, **rustls**, **rustls-pemfile**,
+  **webpki-roots**) so the standard TLS page's CA/client certificate/verification mode is honoured.
+  No OpenSSL and no C build step; results are read as JSON, so `lz4` is off.
 - i18n: **rust-i18n 4**. Config dir: **directories 6**.
 - Stored secrets: **chacha20poly1305 0.11** + **base64 0.22** (XChaCha20-Poly1305).
 - Export: **rust_xlsxwriter 0.99** writes `.xlsx`; **rfd 0.17** (XDG-portal backend on Linux) drives
@@ -282,6 +307,12 @@ not a later refactor.
   It exercises connect, catalog/schema listing, paging, editing and arbitrary SQL (including PL/SQL
   blocks and statements with a trailing `;`) against a real server
   (e.g. Docker `gvenzl/oracle-free:23-slim`, service `FREEPDB1`).
+- Live ClickHouse integration test (ignored by default): set `RUSTGRID_CLICKHOUSE_PASSWORD` (and
+  optionally `RUSTGRID_CLICKHOUSE_HOST`/`PORT`/`USER`/`DATABASE`), then
+  `cargo test -p rustgrid-clickhouse -- --ignored`. It exercises connect, catalog listing, columns,
+  paging with a filter and a sort, `count()`, arbitrary and multi-statement SQL, DDL,
+  rename/truncate/drop and the read-only refusals against a real server
+  (e.g. Docker `clickhouse/clickhouse-server`).
 - Live ODBC integration test (ignored by default): set `RUSTGRID_ODBC_CONNECTION_STRING` (e.g.
   `Driver={ODBC Driver 17 for SQL Server};Server=localhost,1433;UID=sa;PWD=...;TrustServerCertificate=yes;`),
   then `cargo test -p rustgrid-odbc -- --ignored`. It exercises driver enumeration, catalog listing,
@@ -718,7 +749,11 @@ shadcn chrome described above. Implemented today:
    the content pane's tab bar (the bar itself stays neutral so tabs never blend into it; the
    active tab is markedly stronger and bold so it stands out, and the pinned 对象 tab keeps the
    colour while it is the active tab, so the environment stays visible on 用户/查询/备份 too), so
-   production stands out. Tab titles ellipsize at 170px and show their full text on hover.
+   production stands out. Tab titles ellipsize and show their full text on hover. Tabs share the
+   strip evenly — 170px while they fit, shrinking together down to 96px — then the strip scrolls
+   with ◀ / ▶ arrows (or the wheel) instead of clipping; the active tab is scrolled into view.
+   Tabs reorder by dragging (live, one slot per half-tab crossed, auto-scrolling near the strip's
+   edges), and the tab context menu's 关闭右侧 closes every tab to the right of the clicked one.
    Dragging a file onto the window (or onto `RustGrid.exe`, which forwards it to the running
    instance) opens it through the generic drop frame in `app/file_drop.rs`; SQLite is the only
    recognised format today, and `classify_dropped_file` is the extension point for the next one.
@@ -1052,8 +1087,8 @@ shadcn chrome described above. Implemented today:
     tree keeps the focus, so its arrows, Page Up/Down and Enter work from there. Esc or the field's
     ✕ clears the filter and restores the saved tree; 无匹配项 is shown when nothing matches.
 
-Still out of scope: engines other than MySQL, MariaDB, SQLite, SQL Server, PostgreSQL, Oracle and
-Redis, and the disabled placeholder UI
+Still out of scope: engines other than MySQL, MariaDB, SQLite, SQL Server, PostgreSQL, Oracle,
+ClickHouse and Redis, and the disabled placeholder UI
 (the `Design/New/Delete Table` toolbar buttons and the query editor's `Query Builder`/`Snippets`
 items are deliberate stubs — leave them disabled unless asked). The abstractions above are what
 make more engines cheap later — do not build those features early.

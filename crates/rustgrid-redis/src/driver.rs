@@ -1,9 +1,9 @@
 use async_trait::async_trait;
 use rustgrid_core::{
     AdvancedFields, Connection, ConnectionConfig, ConnectionFieldKind, ConnectionFieldLabel,
-    ConnectionFieldSpec, ConnectionFormSpec, ConnectionHomePage, ConnectionPage,
-    ConnectionStandardField, Driver, DriverCapabilities, DriverCapability, DriverDescriptor,
-    DriverIconStyle, DriverId, Result, TableDesignerSpec,
+    ConnectionFieldPlacement, ConnectionFieldSpec, ConnectionFormSpec, ConnectionHomePage,
+    ConnectionPage, ConnectionStandardField, Driver, DriverCapabilities, DriverCapability,
+    DriverDescriptor, DriverIconStyle, DriverId, Result, TableDesignerSpec,
 };
 
 use crate::connection::RedisConnection;
@@ -109,12 +109,14 @@ impl Driver for RedisDriver {
                         // A cluster has a single keyspace (db0); only standalone and sentinel
                         // servers expose numbered databases.
                         visible_when: Some((OPT_MODE, &["standalone", "sentinel"])),
+                        required: false,
                     },
                     ConnectionFieldLabel {
                         field: ConnectionStandardField::Username,
                         label_key: "form.username",
                         hint_key: Some("redis.username.hint"),
                         visible_when: None,
+                        required: false,
                     },
                 ],
                 options: vec![
@@ -138,6 +140,8 @@ impl Driver for RedisDriver {
                         ]),
                         page: ConnectionPage::General,
                         visible_when: None,
+                        placement: ConnectionFieldPlacement::Trailing,
+                        required: false,
                     },
                     ConnectionFieldSpec {
                         key: OPT_SENTINEL_MASTER,
@@ -146,6 +150,8 @@ impl Driver for RedisDriver {
                         kind: ConnectionFieldKind::Text,
                         page: ConnectionPage::General,
                         visible_when: Some((OPT_MODE, "sentinel")),
+                        placement: ConnectionFieldPlacement::Trailing,
+                        required: false,
                     },
                     ConnectionFieldSpec {
                         key: OPT_SENTINEL_HOSTS,
@@ -154,6 +160,8 @@ impl Driver for RedisDriver {
                         kind: ConnectionFieldKind::Text,
                         page: ConnectionPage::General,
                         visible_when: Some((OPT_MODE, "sentinel")),
+                        placement: ConnectionFieldPlacement::Trailing,
+                        required: false,
                     },
                     ConnectionFieldSpec {
                         key: OPT_SENTINEL_PASSWORD,
@@ -162,6 +170,8 @@ impl Driver for RedisDriver {
                         kind: ConnectionFieldKind::Secret,
                         page: ConnectionPage::General,
                         visible_when: Some((OPT_MODE, "sentinel")),
+                        placement: ConnectionFieldPlacement::Trailing,
+                        required: false,
                     },
                     ConnectionFieldSpec {
                         key: OPT_CLUSTER_NODES,
@@ -170,6 +180,8 @@ impl Driver for RedisDriver {
                         kind: ConnectionFieldKind::Text,
                         page: ConnectionPage::General,
                         visible_when: Some((OPT_MODE, "cluster")),
+                        placement: ConnectionFieldPlacement::Trailing,
+                        required: false,
                     },
                     ConnectionFieldSpec {
                         key: OPT_KEY_LIMIT,
@@ -178,6 +190,8 @@ impl Driver for RedisDriver {
                         kind: ConnectionFieldKind::Text,
                         page: ConnectionPage::Advanced,
                         visible_when: None,
+                        placement: ConnectionFieldPlacement::Trailing,
+                        required: false,
                     },
                 ],
                 advanced: AdvancedFields {

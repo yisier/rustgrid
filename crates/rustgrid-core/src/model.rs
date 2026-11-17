@@ -182,7 +182,7 @@ pub struct ColumnInfo {
     pub comment: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "lowercase")]
 pub enum CellValue {
     Null,

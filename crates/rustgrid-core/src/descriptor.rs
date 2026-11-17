@@ -113,6 +113,25 @@ pub struct ConnectionFieldLabel {
     /// (`tns` / `connect_string`); an unset option counts as the controlling `Select`'s first
     /// choice.
     pub visible_when: Option<(&'static str, &'static [&'static str])>,
+    /// Whether the field is required while it is visible. `false` keeps the app's historical
+    /// optional default (the engine's 数据库 field).
+    pub required: bool,
+}
+
+/// Where an engine option field is drawn on the 常规 page.
+///
+/// The standard page is rendered in blocks (identity → address → target → credentials → transport).
+/// An engine that wants its controlling select above the address (or its alias below the address)
+/// declares the placement instead of the app matching on the engine id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionFieldPlacement {
+    /// Above the standard network address block (Oracle's 连接类型).
+    Leading,
+    /// After the network address block and before the credentials (Oracle's 服务名/SID radio, TNS
+    /// alias and tnsnames.ora directory).
+    Target,
+    /// The historical position: after the credentials and the standard database field.
+    Trailing,
 }
 
 /// One choice of a [`ConnectionFieldKind::Select`] field.
@@ -135,6 +154,10 @@ pub enum ConnectionFieldKind {
     Folder,
     /// A dropdown with a fixed set of choices; the first choice is the default.
     Select(Vec<ConnectionFieldChoice>),
+    /// A horizontal radio group; the first choice is the default.
+    Radio(Vec<ConnectionFieldChoice>),
+    /// A multi-line editor (the advanced Oracle connect descriptor).
+    Multiline,
 }
 
 /// One engine-specific field on the connection form.
@@ -158,6 +181,11 @@ pub struct ConnectionFieldSpec {
     /// shown while the connection type is `tns`). A field that already holds a value is always
     /// shown, so a legacy profile can never hide an active option.
     pub visible_when: Option<(&'static str, &'static str)>,
+    /// Where the field is drawn on 常规.
+    pub placement: ConnectionFieldPlacement,
+    /// Whether the field must be filled while it is visible. The form flags it inline like a
+    /// required standard field.
+    pub required: bool,
 }
 
 /// Which of the standard 高级 fields an engine actually honors. The form hides the ones an engine

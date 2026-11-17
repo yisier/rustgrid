@@ -151,6 +151,19 @@ fn strip_schema(name: &str) -> String {
         .unwrap_or_else(|| name.to_string())
 }
 
+/// Strip ClickHouse's `Nullable(...)` / `LowCardinality(...)` wrappers so classification sees the
+/// value's real type. `raw` is already lower-cased by [`classify`].
+fn unwrap_clickhouse_type(raw: &str) -> String {
+    let mut current = raw.trim();
+    while let Some(inner) = current
+        .strip_prefix("nullable(")
+        .or_else(|| current.strip_prefix("lowcardinality("))
+    {
+        current = inner.strip_suffix(')').unwrap_or(inner);
+    }
+    current.to_string()
+}
+
 fn map_column(column: &ColumnDef, source: DriverDialect, target: DriverDialect) -> ColumnDef {
     let logical = classify(column, source);
     let mut mapped = column.clone();
@@ -214,6 +227,8 @@ fn map_column(column: &ColumnDef, source: DriverDialect, target: DriverDialect) 
                 mapped.auto_increment =
                     column.primary_key && mapped.data_type.eq_ignore_ascii_case("integer");
             }
+            // ClickHouse has no identity columns (its defaults/mutations are not auto-increment).
+            DriverDialect::ClickHouse => {}
             DriverDialect::Generic => {}
         }
     }
@@ -289,6 +304,15 @@ fn map_default(column: &ColumnDef, target: DriverDialect) -> String {
                 }
             }
             DriverDialect::Sqlite => "CURRENT_TIMESTAMP".to_string(),
+            DriverDialect::ClickHouse => {
+                if lower.starts_with("current_date") || lower == "curdate()" {
+                    "today()".to_string()
+                } else if lower.starts_with("current_time") || lower == "curtime()" {
+                    "formatDateTime(now(), '%H:%M:%S')".to_string()
+                } else {
+                    "now()".to_string()
+                }
+            }
             DriverDialect::Generic => value.to_string(),
         };
     }
@@ -311,6 +335,7 @@ fn render(logical: &LogicalType, target: DriverDialect, column: &mut ColumnDef) 
         DriverDialect::Postgres => render_postgres(logical, column),
         DriverDialect::SqlServer => render_sqlserver(logical, column),
         DriverDialect::Oracle => render_oracle(logical, column),
+        DriverDialect::ClickHouse => render_clickhouse(logical, column),
         DriverDialect::Sqlite => render_sqlite(logical, column),
         DriverDialect::Generic => render_postgres(logical, column),
     }
@@ -583,6 +608,53 @@ fn render_oracle(logical: &LogicalType, column: &mut ColumnDef) {
     }
 }
 
+fn render_clickhouse(logical: &LogicalType, column: &mut ColumnDef) {
+    match logical {
+        LogicalType::Bool => column.data_type = "Bool".to_string(),
+        LogicalType::Int(bits) => {
+            column.data_type = match bits {
+                0..=8 => "Int8",
+                9..=16 => "Int16",
+                17..=32 => "Int32",
+                _ => "Int64",
+            }
+            .to_string();
+        }
+        LogicalType::UInt(bits) => {
+            column.data_type = match bits {
+                0..=8 => "UInt8",
+                9..=16 => "UInt16",
+                17..=32 => "UInt32",
+                33..=64 => "UInt64",
+                _ => "UInt128",
+            }
+            .to_string();
+        }
+        LogicalType::Decimal { precision, scale } => {
+            // ClickHouse's Decimal(P, S) supports at most 76 digits; the 256-bit family covers 76.
+            let precision = (*precision).clamp(1, 76);
+            column.data_type = "Decimal".to_string();
+            column.length = precision.to_string();
+            column.decimals = (*scale).min(precision).to_string();
+        }
+        LogicalType::Float(double) => {
+            column.data_type = if *double { "Float64" } else { "Float32" }.to_string();
+        }
+        // ClickHouse strings carry no declared length.
+        LogicalType::Text(_) | LogicalType::Binary(_) => {
+            column.data_type = "String".to_string();
+        }
+        LogicalType::Date => column.data_type = "Date".to_string(),
+        // ClickHouse has no TIME type; a formatted string keeps the value readable.
+        LogicalType::Time => column.data_type = "String".to_string(),
+        LogicalType::DateTime { .. } => column.data_type = "DateTime64(3)".to_string(),
+        LogicalType::Uuid => column.data_type = "UUID".to_string(),
+        LogicalType::Json | LogicalType::Xml | LogicalType::Other(_) => {
+            column.data_type = "String".to_string();
+        }
+    }
+}
+
 fn render_sqlite(logical: &LogicalType, column: &mut ColumnDef) {
     column.data_type = match logical {
         LogicalType::Bool | LogicalType::Int(_) | LogicalType::UInt(_) => "INTEGER",
@@ -604,6 +676,11 @@ fn render_sqlite(logical: &LogicalType, column: &mut ColumnDef) {
 
 fn classify(column: &ColumnDef, source: DriverDialect) -> LogicalType {
     let raw = column.data_type.trim().to_ascii_lowercase();
+    let raw = if matches!(source, DriverDialect::ClickHouse) {
+        unwrap_clickhouse_type(&raw)
+    } else {
+        raw
+    };
     let data_type = raw.split('(').next().unwrap_or(&raw).trim().to_string();
     let length = column
         .length
@@ -654,6 +731,24 @@ fn classify(column: &ColumnDef, source: DriverDialect) -> LogicalType {
                 LogicalType::Int(32)
             }
         }
+        // ClickHouse's sized integer types (`Int8`, `Int128`, `UInt256`, ...). They must come
+        // before the SQL-standard aliases: PostgreSQL's `int8` is a 64-bit `bigint`, while
+        // ClickHouse's `Int8` is one byte.
+        "int8" | "int16" | "int32" | "int64" | "int128" | "int256"
+            if matches!(source, DriverDialect::ClickHouse) =>
+        {
+            LogicalType::Int(data_type[3..].parse::<u8>().unwrap_or(64))
+        }
+        "uint8" | "uint16" | "uint32" | "uint64" | "uint128" | "uint256" => {
+            LogicalType::UInt(data_type[4..].parse::<u8>().unwrap_or(64))
+        }
+        "float32" => LogicalType::Float(false),
+        "float64" => LogicalType::Float(true),
+        "fixedstring" => LogicalType::Text(length),
+        "date32" => LogicalType::Date,
+        "datetime64" => LogicalType::DateTime {
+            with_time_zone: false,
+        },
         "bigint" | "int8" | "bigserial" | "serial8" => {
             if column.unsigned {
                 LogicalType::UInt(64)
@@ -828,6 +923,49 @@ mod tests {
         let sqlite = map_schema(&schema, DriverDialect::Mysql, DriverDialect::Sqlite);
         assert_eq!(sqlite.columns[0].data_type, "INTEGER");
         assert!(sqlite.columns[0].auto_increment);
+    }
+
+    #[test]
+    fn mysql_types_become_clickhouse_types() {
+        let schema = TableSchema {
+            columns: vec![
+                column("bigint", "0", "0"),
+                column("varchar", "255", "0"),
+                column("tinyint", "1", "0"),
+                column("decimal", "20", "6"),
+                column("datetime", "0", "0"),
+                column("longblob", "0", "0"),
+            ],
+            ..Default::default()
+        };
+        let mapped = map_schema(&schema, DriverDialect::Mysql, DriverDialect::ClickHouse);
+        assert_eq!(mapped.columns[0].data_type, "Int64");
+        assert_eq!(mapped.columns[1].data_type, "String");
+        assert_eq!(mapped.columns[2].data_type, "Bool");
+        assert_eq!(mapped.columns[3].data_type, "Decimal");
+        assert_eq!(mapped.columns[3].length, "20");
+        assert_eq!(mapped.columns[3].decimals, "6");
+        assert_eq!(mapped.columns[4].data_type, "DateTime64(3)");
+        assert_eq!(mapped.columns[5].data_type, "String");
+    }
+
+    #[test]
+    fn clickhouse_sized_types_classify_by_width() {
+        let schema = TableSchema {
+            columns: vec![
+                column("Int8", "0", "0"),
+                column("UInt64", "0", "0"),
+                column("Nullable(String)", "0", "0"),
+                column("LowCardinality(Nullable(Int32))", "0", "0"),
+            ],
+            ..Default::default()
+        };
+        let mapped = map_schema(&schema, DriverDialect::ClickHouse, DriverDialect::Mysql);
+        assert_eq!(mapped.columns[0].data_type, "tinyint");
+        assert_eq!(mapped.columns[1].data_type, "bigint");
+        assert!(mapped.columns[1].unsigned);
+        assert_eq!(mapped.columns[2].data_type, "longtext");
+        assert_eq!(mapped.columns[3].data_type, "int");
     }
 
     #[test]

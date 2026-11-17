@@ -21,6 +21,7 @@ rustgrid-sqlite.workspace = true
 rustgrid-sqlserver.workspace = true
 rustgrid-postgresql.workspace = true
 rustgrid-oracle.workspace = true
+rustgrid-clickhouse.workspace = true
 rustgrid-redis.workspace = true
 rustgrid-mongodb.workspace = true
 rustgrid-odbc = { workspace = true, optional = true }

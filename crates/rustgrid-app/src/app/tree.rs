@@ -174,14 +174,12 @@ impl AppView {
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        let descriptor = self
-            .registry
-            .get(&form.driver)
-            .map(|driver| driver.descriptor());
         // The driver's spec decides the tabs, the 常规 page's shape, the standard-field renames and
-        // where the engine's own option fields go.
-        if let Some(descriptor) = descriptor.as_ref() {
-            form.apply_spec(&descriptor.connection_form);
+        // where the engine's own option fields go. Normalization runs first, so a legacy profile's
+        // option values match the current select choices and the right fields are visible.
+        if let Some(driver) = self.registry.get(&form.driver) {
+            driver.normalize_connection_options(&mut form.extra);
+            form.apply_spec(&driver.descriptor().connection_form);
         }
         let weak = cx.weak_entity();
         let theme = self.theme;
@@ -1768,6 +1766,9 @@ impl AppView {
             .and_then(|status| status.engine.as_deref())
             .is_some_and(|kind| matches!(kind, "stream" | "json"));
         let documents = self.driver_supports(connection_index, DriverCapability::Documents);
+        // A read-only engine (ClickHouse) cannot identify a single row to edit, so its table pages
+        // never enter edit mode.
+        let read_only_grid = self.driver_supports(connection_index, DriverCapability::ReadOnlyGrid);
         let id = self.next_grid_id;
         self.next_grid_id += 1;
         // For a key grid whose overview was not loaded yet (e.g. a restored session), fetch it
@@ -1818,7 +1819,7 @@ impl AppView {
             sql: None,
             show_toolbar: true,
             show_footer: true,
-            editable: !key_read_only,
+            editable: !key_read_only && !read_only_grid,
             sort_rules: Vec::new(),
             sort_open: false,
             sort_draft: Vec::new(),

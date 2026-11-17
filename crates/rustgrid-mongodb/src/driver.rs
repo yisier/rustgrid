@@ -2,10 +2,10 @@
 
 use async_trait::async_trait;
 use rustgrid_core::{
-    Connection, ConnectionConfig, ConnectionFieldKind, ConnectionFieldLabel, ConnectionFieldSpec,
-    ConnectionFormSpec, ConnectionHomePage, ConnectionPage, ConnectionStandardField,
-    DatabaseEditorSpec, Driver, DriverCapabilities, DriverCapability, DriverDescriptor,
-    DriverIconStyle, DriverId, Result,
+    Connection, ConnectionConfig, ConnectionFieldKind, ConnectionFieldLabel,
+    ConnectionFieldPlacement, ConnectionFieldSpec, ConnectionFormSpec, ConnectionHomePage,
+    ConnectionPage, ConnectionStandardField, DatabaseEditorSpec, Driver, DriverCapabilities,
+    DriverCapability, DriverDescriptor, DriverIconStyle, DriverId, Result,
 };
 
 use crate::connection::MongoConnection;
@@ -69,6 +69,7 @@ impl Driver for MongoDriver {
                     label_key: "mongodb.database",
                     hint_key: Some("mongodb.database.hint"),
                     visible_when: None,
+                    required: false,
                 }],
                 options: vec![
                     ConnectionFieldSpec {
@@ -78,6 +79,8 @@ impl Driver for MongoDriver {
                         kind: ConnectionFieldKind::Text,
                         page: ConnectionPage::General,
                         visible_when: None,
+                        placement: ConnectionFieldPlacement::Trailing,
+                        required: false,
                     },
                     ConnectionFieldSpec {
                         key: OPT_AUTH_MECHANISM,
@@ -95,6 +98,8 @@ impl Driver for MongoDriver {
                         ]),
                         page: ConnectionPage::General,
                         visible_when: None,
+                        placement: ConnectionFieldPlacement::Trailing,
+                        required: false,
                     },
                     ConnectionFieldSpec {
                         key: OPT_REPLICA_SET,
@@ -103,6 +108,8 @@ impl Driver for MongoDriver {
                         kind: ConnectionFieldKind::Text,
                         page: ConnectionPage::Advanced,
                         visible_when: None,
+                        placement: ConnectionFieldPlacement::Trailing,
+                        required: false,
                     },
                     ConnectionFieldSpec {
                         key: OPT_READ_PREFERENCE,
@@ -132,6 +139,8 @@ impl Driver for MongoDriver {
                         ]),
                         page: ConnectionPage::Advanced,
                         visible_when: None,
+                        placement: ConnectionFieldPlacement::Trailing,
+                        required: false,
                     },
                 ],
                 advanced: rustgrid_core::descriptor::AdvancedFields {

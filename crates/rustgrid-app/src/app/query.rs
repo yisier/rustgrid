@@ -876,6 +876,11 @@ impl AppView {
         let supports_schemas = tab
             .connection_index
             .is_some_and(|index| self.driver_supports(index, DriverCapability::Schemas));
+        // A read-only-grid engine's query results keep their grid read-only even when a single
+        // table can be inferred from the statement.
+        let read_only_grid = tab
+            .connection_index
+            .is_some_and(|index| self.driver_supports(index, DriverCapability::ReadOnlyGrid));
         let connection_name = tab
             .connection_index
             .and_then(|connection_index| self.connections.get(connection_index))
@@ -1092,7 +1097,7 @@ impl AppView {
                                     }
                                 }
                             }
-                            editable = true;
+                            editable = !read_only_grid;
                             grid_database = target_database;
                             grid_table = target_table;
                         }
@@ -3535,7 +3540,7 @@ impl AppView {
             .map(TabTarget::Grid)
     }
 
-    fn show_tab(&mut self, target: Option<TabTarget>, cx: &mut Context<'_, Self>) {
+    pub(super) fn show_tab(&mut self, target: Option<TabTarget>, cx: &mut Context<'_, Self>) {
         match target {
             Some(TabTarget::Query(index)) => self.activate_query(index, cx),
             Some(TabTarget::Grid(index)) => {

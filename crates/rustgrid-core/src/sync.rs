@@ -679,7 +679,7 @@ pub fn render_literal(value: &Option<String>, dialect: DriverDialect) -> String 
         return "NULL".to_string();
     };
     match dialect {
-        DriverDialect::Mysql => quote_string(text, true),
+        DriverDialect::Mysql | DriverDialect::ClickHouse => quote_string(text, true),
         DriverDialect::Sqlite => quote_string(text, false),
         DriverDialect::SqlServer => format!("N{}", quote_string(text, false)),
         DriverDialect::Postgres | DriverDialect::Oracle | DriverDialect::Generic => {

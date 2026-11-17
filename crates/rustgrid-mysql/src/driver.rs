@@ -4,10 +4,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rustgrid_core::{
-    Connection, ConnectionConfig, ConnectionFieldChoice, ConnectionFieldKind, ConnectionFieldSpec,
-    ConnectionFormSpec, ConnectionPage, ConnectionProfile, DatabaseEditorSpec, DesignerTab, Driver,
-    DriverCapabilities, DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle,
-    DriverId, Error, Result, TableDesignerSpec, TlsMode,
+    Connection, ConnectionConfig, ConnectionFieldChoice, ConnectionFieldKind,
+    ConnectionFieldPlacement, ConnectionFieldSpec, ConnectionFormSpec, ConnectionPage,
+    ConnectionProfile, DatabaseEditorSpec, DesignerTab, Driver, DriverCapabilities,
+    DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle, DriverId, Error, Result,
+    TableDesignerSpec, TlsMode,
 };
 use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlSslMode};
 
@@ -101,6 +102,8 @@ impl Driver for MysqlDriver {
                     ]),
                     page: ConnectionPage::Advanced,
                     visible_when: None,
+                    placement: ConnectionFieldPlacement::Trailing,
+                    required: false,
                 }],
                 ..Default::default()
             },

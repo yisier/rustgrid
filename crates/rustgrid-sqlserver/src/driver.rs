@@ -3,11 +3,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 use rustgrid_core::{
     AccountKind, AdvancedFields, AutoIncrementRule, Connection, ConnectionConfig,
-    ConnectionFieldChoice, ConnectionFieldKind, ConnectionFieldLabel, ConnectionFieldSpec,
-    ConnectionFormSpec, ConnectionHomePage, ConnectionPage, ConnectionStandardField,
-    DatabaseEditorSpec, DatabaseEditorTab, DefaultSuggestion, DesignerColumnOption,
-    DesignerFieldColumn, DesignerIndexColumn, DesignerIndexKind, DesignerTab, Driver,
-    DriverCapabilities, DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle,
+    ConnectionFieldChoice, ConnectionFieldKind, ConnectionFieldLabel, ConnectionFieldPlacement,
+    ConnectionFieldSpec, ConnectionFormSpec, ConnectionHomePage, ConnectionPage,
+    ConnectionStandardField, DatabaseEditorSpec, DatabaseEditorTab, DefaultSuggestion,
+    DesignerColumnOption, DesignerFieldColumn, DesignerIndexColumn, DesignerIndexKind, DesignerTab,
+    Driver, DriverCapabilities, DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle,
     DriverId, Error, Result, TableDesignerSpec, TlsMode, TriggerDefinition, UserEditorSpec,
 };
 use tiberius::{AuthMethod, Config};
@@ -271,6 +271,7 @@ impl Driver for SqlServerDriver {
                     label_key: "form.sqlserver.database",
                     hint_key: None,
                     visible_when: None,
+                    required: false,
                 }],
                 options: vec![
                     ConnectionFieldSpec {
@@ -280,6 +281,8 @@ impl Driver for SqlServerDriver {
                         kind: ConnectionFieldKind::Select(authentication_choices()),
                         page: ConnectionPage::General,
                         visible_when: None,
+                        placement: ConnectionFieldPlacement::Trailing,
+                        required: false,
                     },
                     // SQL Server handshakes TLS for the login packet even with TLS/SSL off. Some
                     // servers (old builds, or a network path that cuts the handshake) close it,
@@ -301,6 +304,8 @@ impl Driver for SqlServerDriver {
                         ]),
                         page: ConnectionPage::Advanced,
                         visible_when: None,
+                        placement: ConnectionFieldPlacement::Trailing,
+                        required: false,
                     },
                     ConnectionFieldSpec {
                         key: "sqlserver.application_name",
@@ -309,6 +314,8 @@ impl Driver for SqlServerDriver {
                         kind: ConnectionFieldKind::Text,
                         page: ConnectionPage::Advanced,
                         visible_when: None,
+                        placement: ConnectionFieldPlacement::Trailing,
+                        required: false,
                     },
                 ],
                 // SQL Server honors every standard 高级 field.

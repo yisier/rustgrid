@@ -14,9 +14,10 @@ pub fn sqlparser_dialect(dialect: DriverDialect) -> Box<dyn Dialect> {
         DriverDialect::Mysql => Box::new(MySqlDialect {}),
         DriverDialect::Postgres => Box::new(PostgreSqlDialect {}),
         DriverDialect::Oracle => Box::new(OracleDialect {}),
-        DriverDialect::SqlServer | DriverDialect::Sqlite | DriverDialect::Generic => {
-            Box::new(GenericDialect {})
-        }
+        DriverDialect::SqlServer
+        | DriverDialect::Sqlite
+        | DriverDialect::ClickHouse
+        | DriverDialect::Generic => Box::new(GenericDialect {}),
     }
 }
 

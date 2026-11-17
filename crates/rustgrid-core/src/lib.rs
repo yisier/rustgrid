@@ -16,10 +16,11 @@ pub mod view;
 pub use capability::{DriverCapabilities, DriverCapability};
 pub use descriptor::{
     AdvancedFields, AutoIncrementRule, ConnectionFieldChoice, ConnectionFieldKind,
-    ConnectionFieldLabel, ConnectionFieldSpec, ConnectionFormSpec, ConnectionHomePage,
-    ConnectionPage, ConnectionStandardField, DefaultSuggestion, DesignerColumnOption,
-    DesignerFieldColumn, DesignerIndexColumn, DesignerIndexKind, DesignerOptionField, DesignerTab,
-    DriverDescriptor, DriverIconStyle, TableDesignerSpec, TriggerDefinition,
+    ConnectionFieldLabel, ConnectionFieldPlacement, ConnectionFieldSpec, ConnectionFormSpec,
+    ConnectionHomePage, ConnectionPage, ConnectionStandardField, DefaultSuggestion,
+    DesignerColumnOption, DesignerFieldColumn, DesignerIndexColumn, DesignerIndexKind,
+    DesignerOptionField, DesignerTab, DriverDescriptor, DriverIconStyle, TableDesignerSpec,
+    TriggerDefinition,
 };
 pub use dialect::DriverDialect;
 pub use driver::{

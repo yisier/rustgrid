@@ -237,6 +237,7 @@ fn builtin_registry() -> DriverRegistry {
         .with(Arc::new(rustgrid_sqlserver::SqlServerDriver::new()))
         .with(Arc::new(rustgrid_postgresql::PostgresDriver::new()))
         .with(Arc::new(rustgrid_oracle::OracleDriver::new()))
+        .with(Arc::new(rustgrid_clickhouse::ClickHouseDriver::new()))
         .with(Arc::new(rustgrid_redis::RedisDriver::new()))
         .with(Arc::new(rustgrid_mongodb::MongoDriver::new()));
     #[cfg(feature = "driver-odbc")]
@@ -428,6 +429,67 @@ mod tests {
             settings: Default::default(),
         };
         assert!(!driver.supports_table_designer(&profile));
+        assert!(!driver.supports_backup(&profile));
+    }
+
+    /// ClickHouse is an OLAP engine whose grid is read-only: the registration must say so, offer
+    /// the table designer for structure changes, and keep `.rgbak` backups, users and routines off.
+    #[test]
+    fn clickhouse_is_registered_with_a_read_only_grid() {
+        use rustgrid_core::{ConnectionProfile, DesignerTab, DriverCapability, DriverId};
+
+        let registry = builtin_registry();
+        let driver = registry
+            .get(&DriverId::new("clickhouse"))
+            .expect("ClickHouse driver is registered");
+        let descriptor = driver.descriptor();
+        assert_eq!(descriptor.default_port, 8123);
+        assert!(
+            descriptor.capabilities.has(DriverCapability::ReadOnlyGrid),
+            "ClickHouse must advertise the read-only grid"
+        );
+        assert!(
+            descriptor
+                .capabilities
+                .has(DriverCapability::DatabaseManagement),
+            "ClickHouse can create and drop databases"
+        );
+        for absent in [
+            DriverCapability::Users,
+            DriverCapability::Routines,
+            DriverCapability::Schemas,
+            DriverCapability::Views,
+        ] {
+            assert!(
+                !descriptor.capabilities.has(absent),
+                "ClickHouse must not advertise {absent:?}"
+            );
+        }
+        let profile = ConnectionProfile {
+            id: "test".into(),
+            name: "test".into(),
+            driver: DriverId::new("clickhouse"),
+            host: String::new(),
+            port: 8123,
+            username: "default".into(),
+            database: None,
+            options: Default::default(),
+            settings: Default::default(),
+        };
+        assert!(
+            descriptor
+                .table_designer
+                .tabs
+                .contains(&DesignerTab::Fields),
+            "ClickHouse's designer must offer the fields tab"
+        );
+        assert!(driver.supports_table_designer(&profile));
+        let mut read_only = profile.clone();
+        read_only.settings.read_only = true;
+        assert!(
+            !driver.supports_table_designer(&read_only),
+            "a read-only connection cannot redesign tables"
+        );
         assert!(!driver.supports_backup(&profile));
     }
 }

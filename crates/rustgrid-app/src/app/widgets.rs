@@ -1845,7 +1845,14 @@ impl AppView {
     ) -> impl IntoElement {
         let theme = self.theme;
         let target = menu.target;
-        let items = div()
+        // 关闭右侧 is only useful while something sits to the right of the clicked tab.
+        let order = self.ordered_tabs(cx);
+        let tabs_to_the_right = order
+            .iter()
+            .position(|tab| *tab == target)
+            .map(|position| order.len() - position - 1)
+            .unwrap_or(0);
+        let mut items = div()
             .flex()
             .flex_col()
             .w(px(200.0))
@@ -1861,13 +1868,24 @@ impl AppView {
                 t!("tab.close_other").to_string(),
                 self.command_shortcut_label("general.close_other_tabs", cx.platform_info().os),
                 cx.listener(move |this, _event, _window, cx| this.close_other_tabs(target, cx)),
-            ))
-            .child(self.context_item_shortcut(
-                "tab-close-all",
-                t!("tab.close_all").to_string(),
-                self.command_shortcut_label("general.close_all_tabs", cx.platform_info().os),
-                cx.listener(|this, _event, _window, cx| this.close_all_tabs(cx)),
             ));
+        items = if tabs_to_the_right > 0 {
+            items.child(self.context_item(
+                "tab-close-right",
+                t!("tab.close_right").to_string(),
+                cx.listener(move |this, _event, _window, cx| this.close_tabs_to_right(target, cx)),
+            ))
+        } else {
+            items.child(
+                self.context_item_disabled("tab-close-right", t!("tab.close_right").to_string()),
+            )
+        };
+        let items = items.child(self.context_item_shortcut(
+            "tab-close-all",
+            t!("tab.close_all").to_string(),
+            self.command_shortcut_label("general.close_all_tabs", cx.platform_info().os),
+            cx.listener(|this, _event, _window, cx| this.close_all_tabs(cx)),
+        ));
 
         anchored()
             .position(menu.position)

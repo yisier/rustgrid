@@ -27,6 +27,14 @@ pub enum DriverCapability {
     /// it to hide the SQL-only categories (views/routines/backups) and to switch the query editor
     /// to the document language, while the data grid, filter and row form stay the table ones.
     Documents,
+    /// The data grid is a read-only projection of the table (ClickHouse).
+    ///
+    /// Some engines cannot locate a single row: ClickHouse has no unique constraint, its
+    /// `ORDER BY` key is not an identity, and `ALTER TABLE … UPDATE/DELETE` is an asynchronous
+    /// mutation that may touch several rows. The UI then hides the grid's edit/insert/delete
+    /// actions instead of letting the user stage edits the driver has to refuse; writes go
+    /// through the SQL editor.
+    ReadOnlyGrid,
 }
 
 /// The set of capabilities an engine supports.

@@ -61,6 +61,7 @@ MongoDB 数据库管理工具。它的界面布局和交互习惯对齐 Navicat�
 | Oracle                     | 已支持                            |
 | Redis                      | 已支持（单机 / Sentinel / 集群）  |
 | MongoDB                    | 已支持（集合 / 文档 / JSON 命令） |
+| ClickHouse                 | 支持（HTTP；网格只读）          |
 | StarRocks                  | 通过 MySQL 兼容模式               |
 | DB2、达梦 等               | 通过通用 ODBC                     |
 
@@ -93,6 +94,7 @@ MongoDB 数据库管理工具。它的界面布局和交互习惯对齐 Navicat�
 - **Redis** —— 按命名空间浏览单机、Sentinel 和集群服务器；每个键有独立页面（字符串提供
   RAW / JSON，集合提供可编辑表格），键列表支持新建键、设置 TTL、重命名和删除；查询编辑器支持
   Redis 命令与键名补全。
+- **ClickHouse** — HTTP 连接（支持 TLS 与隧道），浏览数据库与 MergeTree 表/视图；数据网格只读（无唯一行标识），支持分页、筛选、排序与导出；SQL 编辑器在固定会话中执行多语句；导入可写入已有表；表设计器可编辑字段、默认值与注释。
 - **MongoDB** —— 浏览数据库与集合，用现有网格和行表单分页、编辑文档（嵌套文档以 JSON 打开），
   查询页直接运行 JSON 命令（`find`、`aggregate`、`count` 以及任意 `runCommand`）。
 - **选项与更新** —— 浅色 / 深色 / 跟随系统主题，英文 / 简体中文 / Русский，可自定义快捷键，
@@ -132,6 +134,7 @@ cargo run -p rustgrid-app
 - `crates/rustgrid-redis` —— Redis 驱动（单机 / Sentinel / 集群），详见 `docs/redis-driver.md`。
 - `crates/rustgrid-mongodb` —— MongoDB 驱动（集合即表、文档即行，查询页跑 JSON 命令），详见
   `docs/mongodb-driver.md`。
+- `crates/rustgrid-clickhouse` — ClickHouse 驱动（HTTP 接口、数据网格只读、SQL 编辑器），见 `docs/clickhouse-driver.md`。
 - `crates/rustgrid-tunnel` —— 共享的 SSH / SOCKS5 / HTTP 隧道，供网络驱动复用。
 - `crates/rustgrid-odbc` —— 通用 ODBC 驱动（DB2、达梦 等）。
 - `crates/rustgrid-backup` —— `.rgbak` 备份容器。

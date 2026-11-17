@@ -557,6 +557,7 @@ impl AppView {
             PendingAction::CloseDesign { index } => self.close_design_now(index, cx),
             PendingAction::CloseAllTabs => self.close_all_tabs_now(cx),
             PendingAction::CloseOtherTabs { keep } => self.close_other_tabs_now(keep, cx),
+            PendingAction::CloseRightTabs { keep } => self.close_tabs_to_right_now(keep, cx),
             PendingAction::GridDiscard { grid_id, nav } => {
                 let target = self
                     .grids

@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -22,16 +22,16 @@ use rustgrid_config::{
 };
 use rustgrid_core::{
     AccountKind, BackupObjectKind, CellValue, CollectionDefinition, ColumnInfo, Connection,
-    ConnectionConfig, ConnectionFieldChoice, ConnectionFieldKind, ConnectionFieldSpec,
-    ConnectionHomePage, ConnectionPage, ConnectionStandardField, DatabaseEditorSpec,
-    DatabaseEditorTab, DatabaseOptions, DefaultObjectType, DefaultPrivilege, DriverCapability,
-    DriverDialect, DriverIconStyle, DriverId, DriverRegistry, Error, FilterCondition,
-    FilterConjunction, FilterGroup, FilterNode, FilterOperator, ObjectGrant, ObjectPrivilegeRow,
-    PageRequest, PrivilegeCatalog, PrivilegeId, PrivilegePreset, PrivilegeScope, QueryResult,
-    RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind, RowInsert, RowUpdate, SavedBackup,
-    SavedQuery, SavedTransfer, ServerSecurableGrant, TableStatus, TlsMode, TunnelAuth, TunnelKind,
-    TunnelLayer, UserAccount, UserDetails, UserEdit, UserEditSection, UserEditorSpec, UserMapping,
-    ViewEdit,
+    ConnectionConfig, ConnectionFieldChoice, ConnectionFieldKind, ConnectionFieldPlacement,
+    ConnectionFieldSpec, ConnectionHomePage, ConnectionPage, ConnectionStandardField,
+    DatabaseEditorSpec, DatabaseEditorTab, DatabaseOptions, DefaultObjectType, DefaultPrivilege,
+    DriverCapability, DriverDialect, DriverIconStyle, DriverId, DriverRegistry, Error,
+    FilterCondition, FilterConjunction, FilterGroup, FilterNode, FilterOperator, ObjectGrant,
+    ObjectPrivilegeRow, PageRequest, PrivilegeCatalog, PrivilegeId, PrivilegePreset,
+    PrivilegeScope, QueryResult, RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind, RowInsert,
+    RowUpdate, SavedBackup, SavedQuery, SavedTransfer, ServerSecurableGrant, TableStatus, TlsMode,
+    TunnelAuth, TunnelKind, TunnelLayer, UserAccount, UserDetails, UserEdit, UserEditSection,
+    UserEditorSpec, UserMapping, ViewEdit,
 };
 use rustgrid_export::ExportFormat;
 
@@ -60,8 +60,8 @@ use gpui_kit::component::time_field::{TimeField, TimeFieldState, TimePrecision};
 
 use ui::{
     ButtonKind, ColumnGrid, ComboBox, ComboOption, DetailColumns, DetailScroll, DetailSort,
-    SortKey, TextInput, TextInputOptions, ViewMode, checkbox_box, main_separator,
-    scrollbar_fractions, scrollbar_thumb, toolbar_separator,
+    SortKey, TextArea, TextAreaOptions, TextInput, TextInputOptions, ViewMode, checkbox_box,
+    main_separator, radio_box, scrollbar_fractions, scrollbar_thumb, toolbar_separator,
 };
 
 // Cell-navigation actions for the in-place grid editor. gpui-kit's `Root` binds `tab`/`shift-tab`
@@ -1529,7 +1529,7 @@ struct ContextMenu {
 
 /// A stable identity for an open tab (its grid / query / design id), so the opening order survives
 /// the index shifts of closing other tabs.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum TabKey {
     Grid(u64),
     Query(u64),
@@ -1546,6 +1546,13 @@ enum TabTarget {
 struct TabMenu {
     target: TabTarget,
     position: Point<Pixels>,
+}
+
+/// An in-progress horizontal drag of an open tab. The strip reorders live as the pointer crosses
+/// a neighbour's midpoint (like Chrome), so dropping needs no extra step.
+#[derive(Clone, Copy)]
+struct TabDrag {
+    source: TabTarget,
 }
 
 /// The window-space rectangles that keep an open submenu flyout (颜色, 管理分组, 转储 SQL 文件,
@@ -1706,6 +1713,17 @@ struct ObjectPane {
 struct TabBar {
     app: WeakEntity<AppView>,
     scroll: ScrollHandle,
+    /// The strip's measured viewport width (`0.0` before the first layout). Every tab is as wide
+    /// as the strip allows, clamped to [`TAB_MIN_WIDTH`]..[`TAB_MAX_WIDTH`], so opening more tabs
+    /// shrinks them all down to the minimum before the strip starts scrolling (with ◀ / ▶ arrows).
+    strip_width: Rc<Cell<f32>>,
+    /// The active tab on the last frame, so switching tabs (or opening one at the far end) scrolls
+    /// the strip to reveal it.
+    last_active_tab: Option<TabTarget>,
+    /// Whether the last frame showed the ◀ / ▶ pagers. While they are shown they take width from
+    /// the strip, so the tab-width calculation adds it back and the arrows disappear again as soon
+    /// as the tabs would fit without them.
+    arrows_shown: bool,
 }
 
 /// The left connection tree (connections -> databases -> categories -> tables). Owns the tree
@@ -2223,6 +2241,8 @@ enum PendingAction {
     CloseAllTabs,
     /// Close every tab except `keep` (the tab menu's Close Others).
     CloseOtherTabs { keep: TabTarget },
+    /// Close every tab to the right of `keep` (the tab menu's Close to the Right).
+    CloseRightTabs { keep: TabTarget },
     /// Discard a grid's pending edits and run one navigation action.
     GridDiscard { grid_id: u64, nav: GridNav },
 }
@@ -2394,6 +2414,10 @@ pub struct AppView {
     /// The open tabs in the order they were opened, shared by the tab bar and Ctrl+Tab. Reconciled
     /// on read (`ordered_tabs`): closed tabs drop out, new ones join at the end.
     tab_sequence: RefCell<Vec<TabKey>>,
+    /// A left-press on a tab, until the pointer moves far enough to start a [`TabDrag`].
+    tab_press: Option<(TabTarget, Point<Pixels>)>,
+    /// The tab drag in progress, if any.
+    tab_drag: Option<TabDrag>,
     queries: Vec<QueryTab>,
     active_design: Option<usize>,
     next_design_id: u64,
@@ -2598,12 +2622,17 @@ pub struct AppView {
     /// The required general-page fields that were empty the last time 测试连接 / 保存并连接 ran, so
     /// the form can flag them inline. Cleared as soon as the user edits the offending field.
     form_errors: BTreeSet<FormField>,
+    /// The required engine option fields (TNS alias, advanced descriptor) flagged by the same
+    /// validation pass, keyed by their `ConnectionProfile::options` key.
+    form_option_errors: BTreeSet<String>,
     /// The tunnel-layer fields flagged as required by the same validation pass.
     form_tunnel_errors: BTreeSet<connection_form::TunnelField>,
     /// The TLS / advanced text inputs of the connection window, keyed by field.
     form_extra_inputs: BTreeMap<connection_form::FormExtra, Entity<TextInput>>,
     /// The engine-specific connection inputs, keyed by their `ConnectionProfile::options` key.
     form_engine_inputs: BTreeMap<String, Entity<TextInput>>,
+    /// The engine-specific multi-line fields (Oracle's advanced connect descriptor).
+    form_engine_areas: BTreeMap<String, Entity<TextArea>>,
     /// The engine-specific `Select` field whose dropdown is open, keyed by its option key.
     form_engine_select_open: Option<String>,
     /// Where the open engine `Select`'s trigger sits, so its menu can be positioned.
@@ -3353,6 +3382,8 @@ impl AppView {
             queries: Vec::new(),
             active_design: None,
             tab_sequence: RefCell::new(Vec::new()),
+            tab_press: None,
+            tab_drag: None,
             next_design_id: 0,
             active_query: None,
             next_query_id: 0,
@@ -3497,9 +3528,11 @@ impl AppView {
             form_inputs: None,
             form_odbc_driver: None,
             form_errors: BTreeSet::new(),
+            form_option_errors: BTreeSet::new(),
             form_tunnel_errors: BTreeSet::new(),
             form_extra_inputs: BTreeMap::new(),
             form_engine_inputs: BTreeMap::new(),
+            form_engine_areas: BTreeMap::new(),
             form_engine_select_open: None,
             form_engine_select_anchor: Rc::new(RefCell::new(Point::default())),
             form_tunnel_inputs: Vec::new(),
@@ -4625,10 +4658,17 @@ impl AppView {
     }
 
     /// A cheap revision of everything [`TabBar`] reads from `AppView`.
-    fn tab_revision(&self, cx: &App) -> u64 {
+    fn tab_revision(&self, window: &Window, cx: &App) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         self.theme.is_dark().hash(&mut hasher);
+        // The tab widths are derived from the strip's width, which follows the window: a resize
+        // must re-render the bar even though nothing else it reads changed.
+        f32::from(window.viewport_size().width)
+            .to_bits()
+            .hash(&mut hasher);
+        // A drag reorder only mutates the order, so it is part of the revision too.
+        self.tab_sequence.borrow().hash(&mut hasher);
         self.connection_colors.hash(&mut hasher);
         self.active_grid.hash(&mut hasher);
         self.active_design.hash(&mut hasher);
@@ -4663,13 +4703,13 @@ impl AppView {
     }
 
     /// Re-render the cached long-lived children only when their inputs changed.
-    fn sync_cached_children(&mut self, cx: &mut Context<'_, Self>) {
+    fn sync_cached_children(&mut self, window: &Window, cx: &mut Context<'_, Self>) {
         let tree_revision = self.tree_revision();
         if tree_revision != self.tree_revision {
             self.tree_revision = tree_revision;
             self.tree_pane.update(cx, |_, cx| cx.notify());
         }
-        let tab_revision = self.tab_revision(cx);
+        let tab_revision = self.tab_revision(window, cx);
         if tab_revision != self.tab_revision {
             self.tab_revision = tab_revision;
             self.tab_bar.update(cx, |_, cx| cx.notify());
@@ -5126,7 +5166,7 @@ impl Render for AppView {
             install_editor_highlight_theme(self.theme, cx);
             self.synced_input_theme = Some(self.theme);
         }
-        self.sync_cached_children(cx);
+        self.sync_cached_children(window, cx);
         // The one search box is shared by 表 / 视图 / 函数 / 查询: swap in the shown page's own text
         // before the content pane renders its toolbar.
         self.sync_object_search(cx);
@@ -5344,6 +5384,7 @@ impl Render for AppView {
                 pane.update(cx, |pane, cx| pane.drag_move(event, cx));
                 this.drag_query_split(event, cx);
                 this.tree_drag_move(event, cx);
+                this.tab_drag_move(event, cx);
                 this.drag_tree_marquee(event, cx);
                 // A cancelled platform drag does not always deliver `FileDropEvent::Exited`; the
                 // next ordinary pointer move (no button held) takes the drop frame down.
@@ -5360,6 +5401,7 @@ impl Render for AppView {
                     pane.update(cx, |pane, cx| pane.end_drag(cx));
                     this.end_query_split_drag(cx);
                     this.tree_drag_end(cx);
+                    this.tab_drag_end(cx);
                     this.end_tree_marquee(cx);
                     if this.file_drop_active {
                         this.file_drop_exited(cx);

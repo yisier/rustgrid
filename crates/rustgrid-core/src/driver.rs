@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 
 use crate::capability::DriverCapabilities;
@@ -56,6 +58,14 @@ pub trait Driver: Send + Sync {
             order: 1000,
         }
     }
+
+    /// Bring a saved profile's engine options up to the driver's current option vocabulary.
+    ///
+    /// The connection form reads `options` directly, so a value renamed by a later version would
+    /// leave a field hidden (or a controlling select on its default) while the old value still
+    /// drives the connection. Drivers with such a migration override this; the default is a no-op,
+    /// and the same normalization runs before `connect` so an unseen profile behaves identically.
+    fn normalize_connection_options(&self, _options: &mut BTreeMap<String, String>) {}
 
     /// Whether this engine connects to a database file rather than a network server. File-based
     /// engines ignore host/port/username/password and take the file path as the profile's

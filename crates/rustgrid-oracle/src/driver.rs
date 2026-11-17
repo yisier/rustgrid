@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -5,12 +6,12 @@ use async_trait::async_trait;
 use oracledb::PoolConfig;
 use rustgrid_core::{
     AccountKind, AdvancedFields, AutoIncrementRule, Connection, ConnectionConfig,
-    ConnectionFieldChoice, ConnectionFieldKind, ConnectionFieldLabel, ConnectionFieldSpec,
-    ConnectionFormSpec, ConnectionHomePage, ConnectionPage, ConnectionStandardField,
-    DatabaseEditorSpec, DefaultSuggestion, DesignerColumnOption, DesignerFieldColumn,
-    DesignerIndexColumn, DesignerIndexKind, DesignerTab, Driver, DriverCapabilities,
-    DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle, DriverId, Error, Result,
-    TableDesignerSpec, TlsMode, TriggerDefinition, UserEditorSpec,
+    ConnectionFieldChoice, ConnectionFieldKind, ConnectionFieldLabel, ConnectionFieldPlacement,
+    ConnectionFieldSpec, ConnectionFormSpec, ConnectionHomePage, ConnectionPage,
+    ConnectionStandardField, DatabaseEditorSpec, DefaultSuggestion, DesignerColumnOption,
+    DesignerFieldColumn, DesignerIndexColumn, DesignerIndexKind, DesignerTab, Driver,
+    DriverCapabilities, DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle,
+    DriverId, Error, Result, TableDesignerSpec, TlsMode, TriggerDefinition, UserEditorSpec,
 };
 
 use crate::connection::OracleConnection;
@@ -213,41 +214,80 @@ impl Driver for OracleDriver {
                 // next to the tnsnames.ora directory.
                 tabs: vec![ConnectionPage::Tunnel, ConnectionPage::Advanced],
                 optional_fields: Vec::new(),
-                // The universal "default database" field is Oracle's service/SID target, decided
-                // by 连接类型. It is meaningless (and ignored by `connect_string`) for the TNS
-                // alias / connect string types, so it hides for them.
-                labels: vec![ConnectionFieldLabel {
-                    field: ConnectionStandardField::Database,
-                    label_key: "form.oracle.database",
-                    hint_key: Some("form.oracle.database_hint"),
-                    visible_when: Some(("oracle.connect_type", &["service", "sid"])),
-                }],
+                // 基本 mode is the whole form for most users: address + service/SID target +
+                // credentials. The host/port and the service/SID field disappear in TNS mode, so
+                // the page never shows a field the selected mode ignores.
+                labels: vec![
+                    ConnectionFieldLabel {
+                        field: ConnectionStandardField::Host,
+                        label_key: "form.network",
+                        hint_key: None,
+                        visible_when: Some(("oracle.connect_type", &["basic"])),
+                        required: true,
+                    },
+                    ConnectionFieldLabel {
+                        field: ConnectionStandardField::Port,
+                        label_key: "form.port",
+                        hint_key: None,
+                        visible_when: Some(("oracle.connect_type", &["basic"])),
+                        required: true,
+                    },
+                    ConnectionFieldLabel {
+                        field: ConnectionStandardField::Database,
+                        label_key: "form.oracle.database",
+                        hint_key: Some("form.oracle.database_hint"),
+                        visible_when: Some(("oracle.connect_type", &["basic"])),
+                        required: true,
+                    },
+                ],
                 options: vec![
+                    // 连接类型: 基本 / TNS / 高级. It is the first thing on the page, exactly like
+                    // Navicat's Basic/TNS choice.
                     ConnectionFieldSpec {
                         key: "oracle.connect_type",
                         label_key: "form.oracle.connect_type",
                         hint_key: None,
                         kind: ConnectionFieldKind::Select(vec![
                             ConnectionFieldChoice {
-                                value: "service",
-                                label_key: "form.oracle.type.service",
-                            },
-                            ConnectionFieldChoice {
-                                value: "sid",
-                                label_key: "form.oracle.type.sid",
+                                value: "basic",
+                                label_key: "form.oracle.type.basic",
                             },
                             ConnectionFieldChoice {
                                 value: "tns",
                                 label_key: "form.oracle.type.tns",
                             },
                             ConnectionFieldChoice {
-                                value: "connect_string",
-                                label_key: "form.oracle.type.connect_string",
+                                value: "advanced",
+                                label_key: "form.oracle.type.advanced",
                             },
                         ]),
                         page: ConnectionPage::General,
                         visible_when: None,
+                        placement: ConnectionFieldPlacement::Leading,
+                        required: false,
                     },
+                    // 基本: one service field, interpreted as a service name or a SID.
+                    ConnectionFieldSpec {
+                        key: "oracle.service_name_type",
+                        label_key: "form.oracle.service_name_type",
+                        hint_key: None,
+                        kind: ConnectionFieldKind::Radio(vec![
+                            ConnectionFieldChoice {
+                                value: "service",
+                                label_key: "form.oracle.service_name",
+                            },
+                            ConnectionFieldChoice {
+                                value: "sid",
+                                label_key: "form.oracle.sid",
+                            },
+                        ]),
+                        page: ConnectionPage::General,
+                        visible_when: Some(("oracle.connect_type", "basic")),
+                        placement: ConnectionFieldPlacement::Target,
+                        required: false,
+                    },
+                    // TNS: the alias from tnsnames.ora, plus its directory. The directory may stay
+                    // empty: oracledb then falls back to TNS_ADMIN / ORACLE_HOME\network\admin.
                     ConnectionFieldSpec {
                         key: "oracle.tns_alias",
                         label_key: "form.oracle.tns_alias",
@@ -255,14 +295,30 @@ impl Driver for OracleDriver {
                         kind: ConnectionFieldKind::Text,
                         page: ConnectionPage::General,
                         visible_when: Some(("oracle.connect_type", "tns")),
+                        placement: ConnectionFieldPlacement::Target,
+                        required: true,
                     },
+                    ConnectionFieldSpec {
+                        key: "oracle.config_dir",
+                        label_key: "form.oracle.config_dir",
+                        hint_key: Some("form.oracle.config_dir_hint"),
+                        kind: ConnectionFieldKind::Folder,
+                        page: ConnectionPage::General,
+                        visible_when: Some(("oracle.connect_type", "tns")),
+                        placement: ConnectionFieldPlacement::Target,
+                        required: false,
+                    },
+                    // 高级: the escape hatch stays on the 高级 tab and is now multi-line, so a
+                    // pasted descriptor keeps its line breaks and a parse error names a real line.
                     ConnectionFieldSpec {
                         key: "oracle.connect_string",
                         label_key: "form.oracle.connect_string",
                         hint_key: Some("form.oracle.connect_string_hint"),
-                        kind: ConnectionFieldKind::Text,
-                        page: ConnectionPage::General,
-                        visible_when: Some(("oracle.connect_type", "connect_string")),
+                        kind: ConnectionFieldKind::Multiline,
+                        page: ConnectionPage::Advanced,
+                        visible_when: Some(("oracle.connect_type", "advanced")),
+                        placement: ConnectionFieldPlacement::Trailing,
+                        required: true,
                     },
                     ConnectionFieldSpec {
                         key: "oracle.wallet_location",
@@ -271,6 +327,8 @@ impl Driver for OracleDriver {
                         kind: ConnectionFieldKind::Folder,
                         page: ConnectionPage::Advanced,
                         visible_when: None,
+                        placement: ConnectionFieldPlacement::Trailing,
+                        required: false,
                     },
                     ConnectionFieldSpec {
                         key: "oracle.wallet_password",
@@ -279,14 +337,8 @@ impl Driver for OracleDriver {
                         kind: ConnectionFieldKind::Secret,
                         page: ConnectionPage::Advanced,
                         visible_when: None,
-                    },
-                    ConnectionFieldSpec {
-                        key: "oracle.config_dir",
-                        label_key: "form.oracle.config_dir",
-                        hint_key: Some("form.oracle.config_dir_hint"),
-                        kind: ConnectionFieldKind::Folder,
-                        page: ConnectionPage::Advanced,
-                        visible_when: None,
+                        placement: ConnectionFieldPlacement::Trailing,
+                        required: false,
                     },
                 ],
                 // Oracle honors the query timeout and the session init SQL; it has no connect
@@ -298,6 +350,63 @@ impl Driver for OracleDriver {
                 },
             },
             order: 30,
+        }
+    }
+
+    /// Migrate the old 4-value `oracle.connect_type` (`service` / `sid` / `tns` /
+    /// `connect_string`) onto the form's 基本 / TNS / 高级 modes plus the service/SID radio. The
+    /// driver keeps reading the old values for a profile that is connected without opening the
+    /// form, so nothing is lost if a user never edits it.
+    fn normalize_connection_options(&self, options: &mut BTreeMap<String, String>) {
+        let current = options
+            .get("oracle.connect_type")
+            .map(|value| value.trim().to_ascii_lowercase());
+        let explicit = matches!(
+            current.as_deref(),
+            Some("basic") | Some("tns") | Some("advanced")
+        );
+        if !explicit {
+            let mode = match current.as_deref() {
+                Some("tns") => Some("tns"),
+                Some("connect_string") => Some("advanced"),
+                Some("sid") => {
+                    options
+                        .entry("oracle.service_name_type".to_string())
+                        .or_insert_with(|| "sid".to_string());
+                    Some("basic")
+                }
+                Some("service") => {
+                    options
+                        .entry("oracle.service_name_type".to_string())
+                        .or_insert_with(|| "service".to_string());
+                    Some("basic")
+                }
+                _ if options
+                    .get("oracle.connect_string")
+                    .is_some_and(|value| !value.trim().is_empty()) =>
+                {
+                    Some("advanced")
+                }
+                _ if options
+                    .get("oracle.tns_alias")
+                    .is_some_and(|value| !value.trim().is_empty()) =>
+                {
+                    Some("tns")
+                }
+                _ => Some("basic"),
+            };
+            if let Some(mode) = mode {
+                options.insert("oracle.connect_type".to_string(), mode.to_string());
+            }
+        }
+        if !options.contains_key("oracle.service_name_type") {
+            let sid = options
+                .get("oracle.sid")
+                .is_some_and(|value| !value.trim().is_empty());
+            options.insert(
+                "oracle.service_name_type".to_string(),
+                if sid { "sid" } else { "service" }.to_string(),
+            );
         }
     }
 
@@ -388,11 +497,35 @@ impl Driver for OracleDriver {
 /// The Easy Connect string (or TNS alias / full descriptor) for a profile. A profile supplies the
 /// service through `oracle.service_name` or the database field; TCPS is used whenever TLS is on.
 fn connect_string(config: &ConnectionConfig, host: &str, port: u16) -> String {
-    if let Some(value) = option(config, "oracle.connect_string") {
-        return value;
-    }
-    if let Some(alias) = option(config, "oracle.tns_alias") {
-        return alias;
+    let mode = option(config, "oracle.connect_type").map(|value| value.to_ascii_lowercase());
+    // The old 4-value vocabulary kept a full descriptor / TNS alias ahead of the selected type.
+    // Keep that precedence for a legacy profile that is connected without opening the form; the
+    // new modes below are explicit and never use a stale field from another mode.
+    let legacy_mode = matches!(
+        mode.as_deref(),
+        None | Some("service") | Some("sid") | Some("tns") | Some("connect_string")
+    );
+    if legacy_mode {
+        if let Some(value) = option(config, "oracle.connect_string") {
+            return value;
+        }
+        if let Some(alias) = option(config, "oracle.tns_alias") {
+            return alias;
+        }
+    } else {
+        match mode.as_deref() {
+            Some("advanced") => {
+                if let Some(value) = option(config, "oracle.connect_string") {
+                    return value;
+                }
+            }
+            Some("tns") => {
+                if let Some(alias) = option(config, "oracle.tns_alias") {
+                    return alias;
+                }
+            }
+            _ => {}
+        }
     }
     // Oracle has no SSL tab: TCPS is implied by a legacy TLS profile or by a configured wallet
     // (the wallet is only useful over TCPS), matching OCI. A TNS alias / connect string above
@@ -400,8 +533,13 @@ fn connect_string(config: &ConnectionConfig, host: &str, port: u16) -> String {
     let tls_on = config.settings.tls.mode != TlsMode::Disabled
         || option(config, "oracle.wallet_location").is_some();
     let protocol = if tls_on { "tcps" } else { "tcp" };
-    // 连接类型 = SID: Easy Connect only takes a service name, so build a connect descriptor.
-    if option(config, "oracle.connect_type").as_deref() == Some("sid") {
+    // 基本 + SID: Easy Connect only takes a service name, so build a connect descriptor. The new
+    // form stores the choice in `oracle.service_name_type`; the legacy form encoded it in
+    // `oracle.connect_type = sid`.
+    let sid_type = option(config, "oracle.service_name_type")
+        .map(|value| value.eq_ignore_ascii_case("sid"))
+        .unwrap_or_else(|| mode.as_deref() == Some("sid"));
+    if sid_type {
         let sid = option(config, "oracle.sid").or_else(|| {
             config
                 .database
@@ -472,37 +610,48 @@ mod tests {
             keys,
             vec![
                 "oracle.connect_type",
+                "oracle.service_name_type",
                 "oracle.tns_alias",
+                "oracle.config_dir",
                 "oracle.connect_string",
                 "oracle.wallet_location",
                 "oracle.wallet_password",
-                "oracle.config_dir",
             ]
         );
-        // 连接类型 on 常规; the TCPS wallet and the tnsnames.ora directory on 高级. Oracle has no
-        // SSL tab (TCPS is carried by the connect descriptor or implied by the wallet).
-        assert_eq!(form.options[0].page, ConnectionPage::General);
-        assert_eq!(form.options[3].page, ConnectionPage::Advanced);
+        // 连接类型 sits above the address; the service/SID radio, TNS alias and directory sit
+        // between the address and the credentials. The descriptor and wallet are on 高级.
+        assert_eq!(form.options[0].placement, ConnectionFieldPlacement::Leading);
+        assert_eq!(form.options[1].placement, ConnectionFieldPlacement::Target);
+        assert_eq!(form.options[2].placement, ConnectionFieldPlacement::Target);
+        assert_eq!(form.options[3].placement, ConnectionFieldPlacement::Target);
+        assert_eq!(form.options[4].page, ConnectionPage::Advanced);
         assert_eq!(form.options[5].page, ConnectionPage::Advanced);
+        assert_eq!(form.options[6].page, ConnectionPage::Advanced);
         assert_eq!(
             form.tabs,
             vec![ConnectionPage::Tunnel, ConnectionPage::Advanced]
         );
-        // 服务名/SID is only meaningful for the service/SID connection types; the field hides for
-        // TNS alias / connect string.
+        // Only 基本 shows the address and the service/SID target; TNS and 高级 hide them.
         assert_eq!(
             form.labels[0].visible_when,
-            Some(("oracle.connect_type", &["service", "sid"][..]))
+            Some(("oracle.connect_type", &["basic"][..]))
         );
-        // The TNS alias / connect string are only shown for their connection type.
+        assert!(form.labels[0].required);
         assert_eq!(
             form.options[1].visible_when,
-            Some(("oracle.connect_type", "tns"))
+            Some(("oracle.connect_type", "basic"))
         );
         assert_eq!(
             form.options[2].visible_when,
-            Some(("oracle.connect_type", "connect_string"))
+            Some(("oracle.connect_type", "tns"))
         );
+        assert!(form.options[2].required);
+        assert_eq!(
+            form.options[4].visible_when,
+            Some(("oracle.connect_type", "advanced"))
+        );
+        assert!(form.options[4].required);
+        assert_eq!(form.options[4].kind, ConnectionFieldKind::Multiline);
         // Oracle honors only the query timeout and the session init SQL.
         assert_eq!(
             form.advanced,
@@ -512,6 +661,36 @@ mod tests {
                 ..AdvancedFields::NONE
             }
         );
+    }
+
+    #[test]
+    fn normalizes_the_legacy_connection_type() {
+        let driver = OracleDriver::new();
+        let normalize = |values: &[(&str, &str)]| {
+            let mut options: BTreeMap<String, String> = values
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect();
+            driver.normalize_connection_options(&mut options);
+            options
+        };
+
+        let service = normalize(&[("oracle.connect_type", "service")]);
+        assert_eq!(service["oracle.connect_type"], "basic");
+        assert_eq!(service["oracle.service_name_type"], "service");
+
+        let sid = normalize(&[("oracle.connect_type", "sid")]);
+        assert_eq!(sid["oracle.connect_type"], "basic");
+        assert_eq!(sid["oracle.service_name_type"], "sid");
+
+        let tns = normalize(&[("oracle.connect_type", "tns")]);
+        assert_eq!(tns["oracle.connect_type"], "tns");
+
+        let descriptor = normalize(&[("oracle.connect_type", "connect_string")]);
+        assert_eq!(descriptor["oracle.connect_type"], "advanced");
+
+        let stale_descriptor = normalize(&[("oracle.connect_string", "(DESCRIPTION=...)")]);
+        assert_eq!(stale_descriptor["oracle.connect_type"], "advanced");
     }
 
     #[test]
@@ -566,16 +745,50 @@ mod tests {
             "db.example.com:1521/FREEPDB1"
         );
 
+        // 基本 + SID builds a descriptor; a stale TNS alias from an older mode must not win.
         config
             .options
-            .insert("oracle.connect_type".to_string(), "sid".to_string());
+            .insert("oracle.connect_type".to_string(), "basic".to_string());
+        config
+            .options
+            .insert("oracle.service_name_type".to_string(), "sid".to_string());
         config.database = Some("ORCL".to_string());
+        config
+            .options
+            .insert("oracle.tns_alias".to_string(), "STALE_ALIAS".to_string());
         assert_eq!(
             connect_string(&config, "db.example.com", 1521),
             "(DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST=db.example.com)(PORT=1521))(CONNECT_DATA=(SID=ORCL)))"
         );
 
-        // A TNS alias wins over the SID type (legacy profiles keep working).
+        // TNS is its own mode; the alias is used and the service target is ignored.
+        config
+            .options
+            .insert("oracle.connect_type".to_string(), "tns".to_string());
+        assert_eq!(
+            connect_string(&config, "db.example.com", 1521),
+            "STALE_ALIAS"
+        );
+
+        // 高级 returns the full descriptor verbatim.
+        config
+            .options
+            .insert("oracle.connect_type".to_string(), "advanced".to_string());
+        config.options.insert(
+            "oracle.connect_string".to_string(),
+            "(DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST=advanced)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=FREEPDB1)))".to_string(),
+        );
+        assert_eq!(
+            connect_string(&config, "db.example.com", 1521),
+            "(DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST=advanced)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=FREEPDB1)))"
+        );
+
+        // Legacy profiles keep the old precedence: a TNS alias still wins over SID.
+        config.options.clear();
+        config.database = Some("ORCL".to_string());
+        config
+            .options
+            .insert("oracle.connect_type".to_string(), "sid".to_string());
         config
             .options
             .insert("oracle.tns_alias".to_string(), "ORCL_ALIAS".to_string());

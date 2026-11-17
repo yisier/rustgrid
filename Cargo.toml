@@ -10,6 +10,7 @@ members = [
     "crates/rustgrid-sqlserver",
     "crates/rustgrid-postgresql",
     "crates/rustgrid-oracle",
+    "crates/rustgrid-clickhouse",
     "crates/rustgrid-redis",
     "crates/rustgrid-mongodb",
     "crates/rustgrid-tunnel",
@@ -38,6 +39,7 @@ rustgrid-sqlite = { path = "crates/rustgrid-sqlite" }
 rustgrid-sqlserver = { path = "crates/rustgrid-sqlserver" }
 rustgrid-postgresql = { path = "crates/rustgrid-postgresql" }
 rustgrid-oracle = { path = "crates/rustgrid-oracle" }
+rustgrid-clickhouse = { path = "crates/rustgrid-clickhouse" }
 rustgrid-tunnel = { path = "crates/rustgrid-tunnel" }
 rustgrid-odbc = { path = "crates/rustgrid-odbc" }
 rustgrid-redis = { path = "crates/rustgrid-redis" }
@@ -75,6 +77,26 @@ bb8 = { version = "0.9", default-features = false }
 tokio-util = { version = "0.7", features = ["compat"] }
 uuid = { version = "1", default-features = false }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# ClickHouse: the official Rust client, which speaks the HTTP interface over hyper 1. No OpenSSL
+# and no C toolchain (SQLCipher's build already needs a C compiler, but ClickHouse adds none);
+# lz4 is off because the driver reads results uncompressed.
+clickhouse = { version = "0.15", default-features = false, features = ["rustls-tls"] }
+# The ClickHouse driver supplies its own hyper client so the TLS page's CA, client certificate and
+# verification mode are honoured. hyper-rustls' `ring` backend shares the provider sqlx already
+# compiles, and rustls-pemfile reads the PEM files the form points at.
+hyper-util = { version = "0.1", default-features = false, features = [
+    "client-legacy",
+    "http1",
+    "tokio",
+] }
+hyper-rustls = { version = "0.27", default-features = false, features = [
+    "http1",
+    "tls12",
+    "ring",
+] }
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
+rustls-pemfile = "2"
+webpki-roots = "1"
 rust-i18n = "4"
 directories = "6"
 sys-locale = "0.3"
