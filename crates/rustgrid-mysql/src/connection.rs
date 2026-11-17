@@ -1543,7 +1543,10 @@ impl Connection for MysqlConnection {
     }
 
     async fn character_sets(&self) -> Result<Vec<String>> {
-        let rows = sqlx::query(
+        // No parameters: use the text protocol. `sqlx::query` intends to prepare even when
+        // nothing is bound, and OceanBase 3.x refuses server-side prepares by default
+        // (issue #62).
+        let rows = sqlx::raw_sql(
             "SELECT character_set_name FROM information_schema.character_sets \
              ORDER BY character_set_name",
         )
@@ -1557,7 +1560,8 @@ impl Connection for MysqlConnection {
     }
 
     async fn collations(&self) -> Result<Vec<String>> {
-        let rows = sqlx::query(
+        // No parameters: use the text protocol, like `character_sets` (issue #62).
+        let rows = sqlx::raw_sql(
             "SELECT collation_name FROM information_schema.collations \
              ORDER BY collation_name",
         )

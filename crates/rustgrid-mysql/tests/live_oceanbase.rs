@@ -64,6 +64,13 @@ async fn live_oceanbase_catalog_page_and_edit() {
         "expected information_schema to be listed"
     );
 
+    // The designer loads these as soon as a table is opened. A prepared catalog query would
+    // fail with OceanBase's error 1235 before the designer could show its fields (issue #62).
+    let charsets = connection.character_sets().await.expect("character sets");
+    assert!(charsets.iter().any(|name| name == "utf8mb4"));
+    let collations = connection.collations().await.expect("collations");
+    assert!(collations.iter().any(|name| name == "utf8mb4_general_ci"));
+
     let database = "rustgrid_oceanbase_live";
     let table = "users";
     connection
