@@ -49,6 +49,15 @@ impl GridView {
         scroll.clamp(0.0, self.grid_scroll_max())
     }
 
+    /// The left edge of the horizontal scrollbar's track, in window space. The track starts where
+    /// the scrolling columns start — after the row gutter and the frozen block — so its painted
+    /// thumb and the pointer maths below use the same `viewport`. A full-table track put the thumb
+    /// where a press was read as a track click, which is why freezing a column left a scrollbar
+    /// that could not be dragged.
+    pub(super) fn grid_hscroll_track_left(&self) -> Pixels {
+        self.hscroll.bounds().left() + px(self.gutter_width() + self.frozen_width())
+    }
+
     /// Move the non-frozen columns to `scroll`. A frozen grid keeps the offset in its own field
     /// (the tracked handle must not translate the frozen subtree); otherwise it drives `hscroll`
     /// exactly as before.
@@ -94,29 +103,44 @@ impl GridView {
         let theme = self.theme;
         let viewport = self.grid_scroll_viewport();
         let max = self.grid_scroll_max();
+        // The track sits under the scrolling columns only: the frozen block (and the gutter)
+        // stay unpanned, so a track over them would paint its thumb at the wrong offset.
+        let lead = self.gutter_width() + self.frozen_width();
+        let row = div()
+            .flex_none()
+            .flex()
+            .flex_row()
+            .w_full()
+            .h(px(GRID_SCROLLBAR_THICKNESS));
         if max <= 0.0 {
             // Reserve the same height as a real scrollbar so the vertical track's viewport stays
             // constant whether or not the grid can scroll horizontally.
-            return div()
-                .flex_none()
-                .h(px(GRID_SCROLLBAR_THICKNESS))
-                .into_any_element();
+            return row.into_any_element();
         }
         let scroll = self.grid_column_scroll();
         let (thumb_left, thumb_len) = scrollbar_fractions(viewport, max, scroll);
 
-        ui::hscrollbar_track("grid-hscrollbar", theme, thumb_left, thumb_len)
-            .on_mouse_down(
+        row.child(
+            div()
+                .w(px(lead))
+                .flex_none()
+                .h_full()
+                .bg(rgb(theme.scroll_track))
+                .border_t_1()
+                .border_color(rgb(theme.border)),
+        )
+        .child(div().flex_1().min_w(px(0.0)).h_full().child(
+            ui::hscrollbar_track("grid-hscrollbar", theme, thumb_left, thumb_len).on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
                     this.grid_hscroll_begin(event.position.x, cx);
                 }),
-            )
-            .into_any_element()
+            ),
+        ))
+        .into_any_element()
     }
 
     pub(super) fn grid_hscroll_begin(&mut self, mouse_x: Pixels, cx: &mut Context<'_, Self>) {
-        let bounds = self.hscroll.bounds();
         let viewport = self.grid_scroll_viewport();
         let max = self.grid_scroll_max();
         let (thumb_w, travel) = scrollbar_thumb(viewport, max);
@@ -125,7 +149,7 @@ impl GridView {
         }
         let scroll = self.grid_column_scroll();
         let thumb_x = (scroll / max) * travel;
-        let relative = f32::from(mouse_x) - f32::from(bounds.left());
+        let relative = f32::from(mouse_x) - f32::from(self.grid_hscroll_track_left());
         let grab = if relative >= thumb_x && relative <= thumb_x + thumb_w {
             relative - thumb_x
         } else {
@@ -144,7 +168,7 @@ impl GridView {
             cx.notify();
             return;
         }
-        let relative = f32::from(event.position.x) - f32::from(self.hscroll.bounds().left());
+        let relative = f32::from(event.position.x) - f32::from(self.grid_hscroll_track_left());
         self.grid_hscroll_set(relative, grab, cx);
     }
 

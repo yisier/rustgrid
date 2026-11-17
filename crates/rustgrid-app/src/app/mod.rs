@@ -1992,6 +1992,11 @@ struct CellEditor {
     col: usize,
     cells: Vec<(usize, usize)>,
     value: String,
+    /// A read-only grid (a query result that maps to no single table, a document viewer, ...)
+    /// opens this as a *viewer*: the value can be focused, partly selected and copied, but nothing
+    /// is staged or written back. This is what makes double-click select a substring of a cell
+    /// instead of only letting the grid copy the whole cell.
+    readonly: bool,
     input: Entity<TextInput>,
 }
 

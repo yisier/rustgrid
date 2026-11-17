@@ -787,10 +787,15 @@ impl GridView {
         cx: &mut Context<'_, Self>,
     ) {
         let (row, col) = cell;
-        if !self.state.editable
-            || row >= self.display_row_count()
-            || col >= self.state.visible_columns
-        {
+        if row >= self.display_row_count() || col >= self.state.visible_columns {
+            return;
+        }
+        // A read-only grid has no edit mode, but its cells still have to be readable and
+        // copyable: the explicit edit gesture (double-click / Enter) opens the value in a
+        // read-only in-place field, where a substring can be selected and copied. Typing a
+        // character keeps doing nothing there, exactly as before.
+        let readonly = !self.state.editable;
+        if readonly && initial.is_some() {
             return;
         }
         let value = self
@@ -804,13 +809,16 @@ impl GridView {
                     .unwrap_or_default(),
                 _ => String::new(),
             });
-        let cells = self
-            .state
-            .selection
-            .as_ref()
-            .filter(|selection| selection.contains(row, col))
-            .map(|selection| selection.cells())
-            .unwrap_or_else(|| vec![(row, col)]);
+        let cells = if readonly {
+            vec![(row, col)]
+        } else {
+            self.state
+                .selection
+                .as_ref()
+                .filter(|selection| selection.contains(row, col))
+                .map(|selection| selection.cells())
+                .unwrap_or_else(|| vec![(row, col)])
+        };
 
         let value = match initial {
             Some(character) => character.to_string(),
@@ -826,6 +834,7 @@ impl GridView {
                 initial_text,
                 TextInputOptions {
                     bare: true,
+                    readonly,
                     text_size: Some(12.5),
                     ..Default::default()
                 },
@@ -867,6 +876,7 @@ impl GridView {
             col,
             cells,
             value: value.clone(),
+            readonly,
             input,
         });
         self.cell_editor_focus_pending = true;
@@ -988,6 +998,7 @@ impl GridView {
             return;
         };
         let multi = editor.cells.len() > 1;
+        let readonly = editor.readonly;
         // A single-cell edit on an existing row auto-commits; a pending insert row waits for Save
         // (the checkmark or Ctrl+S) so a whole new row is inserted in one statement.
         let only_data_rows = matches!(
@@ -995,6 +1006,10 @@ impl GridView {
             Some(GridRow::Data(_))
         );
         self.commit_editor(cx);
+        // A read-only viewer stages nothing, so there is no batch to flush.
+        if readonly {
+            return;
+        }
         // Auto-commit only when this single-cell edit is the *only* pending change. If other
         // edits/inserts are staged, committing here would flush (and reload away) the batch the
         // user is still assembling, so it waits for the commit button instead.
@@ -1011,6 +1026,11 @@ impl GridView {
         let Some(editor) = self.cell_editor.take() else {
             return;
         };
+        if editor.readonly {
+            // A read-only viewer has nothing to stage; closing it must leave the page untouched.
+            cx.notify();
+            return;
+        }
         let data_rows = self.state.rows.len();
         let mut action = Vec::new();
         for (row, col) in editor.cells {

@@ -554,11 +554,13 @@ impl Render for GridView {
         // The cell being edited when its column is temporal. Such a cell carries a "…" button
         // that toggles the date/time popup, whether or not the popup is currently open.
         let editing_temporal = self.cell_editor.as_ref().and_then(|editor| {
-            self.state
-                .columns
-                .get(editor.col)
-                .is_some_and(|column| is_temporal_type(&column.data_type))
-                .then_some((editor.row, editor.col))
+            (!editor.readonly
+                && self
+                    .state
+                    .columns
+                    .get(editor.col)
+                    .is_some_and(|column| is_temporal_type(&column.data_type)))
+            .then_some((editor.row, editor.col))
         });
         // The cell being edited, with its live input entity. The editor is rendered *inside* that
         // cell (below) rather than as an overlay, so it scrolls with the rows and can never be left

@@ -1629,28 +1629,36 @@ impl GridView {
                         None,
                         cx.listener(|this, _event, _window, cx| this.open_delete_confirm(cx)),
                     ))
-                    .child(self.grid_icon_button(
-                        "grid-commit",
-                        "icons/check.svg",
-                        theme.icon_connection,
-                        self.cell_editor.is_some()
-                            || !self.state.edits.is_empty()
-                            || !self.inserts.is_empty(),
-                        t!("grid.save_changes").to_string(),
-                        None,
-                        cx.listener(|this, _event, _window, cx| this.save_grid(cx)),
-                    ))
-                    .child(self.grid_icon_button(
-                        "grid-rollback",
-                        "icons/cross.svg",
-                        theme.danger,
-                        self.cell_editor.is_some()
-                            || !self.state.edits.is_empty()
-                            || !self.inserts.is_empty(),
-                        t!("grid.cancel_changes").to_string(),
-                        None,
-                        cx.listener(|this, _event, _window, cx| this.cancel_edits(cx)),
-                    ))
+                    .child(
+                        self.grid_icon_button(
+                            "grid-commit",
+                            "icons/check.svg",
+                            theme.icon_connection,
+                            self.cell_editor
+                                .as_ref()
+                                .is_some_and(|editor| !editor.readonly)
+                                || !self.state.edits.is_empty()
+                                || !self.inserts.is_empty(),
+                            t!("grid.save_changes").to_string(),
+                            None,
+                            cx.listener(|this, _event, _window, cx| this.save_grid(cx)),
+                        ),
+                    )
+                    .child(
+                        self.grid_icon_button(
+                            "grid-rollback",
+                            "icons/cross.svg",
+                            theme.danger,
+                            self.cell_editor
+                                .as_ref()
+                                .is_some_and(|editor| !editor.readonly)
+                                || !self.state.edits.is_empty()
+                                || !self.inserts.is_empty(),
+                            t!("grid.cancel_changes").to_string(),
+                            None,
+                            cx.listener(|this, _event, _window, cx| this.cancel_edits(cx)),
+                        ),
+                    )
                     .child(self.grid_icon_button(
                         "grid-refresh",
                         "icons/refresh.svg",

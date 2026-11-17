@@ -625,6 +625,12 @@ touching UI code.
   `selecting_cells`, in `grid_view.rs`) and keeps extending the selection into the revealed rows;
   the wheel over a multi-cell range likewise scrolls the viewport, while a single-cell cursor keeps
   the wheel's cursor walk (see `grid_input.rs`).
+- **A read-only grid still opens a cell viewer on the edit gesture.** Double-click (or Enter) on a
+  cell of a grid that cannot be written (`GridState::editable` false — a query result that maps to
+  no single table, a document view, ...) opens the same in-place field, but read-only: the value can
+  be focused, partly selected and copied, while `CellEditor::readonly` makes the close paths stage
+  nothing, so the page and the database stay untouched. This is how a substring of a result cell is
+  selected; without it only the whole cell could be copied.
 - Embed bitmap images with `img(ImageSource::Resource(Resource::Embedded("name".into())))`.
   Calling `img("name")` treats the bare filename as a **URI** and fails with
   `Failed to load asset ... loading image asset from "name"`.
@@ -906,7 +912,11 @@ shadcn chrome described above. Implemented today:
     keeps the unfrozen order, so 取消冻结 / 取消冻结全部列 puts every field back where it was
     without a snapshot. Each frozen header and 字段 row carries a lock glyph; a frozen row cannot
     be dragged in the popup, and 隐藏列 unfreezes a hidden field. The columns after the frozen block
-    pan inside their own clipped strip. 隐藏列 writes the same `GridFieldLayout.hidden` set the 字段
+    pan inside their own clipped strip, and the horizontal scrollbar is drawn only under that
+    strip — starting after the gutter and the frozen block (`GridView::grid_hscroll_track_left`) —
+    so the painted thumb and the drag maths share the scrolling viewport; a full-table track treated
+    a press on the thumb as a click on the track, which made the bar undraggable once a column was
+    frozen. 隐藏列 writes the same `GridFieldLayout.hidden` set the 字段
     popup edits (and the menu listener persists it), so the field is listed unchecked there.
 
 17. 详细列表 density and sorting (`ui/views.rs` + every list page): all detail lists share one
