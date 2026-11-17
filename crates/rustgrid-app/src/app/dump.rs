@@ -1,5 +1,6 @@
-//! *Dump SQL File*: right-click a database and write a portable `.sql` script for the whole
-//! database — its objects' `CREATE` DDL, its table data, or both.
+//! *Dump SQL File*: right-click a database (or a table/view) and write a portable `.sql` script
+//! for the whole database — its objects' `CREATE` DDL, its table data, or both — or for just the
+//! one table/view.
 //!
 //! The dump reuses the engine-agnostic backup primitives ([`Connection::backup_object_metadata`]
 //! and [`Connection::stream_table_rows`]) so it works for every driver without engine-specific
@@ -26,6 +27,43 @@ impl AppView {
         mode: DumpMode,
         cx: &mut Context<'_, Self>,
     ) {
+        self.request_dump_target(connection_index, database_index, None, mode, cx);
+    }
+
+    /// The table/view context menu's 转储 SQL 文件 entry: dump just the right-clicked object.
+    pub(super) fn request_dump_table(
+        &mut self,
+        connection_index: usize,
+        database_index: usize,
+        name: String,
+        is_view: bool,
+        mode: DumpMode,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let kind = if is_view {
+            BackupObjectKind::View
+        } else {
+            BackupObjectKind::Table
+        };
+        self.request_dump_target(
+            connection_index,
+            database_index,
+            Some((kind, name)),
+            mode,
+            cx,
+        );
+    }
+
+    /// Pick the output file and open the dump window. `object` narrows the dump to one table/view;
+    /// `None` dumps the whole database.
+    fn request_dump_target(
+        &mut self,
+        connection_index: usize,
+        database_index: usize,
+        object: Option<(BackupObjectKind, String)>,
+        mode: DumpMode,
+        cx: &mut Context<'_, Self>,
+    ) {
         let Some(database) = self.database_name(connection_index, database_index) else {
             return;
         };
@@ -34,7 +72,10 @@ impl AppView {
             cx.notify();
             return;
         }
-        let default_name = format!("{database}.sql");
+        let default_name = match &object {
+            Some((_, name)) => format!("{name}.sql"),
+            None => format!("{database}.sql"),
+        };
         let title = t!("sqlfile.dump_title").to_string();
         let default_dir = super::export::default_export_dir();
 
@@ -51,7 +92,7 @@ impl AppView {
             };
             let path = handle.path().to_path_buf();
             let _ = this.update(cx, |app, cx| {
-                app.open_dump_window(connection_index, database_index, mode, path, cx);
+                app.open_dump_window(connection_index, database_index, object, mode, path, cx);
             });
         })
         .detach();
@@ -62,6 +103,7 @@ impl AppView {
         &mut self,
         connection_index: usize,
         database_index: usize,
+        object: Option<(BackupObjectKind, String)>,
         mode: DumpMode,
         output_path: PathBuf,
         cx: &mut Context<'_, Self>,
@@ -74,6 +116,7 @@ impl AppView {
         self.dump_dialog = Some(DumpSqlDialog {
             connection_index,
             database_index,
+            object,
             mode,
             output_path: Some(output_path),
             running: false,
@@ -94,8 +137,9 @@ impl AppView {
         cx.notify();
     }
 
-    /// Run the dump: enumerate the database's objects, then write each one's DDL and/or data to
-    /// the chosen file while updating the log and progress live.
+    /// Run the dump: enumerate the database's objects (or use the one table/view the menu named),
+    /// then write each one's DDL and/or data to the chosen file while updating the log and progress
+    /// live.
     pub(super) fn run_dump(&mut self, cx: &mut Context<'_, Self>) {
         let Some(dialog) = self.dump_dialog.as_ref() else {
             return;
@@ -105,6 +149,7 @@ impl AppView {
         }
         let connection_index = dialog.connection_index;
         let database_index = dialog.database_index;
+        let object = dialog.object.clone();
         let mode = dialog.mode;
         let Some(path) = dialog.output_path.clone() else {
             return;
@@ -160,7 +205,11 @@ impl AppView {
             }
         };
         let mut header = format!(
-            "-- RustGrid SQL dump\n-- Server: {connection_name}\n-- Database: {database}\n-- Date: {}\n\n",
+            "-- RustGrid SQL dump\n-- Server: {connection_name}\n-- Database: {database}\n{}-- Date: {}\n\n",
+            match &object {
+                Some((_, name)) => format!("-- Object: {name}\n"),
+                None => String::new(),
+            },
             now_timestamp()
         );
         // MySQL/MariaDB dumps disable foreign-key checks while the data loads (like mysqldump and
@@ -186,51 +235,60 @@ impl AppView {
             .unwrap_or_default();
 
         cx.spawn(async move |this, cx| {
-            // Enumerate the objects: tables and views plus stored routines and events.
-            let listing = {
-                let connection = connection.clone();
-                let database = database.clone();
-                runtime
-                    .spawn(async move {
-                        let mut objects: Vec<(BackupObjectKind, String)> = Vec::new();
-                        for table in connection.list_tables(&database).await? {
-                            let kind = match table.kind {
-                                rustgrid_core::ObjectKind::View => BackupObjectKind::View,
-                                rustgrid_core::ObjectKind::Table => BackupObjectKind::Table,
-                            };
-                            objects.push((kind, table.name));
+            // A table/view menu dumps just that object; the database menu enumerates every table
+            // and view plus the stored routines and events.
+            let objects = match object {
+                Some(target) => vec![target],
+                None => {
+                    let listing = {
+                        let connection = connection.clone();
+                        let database = database.clone();
+                        runtime
+                            .spawn(async move {
+                                let mut objects: Vec<(BackupObjectKind, String)> = Vec::new();
+                                for table in connection.list_tables(&database).await? {
+                                    let kind = match table.kind {
+                                        rustgrid_core::ObjectKind::View => BackupObjectKind::View,
+                                        rustgrid_core::ObjectKind::Table => BackupObjectKind::Table,
+                                    };
+                                    objects.push((kind, table.name));
+                                }
+                                if let Ok(routines) = connection.list_routines(&database).await {
+                                    for name in routines {
+                                        objects.push((BackupObjectKind::Function, name));
+                                    }
+                                }
+                                if let Ok(events) = connection.list_events(&database).await {
+                                    for name in events {
+                                        objects.push((BackupObjectKind::Event, name));
+                                    }
+                                }
+                                // Tables before views before routines: `SHOW CREATE VIEW` references
+                                // its base tables, and routines may reference both, so they must
+                                // already exist.
+                                objects.sort_by_key(|(kind, _)| match kind {
+                                    BackupObjectKind::Table => 0,
+                                    BackupObjectKind::View => 1,
+                                    BackupObjectKind::Function => 2,
+                                    BackupObjectKind::Event => 3,
+                                });
+                                Ok::<_, Error>(objects)
+                            })
+                            .await
+                    };
+                    match listing {
+                        Ok(Ok(objects)) => objects,
+                        Ok(Err(error)) => {
+                            let _ = this
+                                .update(cx, |app, cx| app.finish_dump(Some(error.to_string()), cx));
+                            return;
                         }
-                        if let Ok(routines) = connection.list_routines(&database).await {
-                            for name in routines {
-                                objects.push((BackupObjectKind::Function, name));
-                            }
+                        Err(error) => {
+                            let _ = this
+                                .update(cx, |app, cx| app.finish_dump(Some(error.to_string()), cx));
+                            return;
                         }
-                        if let Ok(events) = connection.list_events(&database).await {
-                            for name in events {
-                                objects.push((BackupObjectKind::Event, name));
-                            }
-                        }
-                        // Tables before views before routines: `SHOW CREATE VIEW` references its
-                        // base tables, and routines may reference both, so they must already exist.
-                        objects.sort_by_key(|(kind, _)| match kind {
-                            BackupObjectKind::Table => 0,
-                            BackupObjectKind::View => 1,
-                            BackupObjectKind::Function => 2,
-                            BackupObjectKind::Event => 3,
-                        });
-                        Ok::<_, Error>(objects)
-                    })
-                    .await
-            };
-            let objects = match listing {
-                Ok(Ok(objects)) => objects,
-                Ok(Err(error)) => {
-                    let _ = this.update(cx, |app, cx| app.finish_dump(Some(error.to_string()), cx));
-                    return;
-                }
-                Err(error) => {
-                    let _ = this.update(cx, |app, cx| app.finish_dump(Some(error.to_string()), cx));
-                    return;
+                    }
                 }
             };
 
@@ -489,6 +547,7 @@ impl AppView {
             DumpMode::Structure => t!("database.dump_structure").to_string(),
             DumpMode::Data => t!("database.dump_data").to_string(),
         };
+        let object = dialog.object.as_ref().map(|(_, name)| name.clone());
         let output = dialog
             .output_path
             .as_ref()
@@ -507,7 +566,7 @@ impl AppView {
         let log = dialog.log.clone();
         let scroll = dialog.log_scroll.clone();
 
-        div()
+        let mut body = div()
             .flex()
             .flex_col()
             .flex_1()
@@ -517,8 +576,11 @@ impl AppView {
                 connection_name,
                 database_name,
                 theme,
-            ))
-            .child(field_line(t!("sqlfile.mode").to_string(), mode, theme))
+            ));
+        if let Some(object) = object {
+            body = body.child(field_line(t!("sqlfile.object").to_string(), object, theme));
+        }
+        body.child(field_line(t!("sqlfile.mode").to_string(), mode, theme))
             .child(field_line(
                 t!("sqlfile.file").to_string(),
                 if output.is_empty() {

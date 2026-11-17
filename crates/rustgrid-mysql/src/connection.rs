@@ -69,11 +69,16 @@ impl MysqlConnection {
         self.text_protocol.load(Ordering::Relaxed)
     }
 
-    fn mark_text_protocol(&self) {
+    /// Mark the pool for the text protocol after a prepared catalog query failed. A proxy that
+    /// rejects server-side prepares also insists on a current database before it routes a catalog
+    /// statement, so it gets the current-database treatment too; a server that only lacks
+    /// prepared statements (OceanBase with `_ob_enable_prepared_statement` off) keeps normal
+    /// qualified names.
+    fn mark_text_protocol_for(&self, error: &sqlx::Error) {
         self.text_protocol.store(true, Ordering::Relaxed);
-        // Every proxy that rejects server-side prepares also insists on a current database
-        // before it routes a catalog statement; select it on each database-scoped session.
-        self.mark_needs_database();
+        if !is_prepare_unsupported_error(error) {
+            self.mark_needs_database();
+        }
     }
 
     /// Whether this session already met a middleware that rejects statements while it has no
@@ -264,6 +269,21 @@ impl MysqlConnection {
         };
 
         let rows = build().fetch_all(&mut *connection).await;
+
+        // A server may reject server-side prepares (OceanBase 3.x keeps
+        // `_ob_enable_prepared_statement` off by default). Retry the same statement as text on
+        // the pinned connection and keep the pool on the text protocol (issue #62).
+        if let Err(error) = &rows
+            && is_prepare_unsupported_error(error)
+        {
+            self.text_protocol.store(true, Ordering::Relaxed);
+            let values: Vec<BoundValue> = binds.iter().map(|bind| BoundValue::Text(bind)).collect();
+            let sql = text_statement(sql, &values);
+            return sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+                .fetch_all(&mut *connection)
+                .await;
+        }
+
         if matches!(&rows, Err(error) if is_no_database_error(error)) {
             self.mark_needs_database();
             if retry {
@@ -317,9 +337,22 @@ impl MysqlConnection {
             let sql = text_statement(sql, &values);
             self.text_rows(connection, database, sql).await
         } else {
-            self.prepared_rows(connection, database, sql, binds, true)
-                .await
-                .map_err(map_query_error)
+            let rows = self
+                .prepared_rows(connection, database, sql, binds, true)
+                .await;
+            match rows {
+                Err(error) if is_prepare_unsupported_error(&error) => {
+                    // A server that only lacks server-side prepares (OceanBase 3.x) keeps normal
+                    // qualified names; retry this catalog read over the text protocol and use it
+                    // for the rest of the pool (issue #62).
+                    self.text_protocol.store(true, Ordering::Relaxed);
+                    let values: Vec<BoundValue> =
+                        binds.iter().map(|bind| BoundValue::Text(bind)).collect();
+                    let sql = text_statement(sql, &values);
+                    self.text_rows(connection, database, sql).await
+                }
+                rows => rows.map_err(map_query_error),
+            }
         }
     }
 
@@ -790,8 +823,8 @@ impl Connection for MysqlConnection {
             .await;
         let rows = match rows {
             Ok(rows) => rows,
-            Err(error) if is_unknown_command_error(&error) || is_no_database_error(&error) => {
-                self.mark_text_protocol();
+            Err(error) if is_prepare_fallback_error(&error) => {
+                self.mark_text_protocol_for(&error);
                 connection
                     .select_database(database)
                     .await
@@ -847,8 +880,8 @@ impl Connection for MysqlConnection {
             .await;
         let rows = match rows {
             Ok(rows) => rows,
-            Err(error) if is_unknown_command_error(&error) || is_no_database_error(&error) => {
-                self.mark_text_protocol();
+            Err(error) if is_prepare_fallback_error(&error) => {
+                self.mark_text_protocol_for(&error);
                 connection
                     .select_database(database)
                     .await
@@ -1377,8 +1410,8 @@ impl Connection for MysqlConnection {
                 .await
             {
                 Ok(rows) => rows,
-                Err(error) if is_unknown_command_error(&error) || is_no_database_error(&error) => {
-                    self.mark_text_protocol();
+                Err(error) if is_prepare_fallback_error(&error) => {
+                    self.mark_text_protocol_for(&error);
                     return self.database_options_via_text(&mut connection, name).await;
                 }
                 Err(error) => return Err(map_query_error(error)),
@@ -1444,8 +1477,8 @@ impl Connection for MysqlConnection {
                 .await
             {
                 Ok(statuses) => statuses,
-                Err(error) if is_unknown_command_error(&error) || is_no_database_error(&error) => {
-                    self.mark_text_protocol();
+                Err(error) if is_prepare_fallback_error(&error) => {
+                    self.mark_text_protocol_for(&error);
                     connection
                         .select_database(database)
                         .await
@@ -1510,7 +1543,10 @@ impl Connection for MysqlConnection {
     }
 
     async fn character_sets(&self) -> Result<Vec<String>> {
-        let rows = sqlx::query(
+        // No parameters: use the text protocol. `sqlx::query` intends to prepare even when
+        // nothing is bound, and OceanBase 3.x refuses server-side prepares by default
+        // (issue #62).
+        let rows = sqlx::raw_sql(
             "SELECT character_set_name FROM information_schema.character_sets \
              ORDER BY character_set_name",
         )
@@ -1524,7 +1560,8 @@ impl Connection for MysqlConnection {
     }
 
     async fn collations(&self) -> Result<Vec<String>> {
-        let rows = sqlx::query(
+        // No parameters: use the text protocol, like `character_sets` (issue #62).
+        let rows = sqlx::raw_sql(
             "SELECT collation_name FROM information_schema.collations \
              ORDER BY collation_name",
         )
@@ -2004,18 +2041,18 @@ impl Connection for MysqlConnection {
                 })
                 .unwrap_or_default()
         } else {
-            let option_row = sqlx::query(
-                "SELECT engine, table_collation, table_comment, auto_increment \
-                 FROM information_schema.tables \
-                 WHERE table_schema = ? AND table_name = ?",
-            )
-            .bind(database)
-            .bind(table)
-            .fetch_optional(&mut *connection)
-            .await
-            .map_err(map_query_error)?;
+            let option_rows = self
+                .metadata_rows(
+                    &mut connection,
+                    database,
+                    "SELECT engine, table_collation, table_comment, auto_increment \
+                     FROM information_schema.tables \
+                     WHERE table_schema = ? AND table_name = ?",
+                    &[database, table],
+                )
+                .await?;
 
-            match option_row {
+            match option_rows.into_iter().next() {
                 Some(row) => {
                     let engine: Option<String> = row.try_get(0).unwrap_or(None);
                     let collation: Option<String> = row.try_get(1).unwrap_or(None);
@@ -2201,7 +2238,7 @@ impl Connection for MysqlConnection {
     }
 
     async fn list_routine_infos(&self, database: &str) -> Result<Vec<RoutineInfo>> {
-        crate::routine::list_routine_infos(&self.pool, database).await
+        crate::routine::list_routine_infos(&self.pool, database, self.text_protocol()).await
     }
 
     async fn routine_details(
@@ -2210,7 +2247,8 @@ impl Connection for MysqlConnection {
         kind: RoutineKind,
         name: &str,
     ) -> Result<RoutineDetails> {
-        crate::routine::routine_details(&self.pool, database, kind, name).await
+        crate::routine::routine_details(&self.pool, database, kind, name, self.text_protocol())
+            .await
     }
 
     fn routine_sql(
@@ -2236,7 +2274,7 @@ impl Connection for MysqlConnection {
     }
 
     async fn view_details(&self, database: &str, name: &str) -> Result<ViewDetails> {
-        crate::view::view_details(&self.pool, database, name).await
+        crate::view::view_details(&self.pool, database, name, self.text_protocol()).await
     }
 
     fn view_sql(&self, database: &str, original: Option<&str>, edit: &ViewEdit) -> String {
@@ -3369,7 +3407,7 @@ fn quote_mysql_string(value: &str) -> String {
 /// One value in a statement generated by this module. The binary protocol binds it as a typed
 /// parameter; the text protocol (used for MySQL-protocol proxies that reject `COM_STMT_PREPARE`)
 /// renders it as a literal.
-enum BoundValue<'a> {
+pub(crate) enum BoundValue<'a> {
     Text(&'a str),
     Number(i64),
 }
@@ -3403,7 +3441,9 @@ fn bound_text_literal(value: &str) -> String {
 /// Replace every `?` of a generated statement with the next bound value, leaving `?` inside
 /// backtick-quoted identifiers or single-quoted literals alone. Only statements built by this
 /// module are rendered here, so the placeholders are always the binds given alongside them.
-fn text_statement(sql: &str, binds: &[BoundValue<'_>]) -> String {
+/// Render a SQL statement with `?` placeholders as a text-protocol statement, replacing each
+/// placeholder with its bound literal in order.
+pub(crate) fn text_statement(sql: &str, binds: &[BoundValue<'_>]) -> String {
     let mut out = String::with_capacity(sql.len() + 16);
     let mut binds = binds.iter();
     let mut quote: Option<char> = None;
@@ -3622,6 +3662,29 @@ fn is_unknown_column_text_error(error: &Error) -> bool {
 /// renders as `<code> - <message>`.
 fn is_unknown_command_error(error: &sqlx::Error) -> bool {
     mysql_error_number(error) == Some(1047)
+}
+
+/// Whether a prepared statement failed because the server does not offer server-side prepares.
+/// OceanBase 3.x keeps the MySQL wire protocol but disables `COM_STMT_PREPARE` by default and
+/// answers `1235 ... while parameter _ob_enable_prepared_statement is disabled, prepared
+/// statement not supported`; the catalog then reads over the text protocol, as it does for
+/// proxies that reject prepares (issue #62).
+fn is_prepare_unsupported_error(error: &sqlx::Error) -> bool {
+    let sqlx::Error::Database(database_error) = error else {
+        return false;
+    };
+    let message = database_error.message().to_ascii_lowercase();
+    message.contains("prepared statement")
+        && (message.contains("not supported") || message.contains("disabled"))
+}
+
+/// The catalog fallbacks run when a server cannot answer the prepared catalog query: a proxy
+/// that rejects prepares or demands a current database first, or OceanBase with server-side
+/// prepares disabled.
+fn is_prepare_fallback_error(error: &sqlx::Error) -> bool {
+    is_unknown_command_error(error)
+        || is_no_database_error(error)
+        || is_prepare_unsupported_error(error)
 }
 
 /// Whether the server (a middleware that routes each statement itself, such as UDAL/TeleDB's
@@ -3957,6 +4020,12 @@ fn has_sql_content(fragment: &str) -> bool {
                 }
             }
             b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                // `/*! ... */` is a MySQL conditional comment: the server executes what it
+                // wraps (a mysqldump's session settings, `ALTER TABLE … DISABLE KEYS`, …), so
+                // the fragment is a statement, not a comment.
+                if bytes.get(i + 2) == Some(&b'!') {
+                    return true;
+                }
                 i += 2;
                 while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
                     i += 1;
@@ -4840,6 +4909,17 @@ mod tests {
             split_statements("SELECT 1; -- trailing\n"),
             vec!["SELECT 1"]
         );
+        // MySQL's conditional comments are executed by the server, so they are statements.
+        assert_eq!(
+            split_statements(
+                "/*!40014 SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0 */;\n\
+                 /*!40000 ALTER TABLE `t` DISABLE KEYS */;"
+            ),
+            vec![
+                "/*!40014 SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0 */",
+                "/*!40000 ALTER TABLE `t` DISABLE KEYS */",
+            ]
+        );
     }
 
     #[test]
@@ -4851,5 +4931,51 @@ mod tests {
         assert!(!super::is_prepare_sticky_proxy("8.0.36"));
         assert!(!super::is_prepare_sticky_proxy("10.11.6-MariaDB"));
         assert!(!super::is_prepare_sticky_proxy("5.7.44-log"));
+    }
+
+    #[test]
+    fn recognises_oceanbase_with_server_side_prepares_disabled() {
+        #[derive(Debug)]
+        struct FakeDatabaseError(&'static str);
+
+        impl std::fmt::Display for FakeDatabaseError {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str(self.0)
+            }
+        }
+
+        impl std::error::Error for FakeDatabaseError {}
+
+        impl sqlx::error::DatabaseError for FakeDatabaseError {
+            fn message(&self) -> &str {
+                self.0
+            }
+
+            fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+                self
+            }
+
+            fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+                self
+            }
+
+            fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+                self
+            }
+
+            fn kind(&self) -> sqlx::error::ErrorKind {
+                sqlx::error::ErrorKind::Other
+            }
+        }
+
+        let oceanbase = sqlx::Error::Database(Box::new(FakeDatabaseError(
+            "1235 - while parameter _ob_enable_prepared_statement is disabled, \
+             prepared statement not supported",
+        )));
+        assert!(super::is_prepare_unsupported_error(&oceanbase));
+        assert!(super::is_prepare_fallback_error(&oceanbase));
+
+        let syntax = sqlx::Error::Database(Box::new(FakeDatabaseError("1064 - syntax error")));
+        assert!(!super::is_prepare_unsupported_error(&syntax));
     }
 }

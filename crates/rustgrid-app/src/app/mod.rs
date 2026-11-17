@@ -723,11 +723,14 @@ impl DumpMode {
     }
 }
 
-/// State of the "Dump SQL File" dialog: a whole-database `CREATE`+data dump written straight to a
-/// `.sql` file, with the same async log/progress view as the backup dialogs.
+/// State of the "Dump SQL File" dialog: a `CREATE`+data dump written straight to a `.sql` file
+/// (the whole database from the database menu, or a single table/view from its context menu), with
+/// the same async log/progress view as the backup dialogs.
 struct DumpSqlDialog {
     connection_index: usize,
     database_index: usize,
+    /// The single object a table menu's dump writes. `None` dumps the whole database.
+    object: Option<(BackupObjectKind, String)>,
     mode: DumpMode,
     /// The `.sql` file the dump writes to, chosen through the system save dialog.
     output_path: Option<std::path::PathBuf>,
@@ -1887,6 +1890,16 @@ struct GridView {
     sort_hover: Option<usize>,
     /// The shared column dropdowns of the sort panel, keyed by draft rule index.
     sort_field_combos: BTreeMap<usize, Entity<ComboBox>>,
+    /// The shared 升序/降序 dropdowns of the sort panel, keyed by draft rule index. They are the
+    /// same control as the filter builder's operator dropdown, so the rows read the same.
+    sort_direction_combos: BTreeMap<usize, Entity<ComboBox>>,
+    /// The sort rule row being dragged to a new position, if any.
+    sort_drag: Option<SortRuleDrag>,
+    /// Bumped every time a mouse click moves the cell selection, together with the clicked cell
+    /// (display row, display column). The info pane observes this grid and focuses that field in
+    /// the row form once per click; a plain selection change from a re-render never does.
+    cell_click_serial: u64,
+    cell_click_cell: Option<(usize, usize)>,
     /// Rows copied with Ctrl+C / the context menu's 复制, for 粘贴 to write into the selected
     /// records. Each cell is `None` for SQL `NULL`. Shared by every grid, so a copy survives a
     /// tab switch and keeps its `NULL`s when pasted into another table.
@@ -1997,6 +2010,11 @@ struct CellEditor {
     col: usize,
     cells: Vec<(usize, usize)>,
     value: String,
+    /// A read-only grid (a query result that maps to no single table, a document viewer, ...)
+    /// opens this as a *viewer*: the value can be focused, partly selected and copied, but nothing
+    /// is staged or written back. This is what makes double-click select a substring of a cell
+    /// instead of only letting the grid copy the whole cell.
+    readonly: bool,
     input: Entity<TextInput>,
 }
 
@@ -2066,6 +2084,19 @@ struct FieldFilterDrag {
     from: usize,
     /// Where it currently sits.
     current: usize,
+    start_y: f32,
+}
+
+/// An in-progress drag of a sort rule row. The rules are a fixed pitch apart, so the target
+/// position comes from how many rows the pointer has travelled from the press; the draft is
+/// reordered live so the row follows the pointer.
+#[derive(Clone, Copy)]
+struct SortRuleDrag {
+    /// The rule's index when the drag started.
+    from: usize,
+    /// Where it currently sits.
+    current: usize,
+    /// Pointer y at the press.
     start_y: f32,
 }
 
@@ -2327,6 +2358,12 @@ const FILTER_VALUE_WIDTH: f32 = 110.0;
 const FILTER_VALUE_MAX_WIDTH: f32 = 200.0;
 const FILTER_ROW_ACTION_SIZE: f32 = 22.0;
 const FILTER_ROW_ACTION_RADIUS: f32 = 6.0;
+/// One sort rule row's pitch: the 24px row plus the card's 4px gap. The drag reorder measures the
+/// pointer's travel in these steps.
+const SORT_RULE_ROW_PITCH: f32 = 28.0;
+/// The sort row's field dropdown stretches over the free width up to this cap, so a wide panel
+/// does not end the row in a large blank stretch.
+const SORT_FIELD_MAX_WIDTH: f32 = 320.0;
 const FILTER_BOUNDARY_BAR_HEIGHT: f32 = 24.0;
 const FILTER_BOUNDARY_ACTION_SIZE: f32 = 18.0;
 const FILTER_BOUNDARY_ACTION_RADIUS: f32 = 4.0;
@@ -2466,8 +2503,9 @@ pub struct AppView {
     dump_dialog: Option<DumpSqlDialog>,
     /// The open "Run SQL File" dialog, if any.
     run_sql_dialog: Option<RunSqlDialog>,
-    /// The database context menu's 转储 SQL 文件 flyout target `(connection, database)`, while open.
-    dump_submenu: Option<(usize, usize)>,
+    /// The 转储 SQL 文件 flyout target while open: the connection and database, plus the table the
+    /// dump covers (`None` for the database menu's whole-database dump).
+    dump_submenu: Option<(usize, usize, Option<String>)>,
     /// The 转储 SQL 文件 flyout's zone while it is shown. The flyout overflows past the menu
     /// panel, so the panel's `on_mouse_down_out` would otherwise close the menu on a click that
     /// actually lands on the flyout (before the item's click can complete); it also keeps the
@@ -2602,6 +2640,8 @@ pub struct AppView {
     /// SQL Server compatibility-level dropdown in the database dialog.
     db_compat_combo: Option<Entity<ComboBox>>,
     db_name_input: Option<Entity<TextInput>>,
+    /// Focus of the read-only database name shown while editing (so its selection can be copied).
+    db_name_focus: FocusHandle,
     /// The first-collection field of the New Database dialog (document stores).
     db_collection_input: Option<Entity<TextInput>>,
     /// The schema name typed in the "New Schema" dialog.
@@ -3515,6 +3555,7 @@ impl AppView {
             db_recovery_combo: None,
             db_compat_combo: None,
             db_name_input: None,
+            db_name_focus: cx.focus_handle(),
             db_collection_input: None,
             schema_name_input: None,
             schema_dialog: None,

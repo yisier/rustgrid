@@ -60,6 +60,10 @@ pub(crate) struct TextInputOptions {
     /// in-place cell editors, which must blend into the grid/design cell instead of looking like a
     /// native input box floating over it.
     pub bare: bool,
+    /// A viewer field: still focusable and selectable (the caret, mouse selection, Ctrl+C and
+    /// context menu work), but every edit is rejected. The grid opens one for a cell on a
+    /// read-only result so part of its value can be selected and copied.
+    pub readonly: bool,
     /// Overrides [`DEFAULT_TEXT_SIZE`] (e.g. the 12px table-designer cells).
     pub text_size: Option<f32>,
     /// Overrides the kit control size (default `Size::Small`, i.e. 24px). Compact popup fields
@@ -82,6 +86,7 @@ pub(crate) struct TextInput {
     icon_color: Option<u32>,
     clearable: bool,
     bare: bool,
+    readonly: bool,
     text_size: Option<f32>,
     size: Option<Size>,
     /// The entity's own focus handle. Callers focus this one; the render pass forwards focus to
@@ -132,6 +137,7 @@ impl TextInput {
             icon_color: options.icon_color,
             clearable: options.clearable,
             bare: options.bare,
+            readonly: options.readonly,
             text_size: options.text_size,
             size: options.size,
             focus: cx.focus_handle(),
@@ -435,6 +441,7 @@ impl Render for TextInput {
             .appearance(!self.bare)
             .focus_ring(false)
             .cleanable(self.clearable)
+            .readonly(self.readonly)
             .text_size(px(self.text_size.unwrap_or(DEFAULT_TEXT_SIZE)));
         if self.bare {
             // Blend into the cell: no inset, so the caret and text line up with the cell text.
@@ -530,6 +537,55 @@ mod tests {
         });
         assert_eq!(after_typing, "xhello");
         assert_eq!(after_undo, "hello");
+    }
+
+    /// The grid opens a read-only cell viewer so a substring of a result value can be selected
+    /// and copied. A read-only input stays focusable and selectable but must never accept text.
+    #[gpui_kit::test]
+    fn a_readonly_field_keeps_its_text(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (handle, view) = cx.update(|cx| {
+            let options = TextInputOptions {
+                readonly: true,
+                ..Default::default()
+            };
+            let field = cx.new(|cx| TextInput::new(Theme::light(), "TPCC261022402", options, cx));
+            let view = cx.new(|_cx| ArrowHarness {
+                field: field.clone(),
+            });
+            let (handle, _window) = gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: Point::default(),
+                        size: size(px(400.), px(200.)),
+                    })),
+                    ..Default::default()
+                },
+                cx,
+                |_, _| view.clone(),
+            )
+            .expect("open test window");
+            (handle, view)
+        });
+        let mut cx = VisualTestContext::from_window(handle, cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.update(|window, cx| {
+            let field = view.read(cx).field.clone();
+            field.update(cx, |field, cx| field.focus_state(window, cx));
+            let _ = window.draw(cx);
+        });
+        cx.simulate_keystrokes("x");
+        cx.simulate_keystrokes("backspace");
+        let text = cx.update(|_window, cx| {
+            view.read(cx)
+                .field
+                .read(cx)
+                .current_text(cx)
+                .unwrap_or_default()
+        });
+        assert_eq!(text, "TPCC261022402");
     }
 
     /// A submit handler may read its own field. The grid's filter value boxes do exactly that when

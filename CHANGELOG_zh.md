@@ -6,6 +6,18 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.1.14] - 2026-11-13
+
+### 新增
+
+- 「选项」新增导航面板、主面板和表格字体与 Ctrl + 鼠标滚轮缩放，新增「应用」按钮并重做布局
+  （[#58](https://github.com/yisier/rustgrid/issues/58)）。
+
+### 变更
+
+- 大结果集解码大幅提速，百万行数据的查询只需此前一小部分时间
+  （[#58](https://github.com/yisier/rustgrid/issues/58)）。
+
 ## [0.1.13] - 2026-11-12
 
 ### 新增
