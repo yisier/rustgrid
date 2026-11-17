@@ -9,6 +9,7 @@ use rustgrid_core::{
     DriverCapabilities, DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle,
     DriverId, Error, Result, TableDesignerSpec, TlsMode,
 };
+use sqlx::Row;
 use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlSslMode};
 
 use crate::connection::{MysqlConnection, is_prepare_sticky_proxy};
@@ -293,12 +294,16 @@ async fn connect(config: &ConnectionConfig, engine: Engine) -> Result<Box<dyn Co
     // no extra query or connection is needed.
     let text_protocol = Arc::new(AtomicBool::new(false));
     let needs_database = Arc::new(AtomicBool::new(false));
+    // The OceanBase probe runs once per pool, not once per pooled connection.
+    let probed = Arc::new(AtomicBool::new(false));
     let after_text_protocol = Arc::clone(&text_protocol);
     let after_needs_database = Arc::clone(&needs_database);
+    let after_probed = Arc::clone(&probed);
     pool_options = pool_options.after_connect(move |connection, _metadata| {
         let init_sql = init_sql.clone();
         let text_protocol = Arc::clone(&after_text_protocol);
         let needs_database = Arc::clone(&after_needs_database);
+        let probed = Arc::clone(&after_probed);
         Box::pin(async move {
             if is_prepare_sticky_proxy(connection.server_version_string()) {
                 text_protocol.store(true, Ordering::Relaxed);
@@ -309,6 +314,21 @@ async fn connect(config: &ConnectionConfig, engine: Engine) -> Result<Box<dyn Co
                 // answers the first COM_STMT_PREPARE with 1235. Use the text protocol for the
                 // whole pool, without the proxy's database-requirement rules (issue #62).
                 text_protocol.store(true, Ordering::Relaxed);
+            }
+            // OceanBase can also accept the login settings and still refuse server-side
+            // prepares (`_ob_enable_prepared_statement` is off by default in 3.x). Its greeting
+            // does not always name the engine, so ask once and keep the pool on the text
+            // protocol — every catalog, designer and account query then works (issue #62).
+            if !text_protocol.load(Ordering::Relaxed) && !probed.swap(true, Ordering::Relaxed) {
+                let oceanbase = sqlx::raw_sql("SELECT VERSION()")
+                    .fetch_one(&mut *connection)
+                    .await
+                    .ok()
+                    .and_then(|row| row.try_get::<String, _>(0).ok())
+                    .is_some_and(|version| is_oceanbase_version(&version));
+                if oceanbase {
+                    text_protocol.store(true, Ordering::Relaxed);
+                }
             }
             if !init_sql.is_empty() {
                 sqlx::raw_sql(sqlx::AssertSqlSafe(init_sql))
@@ -362,6 +382,13 @@ const DEFAULT_IDLE_SECONDS: u64 = 20;
 /// Whether the connection options select the StarRocks compatibility mode.
 fn is_starrocks(options: &std::collections::BTreeMap<String, String>) -> bool {
     options.get("mysql.compatibility").map(String::as_str) == Some("starrocks")
+}
+
+/// Whether `SELECT VERSION()` names OceanBase. OceanBase's MySQL mode can accept the login
+/// settings and still disable server-side prepares, so the driver detects it from the version
+/// and stays on the text protocol (issue #62).
+fn is_oceanbase_version(version: &str) -> bool {
+    version.to_ascii_lowercase().contains("oceanbase")
 }
 
 fn map_connect_error(error: sqlx::Error) -> Error {
@@ -441,5 +468,13 @@ mod tests {
         );
         assert!(driver.supports_table_designer(&mysql));
         assert!(driver.supports_backup(&mysql));
+    }
+
+    #[test]
+    fn recognises_oceanbase_versions() {
+        assert!(super::is_oceanbase_version("3.1.4-OceanBase CE"));
+        assert!(super::is_oceanbase_version("5.7.25-OceanBase_CE-v4.2.5.5"));
+        assert!(!super::is_oceanbase_version("8.0.36"));
+        assert!(!super::is_oceanbase_version("10.11.6-MariaDB"));
     }
 }

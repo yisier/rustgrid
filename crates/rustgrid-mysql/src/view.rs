@@ -7,13 +7,16 @@
 use rustgrid_core::{Error, Result, ViewDetails, ViewEdit, ViewInfo};
 use sqlx::{AssertSqlSafe, MySqlPool};
 
-use crate::connection::{column_text, map_query_error, quote_identifier};
+use crate::connection::{
+    BoundValue, column_text, map_query_error, quote_identifier, text_statement,
+};
 
 /// One view's full definition and creation settings.
 pub(crate) async fn view_details(
     pool: &MySqlPool,
     database: &str,
     name: &str,
+    text: bool,
 ) -> Result<ViewDetails> {
     let sql = format!(
         "SHOW CREATE VIEW {}.{}",
@@ -31,7 +34,7 @@ pub(crate) async fn view_details(
     drop(connection);
 
     let definition = column_text(&row, &["Create View", "Create"]).unwrap_or_default();
-    let mut info = view_info(pool, database, name)
+    let mut info = view_info(pool, database, name, text)
         .await?
         .unwrap_or_else(|| ViewInfo {
             name: name.to_string(),
@@ -50,19 +53,29 @@ pub(crate) async fn view_details(
 }
 
 /// One view's metadata from `information_schema.views` plus its timestamps.
-async fn view_info(pool: &MySqlPool, database: &str, name: &str) -> Result<Option<ViewInfo>> {
-    let row = sqlx::query(
-        "SELECT v.definer, v.security_type, v.check_option, v.is_updatable, \
+async fn view_info(
+    pool: &MySqlPool,
+    database: &str,
+    name: &str,
+    text: bool,
+) -> Result<Option<ViewInfo>> {
+    let sql = "SELECT v.definer, v.security_type, v.check_option, v.is_updatable, \
                 t.create_time, t.update_time \
          FROM information_schema.views AS v \
          LEFT JOIN information_schema.tables AS t \
            ON t.table_schema = v.table_schema AND t.table_name = v.table_name \
-         WHERE v.table_schema = ? AND v.table_name = ?",
-    )
-    .bind(database)
-    .bind(name)
-    .fetch_optional(pool)
-    .await
+         WHERE v.table_schema = ? AND v.table_name = ?";
+    let row = if text {
+        // OceanBase disables server-side prepares; read the catalog as text.
+        let sql = text_statement(sql, &[BoundValue::Text(database), BoundValue::Text(name)]);
+        sqlx::raw_sql(AssertSqlSafe(sql)).fetch_optional(pool).await
+    } else {
+        sqlx::query(sql)
+            .bind(database)
+            .bind(name)
+            .fetch_optional(pool)
+            .await
+    }
     .map_err(map_query_error)?;
     Ok(row.as_ref().map(|row| ViewInfo {
         name: name.to_string(),

@@ -10,7 +10,9 @@ use rustgrid_core::{Error, Result, RoutineDetails, RoutineEdit, RoutineInfo, Rou
 use sqlx::mysql::MySqlRow;
 use sqlx::{AssertSqlSafe, MySqlPool};
 
-use crate::connection::{column_text, map_query_error, quote_identifier};
+use crate::connection::{
+    BoundValue, column_text, map_query_error, quote_identifier, text_statement,
+};
 
 /// The routine columns the list and 信息 tab read.
 const ROUTINE_COLUMNS: &str = "routine_name, routine_type, routine_comment, data_type, definer, \
@@ -20,16 +22,23 @@ const ROUTINE_COLUMNS: &str = "routine_name, routine_type, routine_comment, data
 pub(crate) async fn list_routine_infos(
     pool: &MySqlPool,
     database: &str,
+    text: bool,
 ) -> Result<Vec<RoutineInfo>> {
     let sql = format!(
         "SELECT {ROUTINE_COLUMNS} FROM information_schema.routines \
          WHERE routine_schema = ? ORDER BY routine_name"
     );
-    let rows = sqlx::query(AssertSqlSafe(sql))
-        .bind(database)
-        .fetch_all(pool)
-        .await
-        .map_err(map_query_error)?;
+    let rows = if text {
+        // OceanBase disables server-side prepares; read the catalog as text.
+        let sql = text_statement(&sql, &[BoundValue::Text(database)]);
+        sqlx::raw_sql(AssertSqlSafe(sql)).fetch_all(pool).await
+    } else {
+        sqlx::query(AssertSqlSafe(sql))
+            .bind(database)
+            .fetch_all(pool)
+            .await
+    }
+    .map_err(map_query_error)?;
     Ok(rows.iter().map(read_routine_info).collect())
 }
 
@@ -39,18 +48,31 @@ async fn routine_info(
     database: &str,
     kind: RoutineKind,
     name: &str,
+    text: bool,
 ) -> Result<Option<RoutineInfo>> {
     let sql = format!(
         "SELECT {ROUTINE_COLUMNS} FROM information_schema.routines \
          WHERE routine_schema = ? AND routine_name = ? AND routine_type = ?"
     );
-    let row = sqlx::query(AssertSqlSafe(sql))
-        .bind(database)
-        .bind(name)
-        .bind(kind.sql_name())
-        .fetch_optional(pool)
-        .await
-        .map_err(map_query_error)?;
+    let row = if text {
+        let sql = text_statement(
+            &sql,
+            &[
+                BoundValue::Text(database),
+                BoundValue::Text(name),
+                BoundValue::Text(kind.sql_name()),
+            ],
+        );
+        sqlx::raw_sql(AssertSqlSafe(sql)).fetch_optional(pool).await
+    } else {
+        sqlx::query(AssertSqlSafe(sql))
+            .bind(database)
+            .bind(name)
+            .bind(kind.sql_name())
+            .fetch_optional(pool)
+            .await
+    }
+    .map_err(map_query_error)?;
     Ok(row.as_ref().map(read_routine_info))
 }
 
@@ -60,6 +82,7 @@ pub(crate) async fn routine_details(
     database: &str,
     kind: RoutineKind,
     name: &str,
+    text: bool,
 ) -> Result<RoutineDetails> {
     let verb = kind.sql_name();
     let sql = format!(
@@ -79,7 +102,7 @@ pub(crate) async fn routine_details(
 
     let definition =
         column_text(&row, &["Create Function", "Create Procedure", "Create"]).unwrap_or_default();
-    let info = routine_info(pool, database, kind, name)
+    let info = routine_info(pool, database, kind, name, text)
         .await?
         .unwrap_or_else(|| RoutineInfo {
             name: name.to_string(),

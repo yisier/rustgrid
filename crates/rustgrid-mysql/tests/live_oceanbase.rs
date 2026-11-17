@@ -100,6 +100,23 @@ async fn live_oceanbase_catalog_page_and_edit() {
     assert_eq!(columns.len(), 3);
     assert!(columns[0].primary_key);
 
+    // The table designer loads this; OceanBase's disabled prepares used to fail the options
+    // query here with error 1235.
+    let schema = connection
+        .table_schema(database, table)
+        .await
+        .expect("read the table schema");
+    assert_eq!(schema.columns.len(), 3);
+    assert_eq!(schema.columns[0].name, "id");
+
+    // These two read `information_schema` through prepared statements on other engines; on
+    // OceanBase they must use the text protocol too.
+    let routines = connection
+        .list_routine_infos(database)
+        .await
+        .expect("list routines");
+    assert!(routines.is_empty());
+
     connection
         .insert_rows(
             database,

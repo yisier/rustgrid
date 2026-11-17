@@ -91,6 +91,10 @@ fn serve(listener: TcpListener, reject_sql_mode: bool, oceanbase: bool) -> Vec<S
                             "subqueries or stored function calls here not supported",
                         ),
                     );
+                } else if sql == "SELECT VERSION()" {
+                    // The driver probes once per pool to recognise OceanBase, whose greeting
+                    // does not name the engine.
+                    write_result_set(&mut stream, &["VERSION()"], &[vec![Some("8.0.33")]], false);
                 } else if sql == "SHOW DATABASES" {
                     write_packet(&mut stream, 1, &[1]);
                     // One VAR_STRING column, followed by one text row.
@@ -150,8 +154,9 @@ async fn commands(
 async fn starrocks_skips_sql_mode_but_keeps_other_initialization() {
     let queries = commands(&MysqlDriver::new(), Some("starrocks"), true, false).await;
     assert_eq!(queries[0], "SET NAMES utf8mb4;");
-    assert_eq!(queries[1], "SET @rustgrid_probe = 1");
-    assert_eq!(queries[2], "SHOW DATABASES");
+    assert_eq!(queries[1], "SELECT VERSION()");
+    assert_eq!(queries[2], "SET @rustgrid_probe = 1");
+    assert_eq!(queries[3], "SHOW DATABASES");
 }
 
 #[tokio::test]
@@ -162,6 +167,8 @@ async fn mysql_defaults_keep_both_sql_modes_and_send_names_alone() {
         assert!(queries[0].contains("PIPES_AS_CONCAT,NO_ENGINE_SUBSTITUTION"));
         assert!(!queries[0].contains("NAMES"));
         assert_eq!(queries[1], "SET NAMES utf8mb4;");
+        // The one-shot OceanBase probe runs on ordinary MySQL too; it finds nothing.
+        assert_eq!(queries[2], "SELECT VERSION()");
     }
 }
 
@@ -182,6 +189,7 @@ async fn mariadb_ignores_mysql_compatibility_option() {
     let queries = commands(&MariaDbDriver::new(), Some("starrocks"), false, false).await;
     assert!(queries[0].contains("PIPES_AS_CONCAT,NO_ENGINE_SUBSTITUTION"));
     assert_eq!(queries[1], "SET NAMES utf8mb4;");
+    assert_eq!(queries[2], "SELECT VERSION()");
     assert!(
         MariaDbDriver::new()
             .descriptor()
