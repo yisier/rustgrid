@@ -317,6 +317,12 @@ const totalRows = computed(() => {
           '各数据库在 Docker 中逐个单独启动并预热后测量。数据用于横向对比，不代表生产服务器上的绝对值。'
         ) }}
       </p>
+      <p class="footnote">
+        {{ t(
+          'SQL Server, MariaDB and Redis are not part of this run.',
+          '本次未测试 SQL Server、MariaDB 与 Redis。'
+        ) }}
+      </p>
     </section>
   </div>
 </template>
