@@ -16,6 +16,7 @@ members = [
     "crates/rustgrid-tunnel",
     "crates/rustgrid-odbc",
     "crates/rustgrid-config",
+    "crates/rustgrid-mcp",
     "crates/rustgrid-app",
 ]
 # Patched third-party crates (see `[patch.crates-io]`), not workspace members.
@@ -45,6 +46,7 @@ rustgrid-odbc = { path = "crates/rustgrid-odbc" }
 rustgrid-redis = { path = "crates/rustgrid-redis" }
 rustgrid-mongodb = { path = "crates/rustgrid-mongodb" }
 rustgrid-config = { path = "crates/rustgrid-config" }
+rustgrid-mcp = { path = "crates/rustgrid-mcp" }
 
 async-trait = "0.1"
 chrono = "0.4"
@@ -54,7 +56,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
 anyhow = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "mysql", "tls-rustls-ring", "chrono"] }
