@@ -755,18 +755,21 @@ called that. Two kinds of upgrade:
   `grid_mouse_down`).
 - **Grid editing flow (Navicat's record model).** Enter, Tab and blur only *stage* a cell
   (`finish_cell_editor` → `commit_editor`); nothing is written until the row is left. Leaving a row —
-  Up/Down (also at the grid's edge), or a click on another row (`save_row_on_leave`) — saves that
-  row's staged cells as one UPDATE when `auto_save_row` allows it: Options → Data → "Save changes when
-  leaving a row" (`grid_auto_save`, on by default), no save in flight (`saving`), no pending insert,
-  no bulk step (an undo entry with more than one cell: paste, fill, a multi-cell edit) and all edits
-  in one row; anything else waits for ✓ / Ctrl+S, with "N unsaved" shown next to ✓ / ✗. Down on the
+  Up/Down (also at the grid's edge), or a click on another row (`save_row_on_leave`,
+  `save_new_row_on_click`) — saves that row's staged cells as one UPDATE when `auto_save_row` allows
+  it: Options → Grid → "Save changes when leaving a row" (`grid_auto_save`, on by default), no save in
+  flight (`saving`; Save itself is ignored until it lands), no pending insert, no bulk step (an undo
+  entry with more than one cell: paste, fill, a multi-cell edit) and all edits in one row; anything
+  else waits for ✓ / Ctrl+S, with "N unsaved" shown next to ✓ / ✗. Down on the
   last row opens a new record (`leave_row_vertically`): its cells, gutter and the header are amber
   (`cell_edit_bg`); untouched cells show the column default, (Auto), (Generated) or (Null) from
-  `NewRowColumn::from_def` (the table schema is loaded once, `ensure_new_row_columns`) and an editor
-  starts from that default (`CURRENT_TIMESTAMP` becomes the current time). Up from an untouched new
-  record removes it; leaving a filled one saves it, or — when a `NOT NULL` column without a default
-  is empty (`missing_required`) — keeps it, moves the caret there and names the missing fields. A
-  Down that saves the row it leaves opens the new record after the reload (`open_row_after_save`).
+  `NewRowColumn::from_def` (the table schema is loaded once, `ensure_new_row_columns`, keyed by column
+  name so a field layout change cannot shift it) and an editor starts from that default
+  (`CURRENT_TIMESTAMP` becomes the current time). Up or a click away from an untouched appended new
+  record removes it; leaving a filled one with Up/Down or a click saves it, or — when a `NOT NULL`
+  column without a default is empty (`missing_required`) — keeps it, moves the caret there and names
+  the missing fields (a click is then dropped). A Down that saves the row it leaves opens the new
+  record after the reload (`open_row_after_save`).
   ✗ and Esc discard through the "Unsaved Changes" confirmation (`discard_edits`). An `ENUM` cell
   editor shows a ▾ button (members from `NewRowColumn::members`); Alt+Down/F4 open the list,
   Up/Down move its highlight, Enter picks, Esc closes only the list (`cell_editor_escape`).

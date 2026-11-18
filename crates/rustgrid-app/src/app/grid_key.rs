@@ -119,8 +119,11 @@ impl GridView {
         let memory = status.data_length.map(human_size).unwrap_or_default();
         let editable = self.key_page_editable() && self.state.editable;
         let collection = add_label.is_some();
-        let delete_enabled =
-            editable && collection && self.state.selection.is_some() && !self.state.rows.is_empty();
+        let delete_enabled = editable
+            && !self.saving
+            && collection
+            && self.state.selection.is_some()
+            && !self.state.rows.is_empty();
         // The editor is the source of truth for a string key: a keystroke reflected there but not
         // yet in the mirrored `key_string_dirty` must still enable 保存修改.
         let string_dirty = self.is_string_key_page()
@@ -129,6 +132,7 @@ impl GridView {
                 self.key_string_loaded.as_deref() != Some(live.as_str())
             });
         let save_enabled = editable
+            && !self.saving
             && (string_dirty
                 || self.key_string_dirty
                 || self.cell_editor.is_some()
@@ -186,7 +190,7 @@ impl GridView {
                     "key-page-add",
                     "icons/add_field.svg",
                     add_label,
-                    editable,
+                    editable && !self.saving,
                     theme,
                     cx.listener(|this, _event, window, cx| this.add_insert_row(window, cx)),
                 ))

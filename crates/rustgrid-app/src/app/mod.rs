@@ -1879,9 +1879,10 @@ struct GridView {
     /// `true` while a save is being written. The saved edits stay staged until the page reloads,
     /// so without this a second trigger (a click right after Enter) would write them again.
     saving: bool,
-    /// What a new row needs to know about each display column (its default, whether it must be
-    /// filled), from the table's schema. Loaded the first time a new row is opened.
-    new_row_columns: Option<std::sync::Arc<Vec<grid::NewRowColumn>>>,
+    /// What a new row needs to know about each column (its default, whether it must be filled),
+    /// from the table's schema, keyed by column name so a field layout change cannot attach one
+    /// column's default or ENUM members to another. Loaded the first time a new row is opened.
+    new_row_columns: Option<std::sync::Arc<std::collections::BTreeMap<String, grid::NewRowColumn>>>,
     new_row_columns_loading: bool,
     /// Down on the last row while its changes were being saved: open a new row in this column
     /// once the saved page has reloaded (the reload drops pending rows).

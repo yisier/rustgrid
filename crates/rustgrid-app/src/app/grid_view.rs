@@ -544,6 +544,13 @@ impl Render for GridView {
         let column_order = Arc::new(self.state.column_order.clone());
         let inserts = self.inserts.clone();
         let new_row_hints = self.new_row_columns.clone();
+        let column_names = Arc::new(
+            self.state
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect::<Vec<_>>(),
+        );
         let data_rows = rows.len();
         let column_count = widths.len();
         // The fill handle sits on the active selection's bottom-right cell (Excel's 自动填充).
@@ -748,9 +755,11 @@ impl Render for GridView {
                                     Some(None) => "(Null)".to_string(),
                                     // Untouched: what the server will store (the default,
                                     // (Auto)...), muted like NULL until something is typed.
-                                    None => new_row_hints
-                                        .as_ref()
-                                        .and_then(|hints| hints.get(index))
+                                    None => column_names
+                                        .get(index)
+                                        .and_then(|name| {
+                                            new_row_hints.as_ref().and_then(|hints| hints.get(name))
+                                        })
                                         .map(|column| column.hint.clone())
                                         .unwrap_or_else(|| "(Null)".to_string()),
                                 }

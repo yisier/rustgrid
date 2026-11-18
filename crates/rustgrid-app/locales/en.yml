@@ -1504,7 +1504,7 @@ options.data.show_comments_hint: "Show each column's comment under its name in t
 options.data.show_types: "Show field types"
 options.data.show_types_hint: "Show each column's data type (e.g. VARCHAR, INT) in the header."
 options.data.auto_save: "Save changes when leaving a row"
-options.data.auto_save_hint: "A row's changes are saved when you move to another row (Up/Down or a click). Enter and Tab only move between cells. Changes to several cells at once, and new rows, always wait for Save."
+options.data.auto_save_hint: "A row's changes are saved when you leave it (Up/Down or a click on another row). Enter and Tab only move between cells; a change that spans several cells waits for Save. A new record is saved the same way once it has a value."
 grid.field_filter: "Field Filter"
 grid.field_filter_search: "Search fields..."
 grid.field_filter_empty: "No matching field"

@@ -40,10 +40,26 @@ impl GridView {
             cx.notify();
             return;
         };
-        // Clicking another row leaves the row whose changes are pending, so they are saved.
+        // Clicking another row leaves the row whose changes are pending, so they are saved. A
+        // pending new record is handled the same way a click leaves it: untouched ones are
+        // dropped, filled ones saved, and an empty required field keeps it and stops the click.
         let clicked_row = match &hit {
             GridHit::Cell(row, _) | GridHit::Gutter(row) => *row,
         };
+        if let Some((from_row, _)) = self
+            .state
+            .selection
+            .as_ref()
+            .map(CellSelection::active_cursor)
+            && self.save_new_row_on_click(from_row, clicked_row, cx)
+        {
+            self.cell_press = None;
+            self.selecting_cells = false;
+            self.select_pointer = None;
+            window.focus(&self.focus, cx);
+            cx.notify();
+            return;
+        }
         self.save_row_on_leave(Some(clicked_row), cx);
         let column_count = self.state.visible_columns;
         self.cell_dragged = false;
@@ -1032,9 +1048,7 @@ impl GridView {
 
     /// The members of an `ENUM` column (display column `col`), once the schema is loaded.
     pub(super) fn column_members(&self, col: usize) -> &[String] {
-        self.new_row_columns
-            .as_ref()
-            .and_then(|columns| columns.get(col))
+        self.new_row_column(col)
             .map(|column| column.members.as_slice())
             .unwrap_or(&[])
     }

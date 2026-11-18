@@ -44,6 +44,12 @@ impl GridView {
 
     /// Save: stage the in-place editor (if any), then write every pending insert and edit.
     pub(super) fn save_grid(&mut self, cx: &mut Context<'_, Self>) {
+        // A save already in flight still owns the staged edits and inserts: the page has not
+        // reloaded yet, so writing them again would repeat its inserts (a double-click on Save
+        // inserted the same new record twice).
+        if self.saving {
+            return;
+        }
         if self.cell_editor.is_some() {
             self.commit_editor(cx);
         }
@@ -131,6 +137,9 @@ impl GridView {
         notify_saved: bool,
         cx: &mut Context<'_, Self>,
     ) {
+        if self.saving {
+            return;
+        }
         if inserts.is_empty() && updates.is_empty() {
             if notify_saved {
                 self.show_toast(ToastKind::Info, t!("grid.no_changes").to_string(), cx);
@@ -195,6 +204,8 @@ impl GridView {
         self.cell_editor = None;
         self.cell_editor_blur_subscription = None;
         self.date_picker = None;
+        self.enum_menu = None;
+        self.open_row_after_save = None;
         self.fill_drag = None;
         cx.notify();
     }

@@ -1584,7 +1584,10 @@ impl GridView {
                     "grid-add",
                     "icons/plus.svg",
                     theme.icon_connection,
-                    !scalar_key && !self.state.loading && self.state.visible_columns > 0,
+                    !scalar_key
+                        && !self.state.loading
+                        && !self.saving
+                        && self.state.visible_columns > 0,
                     t!("grid.add_row").to_string(),
                     Some(&GridInsertRow),
                     cx.listener(|this, _event, window, cx| this.add_insert_row(window, cx)),
@@ -1595,6 +1598,7 @@ impl GridView {
                     theme.icon_connection,
                     !scalar_key
                         && !self.state.loading
+                        && !self.saving
                         && self.state.visible_columns > 0
                         && self.state.selection.is_some()
                         && !self.state.rows.is_empty(),
@@ -1606,7 +1610,10 @@ impl GridView {
                     "grid-delete",
                     "icons/minus.svg",
                     theme.danger,
-                    !scalar_key && self.state.selection.is_some() && !self.state.rows.is_empty(),
+                    !scalar_key
+                        && !self.saving
+                        && self.state.selection.is_some()
+                        && !self.state.rows.is_empty(),
                     t!("grid.delete_row").to_string(),
                     None,
                     cx.listener(|this, _event, _window, cx| this.open_delete_confirm(cx)),
@@ -1631,11 +1638,13 @@ impl GridView {
                         "grid-commit",
                         "icons/check.svg",
                         theme.icon_connection,
-                        self.cell_editor
-                            .as_ref()
-                            .is_some_and(|editor| !editor.readonly)
-                            || !self.state.edits.is_empty()
-                            || !self.inserts.is_empty(),
+                        !self.saving
+                            && (self
+                                .cell_editor
+                                .as_ref()
+                                .is_some_and(|editor| !editor.readonly)
+                                || !self.state.edits.is_empty()
+                                || !self.inserts.is_empty()),
                         t!("grid.save_changes").to_string(),
                         None,
                         cx.listener(|this, _event, _window, cx| this.save_grid(cx)),
@@ -1646,11 +1655,13 @@ impl GridView {
                         "grid-rollback",
                         "icons/cross.svg",
                         theme.danger,
-                        self.cell_editor
-                            .as_ref()
-                            .is_some_and(|editor| !editor.readonly)
-                            || !self.state.edits.is_empty()
-                            || !self.inserts.is_empty(),
+                        !self.saving
+                            && (self
+                                .cell_editor
+                                .as_ref()
+                                .is_some_and(|editor| !editor.readonly)
+                                || !self.state.edits.is_empty()
+                                || !self.inserts.is_empty()),
                         t!("grid.cancel_changes").to_string(),
                         None,
                         cx.listener(|this, _event, _window, cx| this.discard_edits(cx)),

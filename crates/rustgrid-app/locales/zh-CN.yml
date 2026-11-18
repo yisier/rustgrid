@@ -1504,7 +1504,7 @@ options.data.show_comments_hint: "在表头字段名称下方显示列的备注�
 options.data.show_types: "展示类型"
 options.data.show_types_hint: "在表头中显示字段的数据类型（如 VARCHAR、INT）。"
 options.data.auto_save: "离开行时保存修改"
-options.data.auto_save_hint: "移到其他行（上/下方向键或点击）时保存该行的修改。回车和 Tab 只在单元格之间移动。一次修改多个单元格以及新增的行始终等待点击保存。"
+options.data.auto_save_hint: "离开一行（上/下方向键或点击其他行）时保存该行的修改。回车和 Tab 只在单元格之间移动；一次修改多个单元格时等待手动保存。新增的记录有了值后也按同样方式保存。"
 grid.field_filter: "字段筛选"
 grid.field_filter_search: "搜索字段..."
 grid.field_filter_empty: "无匹配字段"
