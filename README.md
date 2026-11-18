@@ -9,6 +9,8 @@ MongoDB, built with **Rust + GPUI**. Its layout and interactions follow Navicat,
 nothing: the connection tree, object lists, toolbars and dialogs all behave the way you already
 expect.
 
+Documentation, screenshots and the benchmark report: **<https://yisier.github.io/rustgrid/>**
+
 ## Screenshots
 
 Click a screenshot to view it full size.

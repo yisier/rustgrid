@@ -7354,6 +7354,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "rgbench"
+version = "0.1.15"
+dependencies = [
+ "chrono",
+ "rustgrid-clickhouse",
+ "rustgrid-core",
+ "rustgrid-mongodb",
+ "rustgrid-mysql",
+ "rustgrid-oracle",
+ "rustgrid-postgresql",
+ "rustgrid-sqlite",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "ring"
 version = "0.17.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"

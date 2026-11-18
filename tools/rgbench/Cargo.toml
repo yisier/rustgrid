@@ -1,0 +1,22 @@
+[package]
+name = "rgbench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+description = "Benchmark harness for the RustGrid documentation site (1M / 10M row data sets)."
+
+[dependencies]
+rustgrid-core.workspace = true
+rustgrid-mysql.workspace = true
+rustgrid-postgresql.workspace = true
+rustgrid-sqlite.workspace = true
+rustgrid-clickhouse.workspace = true
+rustgrid-oracle.workspace = true
+rustgrid-mongodb.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+chrono.workspace = true

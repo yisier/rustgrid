@@ -10,3 +10,6 @@ fxc.exe
 .workbuddy-ai/
 # Machine-local docker database credentials (see DATABASES.local.md); contains passwords.
 DATABASES.local.md
+
+# Local benchmark credentials (see tools/rgbench/config.example.json).
+tools/rgbench/config.local.json

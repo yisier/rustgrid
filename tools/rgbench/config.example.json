@@ -1,0 +1,41 @@
+{
+  "mysql": {
+    "host": "127.0.0.1",
+    "port": 3306,
+    "username": "root",
+    "password": "CHANGE_ME",
+    "database": "rgbench"
+  },
+  "postgresql": {
+    "host": "127.0.0.1",
+    "port": 5432,
+    "username": "postgres",
+    "password": "CHANGE_ME",
+    "database": "rgbench"
+  },
+  "clickhouse": {
+    "host": "127.0.0.1",
+    "port": 8123,
+    "username": "default",
+    "password": "",
+    "database": "rgbench"
+  },
+  "mongodb": {
+    "host": "127.0.0.1",
+    "port": 27017,
+    "username": "root",
+    "password": "CHANGE_ME",
+    "database": "rgbench"
+  },
+  "oracle": {
+    "host": "127.0.0.1",
+    "port": 1521,
+    "username": "TEST",
+    "password": "CHANGE_ME",
+    "database": "FREEPDB1",
+    "options": { "oracle.connect_type": "service_name" }
+  },
+  "sqlite": {
+    "path": "target/rgbench/rgbench.db"
+  }
+}

@@ -17,6 +17,7 @@ members = [
     "crates/rustgrid-odbc",
     "crates/rustgrid-config",
     "crates/rustgrid-app",
+    "tools/rgbench",
 ]
 # Patched third-party crates (see `[patch.crates-io]`), not workspace members.
 exclude = ["vendor/sqlx-mysql", "vendor/libsqlite3-sys"]
@@ -186,6 +187,14 @@ libsqlite3-sys = { path = "vendor/libsqlite3-sys" }
 # `target/` size, and delete `target/debug/incremental` whenever it gets large (it is a cache only,
 # Cargo recreates it): both are pure build cache, never shipped.
 debug = "line-tables-only"
+
+[profile.harness]
+# Used by tools/rgbench: optimized like a release build, but without LTO so the harness rebuilds fast.
+inherits = "release"
+lto = false
+codegen-units = 16
+panic = "unwind"
+strip = "none"
 
 [profile.release]
 opt-level = "z"

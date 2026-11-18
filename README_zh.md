@@ -8,6 +8,8 @@ RustGrid 是一款使用 **Rust + GPUI** 构建的跨平台（Windows / macOS / 
 MongoDB 数据库管理工具。它的界面布局和交互习惯对齐 Navicat，连接树、对象列表、工具栏和弹窗都与你
 熟悉的操作一致，迁移毫无成本。
 
+文档、截图与性能报告：**<https://yisier.github.io/rustgrid/zh/>**
+
 ## 界面预览
 
 点击截图可查看原图。

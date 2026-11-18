@@ -1,0 +1,41 @@
+{
+  "version": "0.1.15",
+  "measured_at": "2026-11-18",
+  "assets": [
+    {
+      "file": "RustGrid-0.1.15-windows-x64.zip",
+      "platform": "Windows x64",
+      "bytes": 9813360
+    },
+    {
+      "file": "RustGrid-0.1.15-windows-arm64.zip",
+      "platform": "Windows ARM64",
+      "bytes": 8187674
+    },
+    {
+      "file": "RustGrid-0.1.15-linux-x64.tar.gz",
+      "platform": "Linux x64",
+      "bytes": 13088329
+    },
+    {
+      "file": "RustGrid-0.1.15-linux-arm64.tar.gz",
+      "platform": "Linux ARM64",
+      "bytes": 11315890
+    },
+    {
+      "file": "RustGrid-0.1.15-macos-x64.tar.gz",
+      "platform": "macOS Intel",
+      "bytes": 14464307
+    },
+    {
+      "file": "RustGrid-0.1.15-macos-arm64.tar.gz",
+      "platform": "macOS Apple Silicon",
+      "bytes": 13102790
+    }
+  ],
+  "runtime": {
+    "startup_ms": 745,
+    "idle_memory_mb": 88.2,
+    "installed_mb": 9.8
+  }
+}

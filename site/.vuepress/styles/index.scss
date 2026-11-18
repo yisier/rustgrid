@@ -1,0 +1,43 @@
+:root {
+  --vp-c-accent: #2563eb;
+  --vp-c-accent-hover: #1d4ed8;
+  --vp-c-accent-bg: #2563eb;
+  --vp-c-accent-soft: #eff6ff;
+  --content-width: 860px;
+  --homepage-width: 1080px;
+}
+
+html.dark {
+  --vp-c-accent: #60a5fa;
+  --vp-c-accent-hover: #93c5fd;
+  --vp-c-accent-bg: #2563eb;
+  --vp-c-accent-soft: #172554;
+}
+
+/* The theme's default h2 anchor is loud on a report page. */
+.vp-home [vp-content] h2 {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.vp-home [vp-content] {
+  margin-top: 3rem;
+}
+
+table {
+  display: table;
+  width: 100%;
+  font-variant-numeric: tabular-nums;
+}
+
+th,
+td {
+  padding: 0.4rem 0.6rem;
+  border-color: var(--vp-c-border);
+}
+
+/* Screenshots keep their Windows frame but avoid a hard edge. */
+.vp-doc img {
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgb(15 23 42 / 12%);
+}
