@@ -22,6 +22,7 @@ pub use descriptor::{
     DesignerOptionField, DesignerTab, DriverDescriptor, DriverIconStyle, TableDesignerSpec,
     TriggerDefinition,
 };
+pub use descriptor::{format_member_list, is_member_list_type, is_numeric_type, parse_member_list};
 pub use dialect::DriverDialect;
 pub use driver::{
     Connection, DatabaseEditorSpec, DatabaseEditorTab, Driver, ScriptSession, UserEditorSpec,

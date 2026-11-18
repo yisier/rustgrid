@@ -6,6 +6,7 @@ use rustgrid_core::{
     ColumnDef, DesignerColumnOption, DesignerFieldColumn, DesignerIndexColumn, DesignerOptionField,
     DesignerTab, TriggerDefinition,
 };
+use rustgrid_core::{is_member_list_type, is_numeric_type};
 
 impl TableDesignView {
     /// Flip one check-box control of the detail panel. The control is a
@@ -18,6 +19,7 @@ impl TableDesignView {
             DesignerColumnOption::Sparse => self.toggle_sparse(cx),
             // The editor rows are not toggles.
             DesignerColumnOption::Default
+            | DesignerColumnOption::EnumValues
             | DesignerColumnOption::Collation
             | DesignerColumnOption::IdentityGeneration
             | DesignerColumnOption::IdentityStart
@@ -129,6 +131,9 @@ impl TableDesignView {
         }
         if self.default_menu_open {
             root = root.child(self.render_default_suggestions(cx));
+        }
+        if self.enum_dialog_open {
+            root = root.child(self.render_enum_dialog(cx));
         }
 
         root.on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
@@ -916,7 +921,19 @@ impl TableDesignView {
             .any(|option| matches!(option, DesignerColumnOption::IdentityGeneration));
 
         let mut rows: Vec<AnyElement> = Vec::new();
-        for option in self.designer.column_options.iter().copied() {
+        let mut column_options = self.designer.column_options.clone();
+        if !column_options.contains(&DesignerColumnOption::EnumValues)
+            && column.is_some_and(|c| is_member_list_type(&c.data_type))
+        {
+            let pos = column_options
+                .iter()
+                .position(|opt| *opt == DesignerColumnOption::Default)
+                .map(|p| p + 1)
+                .unwrap_or(0);
+            column_options.insert(pos, DesignerColumnOption::EnumValues);
+        }
+
+        for option in column_options.into_iter() {
             // A control the engine cannot use on the selected column is left out entirely rather
             // than shown dead: SQL Server's `IDENTITY` (one numeric column per table, and only on a
             // new one), or MySQL's `AUTO_INCREMENT` on a type it cannot carry.
@@ -929,6 +946,18 @@ impl TableDesignView {
                     | DesignerColumnOption::IdentityStart
                     | DesignerColumnOption::IdentityIncrement
             ) && !identity_options
+            {
+                continue;
+            }
+            if matches!(
+                option,
+                DesignerColumnOption::Unsigned | DesignerColumnOption::Zerofill
+            ) && !column.is_some_and(|c| is_numeric_type(&c.data_type))
+            {
+                continue;
+            }
+            if option == DesignerColumnOption::EnumValues
+                && !column.is_some_and(|c| is_member_list_type(&c.data_type))
             {
                 continue;
             }
@@ -976,6 +1005,59 @@ impl TableDesignView {
                         field = field.child(self.render_default_suggestion_button());
                     }
                     control = control.child(field);
+                    detail_editor_row(t!(option.label_key()), control.into_any_element())
+                }
+                DesignerColumnOption::EnumValues => {
+                    let mut control = div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .w(px(360.0))
+                        .h(px(22.0))
+                        .when(!enabled, |style| style.opacity(0.5));
+                    let anchor = self.enum_anchor.clone();
+                    let input = div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .h(px(22.0))
+                        .child(self.enum_values_input.clone());
+                    let weak = self.self_weak.clone();
+                    let ellipsis_btn = div()
+                        .id("design-enum-ellipsis")
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .flex_none()
+                        .w(px(24.0))
+                        .h(px(22.0))
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(rgb(theme.border))
+                        .bg(rgb(theme.button_bg))
+                        .cursor_pointer()
+                        .hover(move |style| style.bg(rgb(theme.button_hover_bg)))
+                        .tooltip(ui::text_tooltip(t!("design.enum_edit_button").to_string()))
+                        .on_click(move |_event, _window, cx| {
+                            let _ = weak.update(cx, |view, cx| view.open_enum_editor(cx));
+                        })
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(theme.text))
+                                .child("..."),
+                        );
+                    let ellipsis_wrap = div()
+                        .flex_none()
+                        .on_children_prepainted(move |bounds, _window, _cx| {
+                            if let Some(first) = bounds.first() {
+                                *anchor.borrow_mut() =
+                                    Some(Point::new(first.origin.x, first.origin.y));
+                            }
+                        })
+                        .child(ellipsis_btn);
+                    control = control.child(input).child(ellipsis_wrap);
                     detail_editor_row(t!(option.label_key()), control.into_any_element())
                 }
                 DesignerColumnOption::IdentityGeneration => detail_editor_row(
@@ -1132,8 +1214,8 @@ impl TableDesignView {
             .overflow_y_scroll()
             .flex()
             .flex_col();
-        for (position, suggestion) in suggestions.iter().enumerate() {
-            let value = suggestion.value;
+        for (position, value) in suggestions.iter().enumerate() {
+            let val = value.clone();
             let choose = weak.clone();
             list = list.child(
                 div()
@@ -1148,9 +1230,9 @@ impl TableDesignView {
                     .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
                     .on_click(move |_event, _window, cx| {
                         let _ =
-                            choose.update(cx, |view, cx| view.select_default_suggestion(value, cx));
+                            choose.update(cx, |view, cx| view.select_default_suggestion(&val, cx));
                     })
-                    .child(value.to_string()),
+                    .child(value.clone()),
             );
         }
         let popup = ui::popup_panel(theme)
@@ -1165,6 +1247,165 @@ impl TableDesignView {
         deferred(popup.child(list))
             .with_priority(100)
             .into_any_element()
+    }
+
+    /// The popup list editor for enum / set member values.
+    fn render_enum_dialog(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let bounds = *self.root_bounds.borrow();
+        let origin = bounds.origin;
+        let anchor = self
+            .enum_anchor
+            .borrow()
+            .map(|anchor| Point::new(anchor.x - origin.x, anchor.y - origin.y))
+            .unwrap_or_default();
+        const ROW_HEIGHT: f32 = 28.0;
+        const HEADER_HEIGHT: f32 = 28.0;
+        let anchor_y: f32 = anchor.y.into();
+        let view_height: f32 = bounds.size.height.into();
+        let total_items = self.enum_draft_inputs.len().max(1);
+        let desired = HEADER_HEIGHT + (total_items as f32 * ROW_HEIGHT) + 12.0;
+        let max_panel_height = 240.0f32;
+        let desired_height = desired.min(max_panel_height);
+        let below = view_height - anchor_y - 24.0;
+        let above = anchor_y - 2.0;
+        let open_up = view_height > 0.0 && below < desired_height && above > below;
+        let height = desired_height
+            .min(if open_up { above } else { below })
+            .max(60.0);
+        let top = if open_up {
+            anchor.y - px(height + 2.0)
+        } else {
+            anchor.y + px(24.0)
+        };
+        let left = (anchor.x - px(160.0)).max(px(8.0));
+        let width = 280.0;
+
+        let weak = self.self_weak.clone();
+
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .h(px(HEADER_HEIGHT))
+            .px_2()
+            .border_b_1()
+            .border_color(rgb(theme.border))
+            .bg(rgb(theme.header_bg))
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(theme.text))
+                    .child(t!("design.enum_value_col").to_string()),
+            )
+            .child(
+                div()
+                    .id("design-enum-add-btn")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(20.0))
+                    .h(px(20.0))
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(rgb(theme.button_hover_bg)))
+                    .tooltip(ui::text_tooltip(t!("design.enum_add_value").to_string()))
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.add_enum_draft_value(cx);
+                    }))
+                    .child(
+                        svg()
+                            .path("icons/plus.svg")
+                            .w(px(12.0))
+                            .h(px(12.0))
+                            .text_color(rgb(theme.primary)),
+                    ),
+            );
+
+        let mut list = div()
+            .id("design-enum-list")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .max_h(px(height - HEADER_HEIGHT))
+            .overflow_y_scroll()
+            .p_1()
+            .gap_1();
+
+        if self.enum_draft_inputs.is_empty() {
+            let add_weak = weak.clone();
+            list = list.child(
+                div()
+                    .id("design-enum-empty")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .h(px(40.0))
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme.text_muted))
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                    .on_click(move |_event, _window, cx| {
+                        let _ = add_weak.update(cx, |view, cx| view.add_enum_draft_value(cx));
+                    })
+                    .child(t!("design.enum_empty_hint").to_string()),
+            );
+        } else {
+            for (idx, input) in self.enum_draft_inputs.iter().enumerate() {
+                let remove_weak = weak.clone();
+                let row = div()
+                    .id(SharedString::from(format!("design-enum-row-{idx}")))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .h(px(ROW_HEIGHT))
+                    .px_1()
+                    .child(div().flex_1().min_w(px(0.0)).child(input.clone()))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("design-enum-del-{idx}")))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .flex_none()
+                            .w(px(20.0))
+                            .h(px(20.0))
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .hover(move |style| style.bg(rgb(theme.button_hover_bg)))
+                            .tooltip(ui::text_tooltip(t!("design.enum_del_value").to_string()))
+                            .on_click(move |_event, _window, cx| {
+                                let _ = remove_weak
+                                    .update(cx, |view, cx| view.remove_enum_draft_value(idx, cx));
+                            })
+                            .child(
+                                svg()
+                                    .path("icons/cross.svg")
+                                    .w(px(10.0))
+                                    .h(px(10.0))
+                                    .text_color(rgb(theme.text_muted)),
+                            ),
+                    );
+                list = list.child(row);
+            }
+        }
+
+        let popup = ui::popup_panel(theme)
+            .id("design-enum-popup")
+            .left(left)
+            .top(top)
+            .w(px(width))
+            .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
+                this.enum_dialog_open = false;
+                cx.notify();
+            }))
+            .child(header)
+            .child(list);
+
+        deferred(popup).with_priority(100).into_any_element()
     }
 
     fn render_indexes(&self, cx: &mut Context<'_, Self>) -> AnyElement {
@@ -4570,6 +4811,7 @@ fn detail_option_id(option: DesignerColumnOption) -> &'static str {
         DesignerColumnOption::Zerofill => "zerofill",
         DesignerColumnOption::Collation => "collation",
         DesignerColumnOption::Sparse => "sparse",
+        DesignerColumnOption::EnumValues => "enum-values",
     }
 }
 

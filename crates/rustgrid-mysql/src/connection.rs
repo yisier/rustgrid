@@ -2904,22 +2904,35 @@ fn column_sql(column: &ColumnDef) -> String {
     sql.push(' ');
     sql.push_str(column.data_type.trim());
 
-    let length = column.length.trim();
+    let trimmed_length = column.length.trim();
+    let formatted_length;
+    let length = if is_member_list_type(&column.data_type) && !trimmed_length.is_empty() {
+        if !trimmed_length.contains('\'') {
+            formatted_length = rustgrid_core::format_member_list(
+                &rustgrid_core::parse_member_list(trimmed_length),
+            );
+            formatted_length.as_str()
+        } else {
+            trimmed_length
+        }
+    } else {
+        trimmed_length
+    };
     let decimals = column.decimals.trim();
     if !length.is_empty() && length != "0" && !type_ignores_length(&column.data_type) {
         sql.push('(');
         sql.push_str(length);
-        if !decimals.is_empty() && decimals != "0" {
+        if !decimals.is_empty() && decimals != "0" && !is_member_list_type(&column.data_type) {
             sql.push(',');
             sql.push_str(decimals);
         }
         sql.push(')');
     }
 
-    if column.unsigned {
+    if column.unsigned && type_is_numeric(&column.data_type) {
         sql.push_str(" unsigned");
     }
-    if column.zerofill {
+    if column.zerofill && type_is_numeric(&column.data_type) {
         sql.push_str(" zerofill");
     }
     if !column.charset.trim().is_empty() {
@@ -5148,7 +5161,8 @@ mod tests {
 
 #[cfg(test)]
 mod member_list_tests {
-    use super::{is_member_list_type, parse_show_column_type};
+    use super::{column_sql, is_member_list_type, parse_show_column_type};
+    use rustgrid_core::ColumnDef;
 
     #[test]
     fn enum_and_set_keep_their_member_list_as_the_length() {
@@ -5159,5 +5173,51 @@ mod member_list_tests {
             parse_show_column_type("enum('active','it''s')").1,
             "'active','it''s'"
         );
+        assert_eq!(
+            parse_show_column_type("set('read','write','exec')").1,
+            "'read','write','exec'"
+        );
+    }
+
+    #[test]
+    fn enum_column_ddl_generation_regression_issue_67() {
+        // Standard enum definition with quoted list
+        let col = ColumnDef {
+            name: "rate".to_string(),
+            data_type: "enum".to_string(),
+            length: "'high','slow'".to_string(),
+            nullable: true,
+            // Even if flags are accidentally set, enum must not emit unsigned/zerofill/decimals
+            unsigned: true,
+            zerofill: true,
+            decimals: "0".to_string(),
+            ..ColumnDef::default()
+        };
+        let sql = column_sql(&col);
+        assert_eq!(sql, "`rate` enum('high','slow') NULL");
+        assert!(!sql.contains("unsigned"));
+        assert!(!sql.contains("zerofill"));
+        assert!(!sql.contains(",0"));
+
+        // User typed values without quotes (e.g. "high, slow") -> auto-formatted
+        let col_unquoted = ColumnDef {
+            name: "rate".to_string(),
+            data_type: "enum".to_string(),
+            length: "high, slow".to_string(),
+            nullable: false,
+            ..ColumnDef::default()
+        };
+        let sql_unquoted = column_sql(&col_unquoted);
+        assert_eq!(sql_unquoted, "`rate` enum('high','slow') NOT NULL");
+
+        // SET type
+        let col_set = ColumnDef {
+            name: "perms".to_string(),
+            data_type: "set".to_string(),
+            length: "'read','write'".to_string(),
+            nullable: true,
+            ..ColumnDef::default()
+        };
+        assert_eq!(column_sql(&col_set), "`perms` set('read','write') NULL");
     }
 }

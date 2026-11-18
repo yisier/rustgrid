@@ -384,14 +384,17 @@ pub enum DesignerColumnOption {
     Collation,
     /// Sparse columns (SQL Server).
     Sparse,
+    /// The member values list for `ENUM` / `SET` columns (MySQL/MariaDB).
+    EnumValues,
 }
 
 impl DesignerColumnOption {
-    /// Whether the control is a check box; the rest ([`Default`](Self::Default) and
-    /// [`Collation`](Self::Collation)) are editors.
+    /// Whether the control is a check box; the rest ([`Default`](Self::Default),
+    /// [`EnumValues`](Self::EnumValues) and [`Collation`](Self::Collation)) are editors.
     pub fn is_toggle(self) -> bool {
         match self {
             DesignerColumnOption::Default
+            | DesignerColumnOption::EnumValues
             | DesignerColumnOption::Collation
             | DesignerColumnOption::IdentityGeneration
             | DesignerColumnOption::IdentityStart
@@ -407,6 +410,7 @@ impl DesignerColumnOption {
     pub fn label_key(self) -> &'static str {
         match self {
             DesignerColumnOption::Default => "design.default",
+            DesignerColumnOption::EnumValues => "design.enum_values",
             DesignerColumnOption::AutoIncrement => "design.auto_increment",
             DesignerColumnOption::IdentityGeneration => "design.identity.generation",
             DesignerColumnOption::IdentityStart => "design.identity.start",
@@ -762,6 +766,7 @@ impl Default for TableDesignerSpec {
             tabs: TableDesignerSpec::standard_tabs(),
             column_options: vec![
                 DesignerColumnOption::Default,
+                DesignerColumnOption::EnumValues,
                 DesignerColumnOption::AutoIncrement,
                 DesignerColumnOption::Unsigned,
                 DesignerColumnOption::Zerofill,
@@ -893,9 +898,141 @@ pub struct DriverDescriptor {
     pub order: u16,
 }
 
+/// Whether a column type carries a member list (`ENUM('a','b')`, `SET('x','y')`).
+pub fn is_member_list_type(data_type: &str) -> bool {
+    matches!(
+        data_type.trim().to_ascii_lowercase().as_str(),
+        "enum" | "set"
+    )
+}
+
+/// Whether a column type is numeric (integers, floating point, decimal).
+pub fn is_numeric_type(data_type: &str) -> bool {
+    let data_type = data_type.trim().to_ascii_lowercase();
+    matches!(
+        data_type.as_str(),
+        "tinyint"
+            | "smallint"
+            | "mediumint"
+            | "int"
+            | "integer"
+            | "bigint"
+            | "serial"
+            | "decimal"
+            | "numeric"
+            | "dec"
+            | "fixed"
+            | "float"
+            | "double"
+            | "real"
+            | "bit"
+            | "year"
+    )
+}
+
+/// Parse a raw member list string (e.g. `'a','b','c'` or `a,b,c`) into individual values.
+pub fn parse_member_list(raw: &str) -> Vec<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    if trimmed.contains('\'') {
+        let mut members = Vec::new();
+        let mut chars = trimmed.chars().peekable();
+        while let Some(&ch) = chars.peek() {
+            if ch.is_whitespace() || ch == ',' {
+                chars.next();
+                continue;
+            }
+            if ch == '\'' {
+                chars.next();
+                let mut current = String::new();
+                while let Some(c) = chars.next() {
+                    if c == '\'' {
+                        if chars.peek() == Some(&'\'') {
+                            chars.next();
+                            current.push('\'');
+                        } else {
+                            break;
+                        }
+                    } else if c == '\\' {
+                        if let Some(&next) = chars.peek() {
+                            chars.next();
+                            current.push(next);
+                        } else {
+                            current.push('\\');
+                        }
+                    } else {
+                        current.push(c);
+                    }
+                }
+                members.push(current);
+            } else {
+                let mut current = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c == ',' {
+                        break;
+                    }
+                    current.push(c);
+                    chars.next();
+                }
+                let t = current.trim();
+                if !t.is_empty() {
+                    members.push(t.to_string());
+                }
+            }
+        }
+        members
+    } else {
+        trimmed
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+}
+
+/// Format individual member values into a SQL-safe member list string (e.g. `'a','b','c'`).
+pub fn format_member_list(members: &[String]) -> String {
+    members
+        .iter()
+        .map(|m| format!("'{}'", m.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn member_list_parsing_and_formatting() {
+        assert!(is_member_list_type("enum"));
+        assert!(is_member_list_type("ENUM"));
+        assert!(is_member_list_type("set"));
+        assert!(!is_member_list_type("varchar"));
+        assert!(!is_member_list_type("int"));
+
+        assert!(is_numeric_type("int"));
+        assert!(is_numeric_type("BIGINT"));
+        assert!(is_numeric_type("decimal"));
+        assert!(!is_numeric_type("varchar"));
+        assert!(!is_numeric_type("enum"));
+
+        let items = parse_member_list("'high','slow'");
+        assert_eq!(items, vec!["high", "slow"]);
+        assert_eq!(format_member_list(&items), "'high','slow'");
+
+        let escaped = parse_member_list("'it''s','ok'");
+        assert_eq!(escaped, vec!["it's", "ok"]);
+        assert_eq!(format_member_list(&escaped), "'it''s','ok'");
+
+        let unquoted = parse_member_list("male, female");
+        assert_eq!(unquoted, vec!["male", "female"]);
+        assert_eq!(format_member_list(&unquoted), "'male','female'");
+
+        assert!(parse_member_list("").is_empty());
+    }
 
     #[test]
     fn auto_increment_matches_the_type_without_its_qualifier() {

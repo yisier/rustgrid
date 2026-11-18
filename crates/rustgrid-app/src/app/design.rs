@@ -8,6 +8,7 @@ use rustgrid_core::{
     DesignerOptionField, DesignerTab, ExcludeDef, ForeignKeyDef, IndexColumnDef, IndexDef, RuleDef,
     TableDesignerSpec, TableSchema, TriggerDef, UniqueKeyDef,
 };
+use rustgrid_core::{format_member_list, is_member_list_type, parse_member_list};
 
 /// A row of the field grid, shared by the header and every row.
 pub(super) const DESIGN_ROW_HEIGHT: f32 = 24.0;
@@ -246,6 +247,7 @@ pub(super) fn field_column_display(kind: DesignerFieldColumn, column: &ColumnDef
 #[derive(Clone, PartialEq, Eq)]
 enum InputTag {
     Default,
+    EnumValues,
     Engine,
     Charset,
     Collation,
@@ -771,6 +773,11 @@ pub(super) struct TableDesignView {
     /// editor can size itself to the room the view actually has.
     pub(super) root_bounds: Rc<RefCell<Bounds<Pixels>>>,
     pub(super) default_input: Entity<TextInput>,
+    pub(super) enum_values_input: Entity<TextInput>,
+    pub(super) enum_dialog_open: bool,
+    pub(super) enum_draft_values: Vec<String>,
+    pub(super) enum_draft_inputs: Vec<Entity<TextInput>>,
+    pub(super) enum_anchor: Rc<RefCell<Option<Point<Pixels>>>>,
     /// The list of common default expressions, opened from the chevron beside 默认.
     pub(super) default_menu_open: bool,
     /// The 默认 field's top-left in window coordinates, so its suggestions can open above it when
@@ -960,6 +967,8 @@ impl TableDesignView {
         let column_types = connection.column_types();
         let engines = connection.storage_engines();
         let default_input = text_input(theme, String::new(), weak.clone(), InputTag::Default, cx);
+        let enum_values_input =
+            text_input(theme, String::new(), weak.clone(), InputTag::EnumValues, cx);
         let identity_generation_combo =
             option_combo(theme, weak.clone(), InputTag::IdentityGeneration, cx);
         let identity_start_input = text_input(
@@ -1078,6 +1087,11 @@ impl TableDesignView {
             default_input,
             default_menu_open: false,
             default_anchor: Rc::new(RefCell::new(None)),
+            enum_values_input,
+            enum_dialog_open: false,
+            enum_draft_values: Vec::new(),
+            enum_draft_inputs: Vec::new(),
+            enum_anchor: Rc::new(RefCell::new(None)),
             identity_generation_combo,
             identity_start_input,
             identity_increment_input,
@@ -1176,6 +1190,13 @@ impl TableDesignView {
                     column.default = text.to_string();
                 }
             }
+            InputTag::EnumValues => {
+                if let Some(index) = self.selected_field
+                    && let Some(column) = self.schema.columns.get_mut(index)
+                {
+                    column.length = text.to_string();
+                }
+            }
             InputTag::Engine => self.schema.options.engine = text.to_string(),
             InputTag::Charset => {
                 self.schema.options.charset = text.to_string();
@@ -1241,19 +1262,154 @@ impl TableDesignView {
 
     /// The engine's common default expressions that apply to `column`'s type. The list is filtered
     /// per column, so a `varchar` column is not offered timestamp functions and a numeric column is
-    /// not offered an empty string.
-    pub(super) fn default_suggestions_for(
-        &self,
-        column: Option<&ColumnDef>,
-    ) -> Vec<&rustgrid_core::DefaultSuggestion> {
-        let data_type = column
-            .map(|column| column.data_type.as_str())
-            .unwrap_or_default();
-        self.designer
-            .default_suggestions
+    /// not offered an empty string. For `enum`/`set`, it suggests the member values.
+    pub(super) fn default_suggestions_for(&self, column: Option<&ColumnDef>) -> Vec<String> {
+        let mut result = Vec::new();
+        if let Some(column) = column {
+            if is_member_list_type(&column.data_type) {
+                let members = parse_member_list(&column.length);
+                for m in members {
+                    result.push(format!("'{}'", m.replace('\'', "''")));
+                }
+                result.push("NULL".to_string());
+                result.push("''".to_string());
+                return result;
+            }
+            let data_type = column.data_type.as_str();
+            for suggestion in self.designer.default_suggestions.iter() {
+                if suggestion.applies(data_type) {
+                    result.push(suggestion.value.to_string());
+                }
+            }
+        }
+        result
+    }
+
+    /// Open the enum/set member values list editor popup.
+    pub(super) fn open_enum_editor(&mut self, cx: &mut Context<'_, Self>) {
+        let column = self
+            .selected_field
+            .and_then(|index| self.schema.columns.get(index));
+        let raw = column.map(|c| c.length.as_str()).unwrap_or_default();
+        let values = parse_member_list(raw);
+        let theme = self.theme;
+        let weak = self.self_weak.clone();
+        self.enum_draft_values = values;
+        self.enum_draft_inputs = self
+            .enum_draft_values
             .iter()
-            .filter(|suggestion| suggestion.applies(data_type))
-            .collect()
+            .enumerate()
+            .map(|(index, val)| {
+                let item_weak = weak.clone();
+                cx.new(|cx| {
+                    TextInput::new(
+                        theme,
+                        val.clone(),
+                        TextInputOptions {
+                            placeholder: t!("design.enum_value_placeholder").to_string().into(),
+                            size: Some(Size::Small),
+                            ..Default::default()
+                        },
+                        cx,
+                    )
+                    .on_change(Rc::new(move |text, _window, cx| {
+                        let _ = item_weak.update(cx, |view, cx| {
+                            view.enum_draft_value_changed(index, text, cx);
+                        });
+                    }))
+                })
+            })
+            .collect();
+        self.enum_dialog_open = true;
+        cx.notify();
+    }
+
+    /// Add an empty member value row in the enum editor draft.
+    pub(super) fn add_enum_draft_value(&mut self, cx: &mut Context<'_, Self>) {
+        let index = self.enum_draft_values.len();
+        self.enum_draft_values.push(String::new());
+        let theme = self.theme;
+        let weak = self.self_weak.clone();
+        let input = cx.new(|cx| {
+            TextInput::new(
+                theme,
+                String::new(),
+                TextInputOptions {
+                    placeholder: t!("design.enum_value_placeholder").to_string().into(),
+                    size: Some(Size::Small),
+                    ..Default::default()
+                },
+                cx,
+            )
+            .on_change(Rc::new(move |text, _window, cx| {
+                let _ = weak.update(cx, |view, cx| {
+                    view.enum_draft_value_changed(index, text, cx);
+                });
+            }))
+        });
+        self.enum_draft_inputs.push(input);
+        self.apply_enum_draft(cx);
+    }
+
+    /// Remove a member value at index from the enum editor draft.
+    pub(super) fn remove_enum_draft_value(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        if index < self.enum_draft_values.len() {
+            self.enum_draft_values.remove(index);
+            let theme = self.theme;
+            let weak = self.self_weak.clone();
+            self.enum_draft_inputs = self
+                .enum_draft_values
+                .iter()
+                .enumerate()
+                .map(|(idx, val)| {
+                    let item_weak = weak.clone();
+                    cx.new(|cx| {
+                        TextInput::new(
+                            theme,
+                            val.clone(),
+                            TextInputOptions {
+                                placeholder: t!("design.enum_value_placeholder").to_string().into(),
+                                size: Some(Size::Small),
+                                ..Default::default()
+                            },
+                            cx,
+                        )
+                        .on_change(Rc::new(move |text, _window, cx| {
+                            let _ = item_weak.update(cx, |view, cx| {
+                                view.enum_draft_value_changed(idx, text, cx);
+                            });
+                        }))
+                    })
+                })
+                .collect();
+            self.apply_enum_draft(cx);
+        }
+    }
+
+    /// Update one member value in the enum editor draft.
+    pub(super) fn enum_draft_value_changed(
+        &mut self,
+        index: usize,
+        text: &str,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(val) = self.enum_draft_values.get_mut(index) {
+            *val = text.to_string();
+        }
+        self.apply_enum_draft(cx);
+    }
+
+    fn apply_enum_draft(&mut self, cx: &mut Context<'_, Self>) {
+        let formatted = format_member_list(&self.enum_draft_values);
+        if let Some(index) = self.selected_field
+            && let Some(column) = self.schema.columns.get_mut(index)
+        {
+            column.length = formatted.clone();
+        }
+        self.enum_values_input
+            .update(cx, |input, cx| input.set_text(formatted, cx));
+        self.dirty = true;
+        cx.notify();
     }
 
     /// Take one of the engine's common default expressions from the 默认 suggestions.
@@ -1273,6 +1429,7 @@ impl TableDesignView {
     /// Push the selected field's default and identity controls into the detail panel.
     fn sync_selected_input(&mut self, cx: &mut Context<'_, Self>) {
         self.default_menu_open = false;
+        self.enum_dialog_open = false;
         let column = self
             .selected_field
             .and_then(|index| self.schema.columns.get(index));
@@ -1281,6 +1438,13 @@ impl TableDesignView {
             .unwrap_or_default();
         self.default_input
             .update(cx, |input, cx| input.set_text(default, cx));
+        let enum_values = if column.is_some_and(|c| is_member_list_type(&c.data_type)) {
+            column.map(|c| c.length.clone()).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        self.enum_values_input
+            .update(cx, |input, cx| input.set_text(enum_values, cx));
         let identity =
             column.filter(|column| column.auto_increment && !column.identity.trim().is_empty());
         let generation = identity
@@ -1461,7 +1625,15 @@ impl TableDesignView {
         if let Some(column_def) = self.schema.columns.get_mut(row) {
             match column {
                 FieldColumn::Name => column_def.name = text.to_string(),
-                FieldColumn::Length => column_def.length = text.to_string(),
+                FieldColumn::Length => {
+                    column_def.length = text.to_string();
+                    if Some(row) == self.selected_field
+                        && is_member_list_type(&column_def.data_type)
+                    {
+                        self.enum_values_input
+                            .update(cx, |input, cx| input.set_text(text.to_string(), cx));
+                    }
+                }
                 FieldColumn::Decimals => column_def.decimals = text.to_string(),
                 FieldColumn::Comment => column_def.comment = text.to_string(),
             }
@@ -1983,6 +2155,15 @@ impl TableDesignView {
         cx: &mut Context<'_, Self>,
     ) {
         if row >= self.schema.columns.len() {
+            return;
+        }
+        if column == FieldColumn::Decimals
+            && self
+                .schema
+                .columns
+                .get(row)
+                .is_some_and(|c| is_member_list_type(&c.data_type))
+        {
             return;
         }
         let value = self.field_value(row, column);
@@ -2821,9 +3002,15 @@ impl TableDesignView {
             if column.auto_increment && !self.designer.auto_increment.allows(data_type) {
                 column.auto_increment = false;
             }
+            if is_member_list_type(data_type) {
+                column.decimals.clear();
+                column.unsigned = false;
+                column.zerofill = false;
+            }
         }
         self.type_combo = None;
         self.selected_cell = Some((row, FieldCell::Type));
+        self.sync_selected_input(cx);
         // The popup's search field goes away with the list; hand the keys back to the designer so
         // the arrow keys keep moving the selected cell.
         self.focus_pending = true;
@@ -5519,5 +5706,42 @@ mod tests {
                 "id_copy3".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn enum_column_values_and_defaults() {
+        let col = ColumnDef {
+            name: "status".to_string(),
+            data_type: "enum".to_string(),
+            length: "'active','inactive'".to_string(),
+            ..ColumnDef::default()
+        };
+        assert_eq!(
+            field_column_value(&col, FieldColumn::Length),
+            "'active','inactive'"
+        );
+        assert_eq!(field_column_value(&col, FieldColumn::Decimals), "");
+
+        // Default TableDesignerSpec includes EnumValues option
+        let spec = TableDesignerSpec::default();
+        assert!(
+            spec.column_options
+                .contains(&DesignerColumnOption::EnumValues)
+        );
+
+        // Member list parsing & formatting verification
+        assert!(is_member_list_type(&col.data_type));
+        assert!(is_member_list_type("SET"));
+        assert!(!is_member_list_type("varchar"));
+
+        let parsed = parse_member_list(&col.length);
+        assert_eq!(parsed, vec!["active", "inactive"]);
+        assert_eq!(format_member_list(&parsed), "'active','inactive'");
+
+        // Unquoted input from user
+        let user_raw = "first, second, third";
+        let user_parsed = parse_member_list(user_raw);
+        assert_eq!(user_parsed, vec!["first", "second", "third"]);
+        assert_eq!(format_member_list(&user_parsed), "'first','second','third'");
     }
 }
