@@ -10,6 +10,40 @@ UI labels are quoted as the app shows them, so this file quotes the English stri
 [`CHANGELOG_zh.md`](CHANGELOG_zh.md) and [`CHANGELOG_ru.md`](CHANGELOG_ru.md) quote the 简体中文 and
 Russian ones.
 
+## [0.1.15] - 2026-11-18
+
+### Added
+
+- ClickHouse support: connect over HTTP, browse databases, tables and views, run SQL and design
+  tables.
+- The grid saves a row when you leave it, opens a new record with the column defaults on the last
+  row, and edits `ENUM` cells from a drop-down
+  ([#66](https://github.com/yisier/rustgrid/pull/66)).
+- The Table Designer works from the keyboard: arrows, Tab, Home/End, Insert, Ctrl+Delete and F6
+  move between fields and details.
+- Tabs reorder by dragging, with a floating tab preview and a drop marker, and the tab menu adds
+  Close Tabs to the Right ([#64](https://github.com/yisier/rustgrid/issues/64)).
+- The table menu adds Object Info and Dump SQL File.
+
+### Changed
+
+- The Sort panel matches the filter builder, and a rule reorders by dragging its row.
+- Connection forms place an engine's own fields per engine; Oracle's connection type, TNS alias
+  and descriptor are radio and multi-line fields.
+
+### Fixed
+
+- OceanBase 3.x connects and opens the table designer, routines and views
+  ([#62](https://github.com/yisier/rustgrid/issues/62)).
+- MySQL scripts run statements inside conditional comments.
+- A read-only grid shows Refresh and a Read-only label instead of disabled row actions.
+- Frozen columns keep the horizontal scrollbar draggable, and a read-only cell's text can be
+  selected and copied.
+- A double Save no longer inserts the same new row twice, and new-row defaults stay with their
+  column when fields are hidden or reordered.
+- The database name can be selected and copied while editing a database.
+- The tab strip keeps its widths when a pane is resized, and dragging a tab no longer crashes.
+
 ## [0.1.14] - 2026-11-13
 
 ### Added
