@@ -1551,11 +1551,21 @@ struct TabMenu {
     position: Point<Pixels>,
 }
 
-/// An in-progress horizontal drag of an open tab. The strip reorders live as the pointer crosses
-/// a neighbour's midpoint (like Chrome), so dropping needs no extra step.
+/// An in-progress horizontal drag of an open tab.
+///
+/// The strip does not reorder while the pointer moves: the tab's ghost follows the pointer and a
+/// thin marker shows the slot it will drop into, so nothing under the pointer jumps. The sequence
+/// is reordered once on mouse-up.
 #[derive(Clone, Copy)]
 struct TabDrag {
     source: TabTarget,
+    /// The pointer's x in window space, for the ghost tab.
+    pointer_x: f32,
+    /// Where the pointer grabbed the tab, measured from its left edge, so the ghost keeps the
+    /// grabbed point under the pointer.
+    grab_offset: f32,
+    /// The slot the tab would drop into, counted among the *other* tabs (`0..=n-1`).
+    slot: usize,
 }
 
 /// The window-space rectangles that keep an open submenu flyout (颜色, 管理分组, 转储 SQL 文件,

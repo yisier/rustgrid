@@ -18,13 +18,14 @@ type QueryTabRow = (
     Option<ConnectionColor>,
 );
 
-/// The widest a tab grows; the full title is in the tab's tooltip.
-const TAB_MAX_WIDTH: f32 = 170.0;
+/// The widest a tab grows before its title is ellipsized. A tab sizes itself to its title (the
+/// titles carry the object, database and connection), so a short tab stays narrow while a long one
+/// uses the room it needs; the full title is always in the tab's tooltip.
+const TAB_MAX_WIDTH: f32 = 360.0;
 
-/// The narrowest a tab shrinks to as more tabs open. The strip lays its tabs out as flexbox items
-/// (so it resizes them itself when a pane changes the strip's width), and past this minimum the
-/// tabs stop shrinking and the strip scrolls instead — keeping room for the icon, a few title
-/// characters and the close button.
+/// The narrowest a tab shrinks to as more tabs open. Past this minimum the tabs stop shrinking and
+/// the strip scrolls instead — keeping room for the icon, a few title characters and the close
+/// button.
 const TAB_MIN_WIDTH: f32 = 96.0;
 
 /// How far the pointer must travel before a press on a tab becomes a drag (so a plain click still
@@ -46,6 +47,20 @@ fn tab_background(theme: Theme, color: Option<ConnectionColor>, alpha: u32, fall
         Some(color) => color.tint(theme, alpha),
         None => (fallback << 8) | 0xff,
     }
+}
+
+/// The slot a tab dragged from `source` would drop into, given every tab's center in display
+/// order: the number of *other* tabs whose center is left of the pointer. `None` until every tab
+/// has a laid-out center (the first frame after opening one).
+fn insertion_slot(centers: &[Option<f32>], source: usize, pointer_x: f32) -> Option<usize> {
+    let mut slot = 0;
+    for (index, center) in centers.iter().enumerate() {
+        let center = (*center)?;
+        if index != source && pointer_x > center {
+            slot += 1;
+        }
+    }
+    Some(slot)
 }
 
 impl AppView {
@@ -240,13 +255,38 @@ impl TabBar {
             .unwrap_or_else(Theme::dark)
     }
 
+    /// The window-space rectangle of the tab at display position `index` in the last layout, if it
+    /// was drawn. The strip's tracked scroll handle records one per child, scroll offset included.
+    fn tab_bounds(&self, index: usize) -> Option<Bounds<Pixels>> {
+        self.scroll.bounds_for_item(index)
+    }
+
     /// The center x of the tab at display position `index` in the last layout, if it was drawn.
-    /// The strip's tracked scroll handle records one window-space rectangle per child, scroll
-    /// offset included, so this is where the drag's midpoint test works.
     fn tab_center(&self, index: usize) -> Option<f32> {
-        self.scroll
-            .bounds_for_item(index)
+        self.tab_bounds(index)
             .map(|bounds| f32::from(bounds.origin.x) + f32::from(bounds.size.width) / 2.0)
+    }
+
+    /// The x of the drop marker for `slot`, relative to the strip's viewport: the left edge of the
+    /// first tab, the boundary between two tabs, or the right edge of the last one, with the
+    /// dragged tab left out of the order.
+    fn insert_marker_x(&self, order: &[TabTarget], source: TabTarget, slot: usize) -> Option<f32> {
+        let strip_left = f32::from(self.scroll.bounds().left());
+        let remaining: Vec<Bounds<Pixels>> = order
+            .iter()
+            .enumerate()
+            .filter(|(_, target)| **target != source)
+            .filter_map(|(index, _)| self.tab_bounds(index))
+            .collect();
+        let first = remaining.first()?;
+        let x = if slot == 0 {
+            f32::from(first.left())
+        } else if slot >= remaining.len() {
+            f32::from(remaining[remaining.len() - 1].right())
+        } else {
+            (f32::from(remaining[slot - 1].right()) + f32::from(remaining[slot].left())) / 2.0
+        };
+        Some(x - strip_left)
     }
 
     fn scroll_tabs(&mut self, delta: f32, cx: &mut Context<'_, Self>) -> bool {
@@ -299,6 +339,60 @@ impl TabBar {
                     .flex_none()
                     .text_color(rgb(theme.text_muted)),
             )
+    }
+
+    /// The tab that follows the pointer while dragging: the dragged tab's own title and colour,
+    /// carrying the brand border and a soft shadow so it reads as lifted above the strip.
+    #[allow(clippy::too_many_arguments)]
+    fn drag_ghost(
+        &self,
+        theme: Theme,
+        x: f32,
+        width: f32,
+        title: String,
+        icon: &'static str,
+        icon_color: u32,
+        color: Option<ConnectionColor>,
+    ) -> AnyElement {
+        let background = rgba(tab_background(theme, color, 0xa0, theme.editor_bg));
+        div()
+            .absolute()
+            .left(px(x))
+            .top(px(2.0))
+            .w(px(width))
+            .h(px(26.0))
+            .occlude()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .overflow_hidden()
+            .bg(background)
+            .border_1()
+            .border_color(rgb(theme.brand))
+            .shadow(ui::soft_shadow())
+            .text_size(px(12.0))
+            .child(tree_icon(icon, icon_color))
+            .child(
+                div()
+                    .min_w(px(0.0))
+                    .truncate()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(title),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .flex_none()
+                    .w(px(16.0))
+                    .h(px(16.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child("✕"),
+            )
+            .into_any_element()
     }
 
     fn object_tab(
@@ -395,7 +489,6 @@ impl TabBar {
             .gap_1()
             .h_full()
             .px_2()
-            .flex_1()
             .min_w(px(TAB_MIN_WIDTH))
             .max_w(px(TAB_MAX_WIDTH))
             .overflow_hidden()
@@ -415,9 +508,7 @@ impl TabBar {
                     .border_1()
                     .border_color(rgb(theme.border))
             })
-            .when(dragging, |style| {
-                style.bg(hover_bg).border_color(rgb(theme.brand))
-            })
+            .when(dragging, |style| style.opacity(0.35))
             .hover(move |style| style.bg(hover_bg))
             .on_mouse_down(
                 MouseButton::Left,
@@ -456,7 +547,6 @@ impl TabBar {
             .child(tree_icon(icon, icon_color))
             .child(
                 div()
-                    .flex_1()
                     .min_w(px(0.0))
                     .truncate()
                     .when(active, |style| style.font_weight(FontWeight::SEMIBOLD))
@@ -526,7 +616,6 @@ impl TabBar {
             .gap_1()
             .h_full()
             .px_2()
-            .flex_1()
             .min_w(px(TAB_MIN_WIDTH))
             .max_w(px(TAB_MAX_WIDTH))
             .overflow_hidden()
@@ -546,9 +635,7 @@ impl TabBar {
                     .border_1()
                     .border_color(rgb(theme.border))
             })
-            .when(dragging, |style| {
-                style.bg(hover_bg).border_color(rgb(theme.brand))
-            })
+            .when(dragging, |style| style.opacity(0.35))
             .hover(move |style| style.bg(hover_bg))
             .on_mouse_down(
                 MouseButton::Left,
@@ -587,7 +674,6 @@ impl TabBar {
             .child(tree_icon(icon, icon_color))
             .child(
                 div()
-                    .flex_1()
                     .min_w(px(0.0))
                     .truncate()
                     .when(active, |style| style.font_weight(FontWeight::SEMIBOLD))
@@ -654,7 +740,6 @@ impl TabBar {
             .gap_1()
             .h_full()
             .px_2()
-            .flex_1()
             .min_w(px(TAB_MIN_WIDTH))
             .max_w(px(TAB_MAX_WIDTH))
             .overflow_hidden()
@@ -674,9 +759,7 @@ impl TabBar {
                     .border_1()
                     .border_color(rgb(theme.border))
             })
-            .when(dragging, |style| {
-                style.bg(hover_bg).border_color(rgb(theme.brand))
-            })
+            .when(dragging, |style| style.opacity(0.35))
             .hover(move |style| style.bg(hover_bg))
             .on_mouse_down(
                 MouseButton::Left,
@@ -715,7 +798,6 @@ impl TabBar {
             .child(tree_icon("icons/design_table.svg", icon_color))
             .child(
                 div()
-                    .flex_1()
                     .min_w(px(0.0))
                     .truncate()
                     .when(active, |style| style.font_weight(FontWeight::SEMIBOLD))
@@ -949,9 +1031,20 @@ impl Render for TabBar {
             .map(|app| app.read(cx).ordered_tabs(cx))
             .unwrap_or_default();
         let is_dragging = |target: TabTarget| tab_drag.is_some_and(|drag| drag.source == target);
+        let mut ghost_tab: Option<(String, &'static str, u32, Option<ConnectionColor>)> = None;
         let mut tabs: Vec<(TabTarget, AnyElement)> = Vec::new();
         for (index, id, title, is_view, is_key, color) in grid_tabs {
             let target = TabTarget::Grid(index);
+            let (icon, icon_color) = if is_key {
+                ("icons/primary_key.svg", theme.brand)
+            } else if is_view {
+                ("icons/views.svg", theme.icon_view)
+            } else {
+                ("icons/tables.svg", theme.icon_table)
+            };
+            if is_dragging(target) {
+                ghost_tab = Some((title.clone(), icon, icon_color, color));
+            }
             tabs.push((
                 target,
                 self.table_tab(
@@ -971,6 +1064,15 @@ impl Render for TabBar {
         }
         for (index, id, title, is_view, color) in design_tabs {
             let target = TabTarget::Design(index);
+            let icon = "icons/design_table.svg";
+            let icon_color = if is_view {
+                theme.icon_view
+            } else {
+                theme.icon_table
+            };
+            if is_dragging(target) {
+                ghost_tab = Some((title.clone(), icon, icon_color, color));
+            }
             tabs.push((
                 target,
                 self.design_tab(
@@ -989,6 +1091,9 @@ impl Render for TabBar {
         }
         for (index, id, title, icon, icon_color, color) in query_tabs {
             let target = TabTarget::Query(index);
+            if is_dragging(target) {
+                ghost_tab = Some((title.clone(), icon, icon_color, color));
+            }
             tabs.push((
                 target,
                 self.query_tab(
@@ -1050,6 +1155,48 @@ impl Render for TabBar {
         .absolute()
         .inset_0();
 
+        // The drag's overlay: a thin marker at the slot the tab would drop into and a ghost of the
+        // tab following the pointer's x. Nothing is reordered until the mouse-up, so the strip
+        // never jumps under the pointer.
+        let marker = tab_drag.and_then(|drag| {
+            let position = order.iter().position(|target| *target == drag.source)?;
+            // Dropping back into the tab's own slot changes nothing, and a marker beside the
+            // still-visible dimmed tab would read as a move.
+            if drag.slot == position {
+                return None;
+            }
+            let x = self.insert_marker_x(&order, drag.source, drag.slot)?;
+            let strip_width = f32::from(self.scroll.bounds().size.width);
+            let x = x.clamp(0.0, (strip_width - 2.0).max(0.0));
+            Some(
+                div()
+                    .absolute()
+                    .left(px(x))
+                    .top(px(2.0))
+                    .w(px(2.0))
+                    .h(px(26.0))
+                    .rounded(px(1.0))
+                    .bg(rgb(theme.brand))
+                    .into_any_element(),
+            )
+        });
+        let ghost = ghost_tab.and_then(|(title, icon, icon_color, color)| {
+            let drag = tab_drag?;
+            let source_position = order.iter().position(|target| *target == drag.source)?;
+            let bounds = self.tab_bounds(source_position)?;
+            let strip_left = f32::from(self.scroll.bounds().left());
+            let x = drag.pointer_x - drag.grab_offset - strip_left;
+            Some(self.drag_ghost(
+                theme,
+                x,
+                f32::from(bounds.size.width),
+                title,
+                icon,
+                icon_color,
+                color,
+            ))
+        });
+
         // Reveal the active tab when it changes or a new tab opens at the far end (the strip may
         // be scrolled away from it after the user paged it).
         if self.last_active_tab != active_target {
@@ -1097,7 +1244,9 @@ impl Render for TabBar {
                 .h_full()
                 .child(strip)
                 .child(gpui_kit::base::ScrollableMask::vertical_wheel(&self.scroll))
-                .child(measure),
+                .child(measure)
+                .children(marker)
+                .children(ghost),
         );
         if needs_scroll {
             bar = bar.child(self.scroll_button("tab-scroll-right", false, cx));
@@ -1113,10 +1262,9 @@ impl AppView {
         self.tab_press = Some((target, position));
     }
 
-    /// Update the in-progress tab drag: reorder the strip as the pointer crosses a neighbour's
-    /// midpoint and auto-scroll it near the edges. Only the tab bar repaints, and only when the
-    /// order or the strip's offset actually changes, so a drag does not re-render the page under
-    /// the pointer.
+    /// Update the in-progress tab drag: move the ghost with the pointer, pick the drop slot and
+    /// auto-scroll the strip near its edges. Nothing is reordered until the mouse-up, so the tabs
+    /// under the pointer never jump; only the tab bar repaints, not the page.
     pub(super) fn tab_drag_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<'_, Self>) {
         if event.pressed_button != Some(MouseButton::Left) {
             let was_dragging = self.tab_drag.take().is_some();
@@ -1129,79 +1277,96 @@ impl AppView {
         let Some((source, start)) = self.tab_press else {
             return;
         };
+        let pointer_x = f32::from(event.position.x);
         if self.tab_drag.is_none() {
-            let dx = f32::from(event.position.x) - f32::from(start.x);
+            let dx = pointer_x - f32::from(start.x);
             let dy = f32::from(event.position.y) - f32::from(start.y);
             if dx.hypot(dy) <= TAB_DRAG_THRESHOLD {
                 return;
             }
-            self.tab_drag = Some(TabDrag { source });
+            let order = self.ordered_tabs(cx);
+            let source_position = order.iter().position(|target| *target == source);
+            let grab_offset = source_position
+                .and_then(|position| self.tab_bar.read(cx).tab_bounds(position))
+                .map(|bounds| pointer_x - f32::from(bounds.left()))
+                .unwrap_or(0.0);
+            self.tab_drag = Some(TabDrag {
+                source,
+                pointer_x,
+                grab_offset,
+                slot: source_position.unwrap_or(0),
+            });
             self.notify_tab_bar(cx);
         }
-        self.tab_drag_step(f32::from(event.position.x), cx);
+        let slot = self.tab_drag_slot(pointer_x, cx);
+        if let Some(drag) = self.tab_drag.as_mut() {
+            drag.pointer_x = pointer_x;
+            drag.slot = slot;
+        }
         self.tab_drag_autoscroll(event.position, cx);
+        self.notify_tab_bar(cx);
     }
 
-    /// Finish a tab drag on mouse-up. The order is already applied (the strip reordered live), so
-    /// the drop only clears the drag state.
+    /// Finish a tab drag on mouse-up: reorder the strip to the slot the marker showed, then reveal
+    /// (and activate) the moved tab.
     pub(super) fn tab_drag_end(&mut self, cx: &mut Context<'_, Self>) {
         self.tab_press = None;
-        if self.tab_drag.take().is_some() {
-            self.notify_tab_bar(cx);
-        }
+        let Some(drag) = self.tab_drag.take() else {
+            return;
+        };
+        self.move_tab_to(drag.source, drag.slot, cx);
+        self.notify_tab_bar(cx);
+        self.show_tab(Some(drag.source), cx);
     }
 
     pub(super) fn notify_tab_bar(&self, cx: &mut Context<'_, Self>) {
         self.tab_bar.update(cx, |_, cx| cx.notify());
     }
 
-    /// Move the dragged tab one slot when the pointer crosses the midpoint between it and its
-    /// neighbour. The tabs are all one width, so each swap shifts it exactly one slot; the midpoint
-    /// rule gives the half-tab hysteresis that keeps a drag from flickering between two slots.
-    fn tab_drag_step(&mut self, pointer_x: f32, cx: &mut Context<'_, Self>) {
+    /// The slot a pointer at `pointer_x` would drop into: the number of *other* tabs whose center
+    /// lies left of the pointer. Without a complete previous layout the current position is kept,
+    /// so a fast first move cannot move the tab to the front.
+    fn tab_drag_slot(&self, pointer_x: f32, cx: &mut Context<'_, Self>) -> usize {
         let Some(drag) = self.tab_drag else {
-            return;
+            return 0;
         };
         let order = self.ordered_tabs(cx);
-        // The centers come from the last layout and line up with display positions. If any tab was
-        // not drawn yet (the first frame after opening one), wait for the next move.
-        let centers: Option<Vec<f32>> = {
+        let source_position = order
+            .iter()
+            .position(|target| *target == drag.source)
+            .unwrap_or(0);
+        let centers: Vec<Option<f32>> = {
             let bar = self.tab_bar.read(cx);
             (0..order.len())
                 .map(|index| bar.tab_center(index))
                 .collect()
         };
-        let Some(centers) = centers else {
+        insertion_slot(&centers, source_position, pointer_x).unwrap_or(source_position)
+    }
+
+    /// Move `source` to `slot` in the display order (the index among the other tabs) and rebuild
+    /// the persistent sequence around it.
+    fn move_tab_to(&mut self, source: TabTarget, slot: usize, cx: &App) {
+        let order = self.ordered_tabs(cx);
+        let Some(from) = order.iter().position(|target| *target == source) else {
             return;
         };
-        let Some(mut position) = order.iter().position(|target| *target == drag.source) else {
+        if order.len() <= 1 {
             return;
-        };
-        let mut moved = false;
-        loop {
-            let target =
-                if position > 0 && pointer_x < (centers[position] + centers[position - 1]) / 2.0 {
-                    position - 1
-                } else if position + 1 < centers.len()
-                    && pointer_x > (centers[position] + centers[position + 1]) / 2.0
-                {
-                    position + 1
-                } else {
-                    break;
-                };
-            // `ordered_tabs` reconciled `tab_sequence` just above, so display positions and the
-            // sequence line up one to one.
-            let mut sequence = self.tab_sequence.borrow_mut();
-            if target < sequence.len() && position < sequence.len() {
-                sequence.swap(position, target);
-            }
-            drop(sequence);
-            position = target;
-            moved = true;
         }
-        if moved {
-            self.notify_tab_bar(cx);
+        let slot = slot.min(order.len() - 1);
+        if slot == from {
+            return;
         }
+        // `ordered_tabs` reconciled the sequence just above, so it mirrors the display order; the
+        // source's display position is also its position in the sequence.
+        let mut sequence = self.tab_sequence.borrow_mut();
+        if from >= sequence.len() {
+            return;
+        }
+        let key = sequence.remove(from);
+        let at = slot.min(sequence.len());
+        sequence.insert(at, key);
     }
 
     /// Pan the strip while a dragged tab sits near either edge, so it can be dragged past the
@@ -1342,16 +1507,21 @@ mod tests {
     use gpui_kit::TestSupportExt as _;
     use gpui_kit::test::TestWindowExt as _;
 
-    /// The tab strip's layout contract: equal-width tabs that fill the strip, cap at
-    /// [`TAB_MAX_WIDTH`] and shrink together down to [`TAB_MIN_WIDTH`], after which the strip
-    /// scrolls (the ◀ / ▶ pagers' condition). Widths come from the flexbox, so widening the strip
-    /// (a pane closing, the sidebar narrowing) grows the tabs back without recomputing anything in
-    /// Rust.
+    /// The tab strip's layout contract: a tab sizes itself to its title, stops at
+    /// [`TAB_MAX_WIDTH`] and shrinks down to [`TAB_MIN_WIDTH`] when the tabs no longer fit, after
+    /// which the strip scrolls (the ◀ / ▶ pagers' condition). Widths come from the flexbox, so
+    /// widening the strip (a pane closing, the sidebar narrowing) grows the tabs back without
+    /// recomputing anything in Rust.
     struct StripHarness {
         scroll: ScrollHandle,
         count: usize,
         width: f32,
+        title: &'static str,
     }
+
+    /// Longer than [`TAB_MAX_WIDTH`], so a tab's natural size reaches the cap.
+    const LONG_TITLE: &str =
+        "a very long tab title that definitely exceeds the maximum tab width and then some more";
 
     fn tab_id(index: usize) -> SharedString {
         SharedString::from(format!("test-tab-{index}"))
@@ -1363,6 +1533,7 @@ mod tests {
             _window: &mut Window,
             _cx: &mut Context<'_, Self>,
         ) -> impl IntoElement {
+            let title = self.title;
             let tabs = (0..self.count).map(|index| {
                 div()
                     .id(tab_id(index))
@@ -1373,17 +1544,10 @@ mod tests {
                     .gap_1()
                     .h_full()
                     .px_2()
-                    .flex_1()
                     .min_w(px(TAB_MIN_WIDTH))
                     .max_w(px(TAB_MAX_WIDTH))
                     .overflow_hidden()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .truncate()
-                            .child("a long tab title that is ellipsized"),
-                    )
+                    .child(div().min_w(px(0.0)).truncate().child(title))
                     .into_any_element()
             });
             div().w(px(self.width)).h(px(30.0)).child(
@@ -1426,6 +1590,7 @@ mod tests {
                 scroll: scroll.clone(),
                 count: 5,
                 width: 800.0,
+                title: LONG_TITLE,
             });
             let (handle, _) = gpui_kit::open_window(
                 WindowOptions {
@@ -1442,17 +1607,17 @@ mod tests {
             (handle, harness)
         });
 
-        // Five tabs share an 800px strip: (800 - 4 gaps) / 5 = 156.8 each, below the 170 cap.
+        // Five long-title tabs share an 800px strip: (800 - 4 gaps) / 5 = 156.8 each.
         let widths = tab_widths(handle, 5, cx);
         for width in &widths {
             assert!(
                 (*width - 156.8).abs() < 1.5,
-                "tabs should fill the strip evenly, measured {widths:?}"
+                "tabs should share the strip when their content does not fit, measured {widths:?}"
             );
         }
         assert_eq!(scroll.max_offset().x, px(0.0), "five tabs fit");
 
-        // Fewer tabs cap at TAB_MAX_WIDTH instead of stretching further.
+        // Fewer long tabs size to their title and stop at the maximum.
         harness.update(cx, |harness, cx| {
             harness.count = 2;
             cx.notify();
@@ -1460,13 +1625,29 @@ mod tests {
         for width in tab_widths(handle, 2, cx) {
             assert!(
                 (width - TAB_MAX_WIDTH).abs() < 1.0,
-                "tabs should stop at the maximum width, measured {width}"
+                "a long title should reach the maximum width, measured {width}"
             );
         }
 
-        // Ten tabs at 800px would need 76px each: they stop at the minimum and the strip scrolls.
+        // A short title keeps its own (minimum) width instead of stretching to fill.
+        harness.update(cx, |harness, cx| {
+            harness.count = 3;
+            harness.title = "q";
+            cx.notify();
+        });
+        let widths = tab_widths(handle, 3, cx);
+        for width in &widths {
+            assert!(
+                (width - TAB_MIN_WIDTH).abs() < 1.0,
+                "a short title should stay at the minimum width, measured {widths:?}"
+            );
+        }
+        assert_eq!(scroll.max_offset().x, px(0.0), "three short tabs fit");
+
+        // Ten long tabs at 800px would need 76px each: they stop at the minimum and scroll.
         harness.update(cx, |harness, cx| {
             harness.count = 10;
+            harness.title = LONG_TITLE;
             cx.notify();
         });
         let widths = tab_widths(handle, 10, cx);
@@ -1497,6 +1678,22 @@ mod tests {
         }
         window_pump(handle, cx);
         assert_eq!(scroll.max_offset().x, px(0.0), "ten tabs fit 1600px");
+    }
+
+    #[test]
+    fn insertion_slot_counts_only_the_other_tabs() {
+        let centers = [Some(50.0), Some(150.0), Some(250.0)];
+        // Left of everything: the tab drops first.
+        assert_eq!(insertion_slot(&centers, 1, 10.0), Some(0));
+        // Between A and C: only A counts, so the middle tab keeps its place.
+        assert_eq!(insertion_slot(&centers, 1, 200.0), Some(1));
+        // Right of C: both other tabs count, so it drops last.
+        assert_eq!(insertion_slot(&centers, 1, 260.0), Some(2));
+        // The source is never counted, wherever it sits.
+        assert_eq!(insertion_slot(&centers, 0, 260.0), Some(2));
+        assert_eq!(insertion_slot(&centers, 2, 10.0), Some(0));
+        // An unlaid tab (the first frame) keeps the drag at its current position.
+        assert_eq!(insertion_slot(&[Some(50.0), None], 0, 10.0), None);
     }
 
     fn window_pump(handle: gpui::AnyWindowHandle, cx: &mut TestAppContext) {

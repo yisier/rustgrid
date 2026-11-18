@@ -755,11 +755,13 @@ shadcn chrome described above. Implemented today:
    the content pane's tab bar (the bar itself stays neutral so tabs never blend into it; the
    active tab is markedly stronger and bold so it stands out, and the pinned 对象 tab keeps the
    colour while it is the active tab, so the environment stays visible on 用户/查询/备份 too), so
-   production stands out. Tab titles ellipsize and show their full text on hover. Tabs share the
-   strip evenly — 170px while they fit, shrinking together down to 96px — then the strip scrolls
-   with ◀ / ▶ arrows (or the wheel) instead of clipping; the active tab is scrolled into view.
-   Tabs reorder by dragging (live, one slot per half-tab crossed, auto-scrolling near the strip's
-   edges), and the tab context menu's 关闭右侧 closes every tab to the right of the clicked one.
+   production stands out. Tab titles ellipsize and show their full text on hover. A tab sizes to
+   its title (up to 360px — the titles carry the object, database and connection), shrinking with
+   the others down to 96px when more open; past that the strip scrolls with ◀ / ▶ arrows (or the
+   wheel) instead of clipping and the active tab is scrolled into view. Tabs reorder by dragging:
+   the tab's ghost follows the pointer, a thin marker shows the slot it will drop into (the strip
+   auto-scrolls near its edges), and the order changes on release, so nothing jumps under the
+   pointer. The tab context menu's 关闭右侧 closes every tab to the right of the clicked one.
    Dragging a file onto the window (or onto `RustGrid.exe`, which forwards it to the running
    instance) opens it through the generic drop frame in `app/file_drop.rs`; SQLite is the only
    recognised format today, and `classify_dropped_file` is the extension point for the next one.
