@@ -28,3 +28,7 @@ footer: Apache-2.0 · 版权所有 © 2026 yisier
 ---
 
 <BenchReport />
+
+---
+
+**继续阅读：** [连接](guide/connections.md) · [表](guide/tables.md) · [函数](guide/functions.md) · [查询](guide/queries.md) · [备份](guide/backup.md) · [同步](guide/sync.md) · [设置](guide/settings.md) · [快捷键](guide/shortcuts.md)

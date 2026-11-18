@@ -21,7 +21,7 @@ remembers a manual choice from the language menu in `localStorage`.
 | Path | Page |
 | --- | --- |
 | `site/README.md`, `site/zh/README.md` | Home: hero, benchmark report (`BenchReport.vue`) |
-| `site/guide/*.md`, `site/zh/guide/*.md` | Tables, Functions, Queries, Backup, Sync, Settings |
+| `site/guide/*.md`, `site/zh/guide/*.md` | Connections, Tables, Functions, Queries, Backup, Sync, Settings, Engines, Shortcuts |
 | `site/.vuepress/components/BenchReport.vue` | Size + performance report |
 | `site/.vuepress/data/bench.json` | Benchmark results consumed by the report |
 | `site/.vuepress/data/releases.json` | Release archive sizes + runtime figures |

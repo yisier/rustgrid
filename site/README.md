@@ -28,3 +28,7 @@ footer: Apache-2.0 · Copyright © 2026 yisier
 ---
 
 <BenchReport />
+
+---
+
+**Read the guide:** [Connections](guide/connections.md) · [Tables](guide/tables.md) · [Functions](guide/functions.md) · [Queries](guide/queries.md) · [Backup](guide/backup.md) · [Sync](guide/sync.md) · [Settings](guide/settings.md) · [Keyboard shortcuts](guide/shortcuts.md)
