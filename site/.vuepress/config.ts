@@ -10,6 +10,38 @@ export default defineUserConfig({
   head: [
     ['link', { rel: 'icon', href: '/rustgrid/images/logo.png' }],
     ['meta', { name: 'theme-color', content: '#3b82f6' }],
+    [
+      'script',
+      {},
+      `(function () {
+  try {
+    var base = '/rustgrid/';
+    var pages = [
+      '',
+      'index.html',
+      'guide/install.html',
+      'guide/tables.html',
+      'guide/functions.html',
+      'guide/queries.html',
+      'guide/backup.html',
+      'guide/sync.html',
+      'guide/settings.html'
+    ];
+    var path = window.location.pathname;
+    if (path.indexOf(base) !== 0) return;
+    var rel = path.slice(base.length);
+    if (rel.indexOf('zh/') === 0 || pages.indexOf(rel) === -1) return;
+    var saved = window.localStorage.getItem('rg-locale');
+    if (saved === 'en') return;
+    var prefersChinese = /^zh/i.test(window.navigator.language || '');
+    if (saved === 'zh' || (!saved && prefersChinese)) {
+      window.location.replace(base + 'zh/' + rel + window.location.search + window.location.hash);
+    }
+  } catch (error) {
+    /* storage unavailable: keep the page as requested */
+  }
+})();`,
+    ],
   ],
 
   locales: {
@@ -32,6 +64,7 @@ export default defineUserConfig({
     logoDark: '/images/logo.png',
     repo: 'yisier/rustgrid',
     docsDir: '.',
+    sidebarDepth: 0,
     editLink: false,
     contributors: false,
     lastUpdated: false,
@@ -54,12 +87,14 @@ export default defineUserConfig({
             '/guide/queries.html',
             '/guide/backup.html',
             '/guide/sync.html',
+            '/guide/settings.html',
           ],
         },
       ],
     },
     locales: {
       '/': {
+        sidebarDepth: 0,
         selectLanguageName: 'English',
         selectLanguageText: 'Languages',
         navbar: [
@@ -78,12 +113,14 @@ export default defineUserConfig({
                 '/guide/queries.html',
                 '/guide/backup.html',
                 '/guide/sync.html',
+                '/guide/settings.html',
               ],
             },
           ],
         },
       },
       '/zh/': {
+        sidebarDepth: 0,
         selectLanguageName: '简体中文',
         selectLanguageText: '选择语言',
         navbar: [
@@ -102,6 +139,7 @@ export default defineUserConfig({
                 '/zh/guide/queries.html',
                 '/zh/guide/backup.html',
                 '/zh/guide/sync.html',
+                '/zh/guide/settings.html',
               ],
             },
           ],

@@ -12,14 +12,16 @@ npm run dev      # http://localhost:8080/rustgrid/
 npm run build    # site/.vuepress/dist
 ```
 
-VuePress 2 (`2.0.0-rc.32`) with the default theme, English at `/` and Chinese at `/zh/`.
+VuePress 2 (`2.0.0-rc.32`) with the default theme, English at `/` and Chinese at `/zh/`. On a first
+visit the site follows the browser language (English by default, Chinese for a `zh-*` browser) and
+remembers a manual choice from the language menu in `localStorage`.
 
 ## Layout
 
 | Path | Page |
 | --- | --- |
 | `site/README.md`, `site/zh/README.md` | Home: hero, benchmark report (`BenchReport.vue`) |
-| `site/guide/*.md`, `site/zh/guide/*.md` | Tables, Functions, Queries, Backup, Sync |
+| `site/guide/*.md`, `site/zh/guide/*.md` | Tables, Functions, Queries, Backup, Sync, Settings |
 | `site/.vuepress/components/BenchReport.vue` | Size + performance report |
 | `site/.vuepress/data/bench.json` | Benchmark results consumed by the report |
 | `site/.vuepress/data/releases.json` | Release archive sizes + runtime figures |
