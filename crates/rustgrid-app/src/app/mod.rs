@@ -1739,6 +1739,9 @@ struct TabBar {
     /// The active tab on the last frame, so switching tabs (or opening one at the far end) scrolls
     /// the strip to reveal it.
     last_active_tab: Option<TabTarget>,
+    /// Each open tab's display data from the last render. The drag overlay reads the dragged tab's
+    /// entry so its ghost can be drawn without re-rendering the strip.
+    visuals: Vec<(TabTarget, tabs::TabVisual)>,
 }
 
 /// The left connection tree (connections -> databases -> categories -> tables). Owns the tree
@@ -2654,6 +2657,9 @@ pub struct AppView {
     connect_menu_anchor: Rc<RefCell<Point<Pixels>>>,
     object_pane: Option<Entity<ObjectPane>>,
     tab_bar: Entity<TabBar>,
+    /// The floating ghost and drop marker of a tab drag, kept apart from [`TabBar`] so pointer
+    /// moves repaint only this overlay.
+    tab_drag_overlay: Entity<tabs::TabDragOverlay>,
     tree_pane: Entity<TreePane>,
     /// The connection tree's search text and its field. Typing filters the tree to matching
     /// connections, databases, schemas and tables (see `sidebar::snapshot_connections`).
@@ -3575,6 +3581,7 @@ impl AppView {
             connect_menu_anchor: Rc::new(RefCell::new(Point::default())),
             object_pane: None,
             tab_bar: cx.new(|_| TabBar::new(app.clone())),
+            tab_drag_overlay: cx.new(|_| tabs::TabDragOverlay::new(Theme::dark())),
             tree_pane,
             main_tab: MainTab::Tables,
             db_dialog: None,

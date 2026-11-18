@@ -788,8 +788,8 @@ shadcn chrome described above. Implemented today:
    active tab is markedly stronger and bold so it stands out, and the pinned 对象 tab keeps the
    colour while it is the active tab, so the environment stays visible on 用户/查询/备份 too), so
    production stands out. Tab titles ellipsize and show their full text on hover. A tab sizes to
-   its title (up to 360px — the titles carry the object, database and connection), shrinking with
-   the others down to 96px when more open; past that the strip scrolls with ◀ / ▶ arrows (or the
+   its title (up to 260px — the titles carry the object, database and connection), shrinking with
+   the others down to 120px when more open; past that the strip scrolls with ◀ / ▶ arrows (or the
    wheel) instead of clipping and the active tab is scrolled into view. Tabs reorder by dragging:
    the tab's ghost follows the pointer, a thin marker shows the slot it will drop into (the strip
    auto-scrolls near its edges), and the order changes on release, so nothing jumps under the

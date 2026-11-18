@@ -1,5 +1,6 @@
 use super::*;
 use gpui::HitboxBehavior;
+use gpui_kit::TestSupportExt as _;
 use std::cell::Cell;
 
 /// A table/design tab row: `(index, id, title, is_view, is_key, environment colour)`.
@@ -21,12 +22,12 @@ type QueryTabRow = (
 /// The widest a tab grows before its title is ellipsized. A tab sizes itself to its title (the
 /// titles carry the object, database and connection), so a short tab stays narrow while a long one
 /// uses the room it needs; the full title is always in the tab's tooltip.
-const TAB_MAX_WIDTH: f32 = 360.0;
+const TAB_MAX_WIDTH: f32 = 260.0;
 
 /// The narrowest a tab shrinks to as more tabs open. Past this minimum the tabs stop shrinking and
 /// the strip scrolls instead — keeping room for the icon, a few title characters and the close
 /// button.
-const TAB_MIN_WIDTH: f32 = 96.0;
+const TAB_MIN_WIDTH: f32 = 120.0;
 
 /// How far the pointer must travel before a press on a tab becomes a drag (so a plain click still
 /// activates the tab).
@@ -46,6 +47,148 @@ fn tab_background(theme: Theme, color: Option<ConnectionColor>, alpha: u32, fall
     match color {
         Some(color) => color.tint(theme, alpha),
         None => (fallback << 8) | 0xff,
+    }
+}
+
+/// What the drag overlay needs to draw the floating copy of a tab.
+#[derive(Clone)]
+pub(super) struct TabVisual {
+    title: String,
+    icon: &'static str,
+    icon_color: u32,
+    color: Option<ConnectionColor>,
+}
+
+/// The floating pieces of a tab drag: the ghost that follows the pointer and the drop marker.
+///
+/// A separate entity on purpose: a pointer move updates only this overlay (a marker and one tab
+/// copy), while the tab strip and its many tabs are left untouched, so dragging stays at pointer
+/// speed no matter how many tabs are open.
+pub(super) struct TabDragOverlay {
+    theme: Theme,
+    ghost: Option<OverlayGhost>,
+}
+struct OverlayGhost {
+    visual: TabVisual,
+    /// The ghost's left edge, relative to the strip's viewport.
+    left: f32,
+    width: f32,
+    /// The drop marker's x, relative to the strip's viewport; `None` while dropping back into the
+    /// tab's own slot.
+    marker_x: Option<f32>,
+}
+
+impl TabDragOverlay {
+    pub(super) fn new(theme: Theme) -> Self {
+        Self { theme, ghost: None }
+    }
+
+    fn begin(
+        &mut self,
+        theme: Theme,
+        visual: TabVisual,
+        left: f32,
+        width: f32,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.theme = theme;
+        self.ghost = Some(OverlayGhost {
+            visual,
+            left,
+            width,
+            marker_x: None,
+        });
+        cx.notify();
+    }
+
+    fn set_position(&mut self, left: f32, marker_x: Option<f32>, cx: &mut Context<'_, Self>) {
+        let Some(ghost) = self.ghost.as_mut() else {
+            return;
+        };
+        if (ghost.left - left).abs() < 0.25 && ghost.marker_x == marker_x {
+            return;
+        }
+        ghost.left = left;
+        ghost.marker_x = marker_x;
+        cx.notify();
+    }
+
+    fn end(&mut self, cx: &mut Context<'_, Self>) {
+        if self.ghost.take().is_some() {
+            cx.notify();
+        }
+    }
+}
+
+impl Render for TabDragOverlay {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let mut overlay = div().absolute().inset_0();
+        let Some(ghost) = self.ghost.as_ref() else {
+            return overlay;
+        };
+        let theme = self.theme;
+        let visual = &ghost.visual;
+        let background = rgba(tab_background(theme, visual.color, 0xa0, theme.editor_bg));
+        overlay = overlay.child(
+            div()
+                .id("tab-drag-ghost")
+                .test_support()
+                .absolute()
+                .left(px(ghost.left))
+                // Taller than a tab and lifted above the strip, so it reads as picked up rather
+                // than as a tab squeezed into the row.
+                .top(px(1.0))
+                .w(px(ghost.width))
+                .h(px(28.0))
+                .occlude()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .overflow_hidden()
+                .bg(background)
+                .border_1()
+                .border_color(rgb(theme.brand))
+                .shadow(ui::dialog_shadow())
+                .text_size(px(12.0))
+                .child(tree_icon(visual.icon, visual.icon_color))
+                .child(
+                    div()
+                        .min_w(px(0.0))
+                        .truncate()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(visual.title.clone()),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .flex_none()
+                        .w(px(16.0))
+                        .h(px(16.0))
+                        .text_color(rgb(theme.text_muted))
+                        .child("✕"),
+                ),
+        );
+        // The marker is painted after the ghost: the boundary it marks often falls under the
+        // floating tab, and a line hidden there would not show where the tab will land.
+        if let Some(x) = ghost.marker_x {
+            overlay = overlay.child(
+                div()
+                    .id("tab-drag-marker")
+                    .test_support()
+                    .absolute()
+                    .left(px(x))
+                    .top(px(1.0))
+                    .w(px(2.0))
+                    .h(px(28.0))
+                    .rounded(px(1.0))
+                    .bg(rgb(theme.brand)),
+            );
+        }
+        overlay
     }
 }
 
@@ -245,6 +388,7 @@ impl TabBar {
             scroll: ScrollHandle::new(),
             overflow: Rc::new(Cell::new(false)),
             last_active_tab: None,
+            visuals: Vec::new(),
         }
     }
 
@@ -259,6 +403,15 @@ impl TabBar {
     /// was drawn. The strip's tracked scroll handle records one per child, scroll offset included.
     fn tab_bounds(&self, index: usize) -> Option<Bounds<Pixels>> {
         self.scroll.bounds_for_item(index)
+    }
+
+    /// The dragged tab's display data (title, icon, colour), captured by the last render so the
+    /// drag overlay can draw its ghost without re-rendering the strip.
+    fn tab_visual(&self, target: TabTarget) -> Option<TabVisual> {
+        self.visuals
+            .iter()
+            .find(|(tab, _)| *tab == target)
+            .map(|(_, visual)| visual.clone())
     }
 
     /// The center x of the tab at display position `index` in the last layout, if it was drawn.
@@ -339,60 +492,6 @@ impl TabBar {
                     .flex_none()
                     .text_color(rgb(theme.text_muted)),
             )
-    }
-
-    /// The tab that follows the pointer while dragging: the dragged tab's own title and colour,
-    /// carrying the brand border and a soft shadow so it reads as lifted above the strip.
-    #[allow(clippy::too_many_arguments)]
-    fn drag_ghost(
-        &self,
-        theme: Theme,
-        x: f32,
-        width: f32,
-        title: String,
-        icon: &'static str,
-        icon_color: u32,
-        color: Option<ConnectionColor>,
-    ) -> AnyElement {
-        let background = rgba(tab_background(theme, color, 0xa0, theme.editor_bg));
-        div()
-            .absolute()
-            .left(px(x))
-            .top(px(2.0))
-            .w(px(width))
-            .h(px(26.0))
-            .occlude()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_1()
-            .px_2()
-            .overflow_hidden()
-            .bg(background)
-            .border_1()
-            .border_color(rgb(theme.brand))
-            .shadow(ui::soft_shadow())
-            .text_size(px(12.0))
-            .child(tree_icon(icon, icon_color))
-            .child(
-                div()
-                    .min_w(px(0.0))
-                    .truncate()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(title),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .flex_none()
-                    .w(px(16.0))
-                    .h(px(16.0))
-                    .text_color(rgb(theme.text_muted))
-                    .child("✕"),
-            )
-            .into_any_element()
     }
 
     fn object_tab(
@@ -508,7 +607,7 @@ impl TabBar {
                     .border_1()
                     .border_color(rgb(theme.border))
             })
-            .when(dragging, |style| style.opacity(0.35))
+            .when(dragging, |style| style.opacity(0.2))
             .hover(move |style| style.bg(hover_bg))
             .on_mouse_down(
                 MouseButton::Left,
@@ -635,7 +734,7 @@ impl TabBar {
                     .border_1()
                     .border_color(rgb(theme.border))
             })
-            .when(dragging, |style| style.opacity(0.35))
+            .when(dragging, |style| style.opacity(0.2))
             .hover(move |style| style.bg(hover_bg))
             .on_mouse_down(
                 MouseButton::Left,
@@ -759,7 +858,7 @@ impl TabBar {
                     .border_1()
                     .border_color(rgb(theme.border))
             })
-            .when(dragging, |style| style.opacity(0.35))
+            .when(dragging, |style| style.opacity(0.2))
             .hover(move |style| style.bg(hover_bg))
             .on_mouse_down(
                 MouseButton::Left,
@@ -1031,7 +1130,7 @@ impl Render for TabBar {
             .map(|app| app.read(cx).ordered_tabs(cx))
             .unwrap_or_default();
         let is_dragging = |target: TabTarget| tab_drag.is_some_and(|drag| drag.source == target);
-        let mut ghost_tab: Option<(String, &'static str, u32, Option<ConnectionColor>)> = None;
+        let mut visuals: Vec<(TabTarget, TabVisual)> = Vec::new();
         let mut tabs: Vec<(TabTarget, AnyElement)> = Vec::new();
         for (index, id, title, is_view, is_key, color) in grid_tabs {
             let target = TabTarget::Grid(index);
@@ -1042,9 +1141,15 @@ impl Render for TabBar {
             } else {
                 ("icons/tables.svg", theme.icon_table)
             };
-            if is_dragging(target) {
-                ghost_tab = Some((title.clone(), icon, icon_color, color));
-            }
+            visuals.push((
+                target,
+                TabVisual {
+                    title: title.clone(),
+                    icon,
+                    icon_color,
+                    color,
+                },
+            ));
             tabs.push((
                 target,
                 self.table_tab(
@@ -1070,9 +1175,15 @@ impl Render for TabBar {
             } else {
                 theme.icon_table
             };
-            if is_dragging(target) {
-                ghost_tab = Some((title.clone(), icon, icon_color, color));
-            }
+            visuals.push((
+                target,
+                TabVisual {
+                    title: title.clone(),
+                    icon,
+                    icon_color,
+                    color,
+                },
+            ));
             tabs.push((
                 target,
                 self.design_tab(
@@ -1091,9 +1202,15 @@ impl Render for TabBar {
         }
         for (index, id, title, icon, icon_color, color) in query_tabs {
             let target = TabTarget::Query(index);
-            if is_dragging(target) {
-                ghost_tab = Some((title.clone(), icon, icon_color, color));
-            }
+            visuals.push((
+                target,
+                TabVisual {
+                    title: title.clone(),
+                    icon,
+                    icon_color,
+                    color,
+                },
+            ));
             tabs.push((
                 target,
                 self.query_tab(
@@ -1117,6 +1234,9 @@ impl Render for TabBar {
                 .position(|ordered| ordered == target)
                 .unwrap_or(usize::MAX)
         });
+        // The drag overlay draws the ghost from this cache, so it can update on every pointer move
+        // without the strip re-rendering.
+        self.visuals = visuals;
         // The tabs are the strip's own children: that makes `scroll_to_item` reveal the active
         // tab, and the strip's tracked scroll handle records their rectangles for the drag reorder
         // (`ScrollHandle::bounds_for_item`).
@@ -1155,47 +1275,12 @@ impl Render for TabBar {
         .absolute()
         .inset_0();
 
-        // The drag's overlay: a thin marker at the slot the tab would drop into and a ghost of the
-        // tab following the pointer's x. Nothing is reordered until the mouse-up, so the strip
-        // never jumps under the pointer.
-        let marker = tab_drag.and_then(|drag| {
-            let position = order.iter().position(|target| *target == drag.source)?;
-            // Dropping back into the tab's own slot changes nothing, and a marker beside the
-            // still-visible dimmed tab would read as a move.
-            if drag.slot == position {
-                return None;
-            }
-            let x = self.insert_marker_x(&order, drag.source, drag.slot)?;
-            let strip_width = f32::from(self.scroll.bounds().size.width);
-            let x = x.clamp(0.0, (strip_width - 2.0).max(0.0));
-            Some(
-                div()
-                    .absolute()
-                    .left(px(x))
-                    .top(px(2.0))
-                    .w(px(2.0))
-                    .h(px(26.0))
-                    .rounded(px(1.0))
-                    .bg(rgb(theme.brand))
-                    .into_any_element(),
-            )
-        });
-        let ghost = ghost_tab.and_then(|(title, icon, icon_color, color)| {
-            let drag = tab_drag?;
-            let source_position = order.iter().position(|target| *target == drag.source)?;
-            let bounds = self.tab_bounds(source_position)?;
-            let strip_left = f32::from(self.scroll.bounds().left());
-            let x = drag.pointer_x - drag.grab_offset - strip_left;
-            Some(self.drag_ghost(
-                theme,
-                x,
-                f32::from(bounds.size.width),
-                title,
-                icon,
-                icon_color,
-                color,
-            ))
-        });
+        // The drag's ghost and drop marker live in their own entity: a pointer move updates only
+        // that overlay, while the strip and its tabs stay as they were.
+        let drag_overlay = self
+            .app
+            .upgrade()
+            .map(|app| app.read(cx).tab_drag_overlay.clone());
 
         // Reveal the active tab when it changes or a new tab opens at the far end (the strip may
         // be scrolled away from it after the user paged it).
@@ -1245,8 +1330,7 @@ impl Render for TabBar {
                 .child(strip)
                 .child(gpui_kit::base::ScrollableMask::vertical_wheel(&self.scroll))
                 .child(measure)
-                .children(marker)
-                .children(ghost),
+                .children(drag_overlay),
         );
         if needs_scroll {
             bar = bar.child(self.scroll_button("tab-scroll-right", false, cx));
@@ -1263,13 +1347,15 @@ impl AppView {
     }
 
     /// Update the in-progress tab drag: move the ghost with the pointer, pick the drop slot and
-    /// auto-scroll the strip near its edges. Nothing is reordered until the mouse-up, so the tabs
-    /// under the pointer never jump; only the tab bar repaints, not the page.
+    /// auto-scroll the strip near its edges. Only the drag overlay repaints per pointer move; the
+    /// strip itself is left alone, and nothing is reordered until the mouse-up.
     pub(super) fn tab_drag_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<'_, Self>) {
         if event.pressed_button != Some(MouseButton::Left) {
             let was_dragging = self.tab_drag.take().is_some();
             self.tab_press = None;
             if was_dragging {
+                self.tab_drag_overlay
+                    .update(cx, |overlay, cx| overlay.end(cx));
                 self.notify_tab_bar(cx);
             }
             return;
@@ -1286,8 +1372,16 @@ impl AppView {
             }
             let order = self.ordered_tabs(cx);
             let source_position = order.iter().position(|target| *target == source);
-            let grab_offset = source_position
-                .and_then(|position| self.tab_bar.read(cx).tab_bounds(position))
+            let (bounds, visual, strip_left, theme) = {
+                let bar = self.tab_bar.read(cx);
+                (
+                    source_position.and_then(|position| bar.tab_bounds(position)),
+                    bar.tab_visual(source),
+                    f32::from(bar.scroll.bounds().left()),
+                    self.theme,
+                )
+            };
+            let grab_offset = bounds
                 .map(|bounds| pointer_x - f32::from(bounds.left()))
                 .unwrap_or(0.0);
             self.tab_drag = Some(TabDrag {
@@ -1296,15 +1390,43 @@ impl AppView {
                 grab_offset,
                 slot: source_position.unwrap_or(0),
             });
+            if let Some(visual) = visual {
+                let left = pointer_x - grab_offset - strip_left;
+                let width = bounds
+                    .map(|bounds| f32::from(bounds.size.width))
+                    .unwrap_or(TAB_MIN_WIDTH);
+                self.tab_drag_overlay.update(cx, move |overlay, cx| {
+                    overlay.begin(theme, visual, left, width, cx)
+                });
+            }
             self.notify_tab_bar(cx);
         }
-        let slot = self.tab_drag_slot(pointer_x, cx);
-        if let Some(drag) = self.tab_drag.as_mut() {
-            drag.pointer_x = pointer_x;
-            drag.slot = slot;
-        }
+
+        let order = self.ordered_tabs(cx);
+        let slot = self.tab_drag_slot(&order, pointer_x, cx);
+        let Some(drag) = self.tab_drag.as_mut() else {
+            return;
+        };
+        drag.pointer_x = pointer_x;
+        drag.slot = slot;
+        let drag = *drag;
+        let marker_x = {
+            let bar = self.tab_bar.read(cx);
+            let source_position = order.iter().position(|target| *target == drag.source);
+            if source_position.is_some_and(|position| position != slot) {
+                bar.insert_marker_x(&order, drag.source, slot).map(|x| {
+                    let width = f32::from(bar.scroll.bounds().size.width);
+                    x.clamp(0.0, (width - 2.0).max(0.0))
+                })
+            } else {
+                None
+            }
+        };
+        let strip_left = f32::from(self.tab_bar.read(cx).scroll.bounds().left());
+        let left = pointer_x - drag.grab_offset - strip_left;
+        self.tab_drag_overlay
+            .update(cx, |overlay, cx| overlay.set_position(left, marker_x, cx));
         self.tab_drag_autoscroll(event.position, cx);
-        self.notify_tab_bar(cx);
     }
 
     /// Finish a tab drag on mouse-up: reorder the strip to the slot the marker showed, then reveal
@@ -1314,6 +1436,8 @@ impl AppView {
         let Some(drag) = self.tab_drag.take() else {
             return;
         };
+        self.tab_drag_overlay
+            .update(cx, |overlay, cx| overlay.end(cx));
         self.move_tab_to(drag.source, drag.slot, cx);
         self.notify_tab_bar(cx);
         self.show_tab(Some(drag.source), cx);
@@ -1326,11 +1450,10 @@ impl AppView {
     /// The slot a pointer at `pointer_x` would drop into: the number of *other* tabs whose center
     /// lies left of the pointer. Without a complete previous layout the current position is kept,
     /// so a fast first move cannot move the tab to the front.
-    fn tab_drag_slot(&self, pointer_x: f32, cx: &mut Context<'_, Self>) -> usize {
+    fn tab_drag_slot(&self, order: &[TabTarget], pointer_x: f32, cx: &Context<'_, Self>) -> usize {
         let Some(drag) = self.tab_drag else {
             return 0;
         };
-        let order = self.ordered_tabs(cx);
         let source_position = order
             .iter()
             .position(|target| *target == drag.source)
@@ -1504,7 +1627,6 @@ impl AppView {
 mod tests {
     use super::*;
     use gpui::{Bounds, Point, TestAppContext, WindowBounds, WindowOptions, size};
-    use gpui_kit::TestSupportExt as _;
     use gpui_kit::test::TestWindowExt as _;
 
     /// The tab strip's layout contract: a tab sizes itself to its title, stops at
@@ -1694,6 +1816,95 @@ mod tests {
         assert_eq!(insertion_slot(&centers, 2, 10.0), Some(0));
         // An unlaid tab (the first frame) keeps the drag at its current position.
         assert_eq!(insertion_slot(&[Some(50.0), None], 0, 10.0), None);
+    }
+
+    /// A wrapper shaped like the tab bar's strip viewport, holding the overlay entity at its
+    /// origin: the ghost and marker must land in wrapper coordinates, not window ones.
+    struct OverlayHarness {
+        overlay: Entity<TabDragOverlay>,
+    }
+
+    impl Render for OverlayHarness {
+        fn render(
+            &mut self,
+            _window: &mut Window,
+            _cx: &mut Context<'_, Self>,
+        ) -> impl IntoElement {
+            div()
+                .relative()
+                .w(px(400.0))
+                .h(px(30.0))
+                .child(self.overlay.clone())
+        }
+    }
+
+    #[gpui_kit::test]
+    fn drag_overlay_places_the_ghost_and_marker_in_strip_coordinates(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (handle, overlay) = cx.update(|cx| {
+            let overlay = cx.new(|_| TabDragOverlay::new(Theme::dark()));
+            let harness = cx.new(|_| OverlayHarness {
+                overlay: overlay.clone(),
+            });
+            let (handle, _) = gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: Point::default(),
+                        size: size(px(800.0), px(200.0)),
+                    })),
+                    ..Default::default()
+                },
+                cx,
+                |_, _| harness.clone(),
+            )
+            .expect("open test window");
+            (handle, overlay)
+        });
+
+        overlay.update(cx, |overlay, cx| {
+            overlay.begin(
+                Theme::dark(),
+                TabVisual {
+                    title: "global_params @db (conn) - table".into(),
+                    icon: "icons/tables.svg",
+                    icon_color: 0,
+                    color: None,
+                },
+                40.0,
+                120.0,
+                cx,
+            );
+            overlay.set_position(60.0, Some(200.0), cx);
+        });
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let ghost = window.find("tab-drag-ghost").bounds();
+            assert!(
+                (f32::from(ghost.origin.x) - 60.0).abs() < 1.0,
+                "ghost should follow the pointer's wrapper x, got {ghost:?}"
+            );
+            assert!(
+                (f32::from(ghost.size.width) - 120.0).abs() < 1.0,
+                "ghost should keep the dragged tab's width, got {ghost:?}"
+            );
+            let marker = window.find("tab-drag-marker").bounds();
+            assert!(
+                (f32::from(marker.origin.x) - 200.0).abs() < 1.0,
+                "marker should sit at the drop slot, got {marker:?}"
+            );
+        })
+        .expect("window is alive");
+
+        overlay.update(cx, |overlay, cx| overlay.end(cx));
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.try_find("tab-drag-ghost").is_none(),
+                "ending the drag removes the ghost"
+            );
+        })
+        .expect("window is alive");
     }
 
     fn window_pump(handle: gpui::AnyWindowHandle, cx: &mut TestAppContext) {
