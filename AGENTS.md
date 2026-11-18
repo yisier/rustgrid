@@ -795,7 +795,9 @@ shadcn chrome described above. Implemented today:
    floating preview the engine paints at the pointer without re-rendering the strip or the page;
    the tab under the pointer shows a brand-coloured edge on the side the dragged tab will land
    (`drag_over`), the strip auto-scrolls near its edges, and the order changes once in `on_drop`,
-   so nothing jumps under the pointer. Dropping past the last tab appends it. The tab context
+   so nothing jumps under the pointer. Dropping past the last tab appends it. The drop listeners are
+   plain closures that defer the reorder: notifying the tab bar from inside a listener bound to
+   the tab bar itself (or during its entity update) would borrow it a second time. The tab context
    menu's 关闭右侧 closes every tab to the right of the clicked one.
    Dragging a file onto the window (or onto `RustGrid.exe`, which forwards it to the running
    instance) opens it through the generic drop frame in `app/file_drop.rs`; SQLite is the only

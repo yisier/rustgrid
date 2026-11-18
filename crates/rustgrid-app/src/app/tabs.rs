@@ -553,13 +553,18 @@ impl TabBar {
             .drag_over::<DraggedTab>(move |tab, dragged, _window, _cx| {
                 tab_drop_target_style(tab, theme, display_index, dragged)
             })
-            .on_drop(
-                cx.listener(move |_this, dragged: &DraggedTab, _window, cx| {
-                    let _ = drop.update(cx, |app, cx| {
-                        app.drop_tab_on(dragged.source, display_index, cx);
+            .on_drop(move |dragged: &DraggedTab, _window, cx| {
+                // Deferred, and a plain closure rather than `cx.listener`: the drop reorders the
+                // tabs and notifies the tab bar, and neither may happen while this bar is
+                // borrowed by its own event listener.
+                let app = drop.clone();
+                let source = dragged.source;
+                cx.defer(move |cx| {
+                    let _ = app.update(cx, |app, cx| {
+                        app.drop_tab_on(source, display_index, cx);
                     });
-                }),
-            )
+                });
+            })
             .on_click(cx.listener(move |_this, _event, _window, cx| {
                 let _ = activate.update(cx, |app, cx| {
                     if index < app.queries.len() {
@@ -702,13 +707,18 @@ impl TabBar {
             .drag_over::<DraggedTab>(move |tab, dragged, _window, _cx| {
                 tab_drop_target_style(tab, theme, display_index, dragged)
             })
-            .on_drop(
-                cx.listener(move |_this, dragged: &DraggedTab, _window, cx| {
-                    let _ = drop.update(cx, |app, cx| {
-                        app.drop_tab_on(dragged.source, display_index, cx);
+            .on_drop(move |dragged: &DraggedTab, _window, cx| {
+                // Deferred, and a plain closure rather than `cx.listener`: the drop reorders the
+                // tabs and notifies the tab bar, and neither may happen while this bar is
+                // borrowed by its own event listener.
+                let app = drop.clone();
+                let source = dragged.source;
+                cx.defer(move |cx| {
+                    let _ = app.update(cx, |app, cx| {
+                        app.drop_tab_on(source, display_index, cx);
                     });
-                }),
-            )
+                });
+            })
             .on_click(cx.listener(move |_this, _event, _window, cx| {
                 let _ = activate.update(cx, |app, cx| {
                     if index < app.grids.len() {
@@ -848,13 +858,18 @@ impl TabBar {
             .drag_over::<DraggedTab>(move |tab, dragged, _window, _cx| {
                 tab_drop_target_style(tab, theme, display_index, dragged)
             })
-            .on_drop(
-                cx.listener(move |_this, dragged: &DraggedTab, _window, cx| {
-                    let _ = drop.update(cx, |app, cx| {
-                        app.drop_tab_on(dragged.source, display_index, cx);
+            .on_drop(move |dragged: &DraggedTab, _window, cx| {
+                // Deferred, and a plain closure rather than `cx.listener`: the drop reorders the
+                // tabs and notifies the tab bar, and neither may happen while this bar is
+                // borrowed by its own event listener.
+                let app = drop.clone();
+                let source = dragged.source;
+                cx.defer(move |cx| {
+                    let _ = app.update(cx, |app, cx| {
+                        app.drop_tab_on(source, display_index, cx);
                     });
-                }),
-            )
+                });
+            })
             .on_click(cx.listener(move |_this, _event, _window, cx| {
                 let _ = activate.update(cx, |app, cx| {
                     if index < app.designs.len() {
@@ -1212,13 +1227,16 @@ impl Render for TabBar {
             .min_w(px(24.0))
             .h_full()
             .child("")
-            .on_drop(
-                cx.listener(move |_this, dragged: &DraggedTab, _window, cx| {
-                    let _ = end_drop.update(cx, |app, cx| {
-                        app.drop_tab_on(dragged.source, usize::MAX, cx);
+            .on_drop(move |dragged: &DraggedTab, _window, cx| {
+                // As on the tabs: defer the reorder past this event's dispatch.
+                let app = end_drop.clone();
+                let source = dragged.source;
+                cx.defer(move |cx| {
+                    let _ = app.update(cx, |app, cx| {
+                        app.drop_tab_on(source, usize::MAX, cx);
                     });
-                }),
-            )
+                });
+            })
             .drag_over::<DraggedTab>(move |style, _dragged, _window, _cx| {
                 style.bg(rgb(theme.tree_hover_bg))
             });
