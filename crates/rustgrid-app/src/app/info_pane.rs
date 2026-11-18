@@ -241,6 +241,10 @@ pub(super) struct SidebarHost {
 }
 
 impl SidebarHost {
+    pub(super) fn width(&self) -> f32 {
+        self.width
+    }
+
     pub(super) fn new(
         app: WeakEntity<AppView>,
         app_entity: &Entity<AppView>,
@@ -430,6 +434,10 @@ pub(super) struct InfoPane {
 }
 
 impl InfoPane {
+    pub(super) fn width(&self) -> f32 {
+        self.width
+    }
+
     pub(super) fn new(
         app: WeakEntity<AppView>,
         app_entity: &Entity<AppView>,

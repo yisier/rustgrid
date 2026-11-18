@@ -2939,6 +2939,9 @@ pub struct AppView {
     /// what they read from `AppView` actually changed (they are embedded with `.cached`, which
     /// otherwise freezes them until they are explicitly notified).
     tree_revision: u64,
+    /// A cheap revision of everything [`TabBar`] reads, including the content width the panes
+    /// leave it (a cached bar must be notified when that changes, e.g. a pane drag or toggle).
+    tab_revision: u64,
     /// The connection tree's layout: nested groups holding connections (by profile id), in display
     /// order. Persisted in settings; the `connections` vector holds the live nodes themselves.
     tree_layout: Vec<GroupEntry>,
@@ -3807,6 +3810,7 @@ impl AppView {
             update_progress: None,
             update_checked: false,
             tree_revision: 0,
+            tab_revision: 0,
             tree_layout,
             connection_colors: settings.connection_colors.clone(),
             group_rename: None,
@@ -4739,12 +4743,78 @@ impl AppView {
         hasher.finish()
     }
 
+    /// A cheap revision of everything [`TabBar`] reads from `AppView`: which tabs exist and what
+    /// they show, their environment colours, and the width the panes leave the strip (the bar is a
+    /// cached child, so it must be notified when that changes, not just when tabs change).
+    fn tab_revision(&self, window: &Window, cx: &App) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.theme.is_dark().hash(&mut hasher);
+        f32::from(window.viewport_size().width)
+            .to_bits()
+            .hash(&mut hasher);
+        self.sidebar_open.hash(&mut hasher);
+        self.info_open.hash(&mut hasher);
+        self.form_open.hash(&mut hasher);
+        self.sidebar_host
+            .read(cx)
+            .width()
+            .to_bits()
+            .hash(&mut hasher);
+        self.info_pane.read(cx).width().to_bits().hash(&mut hasher);
+        self.connection_colors.hash(&mut hasher);
+        // Batch-query tab titles name their group, so a group rename must refresh the bar.
+        self.tree_layout.hash(&mut hasher);
+        self.active_grid.hash(&mut hasher);
+        self.active_design.hash(&mut hasher);
+        self.active_query.hash(&mut hasher);
+        self.grids.len().hash(&mut hasher);
+        for grid in &self.grids {
+            let grid = grid.read(cx);
+            grid.state.id.hash(&mut hasher);
+            grid.state.sql.is_some().hash(&mut hasher);
+            grid.state.table.hash(&mut hasher);
+            grid.state.database.hash(&mut hasher);
+        }
+        self.designs.len().hash(&mut hasher);
+        for design in &self.designs {
+            let design = design.read(cx);
+            design.id.hash(&mut hasher);
+            design.dirty.hash(&mut hasher);
+            design.is_view.hash(&mut hasher);
+            design.table.hash(&mut hasher);
+        }
+        self.queries.len().hash(&mut hasher);
+        for query in &self.queries {
+            query.id.hash(&mut hasher);
+            query.name.hash(&mut hasher);
+            query.database.hash(&mut hasher);
+            if let Some(routine) = &query.routine {
+                routine.name.hash(&mut hasher);
+                routine.kind.hash(&mut hasher);
+            }
+            if let Some(view) = &query.view {
+                view.name.hash(&mut hasher);
+                view.original_name.hash(&mut hasher);
+            }
+            if let Some(batch) = &query.batch {
+                batch.group_id.hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    }
+
     /// Re-render the cached long-lived children only when their inputs changed.
-    fn sync_cached_children(&mut self, cx: &mut Context<'_, Self>) {
+    fn sync_cached_children(&mut self, window: &Window, cx: &mut Context<'_, Self>) {
         let tree_revision = self.tree_revision();
         if tree_revision != self.tree_revision {
             self.tree_revision = tree_revision;
             self.tree_pane.update(cx, |_, cx| cx.notify());
+        }
+        let tab_revision = self.tab_revision(window, cx);
+        if tab_revision != self.tab_revision {
+            self.tab_revision = tab_revision;
+            self.tab_bar.update(cx, |_, cx| cx.notify());
         }
     }
 
@@ -5198,7 +5268,7 @@ impl Render for AppView {
             install_editor_highlight_theme(self.theme, cx);
             self.synced_input_theme = Some(self.theme);
         }
-        self.sync_cached_children(cx);
+        self.sync_cached_children(window, cx);
         // The one search box is shared by 表 / 视图 / 函数 / 查询: swap in the shown page's own text
         // before the content pane renders its toolbar.
         self.sync_object_search(cx);

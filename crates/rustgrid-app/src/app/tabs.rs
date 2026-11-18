@@ -296,10 +296,12 @@ impl AppView {
             content = content.font_family(font);
         }
         if has_tabs {
-            // Not cached: the bar is cheap to rebuild, and it must re-evaluate its width-derived
-            // state (the pagers and the tabs' flex sizing) whenever a pane changes the content's
-            // width, which a cached child would miss.
-            content = content.child(self.tab_bar.clone());
+            // Cached again so a re-render of the page (e.g. the drag overlay moving the ghost)
+            // does not rebuild every tab; `tab_revision` notifies it when its own inputs or the
+            // strip's width change.
+            content = content.child(self.tab_bar.clone().cached(cached_style(|d| {
+                d.flex().flex_row().h(px(30.0)).flex_none().w_full()
+            })));
         }
         let mut body_frame = div()
             .relative()
