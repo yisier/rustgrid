@@ -440,15 +440,27 @@ touching UI code.
   `request_focus` focuses when the tab opens or is brought to the front — a key binding only fires
   while its context is in the focused element's path): 保存 from `ctrl-s` / `cmd-s` (`SaveDesign`),
   and `tab` / `shift-tab` (`NextDesignerCell` / `PrevDesignerCell` → `tab_designer_cell`) walking the
-  fields grid's cells — 列名 → 类型 → the engine's text cells (`field_cell_chain`), rolling onto the
-  neighbouring row at the row's end (`field_cell_neighbor`) and handing the keystroke back to the
-  window's focus chain (the detail panel below the grid) only past the grid's first/last cell. The
-  engine's toggles (不是 null / 主键 / 虚拟 / 稀疏) are not Tab stops — they have no editor to focus.
-  Arrow keys work like the table grid too: while the designer root holds focus, Left/Right/Up/Down
-  move `selected_cell` (clamped at the grid edges, keeping the cell kind vertically) and Enter/F2
-  open that cell's editor. Inside a cell editor Up/Down (`DesignerRowUp`/`DesignerRowDown`, bound at
+  fields grid's cells — 列名 → 类型 → every engine cell in display order (`field_cell_chain`), rolling
+  onto the neighbouring row at the row's end (`field_cell_neighbor`) and handing the keystroke back
+  to the window's focus chain (the detail panel below the grid) only past the grid's first/last
+  cell. Tab works from a selected cell as well as from an open editor. The check-box cells
+  (不是 null / 键 / 稀疏) and the detail-panel values (虚拟, 排序规则) are `FieldCell::Flag` stops:
+  Space or Enter toggles a check box (`activate_field_cell`); on a detail-panel value Enter moves the
+  keys to the detail panel. The designer follows the table grid's key rules (`designer_key`): while
+  the designer root holds focus, Left/Right/Up/Down, Home/End, Page Up/Down and Ctrl+Home/End move
+  `selected_cell`, Enter/F2 open that cell's editor, typing a character starts editing with it
+  (`type_into_field_cell`; on 类型 it opens the type list already searching), Alt+Down/F4 open the
+  type list, and Down on the last field appends a new one (`appended_field`), which Up removes again
+  while it is still unnamed. The other designer grids (indexes, foreign keys, unique keys, checks,
+  exclusions, triggers) take Up/Down/Home/End/Page Up/Page Down and Enter/F2 (`designer_list_key`).
+  Commands in the keymap: `designer.find` (Ctrl+F, the field search bar `field_find`),
+  `designer.insert_row` (Insert), `designer.delete_rows` (Ctrl+Delete, through the delete
+  confirmation), `designer.move_up` / `designer.move_down` (Ctrl+Up/Down) and `designer.details`
+  (F6, grid ⇄ detail panel). An empty or repeated field name is underlined in the grid
+  (`invalid_field_names`) and stops Save with a message before any SQL runs. Inside a cell editor Up/Down (`DesignerRowUp`/`DesignerRowDown`, bound at
   `TableDesignerCell > Input`) commit and move one row and Left/Right stay with the caret; Enter
-  commits and moves down. Focus returns to the designer root after the move, so the next arrow keeps
+  commits and stays on the cell (`leave_field_edit`), and Esc restores the text the cell had before
+  the edit (`cancel_field_edit`). Focus returns to the designer root after the move, so the next arrow keeps
   navigating. The fields grid uses the table grid's own selection model (`CellSelection` /
   `CellRange` in `field_selection`): a click selects one cell, drag or Shift-click extends a
   rectangular range, Ctrl/Cmd-click toggles a range, Ctrl+A (`select_all_fields`) selects every
@@ -724,8 +736,8 @@ called that. Two kinds of upgrade:
   and only app-draws the today/OK/Cancel footer. Do not hand-roll the calendar or the time
   spinners again. Picking a date/time does **not** mirror into the cell editor; the picker's 确定
   (`date_picker_ok`) syncs once, closes the popup and returns focus to the in-place editor, so a
-  temporal cell commits exactly like every other cell editor — on blur, Enter, or the bottom 提交
-  button, never by confirming the picker. 取消/Esc discard. While a temporal cell is in edit mode
+  temporal cell stages its value exactly like every other cell editor — on blur or Enter (saved by
+  the grid editing flow below), never by confirming the picker. 取消/Esc discard. While a temporal cell is in edit mode
   it shows a `…` button (`grid_view.rs`) that toggles the popup: it opens it from the editor's
   value, or applies-and-closes it when already open. The popup opens **only** from that `…` button
   — `begin_edit` no longer auto-opens it for temporal cells. The footer's 取消/确定 use
@@ -741,6 +753,23 @@ called that. Two kinds of upgrade:
   focusable so it can be keyboard-edited), and the cell editor's blur handler skips its
   auto-commit while `date_picker` is `Some` (clicking another cell still commits through
   `grid_mouse_down`).
+- **Grid editing flow (Navicat's record model).** Enter, Tab and blur only *stage* a cell
+  (`finish_cell_editor` → `commit_editor`); nothing is written until the row is left. Leaving a row —
+  Up/Down (also at the grid's edge), or a click on another row (`save_row_on_leave`) — saves that
+  row's staged cells as one UPDATE when `auto_save_row` allows it: Options → Data → "Save changes when
+  leaving a row" (`grid_auto_save`, on by default), no save in flight (`saving`), no pending insert,
+  no bulk step (an undo entry with more than one cell: paste, fill, a multi-cell edit) and all edits
+  in one row; anything else waits for ✓ / Ctrl+S, with "N unsaved" shown next to ✓ / ✗. Down on the
+  last row opens a new record (`leave_row_vertically`): its cells, gutter and the header are amber
+  (`cell_edit_bg`); untouched cells show the column default, (Auto), (Generated) or (Null) from
+  `NewRowColumn::from_def` (the table schema is loaded once, `ensure_new_row_columns`) and an editor
+  starts from that default (`CURRENT_TIMESTAMP` becomes the current time). Up from an untouched new
+  record removes it; leaving a filled one saves it, or — when a `NOT NULL` column without a default
+  is empty (`missing_required`) — keeps it, moves the caret there and names the missing fields. A
+  Down that saves the row it leaves opens the new record after the reload (`open_row_after_save`).
+  ✗ and Esc discard through the "Unsaved Changes" confirmation (`discard_edits`). An `ENUM` cell
+  editor shows a ▾ button (members from `NewRowColumn::members`); Alt+Down/F4 open the list,
+  Up/Down move its highlight, Enter picks, Esc closes only the list (`cell_editor_escape`).
 
 ## Scope (do not exceed)
 

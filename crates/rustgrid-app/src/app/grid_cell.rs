@@ -1,6 +1,76 @@
 use super::*;
 
 impl GridView {
+    /// The open ENUM list of the cell being edited, anchored under (or above) the cell like the
+    /// date picker. A press keeps focus in the cell editor so picking does not end the edit.
+    pub(super) fn render_enum_menu(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let Some((row, col, highlight)) = self.enum_menu else {
+            return div().into_any_element();
+        };
+        let members = self.column_members(col).to_vec();
+        if members.is_empty() {
+            return div().into_any_element();
+        }
+        let theme = self.theme;
+        let header_height = self.header_height(cx);
+        let width = self
+            .state
+            .column_widths
+            .get(col)
+            .copied()
+            .unwrap_or(120.0)
+            .max(120.0);
+        let cell_left: f32 =
+            GRID_GUTTER_WIDTH + self.state.column_widths.iter().take(col).sum::<f32>();
+        let handle = self.list_scroll.0.borrow().base_handle.clone();
+        let offset_y = f32::from(handle.offset().y);
+        let viewport_h = f32::from(handle.bounds().size.height);
+        let cell_top = header_height + row as f32 * GRID_ROW_HEIGHT + offset_y;
+        let popup_h = (members.len() as f32 * GRID_ROW_HEIGHT + 4.0).min(240.0);
+        let top = if cell_top + GRID_ROW_HEIGHT + popup_h > header_height + viewport_h {
+            (cell_top - popup_h).max(header_height)
+        } else {
+            cell_top + GRID_ROW_HEIGHT
+        };
+        let items = members.into_iter().enumerate().map(|(index, member)| {
+            let active = index == highlight;
+            div()
+                .id(SharedString::from(format!("enum-member-{index}")))
+                .h(px(GRID_ROW_HEIGHT))
+                .px(px(6.0))
+                .flex()
+                .items_center()
+                .whitespace_nowrap()
+                .cursor_pointer()
+                .when(active, |style| {
+                    style
+                        .bg(rgb(theme.grid_selection_bg))
+                        .text_color(rgb(theme.grid_selection_text))
+                })
+                .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    this.enum_menu_pick(index, cx);
+                    this.commit_editor(cx);
+                }))
+                .child(if member.is_empty() {
+                    "\u{2007}".to_string()
+                } else {
+                    member
+                })
+        });
+        ui::popup_panel(theme)
+            .id("enum-menu")
+            .left(px(cell_left.max(0.0)))
+            .top(px(top))
+            .w(px(width))
+            .max_h(px(240.0))
+            .overflow_y_scroll()
+            .py(px(2.0))
+            .capture_any_mouse_down(|_event, window, _cx| window.prevent_default())
+            .children(items)
+            .into_any_element()
+    }
+
     pub(super) fn render_date_picker(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let Some(picker) = self.date_picker.as_ref() else {
             return div().into_any_element();

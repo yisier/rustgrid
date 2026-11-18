@@ -1611,6 +1611,21 @@ impl GridView {
                     None,
                     cx.listener(|this, _event, _window, cx| this.open_delete_confirm(cx)),
                 ))
+                .when(self.has_pending_edits(), |row| {
+                    // How much Save would write: changed cells plus new rows. Shown next to
+                    // the buttons so a multi-cell edit waiting for Save is never invisible.
+                    let count = self.state.edits.len() + self.inserts.len();
+                    row.child(
+                        div()
+                            .id("grid-unsaved-count")
+                            .flex_none()
+                            .mx_1()
+                            .text_size(px(11.0))
+                            .text_color(rgb(muted))
+                            .whitespace_nowrap()
+                            .child(t!("grid.unsaved_count", count = count).to_string()),
+                    )
+                })
                 .child(
                     self.grid_icon_button(
                         "grid-commit",
@@ -1638,7 +1653,7 @@ impl GridView {
                             || !self.inserts.is_empty(),
                         t!("grid.cancel_changes").to_string(),
                         None,
-                        cx.listener(|this, _event, _window, cx| this.cancel_edits(cx)),
+                        cx.listener(|this, _event, _window, cx| this.discard_edits(cx)),
                     ),
                 );
         } else {

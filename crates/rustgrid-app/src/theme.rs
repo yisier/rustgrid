@@ -213,7 +213,7 @@ impl Theme {
             toolbar_bg: 0x09090b,
             header_bg: 0x18181b,
             row_alt_bg: 0x0c0c0e,
-            cell_edit_bg: 0x3f3f46,
+            cell_edit_bg: 0x4a3f1c,
             grid_selection_bg: 0x2563eb,
             grid_selection_text: 0xfafafa,
             dialog_bg: 0x09090b,

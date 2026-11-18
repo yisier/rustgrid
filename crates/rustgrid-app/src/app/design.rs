@@ -106,17 +106,25 @@ pub(super) enum FieldColumn {
 }
 
 /// A cell of the field grid the caret can rest in, in the order Tab walks them: 列名, 类型, then the
-/// engine's own text cells. The toggles (不是 null / 主键 / 虚拟 / 稀疏) are click-only, so the chain
-/// skips them rather than stranding the caret on something that cannot take it.
+/// engine's own cells in the order the grid shows them. Every cell is reachable from the keyboard,
+/// like the data grid: the check boxes (不是 null / 键 / 稀疏) toggle with Space or Enter.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum FieldCell {
     Name,
     Type,
     Text(FieldColumn),
+    /// A check box or a value set in the detail panel (虚拟, 排序规则).
+    Flag(DesignerFieldColumn),
 }
 
 /// The height of one row of the type drop-down, so its highlight can be scrolled into view.
 pub(super) const TYPE_OPTION_HEIGHT: f32 = 20.0;
+
+/// How many rows Page Up / Page Down move in a designer grid.
+const DESIGN_PAGE_ROWS: isize = 10;
+
+/// More cells than any engine's field grid has, so Home / End clamp to the row's first / last.
+const FIELD_CELLS_MAX: isize = 64;
 
 /// The chain entry a text cell occupies: 列名 is its own entry, the engine's other text cells wrap
 /// their [`FieldColumn`].
@@ -261,6 +269,8 @@ pub(super) struct FieldEdit {
     pub(super) row: usize,
     pub(super) column: FieldColumn,
     pub(super) input: Entity<TextInput>,
+    /// The cell's text before this edit, restored by Esc.
+    pub(super) original: String,
 }
 
 /// The editable text columns of the unique-key grid. Its field list is picked through the same
@@ -739,6 +749,11 @@ pub(super) struct TableDesignView {
     pub(super) column_types: Vec<&'static str>,
     pub(super) edit: Option<FieldEdit>,
     edit_blur: Option<Subscription>,
+    /// The field Down added past the last row; Up from it removes it again while it has no name.
+    pub(super) appended_field: Option<usize>,
+    /// The Ctrl+F field search over the fields grid, while it is open.
+    pub(super) field_find: Option<Entity<TextInput>>,
+    pub(super) field_find_query: String,
     pub(super) type_combo: Option<usize>,
     /// The search field shown at the top of the type drop-down; its text filters the list.
     pub(super) type_search: Option<Entity<TextInput>>,
@@ -1082,6 +1097,9 @@ impl TableDesignView {
             focus: cx.focus_handle(),
             // The designer opens as the active tab, so it takes focus on its first render.
             focus_pending: true,
+            appended_field: None,
+            field_find: None,
+            field_find_query: String::new(),
             preview_editor: None,
             self_weak: cx.weak_entity(),
         }
@@ -1470,20 +1488,27 @@ impl TableDesignView {
                     .position(|kind| field_column_text(*kind) == Some(column))
                     .unwrap_or(0)
             }
+            FieldCell::Flag(kind) => {
+                2 + self
+                    .designer
+                    .field_columns
+                    .iter()
+                    .position(|candidate| *candidate == kind)
+                    .unwrap_or(0)
+            }
         }
     }
 
-    /// The editable cell at a display column; `None` for a toggle or read-only column.
+    /// The cell at a display column: a text cell, the type, or a check-box cell.
     fn field_cell_at(&self, column: usize) -> Option<FieldCell> {
         match column {
             0 => Some(FieldCell::Name),
             1 => Some(FieldCell::Type),
-            _ => self
-                .designer
-                .field_columns
-                .get(column - 2)
-                .and_then(|kind| field_column_text(*kind))
-                .map(FieldCell::Text),
+            _ => self.designer.field_columns.get(column - 2).map(|kind| {
+                field_column_text(*kind)
+                    .map(FieldCell::Text)
+                    .unwrap_or(FieldCell::Flag(*kind))
+            }),
         }
     }
 
@@ -1961,8 +1986,10 @@ impl TableDesignView {
             return;
         }
         let value = self.field_value(row, column);
+        let original = value.clone();
         let weak = self.self_weak.clone();
         let submit = weak.clone();
+        let cancel = weak.clone();
         let theme = self.theme;
         let input = cx.new(move |cx| {
             TextInput::new(
@@ -1978,9 +2005,13 @@ impl TableDesignView {
             .on_change(Rc::new(move |text, _window, cx| {
                 let _ = weak.update(cx, |view, cx| view.set_field_value(row, column, text, cx));
             }))
-            // Enter commits and moves one row down, as it does in the table grid.
+            // Enter only leaves editing and keeps the cell, as it does in the table grid.
             .on_submit(Rc::new(move |window, cx| {
-                let _ = submit.update(cx, |view, cx| view.move_designer_row(1, window, cx));
+                let _ = submit.update(cx, |view, cx| view.leave_field_edit(window, cx));
+            }))
+            // Esc puts the text back the way it was before this edit.
+            .on_cancel(Rc::new(move |window, cx| {
+                let _ = cancel.update(cx, |view, cx| view.cancel_field_edit(window, cx));
             }))
         });
         let focus = input.read(cx).focus_handle();
@@ -1990,7 +2021,12 @@ impl TableDesignView {
         self.edit_blur = None;
         self.select_field_cell(row, field_cell_of(column), cx);
         self.edit_blur = Some(cx.on_blur(&focus, window, |this, _window, cx| this.finish_edit(cx)));
-        self.edit = Some(FieldEdit { row, column, input });
+        self.edit = Some(FieldEdit {
+            row,
+            column,
+            input,
+            original,
+        });
         window.focus(&focus, cx);
         cx.notify();
     }
@@ -2071,6 +2107,7 @@ impl TableDesignView {
                     .on_cancel(Rc::new(move |_window, cx| {
                         let _ = cancel.update(cx, |view, cx| {
                             view.type_combo = None;
+                            view.focus_pending = true;
                             cx.notify();
                         });
                     }))
@@ -2102,7 +2139,11 @@ impl TableDesignView {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        let Some((row, cell)) = self.editing_field_cell() else {
+        // With no editor open, Tab walks on from the selected cell when the grid has the keys.
+        let selected = (self.tab == DesignerTab::Fields && self.focus.is_focused(window))
+            .then_some(self.selected_cell)
+            .flatten();
+        let Some((row, cell)) = self.editing_field_cell().or(selected) else {
             if shift {
                 window.focus_prev(cx);
             } else {
@@ -2113,7 +2154,10 @@ impl TableDesignView {
         self.tab_field_cell(row, cell, shift, window, cx);
     }
 
-    /// Arrow/Enter handling for the fields grid while the designer itself holds focus. Editing
+    /// The designer grids' keys while the grid itself holds focus — the same rules as the data
+    /// grid: arrows / Home / End / Page Up / Page Down move, Ctrl+Home / Ctrl+End jump to the first /
+    /// last row, Enter or F2 edit, typing replaces the cell's text, Space toggles a check box,
+    /// Alt+Down or F4 open the type list, and Down on the last field adds a new one. Editing
     /// keystrokes stay with the cell editor (see `move_designer_row` and the input binding).
     pub(super) fn designer_key(
         &mut self,
@@ -2121,45 +2165,417 @@ impl TableDesignView {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        if self.tab != DesignerTab::Fields
-            || self.edit.is_some()
-            || self.type_combo.is_some()
-            || !self.focus.is_focused(window)
-        {
+        if self.edit.is_some() || self.type_combo.is_some() || !self.focus.is_focused(window) {
             return;
         }
-        if event.keystroke.modifiers.control || event.keystroke.modifiers.platform {
+        let keystroke = &event.keystroke;
+        let modifiers = keystroke.modifiers;
+        let ctrl = modifiers.control || modifiers.platform;
+        let key = keystroke.key.as_str();
+        if self.tab != DesignerTab::Fields {
+            if !ctrl && !modifiers.alt && self.designer_list_key(key, window, cx) {
+                cx.stop_propagation();
+            }
             return;
         }
+        let rows = self.schema.columns.len() as isize;
         let Some((row, cell)) = self
             .selected_cell
             .or_else(|| self.selected_field.map(|row| (row, FieldCell::Name)))
         else {
+            // A table with no fields yet: Down or Enter starts the first one.
+            if rows == 0 && !ctrl && matches!(key, "down" | "enter") {
+                self.begin_empty_field(window, cx);
+                cx.stop_propagation();
+            }
             return;
         };
-        match event.keystroke.key.as_str() {
-            "up" => {
-                self.move_designer_cell(row, cell, -1, 0, cx);
-                cx.stop_propagation();
+        match (key, ctrl, modifiers.alt) {
+            ("home", true, _) => self.move_designer_cell(row, cell, -rows, 0, cx),
+            ("end", true, _) => self.move_designer_cell(row, cell, rows, 0, cx),
+            (_, true, _) => return,
+            ("down" | "up", _, true) | ("f4", _, _) if cell == FieldCell::Type => {
+                self.open_type_combo(row, window, cx)
             }
-            "down" => {
-                self.move_designer_cell(row, cell, 1, 0, cx);
-                cx.stop_propagation();
+            (_, _, true) => return,
+            ("up", ..) => self.move_designer_cell(row, cell, -1, 0, cx),
+            ("down", ..) => self.move_designer_cell(row, cell, 1, 0, cx),
+            ("left", ..) => self.move_designer_cell(row, cell, 0, -1, cx),
+            ("right", ..) => self.move_designer_cell(row, cell, 0, 1, cx),
+            ("pageup", ..) => self.move_designer_cell(row, cell, -DESIGN_PAGE_ROWS, 0, cx),
+            ("pagedown", ..) => self.move_designer_cell(row, cell, DESIGN_PAGE_ROWS, 0, cx),
+            ("home", ..) => self.move_designer_cell(row, cell, 0, -(FIELD_CELLS_MAX), cx),
+            ("end", ..) => self.move_designer_cell(row, cell, 0, FIELD_CELLS_MAX, cx),
+            ("enter" | "f2", ..) => self.activate_field_cell(row, cell, window, cx),
+            ("space", ..) if matches!(cell, FieldCell::Flag(_)) => {
+                self.activate_field_cell(row, cell, window, cx)
             }
-            "left" => {
-                self.move_designer_cell(row, cell, 0, -1, cx);
-                cx.stop_propagation();
+            _ => match keystroke.key_char.as_deref() {
+                Some(text) if !text.is_empty() && !text.chars().any(char::is_control) => {
+                    self.type_into_field_cell(row, cell, text, window, cx)
+                }
+                _ => return,
+            },
+        }
+        cx.stop_propagation();
+    }
+
+    /// Enter / F2 / Space on a fields-grid cell: edit a text cell, open the type list, toggle a check
+    /// box, or — for a value set in the detail panel (虚拟, 排序规则) — move the keys there.
+    fn activate_field_cell(
+        &mut self,
+        row: usize,
+        cell: FieldCell,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let FieldCell::Flag(kind) = cell else {
+            self.open_field_cell(row, cell, window, cx);
+            return;
+        };
+        match kind {
+            DesignerFieldColumn::NotNull => self.toggle_not_null(row, cx),
+            DesignerFieldColumn::Key => self.toggle_field_primary_key(row, cx),
+            DesignerFieldColumn::Sparse => {
+                self.selected_field = Some(row);
+                self.toggle_sparse(cx);
             }
-            "right" => {
-                self.move_designer_cell(row, cell, 0, 1, cx);
-                cx.stop_propagation();
+            _ => self.focus_design_details(window, cx),
+        }
+    }
+
+    /// Typing on a selected cell starts editing it with what was typed, like a spreadsheet: a text
+    /// cell's value is replaced, and on 类型 the type list opens already searching for it.
+    fn type_into_field_cell(
+        &mut self,
+        row: usize,
+        cell: FieldCell,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        match cell {
+            FieldCell::Name => self.begin_typed_edit(row, FieldColumn::Name, text, window, cx),
+            FieldCell::Text(column) => self.begin_typed_edit(row, column, text, window, cx),
+            FieldCell::Type => {
+                self.open_type_combo(row, window, cx);
+                if let Some(input) = self.type_search.clone() {
+                    let text = text.to_string();
+                    self.type_query = text.clone();
+                    self.type_highlight = Some(0);
+                    input.update(cx, |input, cx| input.set_text(text, cx));
+                }
             }
+            FieldCell::Flag(_) => {}
+        }
+    }
+
+    /// Open a text cell's editor with `text` in place of its value.
+    fn begin_typed_edit(
+        &mut self,
+        row: usize,
+        column: FieldColumn,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.begin_edit(row, column, window, cx);
+        self.set_field_value(row, column, text, cx);
+        if let Some(edit) = self.edit.as_ref() {
+            let input = edit.input.clone();
+            let text = text.to_string();
+            input.update(cx, |input, cx| input.set_text(text, cx));
+        }
+    }
+
+    /// Enter in a fields-grid cell editor: keep the text, leave editing, stay on the cell.
+    pub(super) fn leave_field_edit(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.edit_blur = None;
+        if self.edit.take().is_some() {
+            window.focus(&self.focus, cx);
+            cx.notify();
+        }
+    }
+
+    /// Esc in a fields-grid cell editor: put the text back as it was and leave editing.
+    pub(super) fn cancel_field_edit(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.edit_blur = None;
+        if let Some(edit) = self.edit.take() {
+            self.set_field_value(edit.row, edit.column, &edit.original, cx);
+            window.focus(&self.focus, cx);
+            cx.notify();
+        }
+    }
+
+    /// The keys of the designer's other grids (indexes, foreign keys, unique keys, checks,
+    /// exclusions, triggers): Up / Down / Home / End / Page Up / Page Down select a row, Enter or F2
+    /// edit its name. Returns whether the key was used.
+    fn designer_list_key(
+        &mut self,
+        key: &str,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        let (selected, count) = match self.tab {
+            DesignerTab::Indexes => (self.selected_index, self.index_row_count()),
+            DesignerTab::ForeignKeys => (self.selected_fk, self.schema.foreign_keys.len()),
+            DesignerTab::UniqueKeys => (self.selected_unique_key, self.schema.unique_keys.len()),
+            DesignerTab::Checks => (self.selected_check, self.schema.checks.len()),
+            DesignerTab::Excludes => (self.selected_exclude, self.schema.excludes.len()),
+            DesignerTab::Triggers => (self.selected_trigger, self.schema.triggers.len()),
+            _ => return false,
+        };
+        if count == 0 {
+            // An empty list: Down or Enter starts its first row, like the fields grid.
+            if matches!(key, "down" | "enter") {
+                self.insert_design_row(window, cx);
+                return true;
+            }
+            return false;
+        }
+        let current = selected.unwrap_or(0).min(count - 1) as isize;
+        let last = count as isize - 1;
+        let target = match key {
+            "up" => current - 1,
+            "down" => current + 1,
+            "pageup" => current - DESIGN_PAGE_ROWS,
+            "pagedown" => current + DESIGN_PAGE_ROWS,
+            "home" => 0,
+            "end" => last,
             "enter" | "f2" => {
-                self.open_field_cell(row, cell, window, cx);
-                cx.stop_propagation();
+                let row = current as usize;
+                match self.tab {
+                    DesignerTab::Indexes => {
+                        self.begin_index_edit(row, IndexColumn::Name, window, cx)
+                    }
+                    DesignerTab::ForeignKeys => self.begin_fk_edit(row, FkColumn::Name, window, cx),
+                    DesignerTab::UniqueKeys => {
+                        self.begin_unique_key_edit(row, UniqueKeyColumn::Name, window, cx)
+                    }
+                    DesignerTab::Checks => {
+                        self.begin_check_edit(row, CheckColumn::Name, window, cx)
+                    }
+                    DesignerTab::Excludes => {
+                        self.begin_exclude_edit(row, ExcludeColumn::Name, window, cx)
+                    }
+                    DesignerTab::Triggers => {
+                        self.begin_trigger_edit(row, TriggerColumn::Name, window, cx)
+                    }
+                    _ => {}
+                }
+                return true;
             }
+            _ => return false,
+        };
+        let row = target.clamp(0, last) as usize;
+        let modifiers = Modifiers::default();
+        match self.tab {
+            DesignerTab::Indexes => self.select_index_row(row, &modifiers, cx),
+            DesignerTab::ForeignKeys => self.select_fk_row(row, &modifiers, cx),
+            DesignerTab::UniqueKeys => self.select_unique_key_row(row, &modifiers, cx),
+            DesignerTab::Checks => self.select_check_row(row, &modifiers, cx),
+            DesignerTab::Excludes => self.select_exclude_row(row, &modifiers, cx),
+            DesignerTab::Triggers => self.select_trigger_row(row, &modifiers, cx),
             _ => {}
         }
+        self.reveal_design_row(row);
+        window.focus(&self.focus, cx);
+        true
+    }
+
+    /// Insert (the keymap's 插入): a new row in the open grid — a field just below the selected
+    /// one, or a new index / key / check / trigger — with the caret in its name.
+    pub(super) fn insert_design_row(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        if self.is_view {
+            return;
+        }
+        match self.tab {
+            DesignerTab::Fields => self.begin_inserted_field(window, cx),
+            DesignerTab::Indexes => self.begin_empty_index(window, cx),
+            DesignerTab::ForeignKeys => self.begin_empty_foreign_key(window, cx),
+            DesignerTab::UniqueKeys => self.begin_empty_unique_key(window, cx),
+            DesignerTab::Checks => self.begin_empty_check(window, cx),
+            DesignerTab::Excludes => self.begin_empty_exclude(window, cx),
+            DesignerTab::Rules => self.begin_empty_rule(window, cx),
+            DesignerTab::Triggers => self.begin_empty_trigger(window, cx),
+            _ => {}
+        }
+    }
+
+    /// Ctrl+Delete: delete the selected rows of the open grid, after the usual confirmation.
+    pub(super) fn delete_design_rows(&mut self, cx: &mut Context<'_, Self>) {
+        if self.is_view {
+            return;
+        }
+        let kind = match self.tab {
+            DesignerTab::Fields => DesignDeleteKind::Fields,
+            DesignerTab::Indexes => DesignDeleteKind::Indexes,
+            DesignerTab::ForeignKeys => DesignDeleteKind::ForeignKeys,
+            DesignerTab::UniqueKeys => DesignDeleteKind::UniqueKeys,
+            DesignerTab::Checks => DesignDeleteKind::Checks,
+            DesignerTab::Excludes => DesignDeleteKind::Excludes,
+            DesignerTab::Rules => DesignDeleteKind::Rules,
+            DesignerTab::Triggers => DesignDeleteKind::Triggers,
+            _ => return,
+        };
+        self.request_delete(kind, cx);
+    }
+
+    /// Ctrl+Up / Ctrl+Down: move the selected fields one row up / down.
+    pub(super) fn move_design_rows(&mut self, delta: isize, cx: &mut Context<'_, Self>) {
+        if self.tab == DesignerTab::Fields && !self.is_view {
+            self.move_field(delta, cx);
+            if let Some(row) = self.selected_field {
+                self.reveal_design_row(row);
+            }
+        }
+    }
+
+    /// F6: move the keys between the fields grid and the detail panel under it (默认, 自动递增...).
+    pub(super) fn focus_design_details(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        if self.focus.is_focused(window) || self.edit.is_some() || self.type_combo.is_some() {
+            self.edit = None;
+            self.edit_blur = None;
+            self.type_combo = None;
+            window.focus(&self.focus, cx);
+            window.focus_next(cx);
+        } else {
+            window.focus(&self.focus, cx);
+        }
+        cx.notify();
+    }
+
+    /// Ctrl+F: open the field search over the fields grid (or put the caret back in it).
+    pub(super) fn open_field_find(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        if self.tab != DesignerTab::Fields {
+            self.select_tab(DesignerTab::Fields, cx);
+        }
+        self.edit = None;
+        self.edit_blur = None;
+        self.type_combo = None;
+        let theme = self.theme;
+        let weak = self.self_weak.clone();
+        let input = self
+            .field_find
+            .get_or_insert_with(|| {
+                let change = weak.clone();
+                let submit = weak.clone();
+                let cancel = weak.clone();
+                let arrows = weak;
+                cx.new(move |cx| {
+                    TextInput::new(
+                        theme,
+                        "",
+                        TextInputOptions {
+                            size: Some(Size::XSmall),
+                            text_size: Some(12.0),
+                            placeholder: t!("design.find_field").to_string().into(),
+                            icon: Some("icons/search.svg"),
+                            icon_color: Some(theme.text_muted),
+                            clearable: true,
+                            ..Default::default()
+                        },
+                        cx,
+                    )
+                    .on_change(Rc::new(move |text, _window, cx| {
+                        let _ = change.update(cx, |view, cx| {
+                            view.field_find_query = text.to_string();
+                            view.find_field(0, cx);
+                        });
+                    }))
+                    // Enter: the next match (wrapping). Up / Down walk the matches too.
+                    .on_submit(Rc::new(move |_window, cx| {
+                        let _ = submit.update(cx, |view, cx| view.find_field(1, cx));
+                    }))
+                    .on_arrow(Rc::new(move |down, _window, cx| {
+                        let _ = arrows.update(cx, |view, cx| {
+                            view.find_field(if down { 1 } else { -1 }, cx)
+                        });
+                    }))
+                    // Esc closes the search and leaves the caret on the field it found.
+                    .on_cancel(Rc::new(move |window, cx| {
+                        let _ = cancel.update(cx, |view, cx| view.close_field_find(window, cx));
+                    }))
+                })
+            })
+            .clone();
+        let focus = input.read(cx).focus_handle();
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    /// Close the field search and give the keys back to the grid.
+    pub(super) fn close_field_find(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.field_find = None;
+        self.field_find_query.clear();
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    /// The fields whose name contains the search text (case-insensitive), in grid order.
+    pub(super) fn field_find_matches(&self) -> Vec<usize> {
+        let query = self.field_find_query.trim().to_lowercase();
+        if query.is_empty() {
+            return Vec::new();
+        }
+        self.schema
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(_, column)| column.name.to_lowercase().contains(&query))
+            .map(|(row, _)| row)
+            .collect()
+    }
+
+    /// Select a field the search matches: `step` 0 keeps the current field when it still matches
+    /// (typing narrows the search), 1 / -1 go to the next / previous match, wrapping.
+    fn find_field(&mut self, step: isize, cx: &mut Context<'_, Self>) {
+        let matches = self.field_find_matches();
+        if matches.is_empty() {
+            cx.notify();
+            return;
+        }
+        let current = self.selected_field.unwrap_or(0);
+        let target = match step {
+            0 => matches
+                .iter()
+                .copied()
+                .find(|row| *row >= current)
+                .unwrap_or(matches[0]),
+            step if step > 0 => matches
+                .iter()
+                .copied()
+                .find(|row| *row > current)
+                .unwrap_or(matches[0]),
+            _ => matches
+                .iter()
+                .rev()
+                .copied()
+                .find(|row| *row < current)
+                .unwrap_or(matches[matches.len() - 1]),
+        };
+        self.select_field_cell(target, FieldCell::Name, cx);
+        self.reveal_design_row(target);
+    }
+
+    /// Field names that would make the save fail: empty ones and repeated ones (case-insensitive,
+    /// like MySQL). The grid marks them and the save stops on the first.
+    pub(super) fn invalid_field_names(&self) -> BTreeMap<usize, String> {
+        let mut invalid = BTreeMap::new();
+        let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+        for (row, column) in self.schema.columns.iter().enumerate() {
+            let name = column.name.trim();
+            if name.is_empty() {
+                invalid.insert(row, t!("design.name_required").to_string());
+                continue;
+            }
+            if let Some(first) = seen.insert(name.to_lowercase(), row) {
+                let message = t!("design.name_duplicate", name = name).to_string();
+                invalid.entry(first).or_insert_with(|| message.clone());
+                invalid.insert(row, message);
+            }
+        }
+        invalid
     }
 
     /// Move the selected fields-grid cell one step, clamping at the grid edges. Vertical movement
@@ -2174,6 +2590,28 @@ impl TableDesignView {
     ) {
         let rows = self.schema.columns.len();
         if rows == 0 {
+            return;
+        }
+        // Down on the last field adds a new one (Navicat), unless that last field is itself a new,
+        // still empty one. Up from such an untouched new field takes it away again.
+        if d_row == 1 && row + 1 == rows && !self.is_view {
+            let untouched =
+                self.appended_field == Some(row) && self.schema.columns[row].name.trim().is_empty();
+            if !untouched {
+                self.insert_field_at(rows, cx);
+                self.appended_field = Some(rows);
+                self.move_designer_cell(rows, cell, 0, 0, cx);
+                return;
+            }
+        }
+        if d_row < 0
+            && self.appended_field == Some(row)
+            && row + 1 == rows
+            && self.schema.columns[row].name.trim().is_empty()
+        {
+            self.schema.columns.remove(row);
+            self.appended_field = None;
+            self.move_designer_cell(row.saturating_sub(1), cell, 0, 0, cx);
             return;
         }
         let mut target_row = row;
@@ -2259,11 +2697,11 @@ impl TableDesignView {
         let mut chain = vec![FieldCell::Name, FieldCell::Type];
         for kind in &self.designer.field_columns {
             // Two engines' columns can name the same cell (`size`/`length`), so the chain keeps one.
-            if let Some(column) = field_column_text(*kind) {
-                let cell = FieldCell::Text(column);
-                if !chain.contains(&cell) {
-                    chain.push(cell);
-                }
+            let cell = field_column_text(*kind)
+                .map(FieldCell::Text)
+                .unwrap_or(FieldCell::Flag(*kind));
+            if !chain.contains(&cell) {
+                chain.push(cell);
             }
         }
         chain
@@ -2311,6 +2749,12 @@ impl TableDesignView {
             FieldCell::Name => self.begin_edit(row, FieldColumn::Name, window, cx),
             FieldCell::Type => self.open_type_combo(row, window, cx),
             FieldCell::Text(column) => self.begin_edit(row, column, window, cx),
+            // A check box has no editor: the caret rests on it and Space toggles it.
+            FieldCell::Flag(_) => {
+                self.select_field_cell(row, cell, cx);
+                self.reveal_design_row(row);
+                window.focus(&self.focus, cx);
+            }
         }
     }
 
@@ -4277,6 +4721,15 @@ impl TableDesignView {
     /// app for a name (the actual create runs in [`TableDesignView::save_new`]).
     pub(super) fn save(&mut self, cx: &mut Context<'_, Self>) {
         if self.saving {
+            return;
+        }
+        // A field without a name, or two with the same name, would only fail on the server: say
+        // which one before anything is sent, and put the caret on it.
+        if let Some((row, message)) = self.invalid_field_names().into_iter().next() {
+            self.select_tab(DesignerTab::Fields, cx);
+            self.select_field_cell(row, FieldCell::Name, cx);
+            self.reveal_design_row(row);
+            self.report_error(message, cx);
             return;
         }
         if self.is_new {

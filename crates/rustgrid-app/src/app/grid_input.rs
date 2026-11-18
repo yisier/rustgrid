@@ -40,6 +40,11 @@ impl GridView {
             cx.notify();
             return;
         };
+        // Clicking another row leaves the row whose changes are pending, so they are saved.
+        let clicked_row = match &hit {
+            GridHit::Cell(row, _) | GridHit::Gutter(row) => *row,
+        };
+        self.save_row_on_leave(Some(clicked_row), cx);
         let column_count = self.state.visible_columns;
         self.cell_dragged = false;
         let ctrl = event.modifiers.control || event.modifiers.platform;
@@ -616,6 +621,11 @@ impl GridView {
             }
             return;
         }
+        if keystroke.key == "escape" && self.has_pending_edits() {
+            self.discard_edits(cx);
+            cx.stop_propagation();
+            return;
+        }
         let Some((row, col)) = self
             .state
             .selection
@@ -627,6 +637,13 @@ impl GridView {
 
         match keystroke.key.as_str() {
             "up" | "down" | "left" | "right" => {
+                if matches!(keystroke.key.as_str(), "up" | "down")
+                    && !keystroke.modifiers.shift
+                    && self.leave_row_vertically(row, col, keystroke.key == "down", cx)
+                {
+                    cx.stop_propagation();
+                    return;
+                }
                 let row_count = self.display_row_count();
                 let col_count = self.state.visible_columns;
                 if row_count == 0 || col_count == 0 {
@@ -807,6 +824,9 @@ impl GridView {
                     .get(self.state.source_col(col))
                     .map(|cell| cell.as_edit_string())
                     .unwrap_or_default(),
+                Some(GridRow::Insert(index)) if !self.inserts[index].values.contains_key(&col) => {
+                    self.new_row_prefill(col)
+                }
                 _ => String::new(),
             });
         let cells = if readonly {
@@ -855,7 +875,7 @@ impl GridView {
             .on_cancel(Rc::new({
                 let weak = weak.clone();
                 move |_window, cx| {
-                    let _ = weak.update(cx, |grid, cx| grid.cancel_editor(cx));
+                    let _ = weak.update(cx, |grid, cx| grid.cell_editor_escape(cx));
                 }
             }))
         });
@@ -867,7 +887,10 @@ impl GridView {
                 // editor's focus then is not "leaving the edit", so do not auto-commit. The picker
                 // commits or cancels explicitly (and clicking another cell commits through
                 // `grid_mouse_down`).
-                if this.cell_editor.is_some() && this.date_picker.is_none() {
+                if this.cell_editor.is_some()
+                    && this.date_picker.is_none()
+                    && this.enum_menu.is_none()
+                {
                     this.finish_cell_editor(cx);
                 }
             }));
@@ -880,6 +903,10 @@ impl GridView {
             input,
         });
         self.cell_editor_focus_pending = true;
+        // The column defaults and ENUM members come from the table's schema, loaded once.
+        if !readonly {
+            self.ensure_new_row_columns(cx);
+        }
         window.focus(&focus, cx);
         // A temporal cell's picker opens only from its "…" button (see `toggle_date_picker`), not
         // automatically when the editor appears.
@@ -991,31 +1018,73 @@ impl GridView {
         }
     }
 
-    /// Stage the current cell edit, then auto-commit single-cell edits to the database.
-    /// Batch edits stay pending until the user presses the commit button.
+    /// Leave the in-place editor (Enter, focus moving away): the value is staged, not saved.
+    /// Like Navicat, a row's changes are saved only when the row is left (Up / Down, a click on
+    /// another row; see `save_row_on_leave`) or with Save, so Enter and Tab can be used to go on
+    /// changing other cells of the same row first.
     pub(super) fn finish_cell_editor(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(editor) = self.cell_editor.as_ref() else {
+        // Enter with the ENUM list open picks the highlighted member, then leaves editing.
+        if let Some((_, _, highlight)) = self.enum_menu {
+            self.enum_menu_pick(highlight, cx);
+        }
+        self.commit_editor(cx);
+    }
+
+    /// The members of an `ENUM` column (display column `col`), once the schema is loaded.
+    pub(super) fn column_members(&self, col: usize) -> &[String] {
+        self.new_row_columns
+            .as_ref()
+            .and_then(|columns| columns.get(col))
+            .map(|column| column.members.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Open or close the ENUM list of the cell being edited (its "▾" button, Alt+Down, F4). The
+    /// highlight starts on the member the cell holds.
+    pub(super) fn toggle_enum_menu(&mut self, cx: &mut Context<'_, Self>) {
+        if self.enum_menu.take().is_some() {
+            cx.notify();
+            return;
+        }
+        let Some(editor) = self.cell_editor.as_ref().filter(|editor| !editor.readonly) else {
             return;
         };
-        let multi = editor.cells.len() > 1;
-        let readonly = editor.readonly;
-        // A single-cell edit on an existing row auto-commits; a pending insert row waits for Save
-        // (the checkmark or Ctrl+S) so a whole new row is inserted in one statement.
-        let only_data_rows = matches!(
-            row_origin(&self.inserts, self.state.rows.len(), editor.row),
-            Some(GridRow::Data(_))
-        );
-        self.commit_editor(cx);
-        // A read-only viewer stages nothing, so there is no batch to flush.
-        if readonly {
+        let members = self.column_members(editor.col);
+        if members.is_empty() {
             return;
         }
-        // Auto-commit only when this single-cell edit is the *only* pending change. If other
-        // edits/inserts are staged, committing here would flush (and reload away) the batch the
-        // user is still assembling, so it waits for the commit button instead.
-        if !multi && only_data_rows && self.inserts.is_empty() && self.state.edits.len() == 1 {
-            self.commit_edits(cx);
+        let highlight = members
+            .iter()
+            .position(|member| *member == editor.value)
+            .unwrap_or(0);
+        self.enum_menu = Some((editor.row, editor.col, highlight));
+        cx.notify();
+    }
+
+    /// Put ENUM member `index` into the cell editor and close the list.
+    pub(super) fn enum_menu_pick(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        let Some((_, col, _)) = self.enum_menu.take() else {
+            return;
+        };
+        let Some(value) = self.column_members(col).get(index).cloned() else {
+            return;
+        };
+        if let Some(editor) = self.cell_editor.as_mut() {
+            editor.value = value.clone();
+            let input = editor.input.clone();
+            input.update(cx, |input, cx| input.set_text(value, cx));
         }
+        cx.notify();
+    }
+
+    /// Esc in a cell editor: close the ENUM list if it is open, otherwise leave editing without
+    /// keeping the typed text.
+    pub(super) fn cell_editor_escape(&mut self, cx: &mut Context<'_, Self>) {
+        if self.enum_menu.take().is_some() {
+            cx.notify();
+            return;
+        }
+        self.cancel_editor(cx);
     }
 
     pub(super) fn commit_editor(&mut self, cx: &mut Context<'_, Self>) {
@@ -1023,6 +1092,7 @@ impl GridView {
         // The calendar is an absolute overlay: it must not outlive the editor, or it keeps
         // floating over (and swallowing clicks aimed at) the rows.
         self.date_picker = None;
+        self.enum_menu = None;
         let Some(editor) = self.cell_editor.take() else {
             return;
         };
@@ -1039,11 +1109,17 @@ impl GridView {
             }
             match row_origin(&self.inserts, data_rows, row) {
                 Some(GridRow::Insert(index)) => {
+                    let prefill = self.new_row_prefill(col);
                     // Stage into the pending insert row instead of the existing-row edit map.
                     let Some(insert) = self.inserts.get_mut(index) else {
                         continue;
                     };
                     let previous = insert.values.get(&col).cloned();
+                    if previous.is_none() && !prefill.is_empty() && editor.value == prefill {
+                        // The default the editor started with, confirmed unchanged: the server
+                        // applies it anyway, and the row stays "untouched" (Up removes it).
+                        continue;
+                    }
                     let staged = if editor.value.is_empty() && previous.is_none() {
                         None
                     } else if editor.value.is_empty() {
@@ -1138,8 +1214,10 @@ impl GridView {
             (row, col)
         };
 
-        // Save and move the selection (no new editor, like Excel); focus returns to the grid so
-        // the keys keep working.
+        // Tab never saves, not even when it wraps to the next row: it is how the user moves on to
+        // the next cells to change. Only leaving the row with Up / Down or a click saves.
+        // Move the selection (no new editor, like Excel); focus returns to the grid so the keys
+        // keep working.
         self.grid_select_cell((next_row, next_col), None, cx);
         window.focus(&self.focus, cx);
     }
@@ -1158,7 +1236,28 @@ impl GridView {
             return;
         };
         let (row, col) = (editor.row, editor.col);
+        // With the ENUM list open, Up / Down walk its members instead of leaving the cell.
+        if let Some((menu_row, menu_col, highlight)) = self.enum_menu
+            && d_row != 0
+        {
+            let count = self.column_members(menu_col).len().max(1);
+            let next = if d_row > 0 {
+                (highlight + 1).min(count - 1)
+            } else {
+                highlight.saturating_sub(1)
+            };
+            self.enum_menu = Some((menu_row, menu_col, next));
+            cx.notify();
+            return;
+        }
         self.commit_editor(cx);
+        // Up / Down leave the row: its changes are saved, Down on the last row opens a new one,
+        // and a new row that is left is saved or (untouched) removed.
+        if d_row != 0 && self.leave_row_vertically(row, col, d_row > 0, cx) {
+            window.focus(&self.focus, cx);
+            cx.notify();
+            return;
+        }
 
         let column_count = self.state.visible_columns;
         let row_count = self.display_row_count();
@@ -1174,6 +1273,7 @@ impl GridView {
     }
 
     pub(super) fn cancel_editor(&mut self, cx: &mut Context<'_, Self>) {
+        self.enum_menu = None;
         self.cell_editor = None;
         self.cell_editor_blur_subscription = None;
         self.date_picker = None;

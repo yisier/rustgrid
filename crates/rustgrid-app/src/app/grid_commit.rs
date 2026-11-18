@@ -142,6 +142,7 @@ impl GridView {
         let database = self.state.database.clone();
         let table = self.state.table.clone();
         let runtime = self.runtime.clone();
+        self.saving = true;
 
         cx.spawn(async move |this, cx| {
             let result = match runtime
@@ -160,21 +161,25 @@ impl GridView {
                 Err(error) => Err(Error::other(error)),
             };
 
-            let _ = this.update(cx, |grid, cx| match result {
-                Ok(()) => {
-                    if notify_saved {
-                        grid.show_toast(ToastKind::Success, t!("grid.saved").to_string(), cx);
+            let _ = this.update(cx, |grid, cx| {
+                grid.saving = false;
+                match result {
+                    Ok(()) => {
+                        if notify_saved {
+                            grid.show_toast(ToastKind::Success, t!("grid.saved").to_string(), cx);
+                        }
+                        grid.reload_after_write(cx);
                     }
-                    grid.reload_after_write(cx);
-                }
-                Err(error) => {
-                    let message = match error {
-                        Error::Query(text) => text,
-                        other => other.to_string(),
-                    };
-                    grid.state.error = Some(message.clone());
-                    grid.show_error(message, cx);
-                    cx.notify();
+                    Err(error) => {
+                        grid.open_row_after_save = None;
+                        let message = match error {
+                            Error::Query(text) => text,
+                            other => other.to_string(),
+                        };
+                        grid.state.error = Some(message.clone());
+                        grid.show_error(message, cx);
+                        cx.notify();
+                    }
                 }
             });
         })

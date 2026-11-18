@@ -291,6 +291,9 @@ struct SettingsFile {
     /// Whether the grid header shows each column's data type between its name and comment.
     #[serde(default)]
     grid_show_types: bool,
+    /// Save a single changed cell as soon as the edit is left (on by default).
+    #[serde(default = "default_true")]
+    grid_auto_save: bool,
     /// Hide the transfer table rows whose comparison found no difference (on by default).
     #[serde(default = "default_true")]
     sync_hide_same: bool,
@@ -439,6 +442,9 @@ pub struct AppSettings {
     pub grid_show_comments: bool,
     /// Whether the grid header shows each column's data type between its name and comment.
     pub grid_show_types: bool,
+    /// Whether a single changed cell is saved as soon as the edit is left (arrow keys, Enter,
+    /// Tab, a click elsewhere). Off: every change waits for Save, like a multi-cell edit.
+    pub grid_auto_save: bool,
     /// Hide the transfer table rows whose comparison found no difference.
     pub sync_hide_same: bool,
     /// The keymap overrides edited on the Options window's 快捷键 page: command id -> gpui
@@ -486,6 +492,7 @@ impl Default for AppSettings {
             grid_field_layouts: BTreeMap::new(),
             grid_show_comments: false,
             grid_show_types: false,
+            grid_auto_save: true,
             sync_hide_same: true,
             shortcuts: BTreeMap::new(),
             preserve_object_search: true,
@@ -756,6 +763,7 @@ impl ConfigStore {
             grid_field_layouts: file.grid_field_layouts,
             grid_show_comments: file.grid_show_comments,
             grid_show_types: file.grid_show_types,
+            grid_auto_save: file.grid_auto_save,
             sync_hide_same: file.sync_hide_same,
             shortcuts: fold_legacy_shortcuts(
                 file.shortcuts,
@@ -798,6 +806,7 @@ impl ConfigStore {
             grid_field_layouts: settings.grid_field_layouts.clone(),
             grid_show_comments: settings.grid_show_comments,
             grid_show_types: settings.grid_show_types,
+            grid_auto_save: settings.grid_auto_save,
             sync_hide_same: settings.sync_hide_same,
             shortcuts: settings.shortcuts.clone(),
             preserve_object_search: settings.preserve_object_search,

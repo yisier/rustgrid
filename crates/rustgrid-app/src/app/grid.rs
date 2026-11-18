@@ -257,6 +257,122 @@ impl AppView {
     }
 }
 
+/// What a new row shows and checks for one column, derived from the table schema.
+#[derive(Clone, Default)]
+pub(super) struct NewRowColumn {
+    /// The muted text an untouched new-row cell shows: the default, `(Auto)`, `(Null)`...
+    pub(super) hint: String,
+    /// The text the cell's editor starts with (an unquoted literal default).
+    pub(super) prefill: String,
+    /// A `CURRENT_TIMESTAMP`-style default: the editor starts with "now" in this format.
+    pub(super) now_format: Option<&'static str>,
+    /// `NOT NULL`, no default and not generated: a new row cannot be saved without it.
+    pub(super) required: bool,
+    /// An `ENUM` column's members, offered by the cell's drop-down. Empty for other types.
+    pub(super) members: Vec<String>,
+}
+
+/// Split an `ENUM`/`SET` member list (`'a','it''s'`) into its unquoted members.
+pub(super) fn parse_members(list: &str) -> Vec<String> {
+    const QUOTE: char = '\'';
+    let mut members = Vec::new();
+    let mut chars = list.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != QUOTE {
+            continue;
+        }
+        let mut member = String::new();
+        while let Some(c) = chars.next() {
+            if c == QUOTE {
+                if chars.peek() == Some(&QUOTE) {
+                    chars.next();
+                    member.push(QUOTE);
+                } else {
+                    break;
+                }
+            } else {
+                member.push(c);
+            }
+        }
+        members.push(member);
+    }
+    members
+}
+
+impl NewRowColumn {
+    pub(super) fn from_def(def: &rustgrid_core::ColumnDef) -> Self {
+        let mut column = Self::from_def_default(def);
+        if def.data_type.trim().eq_ignore_ascii_case("enum") {
+            column.members = parse_members(&def.length);
+        }
+        column
+    }
+
+    fn from_def_default(def: &rustgrid_core::ColumnDef) -> Self {
+        if def.auto_increment || !def.identity.trim().is_empty() {
+            return Self {
+                hint: t!("grid.new_row_auto").to_string(),
+                ..Self::default()
+            };
+        }
+        if !def.generated.trim().is_empty() {
+            return Self {
+                hint: t!("grid.new_row_generated").to_string(),
+                ..Self::default()
+            };
+        }
+        let default = def.default.trim();
+        if default.is_empty() || default.eq_ignore_ascii_case("null") {
+            return Self {
+                hint: if def.nullable {
+                    "(Null)".to_string()
+                } else {
+                    String::new()
+                },
+                required: !def.nullable,
+                ..Self::default()
+            };
+        }
+        // A quoted literal ('active', MariaDB's style; '' for an empty string) is unquoted.
+        if default.len() >= 2 && default.starts_with('\'') && default.ends_with('\'') {
+            let literal = default[1..default.len() - 1].replace("''", "'");
+            return Self {
+                hint: literal.clone(),
+                prefill: literal,
+                ..Self::default()
+            };
+        }
+        let lower = default.to_ascii_lowercase();
+        if lower.starts_with("current_timestamp") || lower.starts_with("now(") {
+            let data_type = def.data_type.to_ascii_lowercase();
+            let format = if data_type == "date" {
+                "%Y-%m-%d"
+            } else if data_type == "time" {
+                "%H:%M:%S"
+            } else {
+                "%Y-%m-%d %H:%M:%S"
+            };
+            return Self {
+                hint: default.to_string(),
+                now_format: Some(format),
+                ..Self::default()
+            };
+        }
+        // Any other expression (uuid(), a function call) is the server's to evaluate: shown as a
+        // hint, never typed into the editor.
+        let expression = default.contains('(');
+        Self {
+            hint: default.to_string(),
+            prefill: if expression {
+                String::new()
+            } else {
+                default.to_string()
+            },
+            ..Self::default()
+        }
+    }
+}
+
 impl GridView {
     /// The number of rows the grid paints: the loaded page plus any pending insert rows.
     pub(super) fn display_row_count(&self) -> usize {
@@ -293,6 +409,7 @@ impl GridView {
             );
         if !blank {
             self.inserts.push(PendingInsert::appended());
+            self.new_row_opened(cx);
         }
         if self.cell_editor.is_some() {
             self.finish_cell_editor(cx);
@@ -527,6 +644,7 @@ impl GridView {
                             manual,
                         );
                         grid.state.install_page(page.columns, page.rows, widths);
+                        grid.open_requested_new_row(cx);
                         // The page is fetched with `skip_total`; a total that did arrive (an
                         // engine that counts inline) still wins over the background count.
                         if let Some(total) = inline_total {
@@ -765,6 +883,7 @@ impl GridView {
                             compute_column_widths(&query_result.columns, &query_result.rows);
                         grid.state
                             .install_page(query_result.columns, query_result.rows, widths);
+                        grid.open_requested_new_row(cx);
                         grid.state.total_rows = Some(total);
                         grid.state.page_index = 0;
                         grid.state.page_size = total.max(1);
@@ -2071,6 +2190,258 @@ impl GridView {
         !self.state.edits.is_empty() || !self.inserts.is_empty()
     }
 
+    /// The page row whose pending changes auto-save would write when it is left, if any.
+    ///
+    /// Navicat's model: a row's edits are saved when the cursor leaves the row (Up / Down, a
+    /// click on another row); Enter and Tab only stage them. That only applies to changes made one cell at a time on a single
+    /// existing row. A bulk change (any staged step that touched several cells at once: a
+    /// multi-cell edit, paste, fill or Delete over a range) always waits for Save, as do new rows
+    /// and edits spread over several rows. Every staging step records one undo entry with the
+    /// cells it changed, and the undo stack is cleared by each save or reload, so an entry with
+    /// more than one cell means "bulk" without each path having to flag it.
+    pub(super) fn auto_save_row(&self) -> Option<usize> {
+        if !self.auto_save
+            || self.saving
+            || !self.inserts.is_empty()
+            || self.state.undo.iter().any(|step| step.len() > 1)
+        {
+            return None;
+        }
+        let mut rows = self.state.edits.keys().map(|&(row, _)| row);
+        let first = rows.next()?;
+        rows.all(|row| row == first).then_some(first)
+    }
+
+    /// Up / Down leaving row `row` (Navicat's record flow). Returns `true` when it handled the move
+    /// itself, so the caller must not move the cursor:
+    ///
+    /// - Down on the last row opens a new row below it (saving the row being left first).
+    /// - Up from a new row nothing was typed into removes it again; Down there does nothing.
+    /// - Leaving a new row that has values saves it, unless a required field is empty, in which
+    ///   case the cursor stays and the missing fields are named.
+    /// - Leaving an existing row saves its changes (see `auto_save_row`).
+    pub(super) fn leave_row_vertically(
+        &mut self,
+        row: usize,
+        col: usize,
+        down: bool,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        if self.saving {
+            // The reload that follows a save replaces the rows: moving now would land on stale ones.
+            return true;
+        }
+        let last = self.display_row_count().saturating_sub(1);
+        if let Some(GridRow::Insert(index)) = self.row_at(row) {
+            let appended = self.inserts[index].after.is_none();
+            if appended && self.inserts[index].values.is_empty() {
+                if down {
+                    return true;
+                }
+                self.inserts.remove(index);
+                let count = self.display_row_count();
+                if count > 0 {
+                    self.grid_select_cell((row.saturating_sub(1).min(count - 1), col), None, cx);
+                } else {
+                    self.state.selection = None;
+                }
+                cx.notify();
+                return true;
+            }
+            if self.new_row_auto_saves() {
+                let missing = self.missing_required(index);
+                if !missing.is_empty() {
+                    let names: Vec<String> = missing
+                        .iter()
+                        .map(|&col| self.state.columns[col].name.clone())
+                        .collect();
+                    if let Some(&first) = missing
+                        .iter()
+                        .find(|&&col| col < self.state.visible_columns)
+                    {
+                        self.grid_select_cell((row, first), None, cx);
+                    }
+                    self.show_toast(
+                        ToastKind::Error,
+                        t!("grid.missing_required", fields = names.join(", ")).to_string(),
+                        cx,
+                    );
+                    return true;
+                }
+                let open_next = down && row == last;
+                if open_next {
+                    self.open_row_after_save = Some(col);
+                }
+                self.save_grid(cx);
+                return open_next;
+            }
+            if down && row == last && appended {
+                // Auto-save is off (or other changes are pending): the row stays pending and
+                // another new row opens below it.
+                self.push_new_row(col, cx);
+                return true;
+            }
+            return false;
+        }
+        if down && row == last && self.can_add_rows() {
+            if self.auto_save_row().is_some() {
+                self.open_row_after_save = Some(col);
+                self.commit_edits(cx);
+            } else {
+                self.push_new_row(col, cx);
+            }
+            return true;
+        }
+        self.save_row_on_leave(None, cx);
+        false
+    }
+
+    /// Whether new rows can be added to this grid (the "+" button's condition).
+    fn can_add_rows(&self) -> bool {
+        self.state.editable
+            && !self.state.loading
+            && self.state.visible_columns > 0
+            && !self
+                .state
+                .key_status
+                .as_ref()
+                .is_some_and(|status| matches!(status.engine.as_deref(), Some("string" | "json")))
+    }
+
+    /// Whether leaving the (only) pending new row saves it: auto-save is on and nothing else
+    /// is waiting, so the save writes exactly that row.
+    fn new_row_auto_saves(&self) -> bool {
+        self.auto_save && !self.saving && self.state.edits.is_empty() && self.inserts.len() == 1
+    }
+
+    /// The display columns of pending insert `index` that must be filled before it can be saved:
+    /// `NOT NULL`, no default, not generated by the engine, and nothing (or NULL) typed in.
+    fn missing_required(&self, index: usize) -> Vec<usize> {
+        let (Some(columns), Some(insert)) =
+            (self.new_row_columns.as_ref(), self.inserts.get(index))
+        else {
+            return Vec::new();
+        };
+        columns
+            .iter()
+            .enumerate()
+            .filter(|(col, column)| {
+                column.required && !matches!(insert.values.get(col), Some(Some(_)))
+            })
+            .map(|(col, _)| col)
+            .collect()
+    }
+
+    /// Append an empty new row and put the cursor on it, in column `col`.
+    fn push_new_row(&mut self, col: usize, cx: &mut Context<'_, Self>) {
+        self.ensure_new_row_columns(cx);
+        self.inserts.push(PendingInsert::appended());
+        let row = self.display_row_count() - 1;
+        let col = col.min(self.state.visible_columns.saturating_sub(1));
+        self.grid_select_cell((row, col), None, cx);
+    }
+
+    /// Called right after a page is installed: open the new row a Down asked for while the row
+    /// it left was being saved.
+    pub(super) fn open_requested_new_row(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(col) = self.open_row_after_save.take()
+            && self.can_add_rows_after_load()
+        {
+            self.push_new_row(col, cx);
+        }
+    }
+
+    fn can_add_rows_after_load(&self) -> bool {
+        self.state.editable && self.state.visible_columns > 0
+    }
+
+    /// The text a new row's untouched cell starts with when it is edited: the column's default,
+    /// or the current date/time for a `CURRENT_TIMESTAMP` default.
+    pub(super) fn new_row_prefill(&self, col: usize) -> String {
+        let Some(column) = self
+            .new_row_columns
+            .as_ref()
+            .and_then(|columns| columns.get(col))
+        else {
+            return String::new();
+        };
+        match column.now_format {
+            Some(format) => chrono::Local::now().format(format).to_string(),
+            None => column.prefill.clone(),
+        }
+    }
+
+    /// Load each display column's default and requiredness from the table's schema, once.
+    pub(super) fn ensure_new_row_columns(&mut self, cx: &mut Context<'_, Self>) {
+        if self.new_row_columns.is_some() || self.new_row_columns_loading {
+            return;
+        }
+        self.new_row_columns_loading = true;
+        let connection = self.state.connection.clone();
+        let database = self.state.database.clone();
+        let table = self.state.table.clone();
+        let runtime = self.runtime.clone();
+        cx.spawn(async move |this, cx| {
+            let result = match runtime
+                .spawn(async move { connection.table_schema(&database, &table).await })
+                .await
+            {
+                Ok(inner) => inner,
+                Err(error) => Err(Error::other(error)),
+            };
+            let _ = this.update(cx, |grid, cx| {
+                grid.new_row_columns_loading = false;
+                // Without the schema a new row still works: no hints, and the server reports a
+                // missing value itself.
+                if let Ok(schema) = result {
+                    let columns = grid
+                        .state
+                        .columns
+                        .iter()
+                        .map(|column| {
+                            schema
+                                .columns
+                                .iter()
+                                .find(|def| def.name.eq_ignore_ascii_case(&column.name))
+                                .map(NewRowColumn::from_def)
+                                .unwrap_or_default()
+                        })
+                        .collect();
+                    grid.new_row_columns = Some(Arc::new(columns));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Save the pending row edits because the cursor is leaving their row: `to` is the row it
+    /// moves to, or `None` when it leaves regardless (Up / Down, also at the grid's edge, where
+    /// a one-row result has no other row to move to).
+    pub(super) fn save_row_on_leave(&mut self, to: Option<usize>, cx: &mut Context<'_, Self>) {
+        let Some(row) = self.auto_save_row() else {
+            return;
+        };
+        if to == Some(row) {
+            return;
+        }
+        self.commit_edits(cx);
+    }
+
+    /// The "+" button and Duplicate Row open a new row too, so they load the column defaults.
+    pub(super) fn new_row_opened(&mut self, cx: &mut Context<'_, Self>) {
+        self.ensure_new_row_columns(cx);
+    }
+
+    /// The Discard button and Esc: drop every pending edit and insert, after the same
+    /// "Unsaved Changes" confirmation that guards paging and refreshing. With nothing staged
+    /// (only an open, unchanged cell editor) it just closes the editor.
+    pub(super) fn discard_edits(&mut self, cx: &mut Context<'_, Self>) {
+        if !self.guard_pending(GridNav::Discard, cx) {
+            self.cancel_edits(cx);
+        }
+    }
+
     /// If there are pending edits, ask the app to confirm before `nav` discards them. Returns
     /// `true` when the action was deferred (and must not run now).
     fn guard_pending(&mut self, nav: GridNav, cx: &mut Context<'_, Self>) -> bool {
@@ -2089,6 +2460,7 @@ impl GridView {
     /// Run a deferred grid navigation after the user confirmed discarding pending edits.
     pub(super) fn run_grid_nav(&mut self, nav: GridNav, cx: &mut Context<'_, Self>) {
         match nav {
+            GridNav::Discard => self.cancel_edits(cx),
             GridNav::First => self.first_page_now(cx),
             GridNav::Prev => self.prev_page_now(cx),
             GridNav::Next => self.next_page_now(cx),
@@ -2313,6 +2685,57 @@ mod tests {
             values: BTreeMap::new(),
             after,
         }
+    }
+
+    fn def(data_type: &str, nullable: bool, default: &str) -> rustgrid_core::ColumnDef {
+        rustgrid_core::ColumnDef {
+            name: "c".to_string(),
+            data_type: data_type.to_string(),
+            nullable,
+            default: default.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_new_row_shows_each_kind_of_column_default() {
+        let literal = NewRowColumn::from_def(&def("varchar", true, "'active'"));
+        assert_eq!(
+            (literal.hint.as_str(), literal.prefill.as_str()),
+            ("active", "active")
+        );
+        let number = NewRowColumn::from_def(&def("int", false, "0"));
+        assert_eq!(
+            (
+                number.hint.as_str(),
+                number.prefill.as_str(),
+                number.required
+            ),
+            ("0", "0", false)
+        );
+        let null = NewRowColumn::from_def(&def("int", true, ""));
+        assert_eq!((null.hint.as_str(), null.required), ("(Null)", false));
+        let required = NewRowColumn::from_def(&def("int", false, ""));
+        assert!(required.required);
+        let now = NewRowColumn::from_def(&def("datetime", false, "CURRENT_TIMESTAMP"));
+        assert_eq!(now.now_format, Some("%Y-%m-%d %H:%M:%S"));
+        let expression = NewRowColumn::from_def(&def("char", false, "uuid()"));
+        assert_eq!(
+            (expression.hint.as_str(), expression.prefill.as_str()),
+            ("uuid()", "")
+        );
+        let mut auto = def("int", false, "");
+        auto.auto_increment = true;
+        assert!(!NewRowColumn::from_def(&auto).required);
+    }
+
+    #[test]
+    fn an_enum_column_offers_its_members() {
+        let mut column = def("enum", false, "'b'");
+        column.length = "'a','b','it''s'".to_string();
+        let column = NewRowColumn::from_def(&column);
+        assert_eq!(column.members, vec!["a", "b", "it's"]);
+        assert_eq!(column.prefill, "b");
     }
 
     #[test]
