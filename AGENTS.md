@@ -403,10 +403,11 @@ touching UI code.
   so an engine opts in by declaring its own, and only a control the engine's designer SQL actually
   honors is listed, so no driver shows a dead knob.
   MySQL/MariaDB keep 自动递增/无符号/填充零 and every tab; an ENUM/SET column also shows 枚举值 —
-  a popup whose per-value rows write the quoted member list into `ColumnDef::length` (the field
-  grid's 长度 cell and the detail-panel text field edit the same list), its 默认 suggestions offer
-  the members, and 无符号/填充零 only appear on numeric types. The save refuses a member list that
-  is empty or repeats a value before anything reaches the server. SQL Server declares 排序规则/稀疏,
+  a popup whose per-value rows write the quoted member list into `ColumnDef::length` (the
+  detail-panel text field edits the same list, while the field grid's 长度/小数 cells stay blank
+  for these types), its 默认 suggestions offer the members, and 无符号/填充零 only appear on numeric
+  types. The save refuses a member list that is empty or repeats a value before anything reaches
+  the server. SQL Server declares 排序规则/稀疏,
   大小/比例/计算列, and the extra 唯一键/检查 tabs; SQLite has no 选项/注释 (it has neither) and
   Oracle no 选项, while PostgreSQL's 选项 keeps only 注释 and its column detail adds the identity
   sequence's 生成方式/起始值/增量 (`ColumnDef::identity`/`identity_start`/`identity_increment`).

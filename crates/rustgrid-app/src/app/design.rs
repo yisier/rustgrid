@@ -229,10 +229,13 @@ pub(super) fn field_column_text(kind: DesignerFieldColumn) -> Option<FieldColumn
 pub(super) fn field_column_value(column: &ColumnDef, text: FieldColumn) -> String {
     match text {
         FieldColumn::Name => column.name.clone(),
+        // An ENUM/SET column keeps its member list in `length` (MySQL's `enum('a','b')`), but the
+        // grid cell would just repeat the quoted list the 枚举值 detail field owns; the server's
+        // `0` scale is not a real number either. Both cells stay blank and read-only.
+        FieldColumn::Length | FieldColumn::Decimals if is_member_list_type(&column.data_type) => {
+            String::new()
+        }
         FieldColumn::Length => column.length.clone(),
-        // An ENUM/SET column has no scale: its "length" is the member list, so the server reports
-        // `0` here. The cell is read-only for those types (see `begin_edit`) and must not show it.
-        FieldColumn::Decimals if is_member_list_type(&column.data_type) => String::new(),
         FieldColumn::Decimals => column.decimals.clone(),
         FieldColumn::Comment => column.comment.clone(),
     }
@@ -2199,7 +2202,7 @@ impl TableDesignView {
         if row >= self.schema.columns.len() {
             return;
         }
-        if column == FieldColumn::Decimals
+        if matches!(column, FieldColumn::Length | FieldColumn::Decimals)
             && self
                 .schema
                 .columns
@@ -5787,10 +5790,10 @@ mod tests {
             decimals: "0".to_string(),
             ..ColumnDef::default()
         };
-        assert_eq!(
-            field_column_value(&col, FieldColumn::Length),
-            "'active','inactive'"
-        );
+        // The member list stays the column's `length` for the DDL, but the grid cells stay blank:
+        // the 枚举值 detail field and its popup are the place that shows and edits the list.
+        assert_eq!(col.length, "'active','inactive'");
+        assert_eq!(field_column_value(&col, FieldColumn::Length), "");
         assert_eq!(field_column_value(&col, FieldColumn::Decimals), "");
         let numeric = ColumnDef {
             data_type: "decimal".to_string(),
