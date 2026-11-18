@@ -790,10 +790,13 @@ shadcn chrome described above. Implemented today:
    production stands out. Tab titles ellipsize and show their full text on hover. A tab sizes to
    its title (up to 260px — the titles carry the object, database and connection), shrinking with
    the others down to 120px when more open; past that the strip scrolls with ◀ / ▶ arrows (or the
-   wheel) instead of clipping and the active tab is scrolled into view. Tabs reorder by dragging:
-   the tab's ghost follows the pointer, a thin marker shows the slot it will drop into (the strip
-   auto-scrolls near its edges), and the order changes on release, so nothing jumps under the
-   pointer. The tab context menu's 关闭右侧 closes every tab to the right of the clicked one.
+   wheel) instead of clipping and the active tab is scrolled into view. Tabs reorder by dragging
+   with gpui's own drag support, as Zed's tabs do: `on_drag` carries the tab identity and a
+   floating preview the engine paints at the pointer without re-rendering the strip or the page;
+   the tab under the pointer shows a brand-coloured edge on the side the dragged tab will land
+   (`drag_over`), the strip auto-scrolls near its edges, and the order changes once in `on_drop`,
+   so nothing jumps under the pointer. Dropping past the last tab appends it. The tab context
+   menu's 关闭右侧 closes every tab to the right of the clicked one.
    Dragging a file onto the window (or onto `RustGrid.exe`, which forwards it to the running
    instance) opens it through the generic drop frame in `app/file_drop.rs`; SQLite is the only
    recognised format today, and `classify_dropped_file` is the extension point for the next one.

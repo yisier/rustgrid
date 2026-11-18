@@ -1557,23 +1557,6 @@ struct TabMenu {
     position: Point<Pixels>,
 }
 
-/// An in-progress horizontal drag of an open tab.
-///
-/// The strip does not reorder while the pointer moves: the tab's ghost follows the pointer and a
-/// thin marker shows the slot it will drop into, so nothing under the pointer jumps. The sequence
-/// is reordered once on mouse-up.
-#[derive(Clone, Copy)]
-struct TabDrag {
-    source: TabTarget,
-    /// The pointer's x in window space, for the ghost tab.
-    pointer_x: f32,
-    /// Where the pointer grabbed the tab, measured from its left edge, so the ghost keeps the
-    /// grabbed point under the pointer.
-    grab_offset: f32,
-    /// The slot the tab would drop into, counted among the *other* tabs (`0..=n-1`).
-    slot: usize,
-}
-
 /// The window-space rectangles that keep an open submenu flyout (颜色, 管理分组, 转储 SQL 文件,
 /// 导入连接) alive: the row that opened it and the flyout drawn beside that row.
 ///
@@ -1739,9 +1722,6 @@ struct TabBar {
     /// The active tab on the last frame, so switching tabs (or opening one at the far end) scrolls
     /// the strip to reveal it.
     last_active_tab: Option<TabTarget>,
-    /// Each open tab's display data from the last render. The drag overlay reads the dragged tab's
-    /// entry so its ghost can be drawn without re-rendering the strip.
-    visuals: Vec<(TabTarget, tabs::TabVisual)>,
 }
 
 /// The left connection tree (connections -> databases -> categories -> tables). Owns the tree
@@ -2484,10 +2464,6 @@ pub struct AppView {
     /// The open tabs in the order they were opened, shared by the tab bar and Ctrl+Tab. Reconciled
     /// on read (`ordered_tabs`): closed tabs drop out, new ones join at the end.
     tab_sequence: RefCell<Vec<TabKey>>,
-    /// A left-press on a tab, until the pointer moves far enough to start a [`TabDrag`].
-    tab_press: Option<(TabTarget, Point<Pixels>)>,
-    /// The tab drag in progress, if any.
-    tab_drag: Option<TabDrag>,
     queries: Vec<QueryTab>,
     active_design: Option<usize>,
     next_design_id: u64,
@@ -2657,9 +2633,6 @@ pub struct AppView {
     connect_menu_anchor: Rc<RefCell<Point<Pixels>>>,
     object_pane: Option<Entity<ObjectPane>>,
     tab_bar: Entity<TabBar>,
-    /// The floating ghost and drop marker of a tab drag, kept apart from [`TabBar`] so pointer
-    /// moves repaint only this overlay.
-    tab_drag_overlay: Entity<tabs::TabDragOverlay>,
     tree_pane: Entity<TreePane>,
     /// The connection tree's search text and its field. Typing filters the tree to matching
     /// connections, databases, schemas and tables (see `sidebar::snapshot_connections`).
@@ -3460,8 +3433,6 @@ impl AppView {
             queries: Vec::new(),
             active_design: None,
             tab_sequence: RefCell::new(Vec::new()),
-            tab_press: None,
-            tab_drag: None,
             next_design_id: 0,
             active_query: None,
             next_query_id: 0,
@@ -3584,7 +3555,6 @@ impl AppView {
             connect_menu_anchor: Rc::new(RefCell::new(Point::default())),
             object_pane: None,
             tab_bar: cx.new(|_| TabBar::new(app.clone())),
-            tab_drag_overlay: cx.new(|_| tabs::TabDragOverlay::new(Theme::dark())),
             tree_pane,
             main_tab: MainTab::Tables,
             db_dialog: None,
@@ -5497,7 +5467,6 @@ impl Render for AppView {
                 }
                 this.drag_query_split(event, cx);
                 this.tree_drag_move(event, cx);
-                this.tab_drag_move(event, cx);
                 this.drag_tree_marquee(event, cx);
                 // A cancelled platform drag does not always deliver `FileDropEvent::Exited`; the
                 // next ordinary pointer move (no button held) takes the drop frame down.
@@ -5525,7 +5494,6 @@ impl Render for AppView {
                     }
                     this.end_query_split_drag(cx);
                     this.tree_drag_end(cx);
-                    this.tab_drag_end(cx);
                     this.end_tree_marquee(cx);
                     if this.file_drop_active {
                         this.file_drop_exited(cx);
