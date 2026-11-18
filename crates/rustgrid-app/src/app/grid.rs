@@ -272,38 +272,11 @@ pub(super) struct NewRowColumn {
     pub(super) members: Vec<String>,
 }
 
-/// Split an `ENUM`/`SET` member list (`'a','it''s'`) into its unquoted members.
-pub(super) fn parse_members(list: &str) -> Vec<String> {
-    const QUOTE: char = '\'';
-    let mut members = Vec::new();
-    let mut chars = list.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != QUOTE {
-            continue;
-        }
-        let mut member = String::new();
-        while let Some(c) = chars.next() {
-            if c == QUOTE {
-                if chars.peek() == Some(&QUOTE) {
-                    chars.next();
-                    member.push(QUOTE);
-                } else {
-                    break;
-                }
-            } else {
-                member.push(c);
-            }
-        }
-        members.push(member);
-    }
-    members
-}
-
 impl NewRowColumn {
     pub(super) fn from_def(def: &rustgrid_core::ColumnDef) -> Self {
         let mut column = Self::from_def_default(def);
-        if def.data_type.trim().eq_ignore_ascii_case("enum") {
-            column.members = parse_members(&def.length);
+        if rustgrid_core::is_member_list_type(&def.data_type) {
+            column.members = rustgrid_core::parse_member_list(&def.length);
         }
         column
     }
@@ -2798,6 +2771,10 @@ mod tests {
         let column = NewRowColumn::from_def(&column);
         assert_eq!(column.members, vec!["a", "b", "it's"]);
         assert_eq!(column.prefill, "b");
+
+        let mut set = def("set", false, "");
+        set.length = "'read','write'".to_string();
+        assert_eq!(NewRowColumn::from_def(&set).members, vec!["read", "write"]);
     }
 
     #[test]

@@ -4,9 +4,8 @@ use super::*;
 use gpui::HitboxBehavior;
 use rustgrid_core::{
     ColumnDef, DesignerColumnOption, DesignerFieldColumn, DesignerIndexColumn, DesignerOptionField,
-    DesignerTab, TriggerDefinition,
+    DesignerTab, TriggerDefinition, is_member_list_type, is_numeric_type,
 };
-use rustgrid_core::{is_member_list_type, is_numeric_type};
 
 impl TableDesignView {
     /// Flip one check-box control of the detail panel. The control is a
@@ -921,19 +920,7 @@ impl TableDesignView {
             .any(|option| matches!(option, DesignerColumnOption::IdentityGeneration));
 
         let mut rows: Vec<AnyElement> = Vec::new();
-        let mut column_options = self.designer.column_options.clone();
-        if !column_options.contains(&DesignerColumnOption::EnumValues)
-            && column.is_some_and(|c| is_member_list_type(&c.data_type))
-        {
-            let pos = column_options
-                .iter()
-                .position(|opt| *opt == DesignerColumnOption::Default)
-                .map(|p| p + 1)
-                .unwrap_or(0);
-            column_options.insert(pos, DesignerColumnOption::EnumValues);
-        }
-
-        for option in column_options.into_iter() {
+        for option in self.designer.column_options.iter().copied() {
             // A control the engine cannot use on the selected column is left out entirely rather
             // than shown dead: SQL Server's `IDENTITY` (one numeric column per table, and only on a
             // new one), or MySQL's `AUTO_INCREMENT` on a type it cannot carry.
@@ -1038,8 +1025,8 @@ impl TableDesignView {
                         .cursor_pointer()
                         .hover(move |style| style.bg(rgb(theme.button_hover_bg)))
                         .tooltip(ui::text_tooltip(t!("design.enum_edit_button").to_string()))
-                        .on_click(move |_event, _window, cx| {
-                            let _ = weak.update(cx, |view, cx| view.open_enum_editor(cx));
+                        .on_click(move |_event, window, cx| {
+                            let _ = weak.update(cx, |view, cx| view.open_enum_editor(window, cx));
                         })
                         .child(
                             div()
@@ -1278,8 +1265,16 @@ impl TableDesignView {
         } else {
             anchor.y + px(24.0)
         };
-        let left = (anchor.x - px(160.0)).max(px(8.0));
         let width = 280.0;
+        let left = {
+            let view_width: f32 = bounds.size.width.into();
+            let left = (anchor.x - px(160.0)).max(px(8.0));
+            if view_width > 0.0 {
+                left.min(px((view_width - width - 8.0).max(8.0)))
+            } else {
+                left
+            }
+        };
 
         let weak = self.self_weak.clone();
 
@@ -1298,7 +1293,7 @@ impl TableDesignView {
                     .text_size(px(12.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(theme.text))
-                    .child(t!("design.enum_value_col").to_string()),
+                    .child(t!("design.enum_values_title").to_string()),
             )
             .child(
                 div()
@@ -1312,8 +1307,8 @@ impl TableDesignView {
                     .cursor_pointer()
                     .hover(move |style| style.bg(rgb(theme.button_hover_bg)))
                     .tooltip(ui::text_tooltip(t!("design.enum_add_value").to_string()))
-                    .on_click(cx.listener(|this, _event, _window, cx| {
-                        this.add_enum_draft_value(cx);
+                    .on_click(cx.listener(|this, _event, window, cx| {
+                        this.add_enum_draft_value(window, cx);
                     }))
                     .child(
                         svg()
@@ -1347,8 +1342,9 @@ impl TableDesignView {
                     .text_color(rgb(theme.text_muted))
                     .cursor_pointer()
                     .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-                    .on_click(move |_event, _window, cx| {
-                        let _ = add_weak.update(cx, |view, cx| view.add_enum_draft_value(cx));
+                    .on_click(move |_event, window, cx| {
+                        let _ =
+                            add_weak.update(cx, |view, cx| view.add_enum_draft_value(window, cx));
                     })
                     .child(t!("design.enum_empty_hint").to_string()),
             );
@@ -1377,9 +1373,10 @@ impl TableDesignView {
                             .cursor_pointer()
                             .hover(move |style| style.bg(rgb(theme.button_hover_bg)))
                             .tooltip(ui::text_tooltip(t!("design.enum_del_value").to_string()))
-                            .on_click(move |_event, _window, cx| {
-                                let _ = remove_weak
-                                    .update(cx, |view, cx| view.remove_enum_draft_value(idx, cx));
+                            .on_click(move |_event, window, cx| {
+                                let _ = remove_weak.update(cx, |view, cx| {
+                                    view.remove_enum_draft_value(idx, window, cx)
+                                });
                             })
                             .child(
                                 svg()

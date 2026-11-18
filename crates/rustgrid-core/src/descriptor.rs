@@ -906,7 +906,9 @@ pub fn is_member_list_type(data_type: &str) -> bool {
     )
 }
 
-/// Whether a column type is numeric (integers, floating point, decimal).
+/// Whether a column type is numeric (integers, floating point, decimal). Listed explicitly rather
+/// than by suffix: `point`/`multipoint` are geometry types that a suffix test would read as
+/// integers.
 pub fn is_numeric_type(data_type: &str) -> bool {
     let data_type = data_type.trim().to_ascii_lowercase();
     matches!(
@@ -928,6 +930,41 @@ pub fn is_numeric_type(data_type: &str) -> bool {
             | "bit"
             | "year"
     )
+}
+
+/// The character a MySQL string literal's backslash escape stands for. Unknown escapes are the
+/// escaped character itself, exactly as the server reads them.
+fn unescape_member_char(escaped: char) -> char {
+    match escaped {
+        '0' => '\0',
+        'b' => '\u{8}',
+        'n' => '\n',
+        'r' => '\r',
+        't' => '\t',
+        'Z' => '\u{1a}',
+        _ => escaped,
+    }
+}
+
+/// One member value as it appears inside a MySQL string literal, so a value that carries a quote,
+/// a backslash or a control character survives the round trip through the member list.
+fn escape_member_value(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            // The SQL-standard doubling works even with `NO_BACKSLASH_ESCAPES`.
+            '\'' => out.push_str("''"),
+            '\\' => out.push_str("\\\\"),
+            '\0' => out.push_str("\\0"),
+            '\u{8}' => out.push_str("\\b"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{1a}' => out.push_str("\\Z"),
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// Parse a raw member list string (e.g. `'a','b','c'` or `a,b,c`) into individual values.
@@ -958,7 +995,11 @@ pub fn parse_member_list(raw: &str) -> Vec<String> {
                     } else if c == '\\' {
                         if let Some(&next) = chars.peek() {
                             chars.next();
-                            current.push(next);
+                            // `\%` / `\_` keep their backslash even outside a `LIKE` pattern.
+                            if matches!(next, '%' | '_') {
+                                current.push('\\');
+                            }
+                            current.push(unescape_member_char(next));
                         } else {
                             current.push('\\');
                         }
@@ -996,7 +1037,7 @@ pub fn parse_member_list(raw: &str) -> Vec<String> {
 pub fn format_member_list(members: &[String]) -> String {
     members
         .iter()
-        .map(|m| format!("'{}'", m.replace('\'', "''")))
+        .map(|member| format!("'{}'", escape_member_value(member)))
         .collect::<Vec<_>>()
         .join(",")
 }
@@ -1032,6 +1073,28 @@ mod tests {
         assert_eq!(format_member_list(&unquoted), "'male','female'");
 
         assert!(parse_member_list("").is_empty());
+    }
+
+    #[test]
+    fn member_list_escapes_survive_a_round_trip() {
+        // A backslash must be written back doubled, or MySQL reads the pair as an escape.
+        let backslash = parse_member_list(r"'C:\\tmp','a\\b'");
+        assert_eq!(backslash, vec!["C:\\tmp", "a\\b"]);
+        assert_eq!(format_member_list(&backslash), r"'C:\\tmp','a\\b'");
+        assert_eq!(
+            parse_member_list(&format_member_list(&backslash)),
+            backslash
+        );
+
+        // The escape sequences MySQL itself writes in SHOW CREATE come back as their characters.
+        let control = parse_member_list(r"'a\nb','it\'s','\Z'");
+        assert_eq!(control, vec!["a\nb", "it's", "\u{1a}"]);
+        assert_eq!(format_member_list(&control), r"'a\nb','it''s','\Z'");
+
+        // `\%` / `\_` keep their backslash in a string literal, so they do not lose it.
+        let pattern = parse_member_list(r"'\%','\_'");
+        assert_eq!(pattern, vec!["\\%", "\\_"]);
+        assert_eq!(format_member_list(&pattern), r"'\\%','\\_'");
     }
 
     #[test]

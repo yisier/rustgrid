@@ -6,9 +6,9 @@ use gpui_kit::component::Size;
 use rustgrid_core::{
     CheckDef, ColumnDef, DesignerColumnOption, DesignerFieldColumn, DesignerIndexColumn,
     DesignerOptionField, DesignerTab, ExcludeDef, ForeignKeyDef, IndexColumnDef, IndexDef, RuleDef,
-    TableDesignerSpec, TableSchema, TriggerDef, UniqueKeyDef,
+    TableDesignerSpec, TableSchema, TriggerDef, UniqueKeyDef, format_member_list,
+    is_member_list_type, parse_member_list,
 };
-use rustgrid_core::{format_member_list, is_member_list_type, parse_member_list};
 
 /// A row of the field grid, shared by the header and every row.
 pub(super) const DESIGN_ROW_HEIGHT: f32 = 24.0;
@@ -230,6 +230,9 @@ pub(super) fn field_column_value(column: &ColumnDef, text: FieldColumn) -> Strin
     match text {
         FieldColumn::Name => column.name.clone(),
         FieldColumn::Length => column.length.clone(),
+        // An ENUM/SET column has no scale: its "length" is the member list, so the server reports
+        // `0` here. The cell is read-only for those types (see `begin_edit`) and must not show it.
+        FieldColumn::Decimals if is_member_list_type(&column.data_type) => String::new(),
         FieldColumn::Decimals => column.decimals.clone(),
         FieldColumn::Comment => column.comment.clone(),
     }
@@ -241,6 +244,39 @@ pub(super) fn field_column_display(kind: DesignerFieldColumn, column: &ColumnDef
         DesignerFieldColumn::Collation => column.collation.clone(),
         _ => String::new(),
     }
+}
+
+/// ENUM/SET columns whose value list the server would reject: the list must hold at least one
+/// value, and a value cannot appear twice. Keyed by field row, like the field-name errors, so the
+/// save can stop on the first one.
+fn member_list_errors(columns: &[ColumnDef]) -> BTreeMap<usize, String> {
+    let mut invalid = BTreeMap::new();
+    for (row, column) in columns.iter().enumerate() {
+        if !is_member_list_type(&column.data_type) || column.name.trim().is_empty() {
+            continue;
+        }
+        let values = parse_member_list(&column.length);
+        if values.is_empty() {
+            invalid.insert(
+                row,
+                t!("design.enum_values_required", name = column.name.trim()).to_string(),
+            );
+            continue;
+        }
+        let mut seen = BTreeSet::new();
+        if let Some(value) = values.iter().find(|value| !seen.insert(value.as_str())) {
+            invalid.insert(
+                row,
+                t!(
+                    "design.enum_values_duplicate",
+                    name = column.name.trim(),
+                    value = value.as_str()
+                )
+                .to_string(),
+            );
+        }
+    }
+    invalid
 }
 
 /// The auxiliary inputs owned by a designer, identified by their callback tag.
@@ -1267,9 +1303,8 @@ impl TableDesignView {
         let mut result = Vec::new();
         if let Some(column) = column {
             if is_member_list_type(&column.data_type) {
-                let members = parse_member_list(&column.length);
-                for m in members {
-                    result.push(format!("'{}'", m.replace('\'', "''")));
+                for member in parse_member_list(&column.length) {
+                    result.push(format_member_list(&[member]));
                 }
                 result.push("NULL".to_string());
                 result.push("''".to_string());
@@ -1285,55 +1320,20 @@ impl TableDesignView {
         result
     }
 
-    /// Open the enum/set member values list editor popup.
-    pub(super) fn open_enum_editor(&mut self, cx: &mut Context<'_, Self>) {
-        let column = self
-            .selected_field
-            .and_then(|index| self.schema.columns.get(index));
-        let raw = column.map(|c| c.length.as_str()).unwrap_or_default();
-        let values = parse_member_list(raw);
+    /// One editable member value of the enum editor, wired to its row in the draft.
+    fn enum_draft_input(
+        &self,
+        index: usize,
+        value: String,
+        cx: &mut Context<'_, Self>,
+    ) -> Entity<TextInput> {
         let theme = self.theme;
-        let weak = self.self_weak.clone();
-        self.enum_draft_values = values;
-        self.enum_draft_inputs = self
-            .enum_draft_values
-            .iter()
-            .enumerate()
-            .map(|(index, val)| {
-                let item_weak = weak.clone();
-                cx.new(|cx| {
-                    TextInput::new(
-                        theme,
-                        val.clone(),
-                        TextInputOptions {
-                            placeholder: t!("design.enum_value_placeholder").to_string().into(),
-                            size: Some(Size::Small),
-                            ..Default::default()
-                        },
-                        cx,
-                    )
-                    .on_change(Rc::new(move |text, _window, cx| {
-                        let _ = item_weak.update(cx, |view, cx| {
-                            view.enum_draft_value_changed(index, text, cx);
-                        });
-                    }))
-                })
-            })
-            .collect();
-        self.enum_dialog_open = true;
-        cx.notify();
-    }
-
-    /// Add an empty member value row in the enum editor draft.
-    pub(super) fn add_enum_draft_value(&mut self, cx: &mut Context<'_, Self>) {
-        let index = self.enum_draft_values.len();
-        self.enum_draft_values.push(String::new());
-        let theme = self.theme;
-        let weak = self.self_weak.clone();
-        let input = cx.new(|cx| {
+        let change = self.self_weak.clone();
+        let cancel = self.self_weak.clone();
+        cx.new(move |cx| {
             TextInput::new(
                 theme,
-                String::new(),
+                value,
                 TextInputOptions {
                     placeholder: t!("design.enum_value_placeholder").to_string().into(),
                     size: Some(Size::Small),
@@ -1342,47 +1342,85 @@ impl TableDesignView {
                 cx,
             )
             .on_change(Rc::new(move |text, _window, cx| {
-                let _ = weak.update(cx, |view, cx| {
+                let _ = change.update(cx, |view, cx| {
                     view.enum_draft_value_changed(index, text, cx);
                 });
             }))
-        });
-        self.enum_draft_inputs.push(input);
-        self.apply_enum_draft(cx);
+            .on_cancel(Rc::new(move |_window, cx| {
+                let _ = cancel.update(cx, |view, cx| view.close_enum_editor(cx));
+            }))
+        })
     }
 
-    /// Remove a member value at index from the enum editor draft.
-    pub(super) fn remove_enum_draft_value(&mut self, index: usize, cx: &mut Context<'_, Self>) {
-        if index < self.enum_draft_values.len() {
-            self.enum_draft_values.remove(index);
-            let theme = self.theme;
-            let weak = self.self_weak.clone();
-            self.enum_draft_inputs = self
-                .enum_draft_values
-                .iter()
-                .enumerate()
-                .map(|(idx, val)| {
-                    let item_weak = weak.clone();
-                    cx.new(|cx| {
-                        TextInput::new(
-                            theme,
-                            val.clone(),
-                            TextInputOptions {
-                                placeholder: t!("design.enum_value_placeholder").to_string().into(),
-                                size: Some(Size::Small),
-                                ..Default::default()
-                            },
-                            cx,
-                        )
-                        .on_change(Rc::new(move |text, _window, cx| {
-                            let _ = item_weak.update(cx, |view, cx| {
-                                view.enum_draft_value_changed(idx, text, cx);
-                            });
-                        }))
-                    })
-                })
-                .collect();
-            self.apply_enum_draft(cx);
+    /// Open the enum/set member values list editor popup. The first value takes the keyboard, so a
+    /// value can be edited straight away instead of the keystrokes reaching the designer's grid.
+    pub(super) fn open_enum_editor(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let raw = self
+            .selected_field
+            .and_then(|index| self.schema.columns.get(index))
+            .map(|column| column.length.as_str())
+            .unwrap_or_default();
+        self.enum_draft_values = parse_member_list(raw);
+        self.enum_draft_inputs = {
+            let mut inputs = Vec::with_capacity(self.enum_draft_values.len());
+            for (index, value) in self.enum_draft_values.iter().enumerate() {
+                inputs.push(self.enum_draft_input(index, value.clone(), cx));
+            }
+            inputs
+        };
+        self.enum_dialog_open = true;
+        if let Some(first) = self.enum_draft_inputs.first().cloned() {
+            first.update(cx, |input, cx| input.focus_state(window, cx));
+        }
+        cx.notify();
+    }
+
+    /// Close the enum editor popup and hand the keyboard back to the designer.
+    pub(super) fn close_enum_editor(&mut self, cx: &mut Context<'_, Self>) {
+        self.enum_dialog_open = false;
+        self.focus_pending = true;
+        cx.notify();
+    }
+
+    /// Add an empty member value row in the enum editor draft and put the caret in it.
+    pub(super) fn add_enum_draft_value(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let index = self.enum_draft_values.len();
+        self.enum_draft_values.push(String::new());
+        let input = self.enum_draft_input(index, String::new(), cx);
+        self.enum_draft_inputs.push(input.clone());
+        self.apply_enum_draft(cx);
+        input.update(cx, |input, cx| input.focus_state(window, cx));
+    }
+
+    /// Remove the member value at `index` and keep the keyboard in the list.
+    pub(super) fn remove_enum_draft_value(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if index >= self.enum_draft_values.len() {
+            return;
+        }
+        self.enum_draft_values.remove(index);
+        self.enum_draft_inputs = {
+            let mut inputs = Vec::with_capacity(self.enum_draft_values.len());
+            for (idx, value) in self.enum_draft_values.iter().enumerate() {
+                inputs.push(self.enum_draft_input(idx, value.clone(), cx));
+            }
+            inputs
+        };
+        self.apply_enum_draft(cx);
+        // The removed row's successor (or the last row) takes the caret; with no row left the
+        // designer gets the keys back so the `+` hint can be reached from the keyboard.
+        match self
+            .enum_draft_inputs
+            .get(index)
+            .or_else(|| self.enum_draft_inputs.last())
+            .cloned()
+        {
+            Some(input) => input.update(cx, |input, cx| input.focus_state(window, cx)),
+            None => self.focus_pending = true,
         }
     }
 
@@ -1429,7 +1467,10 @@ impl TableDesignView {
     /// Push the selected field's default and identity controls into the detail panel.
     fn sync_selected_input(&mut self, cx: &mut Context<'_, Self>) {
         self.default_menu_open = false;
-        self.enum_dialog_open = false;
+        if self.enum_dialog_open {
+            self.enum_dialog_open = false;
+            self.focus_pending = true;
+        }
         let column = self
             .selected_field
             .and_then(|index| self.schema.columns.get(index));
@@ -2105,6 +2146,7 @@ impl TableDesignView {
         self.edit_blur = None;
         self.type_combo = None;
         self.default_menu_open = false;
+        self.enum_dialog_open = false;
         self.index_edit = None;
         self.index_edit_blur = None;
         self.index_combo = None;
@@ -2759,6 +2801,21 @@ impl TableDesignView {
         invalid
     }
 
+    /// ENUM/SET columns whose value list the server would reject: the list must hold at least one
+    /// value, and a value cannot appear twice. The save stops on the first one, exactly like
+    /// [`Self::invalid_field_names`], instead of waiting for the server's error.
+    pub(super) fn invalid_member_lists(&self) -> BTreeMap<usize, String> {
+        member_list_errors(&self.schema.columns)
+    }
+
+    /// Bring an invalid field into view and say why its save cannot run.
+    fn report_invalid_field(&mut self, row: usize, message: String, cx: &mut Context<'_, Self>) {
+        self.select_tab(DesignerTab::Fields, cx);
+        self.select_field_cell(row, FieldCell::Name, cx);
+        self.reveal_design_row(row);
+        self.report_error(message, cx);
+    }
+
     /// Move the selected fields-grid cell one step, clamping at the grid edges. Vertical movement
     /// keeps the cell kind, so a 长度 stays a 长度 when moving up/down.
     fn move_designer_cell(
@@ -2996,16 +3053,26 @@ impl TableDesignView {
 
     pub(super) fn select_type(&mut self, row: usize, data_type: &str, cx: &mut Context<'_, Self>) {
         if let Some(column) = self.schema.columns.get_mut(row) {
+            let was_member_list = is_member_list_type(&column.data_type);
             column.data_type = data_type.to_string();
             // A type that cannot carry the engine's auto-increment (SQL Server's `IDENTITY` is
             // numeric-only) drops it, so the preview never emits an invalid column.
             if column.auto_increment && !self.designer.auto_increment.allows(data_type) {
                 column.auto_increment = false;
             }
-            if is_member_list_type(data_type) {
+            let is_member_list = is_member_list_type(data_type);
+            if is_member_list {
                 column.decimals.clear();
                 column.unsigned = false;
                 column.zerofill = false;
+                // The "length" of an ENUM/SET is its member list, not a number: a `varchar(255)`
+                // that just became `enum` must not keep `255` as its only value.
+                if !was_member_list {
+                    column.length.clear();
+                }
+            } else if was_member_list {
+                // Leaving ENUM/SET drops the quoted member list, which would read as a length.
+                column.length.clear();
             }
         }
         self.type_combo = None;
@@ -4913,10 +4980,12 @@ impl TableDesignView {
         // A field without a name, or two with the same name, would only fail on the server: say
         // which one before anything is sent, and put the caret on it.
         if let Some((row, message)) = self.invalid_field_names().into_iter().next() {
-            self.select_tab(DesignerTab::Fields, cx);
-            self.select_field_cell(row, FieldCell::Name, cx);
-            self.reveal_design_row(row);
-            self.report_error(message, cx);
+            self.report_invalid_field(row, message, cx);
+            return;
+        }
+        // An ENUM/SET with no value (or a repeated one) is rejected by the server just as late.
+        if let Some((row, message)) = self.invalid_member_lists().into_iter().next() {
+            self.report_invalid_field(row, message, cx);
             return;
         }
         if self.is_new {
@@ -5714,6 +5783,8 @@ mod tests {
             name: "status".to_string(),
             data_type: "enum".to_string(),
             length: "'active','inactive'".to_string(),
+            // MySQL reports a `0` scale for a non-numeric column; the grid must not show it.
+            decimals: "0".to_string(),
             ..ColumnDef::default()
         };
         assert_eq!(
@@ -5721,6 +5792,12 @@ mod tests {
             "'active','inactive'"
         );
         assert_eq!(field_column_value(&col, FieldColumn::Decimals), "");
+        let numeric = ColumnDef {
+            data_type: "decimal".to_string(),
+            decimals: "6".to_string(),
+            ..ColumnDef::default()
+        };
+        assert_eq!(field_column_value(&numeric, FieldColumn::Decimals), "6");
 
         // Default TableDesignerSpec includes EnumValues option
         let spec = TableDesignerSpec::default();
@@ -5743,5 +5820,21 @@ mod tests {
         let user_parsed = parse_member_list(user_raw);
         assert_eq!(user_parsed, vec!["first", "second", "third"]);
         assert_eq!(format_member_list(&user_parsed), "'first','second','third'");
+    }
+
+    #[test]
+    fn a_member_list_must_hold_distinct_values() {
+        let member_list = |data_type: &str, length: &str| ColumnDef {
+            name: "status".to_string(),
+            data_type: data_type.to_string(),
+            length: length.to_string(),
+            ..ColumnDef::default()
+        };
+        assert!(member_list_errors(&[member_list("enum", "'a','b'")]).is_empty());
+        assert!(member_list_errors(&[member_list("set", "read, write")]).is_empty());
+        assert!(member_list_errors(&[member_list("enum", "'a','b','a'")]).contains_key(&0));
+        assert!(member_list_errors(&[member_list("set", "")]).contains_key(&0));
+        // Only a member list type is checked; a numeric column's empty length is normal.
+        assert!(member_list_errors(&[member_list("int", "")]).is_empty());
     }
 }

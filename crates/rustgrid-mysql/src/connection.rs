@@ -11,7 +11,8 @@ use rustgrid_core::{
     ObjectPrivilegeRow, PageRequest, PrivilegeCatalog, QueryResult, Result, RoutineDetails,
     RoutineEdit, RoutineInfo, RoutineKind, RowInsert, RowUpdate, ScriptSession, TableInfo,
     TableOptions, TablePage, TableSchema, TableStatus, TriggerDef, UserAccount, UserDetails,
-    UserEdit, ViewDetails, ViewEdit,
+    UserEdit, ViewDetails, ViewEdit, format_member_list, is_member_list_type, is_numeric_type,
+    parse_member_list,
 };
 use sqlx::mysql::{MySqlColumn, MySqlRow};
 use sqlx::{
@@ -2890,14 +2891,6 @@ fn type_ignores_length(data_type: &str) -> bool {
     )
 }
 
-/// Whether a column type's "length" is its member list (`ENUM('a','b')`, `SET('x','y')`).
-fn is_member_list_type(data_type: &str) -> bool {
-    matches!(
-        data_type.trim().to_ascii_lowercase().as_str(),
-        "enum" | "set"
-    )
-}
-
 /// Render one column definition for `CREATE`/`ALTER TABLE`.
 fn column_sql(column: &ColumnDef) -> String {
     let mut sql = quote_identifier(&column.name);
@@ -2906,15 +2899,11 @@ fn column_sql(column: &ColumnDef) -> String {
 
     let trimmed_length = column.length.trim();
     let formatted_length;
-    let length = if is_member_list_type(&column.data_type) && !trimmed_length.is_empty() {
-        if !trimmed_length.contains('\'') {
-            formatted_length = rustgrid_core::format_member_list(
-                &rustgrid_core::parse_member_list(trimmed_length),
-            );
-            formatted_length.as_str()
-        } else {
-            trimmed_length
-        }
+    // A member list is always written from its parsed values, so a list typed without quotes
+    // (`high, slow`) or with mixed quoting (`'high', slow`) still produces valid DDL.
+    let length = if is_member_list_type(&column.data_type) {
+        formatted_length = format_member_list(&parse_member_list(trimmed_length));
+        formatted_length.as_str()
     } else {
         trimmed_length
     };
@@ -2929,10 +2918,10 @@ fn column_sql(column: &ColumnDef) -> String {
         sql.push(')');
     }
 
-    if column.unsigned && type_is_numeric(&column.data_type) {
+    if column.unsigned && is_numeric_type(&column.data_type) {
         sql.push_str(" unsigned");
     }
-    if column.zerofill && type_is_numeric(&column.data_type) {
+    if column.zerofill && is_numeric_type(&column.data_type) {
         sql.push_str(" zerofill");
     }
     if !column.charset.trim().is_empty() {
@@ -3149,36 +3138,10 @@ fn format_default(column: &ColumnDef, value: &str) -> Option<String> {
     if expression {
         return Some(format!("DEFAULT {value}"));
     }
-    if type_is_numeric(&column.data_type) && value.trim().parse::<f64>().is_ok() {
+    if is_numeric_type(&column.data_type) && value.trim().parse::<f64>().is_ok() {
         return Some(format!("DEFAULT {}", value.trim()));
     }
     Some(format!("DEFAULT {}", quote_literal(value)))
-}
-
-/// Whether a column of this type takes a numeric default, so it is written without quotes.
-fn type_is_numeric(data_type: &str) -> bool {
-    let data_type = data_type.trim().to_ascii_lowercase();
-    // Listed explicitly rather than by suffix: `point`/`multipoint` are geometry types, and a
-    // suffix test would read them as integers.
-    matches!(
-        data_type.as_str(),
-        "tinyint"
-            | "smallint"
-            | "mediumint"
-            | "int"
-            | "integer"
-            | "bigint"
-            | "serial"
-            | "decimal"
-            | "numeric"
-            | "dec"
-            | "fixed"
-            | "float"
-            | "double"
-            | "real"
-            | "bit"
-            | "year"
-    )
 }
 
 fn quote_literal(value: &str) -> String {
@@ -5161,8 +5124,8 @@ mod tests {
 
 #[cfg(test)]
 mod member_list_tests {
-    use super::{column_sql, is_member_list_type, parse_show_column_type};
-    use rustgrid_core::ColumnDef;
+    use super::{column_sql, parse_show_column_type};
+    use rustgrid_core::{ColumnDef, is_member_list_type};
 
     #[test]
     fn enum_and_set_keep_their_member_list_as_the_length() {
@@ -5209,6 +5172,28 @@ mod member_list_tests {
         };
         let sql_unquoted = column_sql(&col_unquoted);
         assert_eq!(sql_unquoted, "`rate` enum('high','slow') NOT NULL");
+
+        // Mixed quoting is normalised too, and a backslash in a value is escaped.
+        let col_mixed = ColumnDef {
+            name: "rate".to_string(),
+            data_type: "enum".to_string(),
+            length: r#"'high', slow"#.to_string(),
+            ..ColumnDef::default()
+        };
+        assert_eq!(
+            column_sql(&col_mixed),
+            "`rate` enum('high','slow') NOT NULL"
+        );
+        let col_backslash = ColumnDef {
+            name: "path".to_string(),
+            data_type: "enum".to_string(),
+            length: r#"'C:\\tmp'"#.to_string(),
+            ..ColumnDef::default()
+        };
+        assert_eq!(
+            column_sql(&col_backslash),
+            r"`path` enum('C:\\tmp') NOT NULL"
+        );
 
         // SET type
         let col_set = ColumnDef {
