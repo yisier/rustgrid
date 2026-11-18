@@ -816,6 +816,8 @@ pub(super) struct TableDesignView {
     pub(super) enum_dialog_open: bool,
     pub(super) enum_draft_values: Vec<String>,
     pub(super) enum_draft_inputs: Vec<Entity<TextInput>>,
+    /// The enum editor's value list, so a value added at the end can be scrolled into view.
+    pub(super) enum_scroll: ScrollHandle,
     pub(super) enum_anchor: Rc<RefCell<Option<Point<Pixels>>>>,
     /// The list of common default expressions, opened from the chevron beside 默认.
     pub(super) default_menu_open: bool,
@@ -1130,6 +1132,7 @@ impl TableDesignView {
             enum_dialog_open: false,
             enum_draft_values: Vec::new(),
             enum_draft_inputs: Vec::new(),
+            enum_scroll: ScrollHandle::new(),
             enum_anchor: Rc::new(RefCell::new(None)),
             identity_generation_combo,
             identity_start_input,
@@ -1372,6 +1375,8 @@ impl TableDesignView {
             inputs
         };
         self.enum_dialog_open = true;
+        // A reopened list starts at its first value, never at the scroll position of a past edit.
+        self.enum_scroll.set_offset(Point::default());
         if let Some(first) = self.enum_draft_inputs.first().cloned() {
             first.update(cx, |input, cx| input.focus_state(window, cx));
         }
@@ -1392,6 +1397,9 @@ impl TableDesignView {
         let input = self.enum_draft_input(index, String::new(), cx);
         self.enum_draft_inputs.push(input.clone());
         self.apply_enum_draft(cx);
+        // The new value is appended below the fold when the list is long; prepaint scrolls it into
+        // view once the row has been laid out.
+        self.enum_scroll.scroll_to_item(index);
         input.update(cx, |input, cx| input.focus_state(window, cx));
     }
 
@@ -1414,6 +1422,10 @@ impl TableDesignView {
             inputs
         };
         self.apply_enum_draft(cx);
+        if !self.enum_draft_values.is_empty() {
+            self.enum_scroll
+                .scroll_to_item(index.min(self.enum_draft_values.len() - 1));
+        }
         // The removed row's successor (or the last row) takes the caret; with no row left the
         // designer gets the keys back so the `+` hint can be reached from the keyboard.
         match self

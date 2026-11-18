@@ -20,12 +20,15 @@ export default defineUserConfig({
       '',
       'index.html',
       'guide/install.html',
+      'guide/connections.html',
+      'guide/settings.html',
       'guide/tables.html',
       'guide/functions.html',
       'guide/queries.html',
       'guide/backup.html',
       'guide/sync.html',
-      'guide/settings.html'
+      'guide/engines.html',
+      'guide/shortcuts.html'
     ];
     var path = window.location.pathname;
     if (path.indexOf(base) !== 0) return;
@@ -77,7 +80,11 @@ export default defineUserConfig({
       '/guide/': [
         {
           text: 'Getting Started',
-          children: ['/guide/install.html'],
+          children: [
+            '/guide/install.html',
+            '/guide/connections.html',
+            '/guide/settings.html',
+          ],
         },
         {
           text: 'Modules',
@@ -87,8 +94,11 @@ export default defineUserConfig({
             '/guide/queries.html',
             '/guide/backup.html',
             '/guide/sync.html',
-            '/guide/settings.html',
           ],
+        },
+        {
+          text: 'Reference',
+          children: ['/guide/engines.html', '/guide/shortcuts.html'],
         },
       ],
     },
@@ -104,7 +114,14 @@ export default defineUserConfig({
         ],
         sidebar: {
           '/guide/': [
-            { text: 'Getting Started', children: ['/guide/install.html'] },
+            {
+              text: 'Getting Started',
+              children: [
+                '/guide/install.html',
+                '/guide/connections.html',
+                '/guide/settings.html',
+              ],
+            },
             {
               text: 'Modules',
               children: [
@@ -113,8 +130,11 @@ export default defineUserConfig({
                 '/guide/queries.html',
                 '/guide/backup.html',
                 '/guide/sync.html',
-                '/guide/settings.html',
               ],
+            },
+            {
+              text: 'Reference',
+              children: ['/guide/engines.html', '/guide/shortcuts.html'],
             },
           ],
         },
@@ -130,7 +150,14 @@ export default defineUserConfig({
         ],
         sidebar: {
           '/zh/guide/': [
-            { text: '开始使用', children: ['/zh/guide/install.html'] },
+            {
+              text: '开始使用',
+              children: [
+                '/zh/guide/install.html',
+                '/zh/guide/connections.html',
+                '/zh/guide/settings.html',
+              ],
+            },
             {
               text: '功能模块',
               children: [
@@ -139,8 +166,11 @@ export default defineUserConfig({
                 '/zh/guide/queries.html',
                 '/zh/guide/backup.html',
                 '/zh/guide/sync.html',
-                '/zh/guide/settings.html',
               ],
+            },
+            {
+              text: '参考',
+              children: ['/zh/guide/engines.html', '/zh/guide/shortcuts.html'],
             },
           ],
         },

@@ -1321,6 +1321,7 @@ impl TableDesignView {
 
         let mut list = div()
             .id("design-enum-list")
+            .track_scroll(&self.enum_scroll)
             .flex()
             .flex_col()
             .flex_1()
