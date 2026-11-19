@@ -36,4 +36,10 @@ impl Runtime {
     {
         self.inner.handle().spawn_blocking(function)
     }
+
+    /// A handle for synchronous callers that need to run one async database operation at a time
+    /// (the MCP stdio loop does this for each request).
+    pub fn handle(&self) -> tokio::runtime::Handle {
+        self.inner.handle().clone()
+    }
 }

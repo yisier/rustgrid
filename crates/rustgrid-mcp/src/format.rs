@@ -4,6 +4,10 @@ use rustgrid_core::{CellValue, QueryResult};
 
 pub const MAX_PAYLOAD_BYTES: usize = 200 * 1024; // 200 KB
 
+/// A single cell is chat context, not a file transfer. Very long text is truncated so one value
+/// cannot blow past [`MAX_PAYLOAD_BYTES`] before the row loop gets a chance to stop.
+const MAX_CELL_CHARS: usize = 4096;
+
 /// Formats a QueryResult into a clean Markdown table with an execution header.
 pub fn format_query_result_markdown(
     connection_name: &str,
@@ -102,9 +106,17 @@ pub fn format_cell_value(cell: &CellValue) -> String {
         CellValue::Int(i) => i.to_string(),
         CellValue::Uint(u) => u.to_string(),
         CellValue::Float(f) => f.to_string(),
-        CellValue::Text(t) => escape_cell(t),
+        CellValue::Text(t) => escape_cell(&truncate_text(t)),
         CellValue::Bytes(b) => format!("<binary: {} bytes>", b.len()),
     }
+}
+
+fn truncate_text(text: &str) -> String {
+    if text.chars().count() <= MAX_CELL_CHARS {
+        return text.to_string();
+    }
+    let truncated: String = text.chars().take(MAX_CELL_CHARS).collect();
+    format!("{truncated}… (truncated)")
 }
 
 #[cfg(test)]

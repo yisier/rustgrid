@@ -31,6 +31,14 @@ use crate::assets::Assets;
 use crate::runtime::Runtime;
 
 fn main() {
+    // MCP's stdio transport: an AI client launches this executable with `--mcp-stdio`, writes
+    // newline-delimited JSON-RPC to stdin and reads the responses from stdout. It must run before
+    // the single-instance lock (the GUI may already be running) and must not initialize GPUI.
+    if std::env::args_os().any(|argument| argument == std::ffi::OsStr::new("--mcp-stdio")) {
+        run_mcp_stdio();
+        return;
+    }
+
     // Dropping a SQLite database onto RustGrid.exe launches the executable with the file as its
     // argument; the running copy opens it when one exists, so a second process never starts.
     let startup_paths: Vec<std::path::PathBuf> = std::env::args_os()
@@ -135,6 +143,44 @@ fn main() {
         )
         .expect("failed to open the main window");
     });
+}
+
+/// The stdio MCP server entry point.
+///
+/// This is a normal second process of the app, launched by the AI client. stdout is the protocol
+/// channel, so **all** logging goes to stderr; a panic still reaches `crash.log` through
+/// [`install_crash_log`].
+fn run_mcp_stdio() {
+    let config = match rustgrid_config::ConfigStore::new() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("[rustgrid-mcp] could not resolve the configuration directory: {error}");
+            std::process::exit(1);
+        }
+    };
+    install_crash_log(config.root());
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .try_init();
+
+    let registry = Arc::new(builtin_registry());
+    let runtime = Runtime::new();
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    if let Err(error) = rustgrid_mcp::stdio::serve(
+        stdin.lock(),
+        stdout.lock(),
+        &config,
+        &registry,
+        &runtime.handle(),
+    ) {
+        eprintln!("[rustgrid-mcp] {error}");
+        std::process::exit(1);
+    }
 }
 
 /// The GPUI application this build launches.

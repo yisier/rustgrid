@@ -388,11 +388,12 @@ impl AppView {
         self.options_single_click_open = self.single_click_open;
         self.options_stop_on_error = self.stop_on_error;
         self.set_options_max_statements(self.max_statements_per_run.to_string(), cx);
-        self.mcp_options =
-            rustgrid_mcp::McpOptionsState::load(self.config.root(), self.mcp_server.active_port());
-        self.options_mcp_port_input = None;
+        self.mcp_options = options_mcp::McpOptionsState::load(&self.config);
         self.options_mcp_max_rows_input = None;
+        self.options_mcp_timeout_input = None;
         self.options_mcp_scope_input = None;
+        self.options_mcp_blacklist_input = None;
+        self.options_mcp_prompt_input = None;
         self.recording_shortcut = None;
         self.ensure_shortcut_search(cx);
         self.ensure_language_combo(cx);
@@ -453,6 +454,10 @@ impl AppView {
 
     /// Close the Options window (called from its footer/ESC, where the window is at hand).
     pub(super) fn close_options(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.mcp_options.editing = None;
+        self.options_mcp_scope_input = None;
+        self.options_mcp_blacklist_input = None;
+        self.options_mcp_prompt_input = None;
         self.options_window = None;
         window.remove_window();
         cx.notify();
@@ -670,7 +675,7 @@ impl AppView {
         }
     }
 
-    fn apply_options(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+    fn apply_options(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> bool {
         self.editor_font_family = self.options_editor_font_family.clone();
         self.editor_font_size = self.options_editor_font_size;
         self.nav_font_family = self.options_nav_font_family.clone();
@@ -703,8 +708,39 @@ impl AppView {
         if let Ok(limit) = self.options_max_statements.trim().parse::<u32>() {
             self.max_statements_per_run = limit;
         }
-        if self.mcp_options.apply(self.config.root()) {
-            self.restart_mcp_http_server();
+        // Commit an open per-connection editor first: its fields are the live ones, and an invalid
+        // read-write confirmation or empty scope must keep the Options window open.
+        if let Err(error) = self.commit_mcp_editor(cx) {
+            if let Some(editing) = self.mcp_options.editing.as_mut() {
+                editing.error = Some(error);
+            }
+            return false;
+        }
+        // The MCP settings are one file, saved on 确定 like the rest of the page. Read the live
+        // field values first because an input's change callback is dispatched on its next render.
+        if let Some(input) = self.options_mcp_max_rows_input.clone()
+            && let Some(text) = input.read(cx).current_text(cx)
+        {
+            self.mcp_options.max_rows = text.chars().filter(char::is_ascii_digit).collect();
+        }
+        if let Some(input) = self.options_mcp_timeout_input.clone()
+            && let Some(text) = input.read(cx).current_text(cx)
+        {
+            self.mcp_options.timeout_seconds = text.chars().filter(char::is_ascii_digit).collect();
+        }
+        // Permissions for deleted connections must not linger in mcp.json.
+        let known: std::collections::BTreeSet<String> = self
+            .connections
+            .iter()
+            .map(|node| node.profile.id.clone())
+            .collect();
+        self.mcp_options
+            .permissions
+            .retain(|profile_id, _| known.contains(profile_id));
+        if let Err(error) = self.mcp_options.save(&self.config) {
+            self.mcp_options.error = Some(format!("Failed to save the AI / MCP settings: {error}"));
+            self.options_section = OptionsSection::Mcp;
+            return false;
         }
         self.recording_shortcut = None;
         // Re-bind every command: the previously bound keystrokes are shadowed by a `NoAction`
@@ -714,12 +750,14 @@ impl AppView {
         self.set_language(language, cx);
         self.persist_settings();
         cx.notify();
+        true
     }
 
     /// 确定: apply the staged settings and close the Options window.
     fn apply_options_and_close(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        self.apply_options(window, cx);
-        self.close_options(window, cx);
+        if self.apply_options(window, cx) {
+            self.close_options(window, cx);
+        }
     }
 
     /// One entry of the left navigation: an icon and the page name in a rounded pill. The active
@@ -1956,7 +1994,9 @@ impl AppView {
                         "options-apply",
                         t!("form.apply").to_string(),
                         false,
-                        cx.listener(|this, _event, window, cx| this.apply_options(window, cx)),
+                        cx.listener(|this, _event, window, cx| {
+                            this.apply_options(window, cx);
+                        }),
                     )),
             )
             .text_color(rgb(theme.text))

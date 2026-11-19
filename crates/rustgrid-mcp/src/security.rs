@@ -1,122 +1,92 @@
-use std::collections::BTreeMap;
+//! Permission checks shared by every MCP tool.
+//!
+//! This module is deliberately conservative: the read-only check parses SQL with the engine's
+//! `sqlparser` dialect and rejects everything that is not a single `SELECT`/`WITH … SELECT`
+//! (or an `EXPLAIN` of one). It is a guardrail, not a database security boundary — the account
+//! a connection uses remains the authority. The UI says so as well.
 
-pub const MCP_OPT_ENABLED: &str = "mcp.enabled";
-pub const MCP_OPT_READ_ONLY: &str = "mcp.read_only";
-pub const MCP_OPT_DATABASE_SCOPE: &str = "mcp.database_scope";
-pub const MCP_OPT_TABLE_BLACKLIST: &str = "mcp.table_blacklist";
-pub const MCP_OPT_AI_CONTEXT_PROMPT: &str = "mcp.ai_context_prompt";
+use std::ops::ControlFlow;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct McpConnectionSettings {
-    pub enabled: bool,
-    pub read_only: bool,
-    pub allowed_databases: Vec<String>,
-    pub table_blacklist: Vec<String>,
-    pub ai_context_prompt: String,
+use rustgrid_core::DriverDialect;
+use sqlparser::ast::{
+    Expr, ObjectName, ObjectNamePart, Query, Select, Statement, TableFactor, Visit, Visitor,
+};
+use sqlparser::dialect::{
+    ClickHouseDialect, Dialect, GenericDialect, MsSqlDialect, MySqlDialect, OracleDialect,
+    PostgreSqlDialect, SQLiteDialect,
+};
+use sqlparser::parser::Parser;
+
+/// What kind of object model the connection speaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineFamily {
+    /// A SQL database. `execute_query` gets SQL validation.
+    Sql(SqlNaming),
+    /// A key-value or document store. The driver's own read-only flag is the guard; SQL keyword
+    /// validation would reject every command.
+    NonSql,
 }
 
-impl Default for McpConnectionSettings {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            read_only: true,
-            allowed_databases: Vec::new(),
-            table_blacklist: Vec::new(),
-            ai_context_prompt: String::new(),
+/// How a SQL engine qualifies a relation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqlNaming {
+    /// `database.table` (MySQL, ClickHouse, generic).
+    Flat,
+    /// `schema.table` inside the connection's database (PostgreSQL, SQL Server, Oracle).
+    SchemaFirst,
+    /// SQLite's `main.table` / `temp.table`, plus attached database aliases.
+    Sqlite,
+}
+
+/// The policy one `execute_query` call is checked against.
+#[derive(Debug, Clone, Copy)]
+pub struct SqlPolicy<'a> {
+    pub dialect: DriverDialect,
+    pub naming: SqlNaming,
+    /// The database the connection runs in when the request does not name one.
+    pub default_database: Option<&'a str>,
+    /// Empty means every database the account can see.
+    pub allowed_databases: &'a [String],
+    pub blacklisted_tables: &'a [String],
+}
+
+/// The engine family for a connection, derived from the driver's capabilities and dialect.
+pub fn engine_family(
+    dialect: DriverDialect,
+    capabilities: &rustgrid_core::DriverCapabilities,
+) -> EngineFamily {
+    use rustgrid_core::DriverCapability;
+
+    if capabilities.has(DriverCapability::KeyValue) || capabilities.has(DriverCapability::Documents)
+    {
+        return EngineFamily::NonSql;
+    }
+    EngineFamily::Sql(match dialect {
+        DriverDialect::Sqlite => SqlNaming::Sqlite,
+        DriverDialect::Postgres | DriverDialect::SqlServer | DriverDialect::Oracle => {
+            SqlNaming::SchemaFirst
         }
+        DriverDialect::Mysql | DriverDialect::ClickHouse | DriverDialect::Generic => {
+            SqlNaming::Flat
+        }
+    })
+}
+
+/// The `sqlparser` dialect matching an engine.
+pub fn parser_dialect(dialect: DriverDialect) -> Box<dyn Dialect> {
+    match dialect {
+        DriverDialect::Mysql => Box::new(MySqlDialect {}),
+        DriverDialect::Postgres => Box::new(PostgreSqlDialect {}),
+        DriverDialect::Oracle => Box::new(OracleDialect {}),
+        DriverDialect::SqlServer => Box::new(MsSqlDialect {}),
+        DriverDialect::Sqlite => Box::new(SQLiteDialect {}),
+        DriverDialect::ClickHouse => Box::new(ClickHouseDialect {}),
+        DriverDialect::Generic => Box::new(GenericDialect {}),
     }
 }
 
-impl McpConnectionSettings {
-    pub fn from_options(options: &BTreeMap<String, String>) -> Self {
-        let enabled = options
-            .get(MCP_OPT_ENABLED)
-            .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
-            .unwrap_or(false);
-
-        let read_only = options
-            .get(MCP_OPT_READ_ONLY)
-            .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
-            .unwrap_or(true);
-
-        let allowed_databases = options
-            .get(MCP_OPT_DATABASE_SCOPE)
-            .map(|s| {
-                s.split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let table_blacklist = options
-            .get(MCP_OPT_TABLE_BLACKLIST)
-            .map(|s| {
-                s.split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(sanitize_identifier)
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let ai_context_prompt = options
-            .get(MCP_OPT_AI_CONTEXT_PROMPT)
-            .cloned()
-            .unwrap_or_default();
-
-        Self {
-            enabled,
-            read_only,
-            allowed_databases,
-            table_blacklist,
-            ai_context_prompt,
-        }
-    }
-
-    pub fn write_to_options(&self, options: &mut BTreeMap<String, String>) {
-        if self.enabled {
-            options.insert(MCP_OPT_ENABLED.to_string(), "true".to_string());
-        } else {
-            options.remove(MCP_OPT_ENABLED);
-        }
-
-        if !self.read_only {
-            options.insert(MCP_OPT_READ_ONLY.to_string(), "false".to_string());
-        } else {
-            options.remove(MCP_OPT_READ_ONLY);
-        }
-
-        if !self.allowed_databases.is_empty() {
-            options.insert(
-                MCP_OPT_DATABASE_SCOPE.to_string(),
-                self.allowed_databases.join(", "),
-            );
-        } else {
-            options.remove(MCP_OPT_DATABASE_SCOPE);
-        }
-
-        if !self.table_blacklist.is_empty() {
-            options.insert(
-                MCP_OPT_TABLE_BLACKLIST.to_string(),
-                self.table_blacklist.join(", "),
-            );
-        } else {
-            options.remove(MCP_OPT_TABLE_BLACKLIST);
-        }
-
-        if !self.ai_context_prompt.trim().is_empty() {
-            options.insert(
-                MCP_OPT_AI_CONTEXT_PROMPT.to_string(),
-                self.ai_context_prompt.clone(),
-            );
-        } else {
-            options.remove(MCP_OPT_AI_CONTEXT_PROMPT);
-        }
-    }
-}
-
+/// Normalize one identifier for the blacklist/allowlist comparisons: drop a surrounding quote
+/// pair and compare case-insensitively.
 pub fn sanitize_identifier(ident: &str) -> String {
     ident
         .trim()
@@ -124,397 +94,653 @@ pub fn sanitize_identifier(ident: &str) -> String {
         .to_lowercase()
 }
 
-pub fn is_table_blacklisted(table: &str, blacklist: &[String]) -> bool {
-    let clean = sanitize_identifier(table);
-    blacklist.iter().any(|b| sanitize_identifier(b) == clean)
+fn normalize_parts(name: &str) -> Vec<String> {
+    name.split('.')
+        .map(sanitize_identifier)
+        .filter(|part| !part.is_empty())
+        .collect()
 }
 
-pub fn is_database_allowed(database: &str, allowed: &[String]) -> bool {
+/// Whether a table name matches an entry of the sensitive-table blacklist.
+///
+/// A bare entry matches the table's last name in any schema; a qualified entry matches its exact
+/// dotted name. Matching is intentionally broad: a table named `public.secrets` is hidden when the
+/// user blacklists `secrets`, and vice versa.
+pub fn is_table_blacklisted(table: &str, blacklist: &[String]) -> bool {
+    let table_parts = normalize_parts(table);
+    let Some(table_last) = table_parts.last() else {
+        return false;
+    };
+    blacklist.iter().any(|entry| {
+        let entry_parts = normalize_parts(entry);
+        let Some(entry_last) = entry_parts.last() else {
+            return false;
+        };
+        if entry_parts.len() == 1 {
+            table_last == entry_last
+        } else {
+            table_parts == entry_parts || table_last == entry_last
+        }
+    })
+}
+
+/// Whether a database is inside the permission's scope. An empty list means every database.
+pub fn is_database_allowed(database: Option<&str>, allowed: &[String]) -> bool {
     if allowed.is_empty() {
         return true;
     }
-    let db_lower = database.trim().to_lowercase();
-    allowed.iter().any(|d| d.trim().to_lowercase() == db_lower)
+    let Some(database) = database.map(str::trim).filter(|db| !db.is_empty()) else {
+        return false;
+    };
+    allowed
+        .iter()
+        .any(|entry| entry.trim().eq_ignore_ascii_case(database))
 }
 
-/// Strip leading SQL comments (-- ..., /* ... */, # ...) and whitespace.
-pub fn strip_leading_comments(mut sql: &str) -> &str {
-    loop {
-        sql = sql.trim_start();
-        if sql.starts_with("--") {
-            if let Some(pos) = sql.find('\n') {
-                sql = &sql[pos + 1..];
-                continue;
-            } else {
-                return "";
-            }
-        } else if sql.starts_with('#') {
-            if let Some(pos) = sql.find('\n') {
-                sql = &sql[pos + 1..];
-                continue;
-            } else {
-                return "";
-            }
-        } else if sql.starts_with("/*") {
-            if let Some(pos) = sql.find("*/") {
-                sql = &sql[pos + 2..];
-                continue;
-            } else {
-                return "";
-            }
-        }
-        break;
-    }
-    sql
+/// Read-only system catalogs a flat (database-first) connection may always inspect.
+fn is_system_database(database: &str) -> bool {
+    matches!(
+        sanitize_identifier(database).as_str(),
+        "information_schema" | "performance_schema" | "system"
+    )
 }
 
-const MUTATING_KEYWORDS: &[&str] = &[
-    "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE", "CREATE", "RENAME", "REPLACE",
-    "MERGE", "UPSERT", "GRANT", "REVOKE", "LOCK", "UNLOCK", "FLUSH", "KILL", "SHUTDOWN",
-    "OPTIMIZE", "REPAIR", "VACUUM", "CALL", "EXEC", "EXECUTE", "DO", "COPY", "LOAD", "SET", "INTO",
-];
-
-/// Ambiguous SQL keywords that are commonly used as column or table aliases (e.g. `SELECT 1 AS set`).
-/// These are permitted only when immediately preceded by the `AS` keyword.
-/// Destructive keywords like `DELETE`, `UPDATE`, `INSERT`, `DROP`, `INTO` can NEVER be aliases.
-const AMBIGUOUS_ALIAS_KEYWORDS: &[&str] = &[
-    "SET", "CALL", "DO", "EXEC", "EXECUTE", "LOAD", "COPY", "LOCK", "UNLOCK",
-];
-
-const DANGEROUS_FUNCTIONS: &[&str] = &[
-    "PG_READ_FILE",
-    "PG_READ_BINARY_FILE",
-    "PG_WRITE_FILE",
-    "PG_READ_FILE_OLD",
-    "PG_STAT_FILE",
-    "PG_LS_DIR",
-    "PG_EXECUTE_SERVER_PROGRAM",
-    "PG_TERMINATE_BACKEND",
-    "PG_CANCEL_BACKEND",
-    "PG_RELOAD_CONF",
-    "PG_ROTATE_LOGFILE",
-    "PG_SWITCH_WAL",
-    "PG_CREATE_RESTORE_POINT",
-    "PG_PROMOTE",
-    "PG_LOGICAL_EMIT_MESSAGE",
-    "PG_IMPORT_SYSTEM_COLLATIONS",
-    "SETVAL",
-    "SET_CONFIG",
-    "LO_CREATE",
-    "LO_PUT",
-    "LOWRITE",
-    "LO_UNLINK",
-    "LO_TRUNCATE",
-    "LO_IMPORT",
-    "LO_EXPORT",
-    "LOAD_FILE",
-    "INTO_OUTFILE",
-    "INTO_DUMPFILE",
-];
-
-const ALLOWED_START_KEYWORDS: &[&str] = &[
-    "SELECT", "SHOW", "EXPLAIN", "DESCRIBE", "DESC", "WITH", "PRAGMA", "INFO", "PING",
-];
-
-/// Lexically tokenizes SQL by stripping comments and string literals, splitting on delimiters.
-pub fn tokenize_sql(sql: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    let chars: Vec<char> = sql.chars().collect();
-    let mut i = 0;
-
-    while i < chars.len() {
-        let c = chars[i];
-        // Single-line comments (-- or #)
-        if c == '-' && i + 1 < chars.len() && chars[i + 1] == '-' {
-            while i < chars.len() && chars[i] != '\n' {
-                i += 1;
-            }
-            continue;
-        }
-        if c == '#' {
-            while i < chars.len() && chars[i] != '\n' {
-                i += 1;
-            }
-            continue;
-        }
-        // Multi-line comments (/* ... */)
-        if c == '/' && i + 1 < chars.len() && chars[i + 1] == '*' {
-            i += 2;
-            while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
-                i += 1;
-            }
-            i += 2;
-            continue;
-        }
-        // String literals ('...', "...", `...`)
-        if c == '\'' || c == '"' || c == '`' {
-            let quote = c;
-            i += 1;
-            while i < chars.len() {
-                if chars[i] == '\\' && i + 1 < chars.len() {
-                    i += 2;
-                } else if chars[i] == quote {
-                    i += 1;
-                    break;
-                } else {
-                    i += 1;
-                }
-            }
-            continue;
-        }
-
-        if c.is_alphanumeric() || c == '_' {
-            current.push(c);
-        } else {
-            if !current.is_empty() {
-                tokens.push(std::mem::take(&mut current));
-            }
-            if c == ';' {
-                tokens.push(";".to_string());
-            }
-        }
-        i += 1;
-    }
-    if !current.is_empty() {
-        tokens.push(current);
-    }
-    tokens
+fn is_sqlite_builtin_schema(schema: &str) -> bool {
+    matches!(sanitize_identifier(schema).as_str(), "main" | "temp")
 }
 
-/// Validates that a SQL statement is strictly read-only and free from mutating keywords and dangerous functions.
-pub fn validate_read_only_sql(sql: &str) -> Result<(), String> {
-    let tokens = tokenize_sql(sql);
-    if tokens.is_empty() {
+/// Functions/table functions that read or write outside the database, or can execute arbitrary
+/// code. Quoted names are already unquoted by the parser, so `"pg_read_file"` is matched too.
+fn is_denied_function(name: &str) -> bool {
+    let lower = sanitize_identifier(name);
+    if lower.contains('@') {
+        return true;
+    }
+    if lower.starts_with("pg_")
+        || lower.starts_with("utl_")
+        || lower.starts_with("dbms_")
+        || lower.starts_with("lo_")
+    {
+        return true;
+    }
+    matches!(
+        lower.as_str(),
+        // PostgreSQL
+        "setval"
+            | "nextval"
+            | "set_config"
+            | "dblink"
+            | "dblink_exec"
+            | "dblink_connect"
+            | "dblink_connect_u"
+            | "dblink_disconnect"
+            | "query_to_xml" // execs the query string; not a read of a table
+            | "pg_sleep"
+            // MySQL / MariaDB
+            | "load_file"
+            | "load_extension"
+            | "benchmark"
+            | "get_lock"
+            | "release_lock"
+            | "sys_exec"
+            | "sys_eval"
+            // SQL Server
+            | "openrowset"
+            | "openquery"
+            | "opendatasource"
+            | "openxml"
+            | "xp_cmdshell"
+            // ClickHouse external table functions
+            | "file"
+            | "url"
+            | "s3"
+            | "remote"
+            | "remote_secure"
+            | "remotesecure"
+            | "cluster"
+            | "mysql"
+            | "postgresql"
+            | "sqlite"
+            | "jdbc"
+            | "odbc"
+            | "hdfs"
+            | "azureblobstorage"
+            | "hudi"
+            | "deltalake"
+            | "generate_random"
+    )
+}
+
+/// Names that cannot be table relations. These are table-valued functions or external scanners
+/// that a SELECT could otherwise use to read files or perform remote work.
+fn is_denied_relation(name: &str) -> bool {
+    let lower = sanitize_identifier(name);
+    if lower.contains('@') {
+        return true;
+    }
+    matches!(
+        lower.as_str(),
+        "openrowset"
+            | "openquery"
+            | "opendatasource"
+            | "dblink"
+            | "dblink_exec"
+            | "dblink_connect"
+            | "dblink_connect_u"
+            | "query_to_xml"
+            | "file"
+            | "url"
+            | "s3"
+            | "remote"
+            | "remote_secure"
+            | "remotesecure"
+            | "cluster"
+            | "mysql"
+            | "postgresql"
+            | "sqlite"
+            | "jdbc"
+            | "odbc"
+            | "hdfs"
+            | "azureblobstorage"
+            | "hudi"
+            | "deltalake"
+            | "input"
+    )
+}
+
+/// Whether a relation is inside the permission's database scope.
+fn relation_allowed(parts: &[String], policy: &SqlPolicy<'_>) -> bool {
+    if parts.is_empty() {
+        return false;
+    }
+    if policy.allowed_databases.is_empty() {
+        return true;
+    }
+
+    // Oracle's tree's "databases" are schemas, so a two-part name checks its own qualifier and an
+    // unqualified name uses the schema the operation named (or the connection's default, if the
+    // scope is unrestricted).
+    if policy.dialect == DriverDialect::Oracle {
+        return match parts.len() {
+            1 => is_database_allowed(policy.default_database, policy.allowed_databases),
+            2 => is_database_allowed(Some(parts[0].as_str()), policy.allowed_databases),
+            _ => false,
+        };
+    }
+
+    match policy.naming {
+        SqlNaming::SchemaFirst => match parts.len() {
+            // schema.table (or a bare table): the connection's own database must be allowed.
+            1 | 2 => is_database_allowed(policy.default_database, policy.allowed_databases),
+            // SQL Server's database.schema.table; PostgreSQL/Oracle reject a three-part name.
+            3 if policy.dialect == DriverDialect::SqlServer => {
+                is_database_allowed(Some(parts[0].as_str()), policy.allowed_databases)
+            }
+            _ => false,
+        },
+        SqlNaming::Flat => match parts.len() {
+            1 => is_database_allowed(policy.default_database, policy.allowed_databases),
+            2 => {
+                is_database_allowed(Some(parts[0].as_str()), policy.allowed_databases)
+                    || is_system_database(&parts[0])
+            }
+            _ => false,
+        },
+        SqlNaming::Sqlite => match parts.len() {
+            1 => is_database_allowed(policy.default_database, policy.allowed_databases),
+            2 => {
+                is_sqlite_builtin_schema(&parts[0])
+                    || is_database_allowed(Some(parts[0].as_str()), policy.allowed_databases)
+            }
+            _ => false,
+        },
+    }
+}
+
+/// Validate one read-only query. `Ok` means the statement is a single `SELECT`/`WITH … SELECT`
+/// (or an `EXPLAIN` of one) whose relations are inside the permission's scope and outside its
+/// sensitive-table blacklist. The engine's own read-only session/flag is the second line of
+/// defense.
+pub fn validate_read_only_sql(sql: &str, policy: &SqlPolicy<'_>) -> Result<(), String> {
+    let sql = sql.trim();
+    if sql.is_empty() {
         return Err("SQL statement is empty".to_string());
     }
-
-    // Split tokens into individual statements by semicolon
-    let mut statements: Vec<Vec<String>> = Vec::new();
-    let mut current_stmt = Vec::new();
-    for token in tokens {
-        if token == ";" {
-            if !current_stmt.is_empty() {
-                statements.push(std::mem::take(&mut current_stmt));
-            }
-        } else {
-            current_stmt.push(token);
-        }
+    // MySQL executes the contents of `/*! … */` (and MariaDB `/*M! … */`) as SQL. The parser
+    // treats both as comments, so a mutation could hide there. Reject them outright.
+    if sql.contains("/*!") || sql.contains("/*M!") {
+        return Err(
+            "Permission Denied: MySQL executable comments are not allowed in Read-Only mode."
+                .to_string(),
+        );
     }
-    if !current_stmt.is_empty() {
-        statements.push(current_stmt);
+    // `MySqlDialect` assumes backslash escapes. A server started with `NO_BACKSLASH_ESCAPES`
+    // would end the string at `\'` and execute what the parser sees as a comment/string. Refuse
+    // escape sequences that can change the statement boundary.
+    if policy.dialect == DriverDialect::Mysql
+        && (sql.contains("\\'") || sql.contains("\\\"") || sql.contains("\\`"))
+    {
+        return Err(
+            "Permission Denied: backslash-quoted strings are not allowed in Read-Only mode."
+                .to_string(),
+        );
     }
 
-    for statement in statements {
-        let first_word = match statement.first() {
-            Some(w) => w.to_uppercase(),
-            None => continue,
-        };
+    let dialect = parser_dialect(policy.dialect);
+    let statements = Parser::parse_sql(dialect.as_ref(), sql)
+        .map_err(|error| format!("Permission Denied: invalid SQL: {error}"))?;
+    if statements.len() != 1 {
+        return Err(
+            "Permission Denied: only one statement is allowed in Read-Only mode.".to_string(),
+        );
+    }
+    if !is_read_only_statement(&statements[0]) {
+        return Err(
+            "Permission Denied: only SELECT, WITH … SELECT and EXPLAIN of a SELECT are allowed in Read-Only mode."
+                .to_string(),
+        );
+    }
 
-        if !ALLOWED_START_KEYWORDS.contains(&first_word.as_str()) {
-            return Err(format!(
-                "Permission Denied: Statement starting with '{}' is not permitted in Read-Only mode.",
-                first_word
-            ));
-        }
+    let mut guard = ReadOnlyGuard::new(policy);
+    match statements.visit(&mut guard) {
+        ControlFlow::Break(error) => Err(error),
+        ControlFlow::Continue(()) => Ok(()),
+    }
+}
 
-        let mut prev_is_as = false;
-        for token in statement {
-            let upper = token.to_uppercase();
+fn is_read_only_statement(statement: &Statement) -> bool {
+    match statement {
+        Statement::Query(_) => true,
+        Statement::Explain { statement, .. } => is_read_only_statement(statement),
+        _ => false,
+    }
+}
 
-            // P2-D: If the token is immediately preceded by "AS" and is an ambiguous keyword (like set/call/do),
-            // it is treated as a column or table alias (e.g. SELECT 1 AS set).
-            // Destructive keywords (DELETE, UPDATE, INSERT, DROP, INTO, etc.) can NEVER be bypassed.
-            let is_permitted_alias =
-                prev_is_as && AMBIGUOUS_ALIAS_KEYWORDS.contains(&upper.as_str());
+struct ReadOnlyGuard<'a> {
+    policy: &'a SqlPolicy<'a>,
+}
 
-            if !is_permitted_alias {
-                if MUTATING_KEYWORDS.contains(&upper.as_str()) {
-                    return Err(format!(
-                        "Permission Denied: Mutating keyword '{}' is prohibited in Read-Only mode.",
-                        upper
-                    ));
+impl<'a> ReadOnlyGuard<'a> {
+    fn new(policy: &'a SqlPolicy<'a>) -> Self {
+        Self { policy }
+    }
+
+    fn object_parts(&self, name: &ObjectName) -> Result<Vec<String>, String> {
+        let mut parts = Vec::with_capacity(name.0.len());
+        for part in &name.0 {
+            match part {
+                ObjectNamePart::Identifier(ident) => parts.push(sanitize_identifier(&ident.value)),
+                ObjectNamePart::Function(_) => {
+                    // A dynamically-built identifier cannot be checked before execution.
+                    return Err(
+                        "Permission Denied: dynamic object names are not allowed in Read-Only mode."
+                            .to_string(),
+                    );
                 }
             }
+        }
+        if parts.is_empty() || parts.iter().any(String::is_empty) {
+            return Err("Permission Denied: invalid object name.".to_string());
+        }
+        Ok(parts)
+    }
 
-            if DANGEROUS_FUNCTIONS.contains(&upper.as_str()) {
-                return Err(format!(
-                    "Permission Denied: Dangerous system function '{}' is prohibited.",
-                    upper
-                ));
-            }
+    fn check_relation(&self, name: &ObjectName) -> Result<(), String> {
+        let parts = self.object_parts(name)?;
+        let full = parts.join(".");
+        if full.contains('@') {
+            return Err(format!(
+                "Permission Denied: database links are not allowed ('{full}')."
+            ));
+        }
+        if is_denied_relation(&parts[parts.len() - 1]) {
+            return Err(format!(
+                "Permission Denied: external table function '{}' is not allowed in Read-Only mode.",
+                parts[parts.len() - 1]
+            ));
+        }
+        if is_table_blacklisted(&full, self.policy.blacklisted_tables) {
+            return Err(format!(
+                "Permission Denied: table '{full}' is on the sensitive-table blacklist."
+            ));
+        }
+        if !relation_allowed(&parts, self.policy) {
+            return Err(format!(
+                "Permission Denied: '{full}' is outside the allowed database scope."
+            ));
+        }
+        Ok(())
+    }
 
-            prev_is_as = upper == "AS";
+    fn check_function(&self, name: &ObjectName) -> Result<(), String> {
+        let parts = self.object_parts(name)?;
+        let last = &parts[parts.len() - 1];
+        if is_denied_function(last) {
+            return Err(format!(
+                "Permission Denied: function '{}' is not allowed in Read-Only mode.",
+                parts.join(".")
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Visitor for ReadOnlyGuard<'_> {
+    type Break = String;
+
+    fn pre_visit_statement(&mut self, statement: &Statement) -> ControlFlow<Self::Break> {
+        if is_read_only_statement(statement) {
+            ControlFlow::Continue(())
+        } else {
+            ControlFlow::Break(format!(
+                "Permission Denied: '{}' is not allowed in Read-Only mode.",
+                statement_kind(statement)
+            ))
         }
     }
 
+    fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
+        if !query.locks.is_empty() {
+            return ControlFlow::Break(
+                "Permission Denied: locking reads (FOR UPDATE / FOR SHARE) are not allowed."
+                    .to_string(),
+            );
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn pre_visit_select(&mut self, select: &Select) -> ControlFlow<Self::Break> {
+        if select.into.is_some() {
+            return ControlFlow::Break(
+                "Permission Denied: SELECT ... INTO is not allowed in Read-Only mode.".to_string(),
+            );
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn pre_visit_relation(&mut self, relation: &ObjectName) -> ControlFlow<Self::Break> {
+        match self.check_relation(relation) {
+            Ok(()) => ControlFlow::Continue(()),
+            Err(error) => ControlFlow::Break(error),
+        }
+    }
+
+    fn pre_visit_table_factor(&mut self, factor: &TableFactor) -> ControlFlow<Self::Break> {
+        let name = match factor {
+            TableFactor::Table { name, args, .. } => {
+                if args.is_some() {
+                    Some(name)
+                } else {
+                    None
+                }
+            }
+            TableFactor::Function { name, .. } => Some(name),
+            _ => None,
+        };
+        if let Some(name) = name
+            && let Err(error) = self.check_relation(name)
+        {
+            return ControlFlow::Break(error);
+        }
+        // A set-returning function in FROM (`SELECT * FROM pg_ls_dir(...)`, `dblink(...)`) is a
+        // table factor, not an expression, so the function deny list must be applied here too.
+        if let Some(name) = name
+            && let Err(error) = self.check_function(name)
+        {
+            return ControlFlow::Break(error);
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<Self::Break> {
+        match expr {
+            Expr::Function(function) => {
+                if let Err(error) = self.check_function(&function.name) {
+                    return ControlFlow::Break(error);
+                }
+            }
+            // Oracle sequences are selected as `sequence.nextval`; the expression is an identifier
+            // pair, not a function call, and `nextval` still changes database state.
+            Expr::CompoundIdentifier(parts)
+                if parts
+                    .last()
+                    .is_some_and(|part| part.value.eq_ignore_ascii_case("nextval")) =>
+            {
+                return ControlFlow::Break(
+                    "Permission Denied: sequence nextval is not allowed in Read-Only mode."
+                        .to_string(),
+                );
+            }
+            _ => {}
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+fn statement_kind(statement: &Statement) -> &'static str {
+    match statement {
+        Statement::Query(_) => "SELECT",
+        Statement::Insert(_) => "INSERT",
+        Statement::Update { .. } => "UPDATE",
+        Statement::Delete(_) => "DELETE",
+        Statement::CreateTable(_) => "CREATE TABLE",
+        Statement::CreateView { .. } => "CREATE VIEW",
+        Statement::CreateIndex(_) => "CREATE INDEX",
+        Statement::Drop { .. } => "DROP",
+        Statement::AlterTable(_) => "ALTER TABLE",
+        Statement::Truncate { .. } => "TRUNCATE",
+        Statement::Merge { .. } => "MERGE",
+        Statement::Set(_) => "SET",
+        Statement::Use(_) => "USE",
+        Statement::Copy { .. } => "COPY",
+        Statement::Call(_) => "CALL",
+        Statement::Execute { .. } => "EXECUTE",
+        Statement::Explain { .. } => "EXPLAIN",
+        _ => "this statement",
+    }
+}
+
+/// The database reference check used by the metadata tools. It accepts a bare table or a
+/// qualified `schema.table` / `database.table` and applies the same scope/blacklist rules as the
+/// SQL validator.
+pub fn check_table_reference(
+    table: &str,
+    database: Option<&str>,
+    policy: &SqlPolicy<'_>,
+) -> Result<(), String> {
+    if is_table_blacklisted(table, policy.blacklisted_tables) {
+        return Err(format!(
+            "Permission Denied: table '{table}' is on the sensitive-table blacklist."
+        ));
+    }
+    if !policy.allowed_databases.is_empty()
+        && !is_database_allowed(database, policy.allowed_databases)
+    {
+        return Err(format!(
+            "Permission Denied: database '{}' is outside the allowed scope.",
+            database.unwrap_or("")
+        ));
+    }
+
+    let parts = normalize_parts(table);
+    if parts.is_empty() {
+        return Err("Permission Denied: invalid table name.".to_string());
+    }
+    if parts.iter().any(|part| part.contains('@')) {
+        return Err("Permission Denied: database links are not allowed.".to_string());
+    }
+    if is_denied_relation(&parts[parts.len() - 1]) {
+        return Err(format!(
+            "Permission Denied: external table function '{}' is not allowed.",
+            parts[parts.len() - 1]
+        ));
+    }
+    // A qualified name is checked against the same rules as a relation in a query.
+    if parts.len() > 1 && !relation_allowed(&parts, policy) {
+        return Err(format!(
+            "Permission Denied: '{table}' is outside the allowed database scope."
+        ));
+    }
     Ok(())
+}
+
+/// The database reference check used by `get_schema`, `describe_table` and `sample_data`.
+pub fn check_database(database: Option<&str>, allowed: &[String]) -> Result<(), String> {
+    if is_database_allowed(database, allowed) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Permission Denied: database '{}' is outside the allowed scope.",
+            database.unwrap_or("")
+        ))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustgrid_core::{DriverCapabilities, DriverCapability};
 
-    #[test]
-    fn test_mcp_connection_settings_serde() {
-        let mut opts = BTreeMap::new();
-        opts.insert(MCP_OPT_ENABLED.to_string(), "true".to_string());
-        opts.insert(MCP_OPT_READ_ONLY.to_string(), "false".to_string());
-        opts.insert(
-            MCP_OPT_DATABASE_SCOPE.to_string(),
-            "db1, db2, db3".to_string(),
-        );
-        opts.insert(
-            MCP_OPT_TABLE_BLACKLIST.to_string(),
-            "`passwords`, [salaries], tokens".to_string(),
-        );
-        opts.insert(
-            MCP_OPT_AI_CONTEXT_PROMPT.to_string(),
-            "Ecommerce testing database".to_string(),
-        );
-
-        let settings = McpConnectionSettings::from_options(&opts);
-        assert!(settings.enabled);
-        assert!(!settings.read_only);
-        assert_eq!(settings.allowed_databases, vec!["db1", "db2", "db3"]);
-        assert_eq!(
-            settings.table_blacklist,
-            vec!["passwords", "salaries", "tokens"]
-        );
-        assert_eq!(settings.ai_context_prompt, "Ecommerce testing database");
-
-        let mut roundtrip_opts = BTreeMap::new();
-        settings.write_to_options(&mut roundtrip_opts);
-        assert_eq!(roundtrip_opts.get(MCP_OPT_ENABLED).unwrap(), "true");
-        assert_eq!(roundtrip_opts.get(MCP_OPT_READ_ONLY).unwrap(), "false");
-        assert_eq!(
-            roundtrip_opts.get(MCP_OPT_DATABASE_SCOPE).unwrap(),
-            "db1, db2, db3"
-        );
-        assert_eq!(
-            roundtrip_opts.get(MCP_OPT_TABLE_BLACKLIST).unwrap(),
-            "passwords, salaries, tokens"
-        );
-
-        let empty_settings = McpConnectionSettings::from_options(&BTreeMap::new());
-        assert!(!empty_settings.enabled);
-        assert!(empty_settings.read_only);
-        assert!(empty_settings.allowed_databases.is_empty());
-        assert!(empty_settings.table_blacklist.is_empty());
-        assert!(empty_settings.ai_context_prompt.is_empty());
-
-        let mut cleared_opts = roundtrip_opts.clone();
-        empty_settings.write_to_options(&mut cleared_opts);
-        assert!(!cleared_opts.contains_key(MCP_OPT_ENABLED));
-        assert!(!cleared_opts.contains_key(MCP_OPT_READ_ONLY));
-        assert!(!cleared_opts.contains_key(MCP_OPT_DATABASE_SCOPE));
-        assert!(!cleared_opts.contains_key(MCP_OPT_TABLE_BLACKLIST));
-        assert!(!cleared_opts.contains_key(MCP_OPT_AI_CONTEXT_PROMPT));
+    fn policy<'a>(naming: SqlNaming, dialect: DriverDialect) -> SqlPolicy<'a> {
+        SqlPolicy {
+            dialect,
+            naming,
+            default_database: Some("app"),
+            allowed_databases: &[],
+            blacklisted_tables: &[],
+        }
     }
 
     #[test]
-    fn test_sanitize_and_blacklist() {
-        let blacklist = vec!["user_secrets".to_string(), "credit_cards".to_string()];
-        assert!(is_table_blacklisted("user_secrets", &blacklist));
-        assert!(is_table_blacklisted("`user_secrets`", &blacklist));
-        assert!(is_table_blacklisted("\"USER_SECRETS\"", &blacklist));
-        assert!(is_table_blacklisted("[Credit_Cards]", &blacklist));
-        assert!(!is_table_blacklisted("orders", &blacklist));
-        assert!(!is_table_blacklisted("public.orders", &blacklist));
+    fn allows_plain_select_and_explain() {
+        let p = policy(SqlNaming::Flat, DriverDialect::Mysql);
+        assert!(validate_read_only_sql("SELECT * FROM users", &p).is_ok());
+        assert!(validate_read_only_sql("WITH x AS (SELECT 1) SELECT * FROM x", &p).is_ok());
+        assert!(validate_read_only_sql("EXPLAIN SELECT * FROM users", &p).is_ok());
     }
 
     #[test]
-    fn test_database_allowed() {
-        let allowed = vec!["dev_shop".to_string(), "analytics".to_string()];
-        assert!(is_database_allowed("dev_shop", &allowed));
-        assert!(is_database_allowed("DEV_SHOP", &allowed));
-        assert!(is_database_allowed("analytics", &allowed));
-        assert!(!is_database_allowed("prod_secrets", &allowed));
-
-        assert!(is_database_allowed("any_db", &[]));
+    fn rejects_writes_and_multiple_statements() {
+        let p = policy(SqlNaming::Flat, DriverDialect::Mysql);
+        for sql in [
+            "INSERT INTO users VALUES (1)",
+            "UPDATE users SET name = 'x'",
+            "DELETE FROM users",
+            "DROP TABLE users",
+            "CREATE TABLE x (id INT)",
+            "SELECT 1; DROP TABLE users",
+            "WITH x AS (DELETE FROM users RETURNING *) SELECT * FROM x",
+            "SELECT * INTO copy FROM users",
+            "SELECT * FROM users FOR UPDATE",
+        ] {
+            assert!(validate_read_only_sql(sql, &p).is_err(), "allowed: {sql}");
+        }
     }
 
     #[test]
-    fn test_strip_comments() {
-        let sql = "-- single line comment\nSELECT * FROM t;";
-        assert_eq!(strip_leading_comments(sql).trim(), "SELECT * FROM t;");
-
-        let sql2 = "/* multi\nline\ncomment */ SELECT 1;";
-        assert_eq!(strip_leading_comments(sql2).trim(), "SELECT 1;");
-
-        let sql3 = "# mysql comment\nSELECT 2;";
-        assert_eq!(strip_leading_comments(sql3).trim(), "SELECT 2;");
-
-        let sql4 = "-- unclosed";
-        assert_eq!(strip_leading_comments(sql4), "");
+    fn rejects_mysql_executable_comments_and_escape_tricks() {
+        let p = policy(SqlNaming::Flat, DriverDialect::Mysql);
+        assert!(validate_read_only_sql("SELECT 1 /*! INTO OUTFILE '/tmp/x' */", &p).is_err());
+        assert!(validate_read_only_sql("SELECT 'a\\'; DROP TABLE users; --'", &p).is_err());
     }
 
     #[test]
-    fn test_validate_read_only_allowed() {
-        assert!(validate_read_only_sql("SELECT * FROM users").is_ok());
-        assert!(validate_read_only_sql("  select id, name from products where id = 1;").is_ok());
-        assert!(validate_read_only_sql("EXPLAIN SELECT 1").is_ok());
-        assert!(validate_read_only_sql("DESCRIBE orders").is_ok());
-        assert!(validate_read_only_sql("SHOW TABLES;").is_ok());
-        assert!(
-            validate_read_only_sql("/* comment */ WITH cte AS (SELECT 1 AS val) SELECT * FROM cte")
-                .is_ok()
-        );
-        // P2-D: Column aliases named set, call, do should not be falsely blocked
-        assert!(validate_read_only_sql("SELECT 1 AS set").is_ok());
-        assert!(validate_read_only_sql("SELECT 1 AS call").is_ok());
-        assert!(validate_read_only_sql("SELECT 1 AS do").is_ok());
-        assert!(validate_read_only_sql("SELECT 1 AS copy, 2 AS lock").is_ok());
+    fn rejects_backslash_boundary_on_postgres() {
+        let p = policy(SqlNaming::SchemaFirst, DriverDialect::Postgres);
+        let sql = "SELECT 'a\\'; DROP TABLE users; --'";
+        assert!(validate_read_only_sql(sql, &p).is_err());
     }
 
     #[test]
-    fn test_validate_read_only_blocked() {
-        assert!(validate_read_only_sql("").is_err());
-        assert!(validate_read_only_sql("   ").is_err());
-        assert!(validate_read_only_sql("INSERT INTO users VALUES (1)").is_err());
-        assert!(validate_read_only_sql("UPDATE users SET name = 'foo'").is_err());
-        assert!(validate_read_only_sql("DELETE FROM users WHERE id = 1").is_err());
-        assert!(validate_read_only_sql("DROP TABLE users").is_err());
-        assert!(validate_read_only_sql("ALTER TABLE users ADD COLUMN age INT").is_err());
-        assert!(validate_read_only_sql("TRUNCATE TABLE users").is_err());
-        assert!(validate_read_only_sql("CREATE TABLE foo (id INT)").is_err());
-        assert!(validate_read_only_sql("GRANT ALL PRIVILEGES ON *.* TO 'root'").is_err());
+    fn rejects_quoted_dangerous_functions() {
+        let p = policy(SqlNaming::SchemaFirst, DriverDialect::Postgres);
+        assert!(validate_read_only_sql("SELECT \"pg_read_file\"('/etc/passwd')", &p).is_err());
+        assert!(validate_read_only_sql("SELECT pg_catalog.setval('s', 1)", &p).is_err());
+        // A set-returning function in FROM is a table factor, not `Expr::Function`.
+        assert!(validate_read_only_sql("SELECT * FROM pg_ls_dir('/')", &p).is_err());
+        assert!(validate_read_only_sql("SELECT * FROM generate_series(1, 3)", &p).is_ok());
+        let p = policy(SqlNaming::Flat, DriverDialect::Mysql);
+        assert!(validate_read_only_sql("SELECT `LOAD_FILE`('/etc/passwd')", &p).is_err());
+    }
 
-        // P1-B: SELECT ... INTO is mutating table creation
-        assert!(validate_read_only_sql("SELECT 1 AS x INTO TEMP _rg_tmp_probe").is_err());
-        assert!(validate_read_only_sql("SELECT * INTO new_table FROM old_table").is_err());
-
-        // P2-C: Dangerous system functions
-        assert!(validate_read_only_sql("SELECT pg_terminate_backend(1234)").is_err());
-        assert!(validate_read_only_sql("SELECT pg_cancel_backend(1234)").is_err());
-        assert!(validate_read_only_sql("SELECT setval('seq', 1)").is_err());
-        assert!(validate_read_only_sql("SELECT set_config('timeout', '1s', false)").is_err());
-        assert!(validate_read_only_sql("SELECT (pg_stat_file('/etc/hosts')).size").is_err());
-
-        // Comment evasion and multi-statement injection
-        assert!(validate_read_only_sql("-- comment\nDROP TABLE users;").is_err());
-        assert!(validate_read_only_sql("SELECT 1; DROP TABLE users;").is_err());
-        assert!(validate_read_only_sql("SELECT 1; UPDATE users SET admin = 1;").is_err());
-
-        // P0-1 regression: CTE wrapper mutations
-        assert!(
-            validate_read_only_sql("WITH x AS (DELETE FROM users RETURNING *) SELECT * FROM x;")
-                .is_err()
-        );
+    #[test]
+    fn rejects_sql_server_external_table_functions() {
+        let p = policy(SqlNaming::SchemaFirst, DriverDialect::SqlServer);
         assert!(
             validate_read_only_sql(
-                "WITH x AS (UPDATE users SET name='x' RETURNING *) SELECT * FROM x;"
+                "SELECT * FROM OPENROWSET(BULK 'C:\\secret', SINGLE_CLOB) AS x",
+                &p
             )
             .is_err()
         );
-        assert!(
-            validate_read_only_sql("WITH x AS (INSERT INTO users VALUES(1) RETURNING *) SELECT 1;")
-                .is_err()
-        );
+        assert!(validate_read_only_sql("SELECT * FROM OPENQUERY(lnk, 'SELECT 1')", &p).is_err());
+    }
 
-        // P0-2 regression: Dangerous file read and server program functions
-        assert!(validate_read_only_sql("SELECT pg_read_file('/etc/hosts');").is_err());
-        assert!(validate_read_only_sql("SELECT pg_read_binary_file('/etc/passwd');").is_err());
-        assert!(validate_read_only_sql("SELECT load_file('/etc/passwd');").is_err());
+    #[test]
+    fn blacklist_matches_qualified_and_bare_names() {
+        let blacklist = vec!["secret".to_string()];
+        assert!(is_table_blacklisted("public.secret", &blacklist));
+        assert!(is_table_blacklisted("secret", &blacklist));
+        assert!(!is_table_blacklisted("public.orders", &blacklist));
+
+        let blacklist = vec!["public.secret".to_string()];
+        assert!(is_table_blacklisted("public.secret", &blacklist));
+        assert!(is_table_blacklisted("secret", &blacklist));
+    }
+
+    #[test]
+    fn scope_rejects_qualified_databases() {
+        let allowed = vec!["app".to_string()];
+        let p = SqlPolicy {
+            dialect: DriverDialect::Mysql,
+            naming: SqlNaming::Flat,
+            default_database: Some("app"),
+            allowed_databases: &allowed,
+            blacklisted_tables: &[],
+        };
+        assert!(validate_read_only_sql("SELECT * FROM users", &p).is_ok());
+        assert!(validate_read_only_sql("SELECT * FROM other.users", &p).is_err());
+        assert!(validate_read_only_sql("SELECT * FROM information_schema.tables", &p).is_ok());
+
+        let p = SqlPolicy {
+            dialect: DriverDialect::Postgres,
+            naming: SqlNaming::SchemaFirst,
+            default_database: Some("app"),
+            allowed_databases: &allowed,
+            blacklisted_tables: &[],
+        };
+        assert!(validate_read_only_sql("SELECT * FROM public.users", &p).is_ok());
+    }
+
+    #[test]
+    fn oracle_scope_uses_schema_as_the_database_unit() {
+        let allowed = vec!["hr".to_string()];
+        let p = SqlPolicy {
+            dialect: DriverDialect::Oracle,
+            naming: SqlNaming::SchemaFirst,
+            default_database: None,
+            allowed_databases: &allowed,
+            blacklisted_tables: &[],
+        };
+        assert!(validate_read_only_sql("SELECT * FROM hr.employees", &p).is_ok());
+        assert!(validate_read_only_sql("SELECT * FROM scott.emp", &p).is_err());
+        // Without a schema the connection's current schema is unknown; the restricted scope
+        // refuses rather than guessing.
+        assert!(validate_read_only_sql("SELECT * FROM employees", &p).is_err());
+        assert!(validate_read_only_sql("SELECT seq.nextval FROM hr.employees", &p).is_err());
+    }
+
+    #[test]
+    fn engine_family_uses_capabilities() {
+        let caps = DriverCapabilities::none().with(DriverCapability::KeyValue);
+        assert_eq!(
+            engine_family(DriverDialect::Generic, &caps),
+            EngineFamily::NonSql
+        );
+        let caps = DriverCapabilities::none();
+        assert_eq!(
+            engine_family(DriverDialect::Postgres, &caps),
+            EngineFamily::Sql(SqlNaming::SchemaFirst)
+        );
     }
 }

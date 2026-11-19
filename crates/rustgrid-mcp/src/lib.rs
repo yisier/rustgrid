@@ -1,15 +1,24 @@
-pub mod config;
+//! The built-in Model Context Protocol (MCP) server.
+//!
+//! RustGrid is a desktop app, so the server speaks MCP's **stdio** transport: an AI client
+//! launches `RustGrid --mcp-stdio`, writes newline-delimited JSON-RPC to the process's stdin and
+//! reads the responses from its stdout. Nothing listens on a network port and no bearer token is
+//! involved; permission comes from `mcp.json` (edited in Options → AI / MCP) and the database
+//! account's own grants.
+//!
+//! The read-only SQL check in [`security`] is a guardrail. The real boundary is the account the
+//! saved connection uses; the UI says so, and a read-only database user is the recommended setup.
+
 pub mod format;
-pub mod http;
 pub mod protocol;
 pub mod security;
+pub mod stdio;
 pub mod tools;
 
-pub use config::*;
 pub use format::*;
-pub use http::*;
 pub use protocol::*;
 pub use security::*;
+pub use stdio::*;
 pub use tools::*;
 
 use std::sync::Arc;
@@ -18,9 +27,10 @@ use rustgrid_config::ConfigStore;
 use rustgrid_core::DriverRegistry;
 use serde_json::{Value, json};
 
+/// Executes one JSON-RPC request against the current `mcp.json` document.
 pub async fn process_request(
     config: &ConfigStore,
-    mcp_cfg: &McpConfig,
+    mcp_cfg: &rustgrid_config::McpConfig,
     registry: &Arc<DriverRegistry>,
     request: JsonRpcRequest,
 ) -> JsonRpcResponse {
