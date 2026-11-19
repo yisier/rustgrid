@@ -237,7 +237,7 @@ pub(super) fn settings_card(theme: Theme) -> Div {
 
 /// One setting row: the title (and an optional one-line hint) on the left, its control on the
 /// right. `divider` draws the hairline to the next row; the last row of a card passes `false`.
-fn setting_row(
+pub(super) fn setting_row(
     id: &'static str,
     theme: Theme,
     title: String,
@@ -293,7 +293,7 @@ fn setting_row(
 
 /// A setting row whose control is a switch. The row owns the click (the switch is an inert
 /// indicator), so the whole line toggles and the control only reflects the state.
-fn toggle_row(
+pub(super) fn toggle_row(
     theme: Theme,
     id: &'static str,
     title: String,
@@ -388,6 +388,11 @@ impl AppView {
         self.options_single_click_open = self.single_click_open;
         self.options_stop_on_error = self.stop_on_error;
         self.set_options_max_statements(self.max_statements_per_run.to_string(), cx);
+        self.mcp_options =
+            rustgrid_mcp::McpOptionsState::load(self.config.root(), self.mcp_server.active_port());
+        self.options_mcp_port_input = None;
+        self.options_mcp_max_rows_input = None;
+        self.options_mcp_scope_input = None;
         self.recording_shortcut = None;
         self.ensure_shortcut_search(cx);
         self.ensure_language_combo(cx);
@@ -698,6 +703,9 @@ impl AppView {
         if let Ok(limit) = self.options_max_statements.trim().parse::<u32>() {
             self.max_statements_per_run = limit;
         }
+        if self.mcp_options.apply(self.config.root()) {
+            self.restart_mcp_http_server();
+        }
         self.recording_shortcut = None;
         // Re-bind every command: the previously bound keystrokes are shadowed by a `NoAction`
         // so a changed or cleared shortcut stops firing.
@@ -883,6 +891,10 @@ impl AppView {
             OptionsSection::Data => (
                 t!("options.data").to_string(),
                 Some(t!("options.data.description").to_string()),
+            ),
+            OptionsSection::Mcp => (
+                t!("options.mcp.title").to_string(),
+                Some(t!("options.mcp.description").to_string()),
             ),
             OptionsSection::About => (
                 t!("options.about").to_string(),
@@ -1098,6 +1110,19 @@ impl AppView {
             )
             .child(
                 self.options_nav_item(
+                    "options-mcp",
+                    "icons/zap.svg",
+                    t!("options.mcp.title").to_string(),
+                    self.options_section == OptionsSection::Mcp,
+                )
+                .on_click(cx.listener(|this, _event, _window, cx| {
+                    this.options_section = OptionsSection::Mcp;
+                    this.recording_shortcut = None;
+                    cx.notify();
+                })),
+            )
+            .child(
+                self.options_nav_item(
                     "options-about",
                     "icons/info.svg",
                     t!("options.about").to_string(),
@@ -1116,6 +1141,7 @@ impl AppView {
             OptionsSection::Editor => self.options_editor_body(cx).into_any_element(),
             OptionsSection::Shortcuts => self.options_shortcuts_body(cx).into_any_element(),
             OptionsSection::Data => self.options_data_body(cx).into_any_element(),
+            OptionsSection::Mcp => self.options_mcp_body(cx).into_any_element(),
             OptionsSection::About => self.options_about_body(cx).into_any_element(),
         }
     }
@@ -2004,6 +2030,7 @@ fn options_section_label(section: OptionsSection) -> String {
         OptionsSection::Editor => t!("options.editor"),
         OptionsSection::Shortcuts => t!("options.shortcuts"),
         OptionsSection::Data => t!("options.data"),
+        OptionsSection::Mcp => t!("options.mcp.title"),
         OptionsSection::About => t!("options.about"),
     }
     .to_string()

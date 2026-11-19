@@ -2416,6 +2416,8 @@ enum OptionsSection {
     Shortcuts,
     /// The 数据 page: grid display preferences (the field-comment toggle).
     Data,
+    /// The AI / MCP page: global Model Context Protocol server settings and client integration.
+    Mcp,
     About,
 }
 
@@ -2731,6 +2733,13 @@ pub struct AppView {
     max_statements_per_run: u32,
     /// Stop a script at its first failing statement (Options → General).
     stop_on_error: bool,
+    /// Background MCP server manager (lifecycle, port tracking, and graceful shutdown).
+    mcp_server: rustgrid_mcp::McpServerManager,
+    /// Staged MCP options in the Options dialog.
+    mcp_options: rustgrid_mcp::McpOptionsState,
+    options_mcp_port_input: Option<Entity<TextInput>>,
+    options_mcp_max_rows_input: Option<Entity<TextInput>>,
+    options_mcp_scope_input: Option<Entity<TextInput>>,
     /// Each query tab's 信息 text, in a read-only editor (select, Shift+arrows, Ctrl+C), by tab id.
     query_info_editors: std::collections::HashMap<u64, Entity<ui::SqlEditor>>,
     /// A group query's current connection/statement error, in a read-only editor (select and
@@ -3175,6 +3184,7 @@ pub(crate) mod line_edit;
 mod list_ops;
 mod objects;
 mod options;
+mod options_mcp;
 mod privilege_manager;
 mod query;
 mod query_editor;
@@ -3416,7 +3426,7 @@ impl AppView {
             }
         });
 
-        Self {
+        let mut this_app = Self {
             registry,
             config,
             pending_session_tables: Vec::new(),
@@ -3609,6 +3619,11 @@ impl AppView {
             single_click_open: settings.single_click_open,
             max_statements_per_run: settings.max_statements_per_run,
             stop_on_error: settings.stop_on_error,
+            mcp_server: rustgrid_mcp::McpServerManager::new(),
+            mcp_options: rustgrid_mcp::McpOptionsState::default(),
+            options_mcp_port_input: None,
+            options_mcp_max_rows_input: None,
+            options_mcp_scope_input: None,
             query_info_editors: std::collections::HashMap::new(),
             batch_error_editors: std::collections::HashMap::new(),
             last_shown_tab: None,
@@ -3945,7 +3960,14 @@ impl AppView {
             backup_window_focus: cx.focus_handle(),
             main_window_id: None,
             _window_closed: window_closed,
-        }
+        };
+        this_app.restart_mcp_http_server();
+        this_app
+    }
+
+    pub(super) fn restart_mcp_http_server(&mut self) {
+        self.mcp_server
+            .restart((*self.config).clone(), self.registry.clone());
     }
 
     fn set_theme(&mut self, setting: ThemeSetting, cx: &mut Context<'_, Self>) {

@@ -7688,6 +7688,7 @@ dependencies = [
  "rustgrid-core",
  "rustgrid-export",
  "rustgrid-import",
+ "rustgrid-mcp",
  "rustgrid-mongodb",
  "rustgrid-mysql",
  "rustgrid-odbc",
@@ -7697,6 +7698,7 @@ dependencies = [
  "rustgrid-sqlite",
  "rustgrid-sqlserver",
  "self_update",
+ "serde",
  "serde_json",
  "sqlformat",
  "sqlparser",
@@ -7782,6 +7784,21 @@ dependencies = [
  "encoding_rs",
  "rustgrid-core",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "rustgrid-mcp"
+version = "0.1.14"
+dependencies = [
+ "anyhow",
+ "chacha20poly1305",
+ "hex",
+ "rustgrid-config",
+ "rustgrid-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
