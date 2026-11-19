@@ -200,7 +200,7 @@ impl AppView {
                     theme,
                     "options-mcp-global-enabled",
                     t!("options.mcp.global_enabled").to_string(),
-                    Some(t!("options.mcp.global_enabled_hint").to_string()),
+                    None,
                     self.mcp_options.enabled,
                     true,
                 )
@@ -225,7 +225,7 @@ impl AppView {
                 "options-mcp-timeout",
                 theme,
                 t!("options.mcp.timeout").to_string(),
-                Some(t!("options.mcp.timeout_hint").to_string()),
+                None,
                 div()
                     .w(px(90.0))
                     .flex_none()
@@ -310,7 +310,7 @@ impl AppView {
             serde_json::to_string_pretty(&client_config).unwrap_or_else(|_| "{}".to_string());
 
         let copy_config = {
-            let text = client_config.clone();
+            let text = client_config;
             self.dialog_button(
                 "mcp-copy-config",
                 t!("options.mcp.copy_config").to_string(),
@@ -326,53 +326,28 @@ impl AppView {
         let clients_card = settings_card(theme)
             .child(
                 div()
-                    .px_4()
-                    .py_3()
-                    .text_size(px(11.5))
-                    .line_height(px(16.0))
-                    .text_color(rgb(theme.text_muted))
-                    .child(t!("options.mcp.stdio_hint").to_string()),
-            )
-            .child(
-                div()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .flex_wrap()
-                    .gap_2()
+                    .justify_between()
+                    .gap_3()
                     .px_4()
-                    .pb_3()
-                    .children(tags),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_start()
-                    .gap_2()
-                    .px_4()
-                    .pb_4()
+                    .py_3()
                     .child(
                         div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .p_3()
-                            .rounded(px(6.0))
-                            .border_1()
-                            .border_color(rgb(theme.border))
-                            .bg(rgb(theme.header_bg))
-                            .font_family(SharedString::from("monospace"))
-                            .text_size(px(11.0))
-                            .line_height(px(15.0))
-                            .text_color(rgb(theme.text))
-                            .child(client_config.clone()),
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .flex_wrap()
+                            .gap_2()
+                            .children(tags),
                     )
                     .child(copy_config),
             )
             .child(
                 div()
                     .px_4()
-                    .pb_3()
+                    .pb_2()
                     .text_size(px(11.0))
                     .text_color(rgb(theme.primary))
                     .children(self.mcp_options.copied.clone()),
@@ -434,25 +409,14 @@ impl AppView {
                             row.border_b_1().border_color(rgb(theme.border))
                         })
                         .child(
-                            div()
-                                .w(px(180.0))
-                                .flex()
-                                .flex_col()
-                                .child(
-                                    div()
-                                        .text_size(px(12.5))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(rgb(theme.text))
-                                        .truncate()
-                                        .child(node.profile.name.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(11.0))
-                                        .text_color(rgb(theme.text_muted))
-                                        .truncate()
-                                        .child(node.profile.driver.as_str().to_string()),
-                                ),
+                            div().w(px(180.0)).flex().flex_col().child(
+                                div()
+                                    .text_size(px(12.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(rgb(theme.text))
+                                    .truncate()
+                                    .child(node.profile.name.clone()),
+                            ),
                         )
                         .child(
                             div()
@@ -541,13 +505,6 @@ impl AppView {
                 theme,
                 t!("options.mcp.matrix_section").to_string(),
             ))
-            .child(
-                div()
-                    .px(px(2.0))
-                    .text_size(px(11.0))
-                    .text_color(rgb(theme.text_muted))
-                    .child(t!("options.mcp.matrix_hint").to_string()),
-            )
             .child(matrix_card)
             .into_any_element()
     }

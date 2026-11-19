@@ -915,10 +915,7 @@ impl AppView {
                 t!("options.data").to_string(),
                 Some(t!("options.data.description").to_string()),
             ),
-            OptionsSection::Mcp => (
-                t!("options.mcp.title").to_string(),
-                Some(t!("options.mcp.description").to_string()),
-            ),
+            OptionsSection::Mcp => (t!("options.mcp.title").to_string(), None),
             OptionsSection::About => (
                 t!("options.about").to_string(),
                 Some(t!("options.about.description").to_string()),
