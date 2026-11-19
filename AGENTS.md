@@ -195,8 +195,9 @@ not a later refactor.
   `libcckeylibcckey` AES-128-CBC password scheme DBX also reads) and the DBX plain-JSON reader,
   all mapped onto a common `TransferConnection`.
   `mcp.json` (versioned `McpConfig`) is the machine-local AI permission file: the MCP global
-  switch, default row cap/operation timeout, and per-profile enable/read-only/database
-  scope/sensitive-table blacklist/context prompt. It is deliberately separate from
+  switch, default row cap/operation timeout, and a per-profile read-only/full-access switch.
+  Advanced `allowed_databases`/`blacklisted_tables`/`context_prompt` fields remain in the file for
+  hand-editing but are not exposed by the simplified Options page. It is deliberately separate from
   `connections.json`, so exporting a connection cannot grant AI access. `ConfigStore::new`
   honours `RUSTGRID_CONFIG_DIR` (tests/portable installs) and `with_root` builds one at an
   explicit directory.
@@ -208,10 +209,12 @@ not a later refactor.
   `SELECT`/`WITH … SELECT`/`EXPLAIN SELECT` parsed with `sqlparser` in the connection's
   `Driver::dialect_for` dialect, with locking reads, `SELECT … INTO`, MySQL executable comments,
   quoted dangerous functions and external table functions refused; writes are only possible on a
-  connection whose user explicitly confirmed Read-Write. This guard is a **best-effort boundary**,
-  not a security guarantee — the database account's grants are what actually protect the data, so
+  connection whose user turned on the Options page's full-access switch. This guard is a
+  **best-effort boundary**, not a security guarantee — the database account's grants are what
+  actually protect the data, so
   the UI recommends a read-only account. Database scope and the sensitive-table blacklist are
-  checked for every metadata tool and for parsed queries; see `docs/mcp.md`.
+  checked for every metadata tool and for parsed queries; they are advanced `mcp.json` fields (the
+  Options page only edits the read-only/full-access switch). See `docs/mcp.md`.
 - `crates/rustgrid-app` — GPUI binary `RustGrid`: `src/app/` is the view/render layer, split
   by feature (`mod.rs` holds `AppView`, its state, the `Render` entry, free helpers and
   tests; the rest are `impl AppView` submodules: `tree`, `database`, `db_dialog`, `objects`,
@@ -1174,13 +1177,15 @@ shadcn chrome described above. Implemented today:
 22. Built-in MCP server (stdio, `crates/rustgrid-mcp` + `app/options_mcp.rs`): an AI client launches
     `RustGrid --mcp-stdio` (handled before the single-instance lock and without GPUI; stdout is
     JSON-RPC only). It exposes `list_connections`, `get_schema`, `describe_table`, `sample_data` and
-    `execute_query`. Options → AI / MCP owns the global switch, row cap/timeout, stdio client
-    snippets and a per-connection editor (enable, read-only or explicitly confirmed read-write,
-    database scope, sensitive-table blacklist, business context); those permissions live only in
-    `mcp.json`, keyed by profile id. Read-only `execute_query` parses one SELECT/EXPLAIN SELECT with
-    `sqlparser` in the driver's own dialect and rejects writes, locking reads, `SELECT … INTO`,
-    executable comments, dangerous/external functions and out-of-scope relations; it is a guardrail,
-    with the database account as the real boundary. See `docs/mcp.md`.
+    `execute_query`. Options → AI / MCP is deliberately minimal: the global switch, return-row cap
+    (default 0 = unlimited), operation timeout, a read-only stdio access-method row, horizontally
+    tabbed client snippets, and one read-only/full-access switch per saved connection. When the
+    global switch is on every connection is read-only; the switch grants full (read-write) access.
+    Permissions live only in `mcp.json`, keyed by profile id; advanced database scope, sensitive
+    tables and business context remain hand-editable fields. Read-only `execute_query` parses one
+    SELECT/EXPLAIN SELECT with `sqlparser` in the driver's own dialect and rejects writes, locking
+    reads, `SELECT … INTO`, executable comments, dangerous/external functions and out-of-scope
+    relations; it is a guardrail, with the database account as the real boundary. See `docs/mcp.md`.
 
 Still out of scope: engines other than MySQL, MariaDB, SQLite, SQL Server, PostgreSQL, Oracle,
 ClickHouse and Redis, and the disabled placeholder UI

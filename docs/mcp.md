@@ -72,12 +72,12 @@ the user explicitly grants Read-Write, because a key/command target cannot be au
 sensitive-object list.
 
 **This is a guardrail, not a security boundary.** The database account's grants are what actually
-protect the data. A read-only database account is the recommended setup; in **Read-Write** mode the
-AI can change or delete whatever the account can (the Options UI asks for an explicit confirmation
-before enabling it). Read-Write SQL is not parsed: the selected database is checked against the
-scope, but a qualified name in arbitrary SQL is bounded only by the account. Blacklisting a base
-table does not rewrite a view, stored function or trigger that reads it — blacklist the view too, or
-use account grants.
+protect the data. A read-only database account is the recommended setup; the per-connection
+full-access switch grants read-write access, so turn it on only when you trust the client and the
+account. Read-Write SQL is not parsed: the selected database is checked against the scope, but a
+qualified name in arbitrary SQL is bounded only by the account. Blacklisting a base table does not
+rewrite a view, stored function or trigger that reads it — blacklist the view too, or use account
+grants.
 
 ## Permissions (`mcp.json`)
 
@@ -89,12 +89,11 @@ does not grant AI access.
 {
   "version": 1,
   "enabled": true,
-  "max_rows": 50,
+  "max_rows": 0,
   "timeout_seconds": 30,
   "connections": {
     "<profile id>": {
-      "enabled": true,
-      "read_only": true,
+      "read_only": false,
       "allowed_databases": ["shop_dev"],
       "blacklisted_tables": ["passwords", "audit.secrets"],
       "context_prompt": "orders is the source of truth for revenue"
@@ -104,15 +103,22 @@ does not grant AI access.
 ```
 
 - `enabled` is the global switch. When it is off the server still speaks the protocol but every
-  tool returns a clear "MCP is disabled" error, so the client can stay connected.
-- `max_rows` is a hard ceiling (`0` means no cap); a tool may ask for fewer rows, never more.
+  tool returns a clear "MCP is disabled" error, so the client can stay connected. When it is on,
+  every saved connection is available **read-only**; an absent `connections` entry is the same safe
+  default.
+- `max_rows` is a hard ceiling (`0`, the default, means no cap); a tool may ask for fewer rows,
+  never more.
 - `timeout_seconds` bounds each connection/query/metadata operation (clamped to 1–600 seconds).
+- `read_only` is the only per-connection field the Options page edits: `true` (default) is
+  read-only, `false` is the explicit **full access** (read-write) grant behind the page's switch.
 - `allowed_databases` empty means every database the account can see. For schema-first engines the
   tree's "databases" are schemas (PostgreSQL/SQL Server: schemas inside the connection's database;
-  Oracle: schemas); the same names are used in this list.
+  Oracle: schemas); the same names are used in this list. Advanced field, hand-edited only.
 - `blacklisted_tables` entries match case-insensitively; a bare name matches any schema and a
-  qualified `schema.table` entry matches both the dotted name and its last component.
-- `context_prompt` is returned by `list_connections` as business instructions.
+  qualified `schema.table` entry matches both the dotted name and its last component. Advanced
+  field, hand-edited only.
+- `context_prompt` is returned by `list_connections` as business instructions. Advanced field,
+  hand-edited only.
 
 The file is written atomically by `ConfigStore::save_mcp`, is versioned, and is migrated when a
 newer RustGrid reads an older file. A malformed file is reported in Options → AI / MCP rather than

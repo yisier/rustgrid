@@ -196,12 +196,6 @@ async fn open_access(
         .cloned()
         .ok_or_else(|| CallToolResult::error(format!("Connection '{connection}' not found.")))?;
     let permission = mcp_cfg.permission(&profile.id);
-    if !permission.enabled {
-        return Err(CallToolResult::error(format!(
-            "Connection '{}' is not authorized for AI / MCP access.",
-            profile.name
-        )));
-    }
     let driver = registry.get(&profile.driver).ok_or_else(|| {
         CallToolResult::error(format!(
             "Driver '{}' is not registered in this RustGrid build.",
@@ -316,9 +310,6 @@ pub fn handle_list_connections(config: &ConfigStore, mcp_cfg: &McpConfig) -> Cal
     let mut count = 0;
     for profile in &profiles {
         let permission = mcp_cfg.permission(&profile.id);
-        if !permission.enabled {
-            continue;
-        }
         count += 1;
         out.push_str(&format!(
             "- **{}** (ID: `{}` | Engine: `{}`)\n",

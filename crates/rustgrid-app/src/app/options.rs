@@ -391,9 +391,6 @@ impl AppView {
         self.mcp_options = options_mcp::McpOptionsState::load(&self.config);
         self.options_mcp_max_rows_input = None;
         self.options_mcp_timeout_input = None;
-        self.options_mcp_scope_input = None;
-        self.options_mcp_blacklist_input = None;
-        self.options_mcp_prompt_input = None;
         self.recording_shortcut = None;
         self.ensure_shortcut_search(cx);
         self.ensure_language_combo(cx);
@@ -454,10 +451,6 @@ impl AppView {
 
     /// Close the Options window (called from its footer/ESC, where the window is at hand).
     pub(super) fn close_options(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        self.mcp_options.editing = None;
-        self.options_mcp_scope_input = None;
-        self.options_mcp_blacklist_input = None;
-        self.options_mcp_prompt_input = None;
         self.options_window = None;
         window.remove_window();
         cx.notify();
@@ -707,14 +700,6 @@ impl AppView {
         // An empty or invalid entry keeps the current limit.
         if let Ok(limit) = self.options_max_statements.trim().parse::<u32>() {
             self.max_statements_per_run = limit;
-        }
-        // Commit an open per-connection editor first: its fields are the live ones, and an invalid
-        // read-write confirmation or empty scope must keep the Options window open.
-        if let Err(error) = self.commit_mcp_editor(cx) {
-            if let Some(editing) = self.mcp_options.editing.as_mut() {
-                editing.error = Some(error);
-            }
-            return false;
         }
         // The MCP settings are one file, saved on 确定 like the rest of the page. Read the live
         // field values first because an input's change callback is dispatched on its next render.

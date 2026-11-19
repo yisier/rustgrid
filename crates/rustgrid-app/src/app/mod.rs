@@ -2737,9 +2737,6 @@ pub struct AppView {
     mcp_options: options_mcp::McpOptionsState,
     options_mcp_max_rows_input: Option<Entity<TextInput>>,
     options_mcp_timeout_input: Option<Entity<TextInput>>,
-    options_mcp_scope_input: Option<Entity<TextInput>>,
-    options_mcp_blacklist_input: Option<Entity<TextInput>>,
-    options_mcp_prompt_input: Option<Entity<ui::TextArea>>,
     /// Each query tab's 信息 text, in a read-only editor (select, Shift+arrows, Ctrl+C), by tab id.
     query_info_editors: std::collections::HashMap<u64, Entity<ui::SqlEditor>>,
     /// A group query's current connection/statement error, in a read-only editor (select and
@@ -3622,9 +3619,6 @@ impl AppView {
             mcp_options: options_mcp::McpOptionsState::default(),
             options_mcp_max_rows_input: None,
             options_mcp_timeout_input: None,
-            options_mcp_scope_input: None,
-            options_mcp_blacklist_input: None,
-            options_mcp_prompt_input: None,
             query_info_editors: std::collections::HashMap::new(),
             batch_error_editors: std::collections::HashMap::new(),
             last_shown_tab: None,

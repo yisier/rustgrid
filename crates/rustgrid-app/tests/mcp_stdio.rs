@@ -178,7 +178,6 @@ fn sqlite_tools_enforce_read_only_and_the_sensitive_table_list() {
     mcp.connections.insert(
         "sqlite-test".to_string(),
         McpConnectionPermission {
-            enabled: true,
             read_only: true,
             allowed_databases: Vec::new(),
             blacklisted_tables: vec!["secret".to_string()],

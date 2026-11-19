@@ -6,8 +6,10 @@
 //! `connections.json`: AI permission is machine-local and must not travel with an exported
 //! `.rgc` connection bundle.
 //!
-//! Permissions are keyed by the connection profile id. A connection with no entry — or an entry
-//! whose `enabled` is false — is invisible to every MCP tool.
+//! Permissions are keyed by the connection profile id. Every saved connection is available
+//! read-only once the global switch is on; its entry only records whether the user granted full
+//! access (read-write). Advanced fields (database scope, blacklist, context) can be set by hand in
+//! `mcp.json` but the simplified Options page does not edit them.
 
 use std::collections::BTreeMap;
 
@@ -20,7 +22,7 @@ pub const MCP_CONFIG_VERSION: u32 = 1;
 pub const MCP_CONFIG_FILE: &str = "mcp.json";
 
 /// The default number of rows a tool returns. `0` means no row cap.
-pub const DEFAULT_MCP_MAX_ROWS: u32 = 50;
+pub const DEFAULT_MCP_MAX_ROWS: u32 = 0;
 
 /// The default per-request timeout for a database operation.
 pub const DEFAULT_MCP_TIMEOUT_SECONDS: u32 = 30;
@@ -40,21 +42,20 @@ fn default_true() -> bool {
 /// What one saved connection allows an MCP client to do.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpConnectionPermission {
-    /// Whether the connection is exposed at all.
-    #[serde(default)]
-    pub enabled: bool,
     /// Read-only mode. This is a guardrail, not a database security boundary: the account's own
-    /// grants remain the authority. The MCP server additionally refuses writes for SQL engines.
+    /// grants remain the authority. `false` is the explicit full-access (read-write) grant.
     #[serde(default = "default_true")]
     pub read_only: bool,
-    /// Databases the client may access. Empty means every database the account can see.
+    /// Databases the client may access. Empty means every database the account can see. Advanced
+    /// `mcp.json` field; the simplified Options page only edits `read_only`.
     #[serde(default)]
     pub allowed_databases: Vec<String>,
     /// Tables hidden from discovery and refused in queries. A bare name matches the table in any
-    /// schema; a qualified `schema.table` entry matches that qualified name.
+    /// schema; a qualified `schema.table` entry matches that qualified name. Advanced field.
     #[serde(default)]
     pub blacklisted_tables: Vec<String>,
-    /// Optional business context included in `list_connections` and handed to the model.
+    /// Optional business context included in `list_connections` and handed to the model. Advanced
+    /// field.
     #[serde(default)]
     pub context_prompt: String,
 }
@@ -62,7 +63,6 @@ pub struct McpConnectionPermission {
 impl Default for McpConnectionPermission {
     fn default() -> Self {
         Self {
-            enabled: false,
             read_only: true,
             allowed_databases: Vec::new(),
             blacklisted_tables: Vec::new(),
@@ -79,7 +79,6 @@ impl McpConnectionPermission {
 }
 
 static EMPTY_PERMISSION: McpConnectionPermission = McpConnectionPermission {
-    enabled: false,
     read_only: true,
     allowed_databases: Vec::new(),
     blacklisted_tables: Vec::new(),
@@ -128,11 +127,6 @@ impl McpConfig {
             .unwrap_or_default()
     }
 
-    /// Whether the global switch and the connection's own entry both allow access.
-    pub fn is_enabled_for(&self, profile_id: &str) -> bool {
-        self.enabled && self.permission(profile_id).enabled
-    }
-
     /// A per-request timeout, clamped to a sane range so a bad file cannot hang or spin.
     pub fn timeout(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.timeout_seconds.clamp(1, 600) as u64)
@@ -152,9 +146,7 @@ mod tests {
     fn defaults_are_disabled_and_read_only() {
         let cfg = McpConfig::default();
         assert!(!cfg.enabled);
-        assert!(!cfg.permission("missing").enabled);
         assert!(cfg.permission("missing").read_only);
-        assert!(!cfg.is_enabled_for("missing"));
     }
 
     #[test]
@@ -168,7 +160,6 @@ mod tests {
         cfg.connections.insert(
             "conn".to_string(),
             McpConnectionPermission {
-                enabled: true,
                 read_only: false,
                 allowed_databases: vec!["dev".to_string()],
                 blacklisted_tables: vec!["secrets".to_string()],
@@ -178,8 +169,8 @@ mod tests {
         let text = serde_json::to_string(&cfg).unwrap();
         let back: McpConfig = serde_json::from_str(&text).unwrap();
         assert_eq!(back, cfg);
-        assert!(back.is_enabled_for("conn"));
-        assert!(!back.is_enabled_for("other"));
+        assert!(!back.permission("conn").read_only);
+        assert!(back.permission("other").read_only);
         assert_eq!(back.timeout().as_secs(), 5);
     }
 
