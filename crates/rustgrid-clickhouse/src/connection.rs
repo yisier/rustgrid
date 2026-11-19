@@ -705,10 +705,12 @@ impl Connection for ClickHouseConnection {
                 name,
                 nullable: helpers::is_nullable(&data_type),
                 data_type,
-                default: (!generated && default_kind.eq_ignore_ascii_case("DEFAULT"))
-                    .then_some(expression.clone())
-                    .unwrap_or_default(),
-                generated: generated.then_some(expression).unwrap_or_default(),
+                default: if !generated && default_kind.eq_ignore_ascii_case("DEFAULT") {
+                    expression.clone()
+                } else {
+                    String::new()
+                },
+                generated: if generated { expression } else { String::new() },
                 extra: if generated {
                     default_kind.to_ascii_uppercase()
                 } else {

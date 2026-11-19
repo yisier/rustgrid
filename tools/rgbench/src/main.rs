@@ -275,19 +275,19 @@ async fn bench_engine(
         })
         .await?;
 
-        let first_page = median_page(&connection, &schema, table_ref, || {
+        let first_page = median_page(connection.as_ref(), &schema, table_ref, || {
             PageRequest::new(0, PAGE).with_skip_total(true)
         })
         .await?;
 
-        let deep_100k = median_page(&connection, &schema, table_ref, || {
+        let deep_100k = median_page(connection.as_ref(), &schema, table_ref, || {
             PageRequest::new(100, PAGE).with_skip_total(true)
         })
         .await?;
 
         let deep_1m = if rows >= 10_000_000 {
             Some(
-                median_page(&connection, &schema, table_ref, || {
+                median_page(connection.as_ref(), &schema, table_ref, || {
                     PageRequest::new(1000, PAGE).with_skip_total(true)
                 })
                 .await?,
@@ -303,7 +303,7 @@ async fn bench_engine(
             "created_at"
         };
 
-        let filtered = median_page(&connection, &schema, table_ref, || {
+        let filtered = median_page(connection.as_ref(), &schema, table_ref, || {
             PageRequest::new(0, 100)
                 .with_skip_total(true)
                 .with_filter(vec![equality(status_column, "paid")])
@@ -373,7 +373,7 @@ async fn bench_engine(
 }
 
 async fn median_page<F>(
-    connection: &Box<dyn Connection>,
+    connection: &dyn Connection,
     schema: &str,
     table: &str,
     request: F,
