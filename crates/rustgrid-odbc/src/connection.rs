@@ -170,6 +170,30 @@ impl OdbcConnection {
         }
     }
 
+    /// The `DROP` statement for a table/view in this engine's own syntax, or `None` when the
+    /// engine's syntax is unknown. Used by the SQL dump and the archive's extracted script, so
+    /// both initialise a fresh database like Navicat's export.
+    fn drop_statement(&self, database: &str, kind: BackupObjectKind, name: &str) -> Option<String> {
+        let verb = if kind == BackupObjectKind::View {
+            "VIEW"
+        } else {
+            "TABLE"
+        };
+        let qualified = self.qualify(database, name);
+        let lower = self.engine.to_ascii_lowercase();
+        if lower == "oracle" {
+            // Oracle has no `DROP … IF EXISTS`.
+            Some(format!("DROP {verb} {qualified}"))
+        } else if matches!(
+            lower.as_str(),
+            "mysql" | "mariadb" | "postgresql" | "postgres" | "sqlserver" | "sqlite" | "clickhouse"
+        ) {
+            Some(format!("DROP {verb} IF EXISTS {qualified}"))
+        } else {
+            None
+        }
+    }
+
     /// Prepare `sql` with `?` placeholders, bind `params` (text; `None` is SQL NULL), and execute.
     fn execute_script(&self, sql: &str, params: &[Option<String>]) -> Result<Option<u64>> {
         self.with_handle(|api, dbc| {
@@ -1395,6 +1419,10 @@ impl Connection for OdbcConnection {
             name: name.to_string(),
             kind,
             ddl,
+            drop_ddl: self
+                .drop_statement(database, kind, name)
+                .unwrap_or_default(),
+            references: Vec::new(),
             fields,
             trigger_ddl,
             rows: Vec::new(),

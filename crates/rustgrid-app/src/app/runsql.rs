@@ -10,11 +10,13 @@ use super::file_dialog::open_dialog;
 use super::*;
 
 impl AppView {
-    /// The database context menu's 运行 SQL 文件 entry: open the run window on this database.
+    /// The database (or schema) context menu's 运行 SQL 文件 entry: open the run window on this
+    /// database, with the schema the menu was opened on when the engine has them.
     pub(super) fn open_run_sql_file(
         &mut self,
         connection_index: usize,
         database_index: usize,
+        schema: Option<String>,
         cx: &mut Context<'_, Self>,
     ) {
         if self.connection_arc(connection_index).is_none() {
@@ -22,10 +24,12 @@ impl AppView {
             cx.notify();
             return;
         }
-        // A schema-qualified engine needs a default schema for the dialog's 模式 row; use the
-        // database's first schema when it has been loaded.
-        let schema = if self.driver_supports(connection_index, DriverCapability::Schemas) {
-            self.connections
+        // A schema-qualified engine needs a default schema for the dialog's 模式 row: the one the
+        // menu was opened on, or the database's first schema when it has been loaded.
+        let schema = match schema {
+            Some(schema) => schema,
+            None if self.driver_supports(connection_index, DriverCapability::Schemas) => self
+                .connections
                 .get(connection_index)
                 .and_then(|node| match &node.databases {
                     Loadable::Loaded(databases) => databases.get(database_index),
@@ -35,9 +39,8 @@ impl AppView {
                     Some(Loadable::Loaded(schemas)) => schemas.first().cloned(),
                     _ => None,
                 })
-                .unwrap_or_default()
-        } else {
-            String::new()
+                .unwrap_or_default(),
+            None => String::new(),
         };
 
         self.new_backup_dialog = None;
@@ -359,6 +362,7 @@ impl AppView {
         records: usize,
         cx: &mut Context<'_, Self>,
     ) {
+        let mut repaint = failed.is_some();
         if let Some(dialog) = self.run_sql_dialog.as_mut() {
             match failed {
                 Some(error) => {
@@ -380,11 +384,20 @@ impl AppView {
                 }
             }
             dialog.log_scroll.scroll_to_bottom();
+            // Batch repaints on long scripts: one per statement would re-lay out the whole log
+            // hundreds of times a second. A failure always repaints immediately.
+            repaint |= index % 16 == 0;
         }
-        cx.notify();
+        if repaint {
+            cx.notify();
+        }
     }
 
     fn finish_run_sql(&mut self, fatal: Option<String>, cx: &mut Context<'_, Self>) {
+        let connection_index = self
+            .run_sql_dialog
+            .as_ref()
+            .map(|dialog| dialog.connection_index);
         if let Some(dialog) = self.run_sql_dialog.as_mut() {
             dialog.running = false;
             if let Some(error) = &fatal {
@@ -407,6 +420,12 @@ impl AppView {
                 .to_string(),
             );
             dialog.log_scroll.scroll_to_bottom();
+        }
+        // A script may have created, dropped or altered objects (the usual reason to run a file),
+        // so reload the connection's databases/objects once it finishes. Open table grids are not
+        // touched: they may hold staged edits.
+        if let Some(connection_index) = connection_index {
+            self.load_databases(connection_index, cx);
         }
         cx.notify();
     }

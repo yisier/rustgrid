@@ -2103,10 +2103,16 @@ impl GridView {
         // cells are selected — a freshly loaded page selects its first record, which used to hide
         // the statement for the whole life of the page. A document store speaks no SQL, so its
         // line stays empty.
+        // Pending cell edits preview the `UPDATE` they will run, so the line reflects the
+        // statement the grid is actually about to send rather than the page's `SELECT`.
         let sql = if self.state.documents {
             String::new()
         } else {
-            flatten_status_sql(&self.state.sql())
+            flatten_status_sql(
+                &self
+                    .pending_update_sql()
+                    .unwrap_or_else(|| self.state.sql()),
+            )
         };
         let message: AnyElement = if sql.is_empty() {
             div().into_any_element()

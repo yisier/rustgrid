@@ -393,6 +393,7 @@ impl AppView {
                 let di = *database_index;
                 let key_value = self.driver_supports(ci, DriverCapability::KeyValue);
                 let documents = self.driver_supports(ci, DriverCapability::Documents);
+                let schema_engine = self.driver_supports(ci, DriverCapability::Schemas);
                 let opened = self
                     .connections
                     .get(ci)
@@ -497,17 +498,21 @@ impl AppView {
                         ));
                 } else {
                     if !documents {
-                        items = items
-                            .child(self.context_item(
-                                "db-run-sql",
-                                t!("database.run_sql_file").to_string(),
-                                cx.listener(move |this, _event, _window, cx| {
-                                    this.context_menu = None;
-                                    this.dump_submenu = None;
-                                    this.open_run_sql_file(ci, di, cx);
-                                }),
-                            ))
-                            .child(self.dump_sql_submenu_item(ci, di, None, false, cx));
+                        items = items.child(self.context_item(
+                            "db-run-sql",
+                            t!("database.run_sql_file").to_string(),
+                            cx.listener(move |this, _event, _window, cx| {
+                                this.context_menu = None;
+                                this.dump_submenu = None;
+                                this.open_run_sql_file(ci, di, None, cx);
+                            }),
+                        ));
+                        // A schema-qualified engine dumps one schema at a time, so 转储 SQL 文件
+                        // lives on the schema row (the schema menu) instead of the database row.
+                        if !schema_engine {
+                            items = items
+                                .child(self.dump_sql_submenu_item(ci, di, None, None, false, cx));
+                        }
                     }
                     items = items.child(self.context_item(
                         "db-refresh",
@@ -614,6 +619,26 @@ impl AppView {
                             this.context_menu = None;
                             this.open_new_query_for_schema(ci, di, new_query_schema.clone(), cx);
                         }),
+                    ))
+                    .child(self.context_item(
+                        "schema-run-sql",
+                        t!("database.run_sql_file").to_string(),
+                        cx.listener({
+                            let schema = schema.clone();
+                            move |this, _event, _window, cx| {
+                                this.context_menu = None;
+                                this.dump_submenu = None;
+                                this.open_run_sql_file(ci, di, Some(schema.clone()), cx);
+                            }
+                        }),
+                    ))
+                    .child(self.dump_sql_submenu_item(
+                        ci,
+                        di,
+                        None,
+                        Some(schema.clone()),
+                        false,
+                        cx,
                     ))
                     .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
                     .child(self.context_item(
@@ -962,6 +987,7 @@ impl AppView {
                         ci,
                         di,
                         Some(name.clone()),
+                        None,
                         is_view,
                         cx,
                     ));
@@ -2013,27 +2039,33 @@ impl AppView {
     }
 
     /// The 转储 SQL 文件 row: a submenu trigger that reveals a right-hand flyout with the dump
-    /// modes. The database menu dumps the whole database (`table: None`); a table/view menu dumps
-    /// just that object (a view offers 仅结构 only, since it has no rows of its own). The flyout is
-    /// a child of this row, positioned just past the menu's right edge, so it reads like
-    /// Navicat's submenu.
+    /// modes. The database menu dumps the whole database (`table`/`schema` both `None`); a table/view
+    /// menu dumps just that object (a view offers 仅结构 only, since it has no rows of its own); a
+    /// schema menu dumps that schema's objects (`schema: Some(..)`). The flyout is a child of this
+    /// row, positioned just past the menu's right edge, so it reads like Navicat's submenu.
     fn dump_sql_submenu_item(
         &self,
         connection_index: usize,
         database_index: usize,
         table: Option<String>,
+        schema: Option<String>,
         is_view: bool,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let theme = self.theme;
-        let key = (connection_index, database_index, table.clone());
+        let key = (
+            connection_index,
+            database_index,
+            table.clone(),
+            schema.clone(),
+        );
         let open = self.dump_submenu == Some(key.clone());
         let zone = self.dump_zone.clone();
         let bounds_slot = self.dump_zone.clone();
-        let trigger_id = if table.is_some() {
-            "table-dump-sql"
-        } else {
-            "db-dump-sql"
+        let trigger_id = match (&table, &schema) {
+            (Some(_), _) => "table-dump-sql",
+            (None, Some(_)) => "schema-dump-sql",
+            (None, None) => "db-dump-sql",
         };
         let mut base = div()
             .relative()
@@ -2101,6 +2133,7 @@ impl AppView {
                 connection_index,
                 database_index,
                 table,
+                schema,
                 is_view,
                 theme,
                 self.dump_zone.clone(),
@@ -2458,35 +2491,48 @@ impl AppView {
     }
 }
 
-/// The 转储 SQL 文件 flyout: the dump modes, each starting a `.sql` dump of the database or of the
-/// table/view the menu was opened on.
+/// The 转储 SQL 文件 flyout: the dump modes, each starting a `.sql` dump of the database, the
+/// schema, or the table/view the menu was opened on.
 fn dump_sql_flyout(
     connection_index: usize,
     database_index: usize,
     table: Option<String>,
+    schema: Option<String>,
     is_view: bool,
     theme: Theme,
     zone: Rc<RefCell<SubmenuZone>>,
     cx: &mut Context<'_, AppView>,
 ) -> AnyElement {
-    let key = (connection_index, database_index, table.clone());
+    let key = (
+        connection_index,
+        database_index,
+        table.clone(),
+        schema.clone(),
+    );
     let mut modes: Vec<(&'static str, String, DumpMode)> = Vec::new();
     if table.is_none() {
+        // The database and the schema menu offer the same three modes; the ids stay distinct so
+        // each row identifies its own menu.
+        let ids = if schema.is_some() {
+            (
+                "schema-dump-all",
+                "schema-dump-structure",
+                "schema-dump-data",
+            )
+        } else {
+            ("db-dump-all", "db-dump-structure", "db-dump-data")
+        };
         modes.push((
-            "db-dump-all",
+            ids.0,
             t!("database.dump_structure_and_data").to_string(),
             DumpMode::StructureAndData,
         ));
         modes.push((
-            "db-dump-structure",
+            ids.1,
             t!("database.dump_structure").to_string(),
             DumpMode::Structure,
         ));
-        modes.push((
-            "db-dump-data",
-            t!("database.dump_data").to_string(),
-            DumpMode::Data,
-        ));
+        modes.push((ids.2, t!("database.dump_data").to_string(), DumpMode::Data));
     } else if is_view {
         // A view has no rows of its own, so only its script can be dumped.
         modes.push((
@@ -2528,6 +2574,7 @@ fn dump_sql_flyout(
         }));
     for (id, label, mode) in modes {
         let target = table.clone();
+        let target_schema = schema.clone();
         flyout = flyout.child(
             div()
                 .id(id)
@@ -2555,7 +2602,16 @@ fn dump_sql_flyout(
                             mode,
                             cx,
                         ),
-                        None => this.request_dump(connection_index, database_index, mode, cx),
+                        None => match &target_schema {
+                            Some(schema) => this.request_dump_schema(
+                                connection_index,
+                                database_index,
+                                schema.clone(),
+                                mode,
+                                cx,
+                            ),
+                            None => this.request_dump(connection_index, database_index, mode, cx),
+                        },
                     }
                 }))
                 .child(label),

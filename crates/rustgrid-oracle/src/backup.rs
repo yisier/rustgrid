@@ -21,6 +21,23 @@ pub(crate) async fn backup_object_metadata(
             let schema_def = crate::schema::table_schema(connection, database, name).await?;
             let (schema, bare) = connection.resolve(name);
             let ddl = crate::schema::table_schema_sql(&schema, &bare, None, &schema_def);
+            let drop_ddl = format!("DROP TABLE {} CASCADE CONSTRAINTS", qualify(&schema, &bare));
+            let references = schema_def
+                .foreign_keys
+                .iter()
+                .map(|foreign_key| {
+                    let referenced_schema = if foreign_key.referenced_schema.trim().is_empty() {
+                        schema.as_str()
+                    } else {
+                        foreign_key.referenced_schema.trim()
+                    };
+                    if referenced_schema.is_empty() {
+                        foreign_key.referenced_table.clone()
+                    } else {
+                        format!("{referenced_schema}.{}", foreign_key.referenced_table)
+                    }
+                })
+                .collect();
             let fields = schema_def
                 .columns
                 .iter()
@@ -34,21 +51,28 @@ pub(crate) async fn backup_object_metadata(
                 name: name.to_string(),
                 kind,
                 ddl,
+                drop_ddl,
+                references,
                 fields,
                 trigger_ddl,
                 rows: Vec::new(),
             })
         }
-        BackupObjectKind::View => Ok(ObjectDump {
-            name: name.to_string(),
-            kind,
-            ddl: crate::view::view_details(connection, database, name)
-                .await?
-                .definition,
-            fields: Vec::new(),
-            trigger_ddl: Vec::new(),
-            rows: Vec::new(),
-        }),
+        BackupObjectKind::View => {
+            let (schema, bare) = connection.resolve(name);
+            Ok(ObjectDump {
+                name: name.to_string(),
+                kind,
+                ddl: crate::view::view_details(connection, database, name)
+                    .await?
+                    .definition,
+                drop_ddl: format!("DROP VIEW {}", qualify(&schema, &bare)),
+                references: Vec::new(),
+                fields: Vec::new(),
+                trigger_ddl: Vec::new(),
+                rows: Vec::new(),
+            })
+        }
         BackupObjectKind::Function => {
             let definition = match crate::routine::routine_details(
                 connection,
@@ -70,10 +94,14 @@ pub(crate) async fn backup_object_metadata(
                     .definition
                 }
             };
+            let (schema, bare) = connection.resolve(name);
+            let drop_ddl = routine_drop_sql(&schema, &bare, &definition).unwrap_or_default();
             Ok(ObjectDump {
                 name: name.to_string(),
                 kind,
                 ddl: definition,
+                drop_ddl,
+                references: Vec::new(),
                 fields: Vec::new(),
                 trigger_ddl: Vec::new(),
                 rows: Vec::new(),
@@ -83,6 +111,8 @@ pub(crate) async fn backup_object_metadata(
             name: name.to_string(),
             kind,
             ddl: String::new(),
+            drop_ddl: String::new(),
+            references: Vec::new(),
             fields: Vec::new(),
             trigger_ddl: Vec::new(),
             rows: Vec::new(),
@@ -151,7 +181,8 @@ pub(crate) async fn restore_object(
             let qualified = qualify(&schema, &bare);
             match object.kind {
                 BackupObjectKind::Table => {
-                    let _ = raw.execute(&format!("DROP TABLE {qualified}"), &[]);
+                    let _ =
+                        raw.execute(&format!("DROP TABLE {qualified} CASCADE CONSTRAINTS"), &[]);
                     let ddl = rewrite_identity(object.ddl.trim().trim_end_matches(';').trim());
                     if ddl.is_empty() {
                         return Err(Error::Query(format!(

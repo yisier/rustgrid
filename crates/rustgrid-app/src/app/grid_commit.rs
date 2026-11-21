@@ -1,5 +1,7 @@
 use super::grid::row_origin;
 use super::*;
+use crate::session::display_table_path;
+use rustgrid_core::{RowChange, RowChangeKind, render_change_sql};
 
 impl GridView {
     pub(super) fn date_picker_today(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
@@ -80,12 +82,9 @@ impl GridView {
             .collect()
     }
 
-    /// Build the pending existing-row edits as engine-agnostic [`RowUpdate`]s.
-    fn collect_updates(&self) -> Vec<RowUpdate> {
-        if self.state.edits.is_empty() {
-            return Vec::new();
-        }
-
+    /// The display columns that identify a row for an `UPDATE`/`DELETE`: the primary key, or
+    /// every column when the table has none.
+    fn key_columns(&self) -> Vec<usize> {
         let primary_keys: Vec<usize> = self
             .state
             .columns
@@ -94,37 +93,85 @@ impl GridView {
             .filter(|(_, column)| column.primary_key)
             .map(|(index, _)| index)
             .collect();
-        let key_columns: Vec<usize> = if primary_keys.is_empty() {
+        if primary_keys.is_empty() {
             (0..self.state.columns.len()).collect()
         } else {
             primary_keys
-        };
-
-        let mut by_row: BTreeMap<usize, Vec<(usize, Option<String>)>> = BTreeMap::new();
-        for (&(row, col), value) in &self.state.edits {
-            by_row.entry(row).or_default().push((col, value.clone()));
         }
+    }
 
-        let mut updates = Vec::new();
-        for (row, cells) in by_row {
-            let Some(row_values) = self.state.rows.get(row) else {
-                continue;
-            };
-            let set = cells
-                .into_iter()
-                .map(|(col, value)| (self.state.columns[col].name.clone(), value))
-                .collect();
-            let keys = key_columns
-                .iter()
-                .filter_map(|&col| {
+    /// Build one page row's pending edits as an engine-agnostic [`RowUpdate`].
+    fn update_for_row(&self, row: usize) -> Option<RowUpdate> {
+        let row_values = self.state.rows.get(row)?;
+        let key_columns = self.key_columns();
+        let set: Vec<(String, Option<String>)> = self
+            .state
+            .edits
+            .iter()
+            .filter(|((edited_row, _), _)| *edited_row == row)
+            .filter_map(|(&(_, col), value)| {
+                self.state
+                    .columns
+                    .get(col)
+                    .map(|column| (column.name.clone(), value.clone()))
+            })
+            .collect();
+        if set.is_empty() {
+            return None;
+        }
+        let keys = key_columns
+            .iter()
+            .filter_map(|&col| {
+                Some((
+                    self.state.columns.get(col)?.name.clone(),
                     row_values
                         .get(self.state.source_col(col))
-                        .map(|value| (self.state.columns[col].name.clone(), value.as_edit_value()))
-                })
-                .collect();
-            updates.push(RowUpdate { set, keys });
+                        .and_then(|value| value.as_edit_value()),
+                ))
+            })
+            .collect();
+        Some(RowUpdate { set, keys })
+    }
+
+    /// The `UPDATE` the pending edits will run, for the grid's status line. The active record is
+    /// previewed; when it has no edits of its own, the first edited row stands in so a bulk change
+    /// still shows its statement instead of the page's `SELECT`.
+    pub(super) fn pending_update_sql(&self) -> Option<String> {
+        if self.state.edits.is_empty() || self.state.table.is_empty() {
+            return None;
         }
-        updates
+        let active = self
+            .state
+            .selection
+            .as_ref()
+            .and_then(|selection| self.row_at(selection.active_cursor().0));
+        let row = match active {
+            Some(GridRow::Data(row)) if self.state.edits.keys().any(|&(r, _)| r == row) => row,
+            _ => self
+                .state
+                .edits
+                .keys()
+                .map(|(row, _)| row)
+                .next()
+                .copied()?,
+        };
+        let update = self.update_for_row(row)?;
+        let table = display_table_path(self.state.dialect, &self.state.database, &self.state.table);
+        let change = RowChange {
+            kind: RowChangeKind::Update,
+            keys: update.keys,
+            values: update.set,
+            changes: Vec::new(),
+        };
+        Some(render_change_sql(&table, &change, self.state.dialect))
+    }
+
+    /// Build the pending existing-row edits as engine-agnostic [`RowUpdate`]s.
+    fn collect_updates(&self) -> Vec<RowUpdate> {
+        let rows: BTreeSet<usize> = self.state.edits.keys().map(|&(row, _)| row).collect();
+        rows.into_iter()
+            .filter_map(|row| self.update_for_row(row))
+            .collect()
     }
 
     /// Write the pending inserts and updates in one transaction-ish pass, then reload the page.
@@ -288,20 +335,7 @@ impl GridView {
 
     /// Execute the confirmed row deletion for this grid, then reload the page.
     pub(super) fn delete_rows(&mut self, rows: Vec<usize>, cx: &mut Context<'_, Self>) {
-        let primary_keys: Vec<usize> = self
-            .state
-            .columns
-            .iter()
-            .enumerate()
-            .filter(|(_, column)| column.primary_key)
-            .map(|(index, _)| index)
-            .collect();
-        let key_columns: Vec<usize> = if primary_keys.is_empty() {
-            (0..self.state.columns.len()).collect()
-        } else {
-            primary_keys
-        };
-
+        let key_columns = self.key_columns();
         let mut keys = Vec::new();
         for row in &rows {
             let Some(values) = self.state.rows.get(*row) else {

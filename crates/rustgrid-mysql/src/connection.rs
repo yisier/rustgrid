@@ -473,7 +473,19 @@ impl MysqlConnection {
             .collect();
 
         let mut trigger_ddl = Vec::new();
+        let mut references = Vec::new();
         if let Ok(schema) = self.table_schema(database, table).await {
+            for foreign_key in &schema.foreign_keys {
+                references.push(if foreign_key.referenced_schema.trim().is_empty() {
+                    foreign_key.referenced_table.clone()
+                } else {
+                    format!(
+                        "{}.{}",
+                        foreign_key.referenced_schema.trim(),
+                        foreign_key.referenced_table
+                    )
+                });
+            }
             for trigger in &schema.triggers {
                 if let Ok(ddl) = self.show_create(database, &trigger.name, "TRIGGER").await {
                     trigger_ddl.push(ddl);
@@ -485,6 +497,8 @@ impl MysqlConnection {
             name: table.to_string(),
             kind: BackupObjectKind::Table,
             ddl,
+            drop_ddl: format!("DROP TABLE IF EXISTS {}", quote_identifier(table)),
+            references,
             fields,
             trigger_ddl,
             rows: Vec::new(),
@@ -1672,9 +1686,12 @@ impl Connection for MysqlConnection {
         kind: BackupObjectKind,
         name: &str,
     ) -> Result<ObjectDump> {
-        let ddl = match kind {
+        let (ddl, drop_ddl) = match kind {
             BackupObjectKind::Table => return self.table_metadata(database, name).await,
-            BackupObjectKind::View => self.show_create(database, name, "VIEW").await?,
+            BackupObjectKind::View => (
+                self.show_create(database, name, "VIEW").await?,
+                format!("DROP VIEW IF EXISTS {}", quote_identifier(name)),
+            ),
             BackupObjectKind::Function => {
                 let mut connection = self.database_connection(database).await?;
                 let routine_type: Option<String> = self
@@ -1699,14 +1716,22 @@ impl Connection for MysqlConnection {
                 } else {
                     "FUNCTION"
                 };
-                self.show_create(database, name, verb).await?
+                (
+                    self.show_create(database, name, verb).await?,
+                    format!("DROP {verb} IF EXISTS {}", quote_identifier(name)),
+                )
             }
-            BackupObjectKind::Event => self.show_create(database, name, "EVENT").await?,
+            BackupObjectKind::Event => (
+                self.show_create(database, name, "EVENT").await?,
+                format!("DROP EVENT IF EXISTS {}", quote_identifier(name)),
+            ),
         };
         Ok(ObjectDump {
             name: name.to_string(),
             kind,
             ddl,
+            drop_ddl,
+            references: Vec::new(),
             fields: Vec::new(),
             trigger_ddl: Vec::new(),
             rows: Vec::new(),

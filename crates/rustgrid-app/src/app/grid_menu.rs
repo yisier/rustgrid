@@ -403,37 +403,54 @@ impl GridView {
             }
             None => (0, 0),
         };
-        let selected_rows = selection
-            .as_ref()
-            .map(|selection| selection.row_indices())
-            .unwrap_or_default();
-        let map_rows = !selected_rows.is_empty() && selected_rows.len() == block.len();
+        // A single copied value drops into every selected cell (Excel / Navicat fill), so a
+        // vertical range of a column is filled in one paste instead of only its first row.
+        let fill_selection = paste_fills_selection(&block, selection.as_ref());
         let mut action = Vec::new();
-        for (index, values) in block.iter().enumerate() {
-            let target_row = if map_rows {
-                selected_rows[index]
-            } else {
-                start_row + index
-            };
-            if map_rows {
-                // A one-to-one paste onto selected records never creates rows; it only fills the
-                // selected ones, which may include pending insert rows the user added.
-                if target_row >= self.display_row_count() {
-                    break;
+        if fill_selection {
+            let value = &block[0][0];
+            let selected_cells = selection
+                .as_ref()
+                .map(CellSelection::cells)
+                .unwrap_or_default();
+            for (row, col) in selected_cells {
+                if col >= self.state.visible_columns || row >= self.display_row_count() {
+                    continue;
                 }
-            } else {
-                // A free paste that runs past the grid grows appended pending rows to hold the
-                // overflow.
-                while target_row >= self.display_row_count() {
-                    self.inserts.push(PendingInsert::appended());
-                }
+                self.stage_paste_cell(row, col, value, &mut action);
             }
-            for (offset, value) in values.iter().enumerate() {
-                let target_col = start_col + offset;
-                if target_col >= self.state.visible_columns {
-                    break;
+        } else {
+            let selected_rows = selection
+                .as_ref()
+                .map(|selection| selection.row_indices())
+                .unwrap_or_default();
+            let map_rows = !selected_rows.is_empty() && selected_rows.len() == block.len();
+            for (index, values) in block.iter().enumerate() {
+                let target_row = if map_rows {
+                    selected_rows[index]
+                } else {
+                    start_row + index
+                };
+                if map_rows {
+                    // A one-to-one paste onto selected records never creates rows; it only fills
+                    // the selected ones, which may include pending insert rows the user added.
+                    if target_row >= self.display_row_count() {
+                        break;
+                    }
+                } else {
+                    // A free paste that runs past the grid grows appended pending rows to hold the
+                    // overflow.
+                    while target_row >= self.display_row_count() {
+                        self.inserts.push(PendingInsert::appended());
+                    }
                 }
-                self.stage_paste_cell(target_row, target_col, value, &mut action);
+                for (offset, value) in values.iter().enumerate() {
+                    let target_col = start_col + offset;
+                    if target_col >= self.state.visible_columns {
+                        break;
+                    }
+                    self.stage_paste_cell(target_row, target_col, value, &mut action);
+                }
             }
         }
         if !action.is_empty() {
@@ -595,6 +612,15 @@ fn normalize_clipboard_text(text: &str) -> String {
         .to_string()
 }
 
+/// Whether a pasted block fills the whole selection instead of anchoring at its top-left cell.
+/// A single copied value fills every selected cell, which is what makes a vertical multi-select
+/// editable in one paste; a multi-row block keeps the existing one-to-one row mapping or free paste.
+fn paste_fills_selection(block: &[Vec<Option<String>>], selection: Option<&CellSelection>) -> bool {
+    selection.is_some_and(|selection| !selection.is_single_cell())
+        && block.len() == 1
+        && block.first().is_some_and(|row| row.len() == 1)
+}
+
 /// Whether an empty pasted cell must become SQL `NULL` for this column type: numeric and temporal
 /// columns reject `''`, while text columns can hold an explicit empty string. Unknown types keep
 /// the empty string (the conservative choice, since the engine may accept it).
@@ -670,6 +696,26 @@ mod tests {
         let block = parse_clipboard_text("NULL\t\r\n\tx");
         assert_eq!(block[0][0], None);
         assert_eq!(block[0][1], Some(String::new()));
+    }
+
+    #[test]
+    fn one_copied_value_fills_every_selected_cell() {
+        let value = vec![vec![Some("9".to_string())]];
+        let vertical = CellSelection::single((0, 0), (19, 0));
+        assert!(paste_fills_selection(&value, Some(&vertical)));
+        // A block with the selection's row count keeps its one-to-one mapping.
+        let column = vec![vec![Some("1".to_string())], vec![Some("2".to_string())]];
+        let two_rows = CellSelection::single((0, 0), (1, 0));
+        assert!(!paste_fills_selection(&column, Some(&two_rows)));
+        // A single cell selection pastes normally, and a wider block is never a fill.
+        let single = CellSelection::new(0, 0);
+        assert!(!paste_fills_selection(&value, Some(&single)));
+        let block = CellSelection::single((0, 0), (1, 1));
+        assert!(!paste_fills_selection(
+            &[vec![Some("a".to_string()), Some("b".to_string())]],
+            Some(&block)
+        ));
+        assert!(!paste_fills_selection(&value, None));
     }
 
     #[test]

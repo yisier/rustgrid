@@ -614,6 +614,9 @@ struct BackupRenameEdit {
 struct NewBackupDialog {
     connection_index: usize,
     database: String,
+    /// The schema the object list is scoped to on schema-qualified engines; `None` covers the
+    /// whole database (the schema-less engines always use `None`).
+    schema: Option<String>,
     tab: BackupDialogTab,
     objects: Vec<BackupObjectEntry>,
     /// Name the configuration is saved under by the *Save* button.
@@ -729,16 +732,23 @@ impl DumpMode {
     }
 }
 
-/// State of the "Dump SQL File" dialog: a `CREATE`+data dump written straight to a `.sql` file
-/// (the whole database from the database menu, or a single table/view from its context menu), with
-/// the same async log/progress view as the backup dialogs.
+/// State of the "Dump SQL File" dialog: an object-selection page (tables/views/routines/events of
+/// the clicked database or schema, mirroring the backup's Extract SQL window) followed by the same
+/// async log/progress view as the other backup dialogs.
 struct DumpSqlDialog {
     connection_index: usize,
     database_index: usize,
+    /// The schema a schema menu's dump writes. `None` dumps the whole database.
+    schema: Option<String>,
     /// The single object a table menu's dump writes. `None` dumps the whole database.
     object: Option<(BackupObjectKind, String)>,
     mode: DumpMode,
-    /// The `.sql` file the dump writes to, chosen through the system save dialog.
+    /// The objects listed on the dialog's 对象选择 page, all selected when it opens.
+    objects: Vec<BackupObjectEntry>,
+    /// Whether the object list is still being read from the server.
+    loading: bool,
+    tab: BackupDialogTab,
+    /// The `.sql` file the dump writes to, chosen when the dump starts.
     output_path: Option<std::path::PathBuf>,
     running: bool,
     /// Set by 停止 to abort the run loop early (checked between objects/rows).
@@ -2512,9 +2522,9 @@ pub struct AppView {
     dump_dialog: Option<DumpSqlDialog>,
     /// The open "Run SQL File" dialog, if any.
     run_sql_dialog: Option<RunSqlDialog>,
-    /// The 转储 SQL 文件 flyout target while open: the connection and database, plus the table the
-    /// dump covers (`None` for the database menu's whole-database dump).
-    dump_submenu: Option<(usize, usize, Option<String>)>,
+    /// The 转储 SQL 文件 flyout target while open: the connection and database, plus the table or
+    /// schema the dump covers (`None` for the database menu's whole-database dump).
+    dump_submenu: Option<(usize, usize, Option<String>, Option<String>)>,
     /// The 转储 SQL 文件 flyout's zone while it is shown. The flyout overflows past the menu
     /// panel, so the panel's `on_mouse_down_out` would otherwise close the menu on a click that
     /// actually lands on the flyout (before the item's click can complete); it also keeps the

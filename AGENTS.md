@@ -650,10 +650,15 @@ touching UI code.
   is invisible when unselected (so rows never shift). `ui::ComboBox` defaults to the kit's
   `Size::XSmall` (20px, 12px text) so every dropdown in the project is the same compact size; the
   filter builder is the one exception and opts into the design's taller trigger via
-  `ComboBox::height` / `text_size` / `radius`. The table designer's type dropdown
-  (`design_view.rs::render_type_combo`) is hand-built and must mirror the compact default: a 20px
-  `ui::TextInput` search (`TextInputOptions { size: Some(Size::XSmall), .. }`) above 20px rows, and
-  an `icons/check.svg` on the right of the selected row, `opacity(0)` on the others.
+  `ComboBox::height` / `text_size` / `radius`. The table designer's type cell is an **editable
+  combo** (`design_view.rs::design_type_cell` + `render_type_combo`): opening it swaps a bare
+  20px `ui::TextInput` (`TextInputOptions { size: Some(Size::XSmall), .. }`, pre-filled with the
+  current type and selected) into the cell itself, with the type list below it; typing filters the
+  list, Enter takes the highlighted type, and when nothing matches the typed text is taken as the
+  type (so `varchar(50)`, `int unsigned` and an engine's unlisted types can be entered; a plain
+  `base(params)` declaration is split into the type and the 长度/小数 cells). The list
+  keeps 20px rows, `icons/check.svg` on the selected row (`opacity(0)` on the others) and a custom
+  `Use "…"` row when the query matches no listed type.
 - Keep dialog controls compact: 12px text, ~24px-high buttons, compact text fields. gpui-kit's
   sizing defaults are larger than the app's metrics, so `ui::TextInput` renders the kit input at
   `Size::Small`, disables the kit's focus ring (the "shadow" that otherwise floats over the field)
@@ -768,8 +773,10 @@ called that. Two kinds of upgrade:
   it: Options → Grid → "Save changes when leaving a row" (`grid_auto_save`, on by default), no save in
   flight (`saving`; Save itself is ignored until it lands), no pending insert, no bulk step (an undo
   entry with more than one cell: paste, fill, a multi-cell edit) and all edits in one row; anything
-  else waits for ✓ / Ctrl+S, with "N unsaved" shown next to ✓ / ✗. Down on the
-  last row opens a new record (`leave_row_vertically`): its cells, gutter and the header are amber
+  else waits for ✓ / Ctrl+S, with "N unsaved" shown next to ✓ / ✗. Typing into a multi-cell
+  selection stages the value in every selected cell, and a one-cell paste fills every selected cell
+  (`grid_menu.rs::paste_fills_selection`), so a vertical range can be changed in one gesture. Down
+  on the last row opens a new record (`leave_row_vertically`): its cells, gutter and the header are amber
   (`cell_edit_bg`); untouched cells show the column default, (Auto), (Generated) or (Null) from
   `NewRowColumn::from_def` (the table schema is loaded once, `ensure_new_row_columns`, keyed by column
   name so a field layout change cannot shift it) and an editor starts from that default
@@ -1257,9 +1264,12 @@ make more engines cheap later — do not build those features early.
   The statement always occupies the line, even while cells are selected (a page opens with its first
   record selected); the selection summary and the numeric sum moved up into the record toolbar's
   left end (`render_grid_controls`, after the row action buttons), so a selection never hides the
-  SQL. A document store speaks no SQL, so its line stays empty. The statement is usually wider than
-  the bar, so it pans: the wheel (or a horizontal trackpad swipe) moves `status_sql_scroll`, and a
-  selection drag held in the line's edge zone (`STATUS_SQL_EDGE_ZONE`) starts the edge auto-scroll
+  SQL. While a record has staged edits, the line previews the `UPDATE` those edits will run
+  (`GridView::pending_update_sql`, built from the same keys and values the save writes) instead of
+  the page's `SELECT`. A document store speaks no SQL, so its line stays empty. The statement is
+  usually wider than the bar, so it pans: the wheel (or a horizontal trackpad swipe) moves
+  `status_sql_scroll`, and a selection drag held in the line's edge zone (`STATUS_SQL_EDGE_ZONE`)
+  starts the edge auto-scroll
   (`status_sql_maybe_autoscroll`), whose tick keeps panning and extending the selection while the
   pointer stays there. The drag's window-level move/up listeners come from a root canvas painted
   while `status_sql_selecting`, like the fill handle's.

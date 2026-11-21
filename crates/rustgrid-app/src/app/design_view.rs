@@ -569,6 +569,9 @@ impl TableDesignView {
             .edit
             .as_ref()
             .map(|editor| (editor.row, editor.column, editor.input.clone()));
+        // The type cell swaps its text for the editable combo field while its list is open.
+        let type_open = self.type_combo;
+        let type_editor = self.type_search.clone();
         let weak = self.self_weak.clone();
         let combo_anchor = self.combo_anchor.clone();
         let row_widths = widths.clone();
@@ -733,6 +736,7 @@ impl TableDesignView {
                                         &weak,
                                         row,
                                         combo_anchor.clone(),
+                                        type_editor.clone().filter(|_| type_open == Some(row)),
                                     ));
                                 for (offset, kind) in spec_columns.iter().enumerate() {
                                     let column_index = 2 + offset;
@@ -2874,15 +2878,62 @@ impl TableDesignView {
             .map(|column| column.data_type.clone())
             .unwrap_or_default();
         let weak = self.self_weak.clone();
+        // The list follows the query the field has reported, not the field's own text: on open the
+        // field shows the current type with the whole list available, and only typing filters it.
+        let query = self.type_query.trim().to_string();
+        let types = filter_type_list(&self.column_types, &query);
 
         let mut options = div()
             .id("design-type-options")
-            .max_h(px(300.0))
+            .max_h(px(TYPE_LIST_MAX_HEIGHT))
             .overflow_y_scroll()
             .track_scroll(&self.type_scroll)
             .flex()
-            .flex_col();
-        for (index, data_type) in self.filtered_types().into_iter().enumerate() {
+            .flex_col()
+            .gap(px(TYPE_OPTION_GAP))
+            .p_1();
+        if types.is_empty() && !query.is_empty() {
+            // Nothing in the engine's list matches the typed text: offer it as a custom type, so
+            // `varchar(50)` or an engine type missing from the catalogue can still be entered.
+            let custom = query.clone();
+            let custom_weak = weak.clone();
+            options = options.child(
+                div()
+                    .id("design-type-custom")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .h(px(TYPE_OPTION_HEIGHT))
+                    .px_2()
+                    .flex_none()
+                    .rounded_sm()
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme.brand))
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                    .on_click(move |_event, _window, cx| {
+                        let _ = custom_weak
+                            .update(cx, |view, cx| view.commit_type_text(row, &custom, cx));
+                    })
+                    .child(
+                        svg()
+                            .path("icons/plus.svg")
+                            .w(px(12.0))
+                            .h(px(12.0))
+                            .flex_none()
+                            .text_color(rgb(theme.brand)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .truncate()
+                            .child(t!("design.type_custom", value = query.clone()).to_string()),
+                    ),
+            );
+        }
+        for (index, data_type) in types.into_iter().enumerate() {
             let selected = data_type == current;
             let highlighted = self.type_highlight == Some(index);
             let weak = weak.clone();
@@ -2899,25 +2950,33 @@ impl TableDesignView {
                     .h(px(TYPE_OPTION_HEIGHT))
                     .px_2()
                     .flex_none()
+                    .rounded_sm()
                     .text_size(px(12.0))
                     .cursor_pointer()
-                    .when(selected, move |style| {
-                        style
-                            .bg(rgb(theme.tree_selected_bg))
-                            .text_color(rgb(theme.tree_selected_text))
-                    })
-                    // The keyboard highlight (Up/Down) reads like a hover, and outranks the
-                    // selected row's tint so the row the caret is on is the one that stands out.
+                    // The keyboard highlight (Up/Down) reads like a hover on the other rows; the
+                    // column's current type keeps its selected tint so it is easy to find when the
+                    // list opens.
                     .when(highlighted, move |style| {
                         style
                             .bg(rgb(theme.tree_hover_bg))
                             .text_color(rgb(theme.text))
                     })
+                    .when(selected, move |style| {
+                        style
+                            .bg(rgb(theme.tree_selected_bg))
+                            .text_color(rgb(theme.tree_selected_text))
+                    })
                     .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
                     .on_click(move |_event, _window, cx| {
                         let _ = weak.update(cx, |view, cx| view.select_type(row, data_type, cx));
                     })
-                    .child(data_type.to_string())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .truncate()
+                            .child(data_type.to_string()),
+                    )
                     .child(
                         svg()
                             .path("icons/check.svg")
@@ -2930,27 +2989,24 @@ impl TableDesignView {
             );
         }
 
-        let mut popup = ui::popup_panel(theme)
+        let popup = ui::popup_panel(theme)
             .id("design-type-list")
             .left(anchor.x)
             .top(anchor.y)
             .w(px(FIELD_TYPE_WIDTH))
-            .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
+            .rounded_md()
+            .overflow_hidden()
+            .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                // A press in the editable cell itself (positioning the caret in the field) must not
+                // dismiss the list; only a press anywhere else does.
+                if this.type_cell_contains(event.position) {
+                    return;
+                }
                 this.type_combo = None;
+                this.type_query.clear();
                 cx.notify();
-            }));
-        if let Some(search) = self.type_search.clone() {
-            popup = popup.child(
-                div()
-                    .flex_none()
-                    .px_1p5()
-                    .py_1()
-                    .border_b_1()
-                    .border_color(rgb(theme.grid_line))
-                    .child(div().h(px(20.0)).child(search)),
-            );
-        }
-        popup = popup.child(options);
+            }))
+            .child(options);
         deferred(popup).with_priority(100).into_any_element()
     }
 
@@ -4217,10 +4273,12 @@ fn design_type_cell(
     weak: &WeakEntity<TableDesignView>,
     row: usize,
     anchor: Rc<RefCell<BTreeMap<usize, Point<Pixels>>>>,
+    editor: Option<Entity<TextInput>>,
 ) -> AnyElement {
     let down = weak.clone();
     let moved = weak.clone();
-    div()
+    let chevron_weak = weak.clone();
+    let cell = div()
         .flex()
         .items_center()
         .h(px(DESIGN_ROW_HEIGHT))
@@ -4235,15 +4293,65 @@ fn design_type_cell(
             style
                 .bg(rgb(theme.grid_selection_bg))
                 .text_color(rgb(theme.grid_selection_text))
-        })
-        .pl(px(DESIGN_CELL_INSET))
+        });
+    let chevron = svg()
+        .path("icons/chevron-down.svg")
+        .w(px(10.0))
+        .h(px(10.0))
+        .flex_none()
+        .text_color(rgb(if editor.is_some() || selected {
+            theme.grid_selection_text
+        } else {
+            theme.text_muted
+        }));
+    if let Some(editor) = editor {
+        return cell
+            .id(id.clone())
+            .bg(rgb(theme.input_bg))
+            // The cell's selection colour must not leak into the editor, or its text is invisible
+            // on the light input background.
+            .text_color(rgb(theme.text))
+            .pl(px(DESIGN_CELL_INSET))
+            .pr(px(4.0))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .w(px(width - DESIGN_CELL_INSET - 4.0))
+                    .h(px(DESIGN_ROW_HEIGHT))
+                    .child(div().flex_1().min_w(px(0.0)).h_full().child(editor))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("design-type-chevron-{row}")))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .w(px(12.0))
+                            .h_full()
+                            .flex_none()
+                            .cursor_pointer()
+                            .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                                let _ = chevron_weak
+                                    .update(cx, |view, cx| view.open_type_combo(row, window, cx));
+                            })
+                            .child(chevron.text_color(rgb(theme.text_muted))),
+                    ),
+            )
+            .into_any_element();
+    }
+    cell.pl(px(DESIGN_CELL_INSET))
         .pr(px(4.0))
         .cursor_pointer()
         .on_children_prepainted(move |bounds, _window, _cx| {
             if let Some(first) = bounds.first() {
-                anchor
-                    .borrow_mut()
-                    .insert(row, Point::new(first.left(), first.bottom()));
+                // Anchor the list to the cell's left edge, not to the text (which starts after the
+                // cell's inset), so the popup lines up with the column.
+                anchor.borrow_mut().insert(
+                    row,
+                    Point::new(first.left() - px(DESIGN_CELL_INSET), first.bottom()),
+                );
             }
         })
         .id(id)
@@ -4261,18 +4369,7 @@ fn design_type_cell(
             });
         })
         .child(div().flex_1().min_w(px(0.0)).overflow_hidden().child(text))
-        .child(
-            svg()
-                .path("icons/chevron-down.svg")
-                .w(px(10.0))
-                .h(px(10.0))
-                .flex_none()
-                .text_color(rgb(if selected {
-                    theme.grid_selection_text
-                } else {
-                    theme.text_muted
-                })),
-        )
+        .child(chevron)
         .into_any_element()
 }
 

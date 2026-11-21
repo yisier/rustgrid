@@ -75,6 +75,7 @@ pub(crate) struct TextInputOptions {
 enum Pending {
     SetText(String, bool),
     SetPlaceholder(SharedString),
+    SelectAll,
 }
 
 pub(crate) struct TextInput {
@@ -186,6 +187,13 @@ impl TextInput {
     ) {
         self.pending
             .push(Pending::SetPlaceholder(placeholder.into()));
+        cx.notify();
+    }
+
+    /// Selects the whole value on the next render, so typing replaces it. The table designer's type
+    /// cell opens this way: the current type is shown but a keystroke starts a new one.
+    pub(crate) fn select_all(&mut self, cx: &mut Context<Self>) {
+        self.pending.push(Pending::SelectAll);
         cx.notify();
     }
 
@@ -358,6 +366,9 @@ impl TextInput {
                     state.update(cx, |state, cx| {
                         state.set_placeholder(placeholder.clone(), window, cx);
                     });
+                }
+                Pending::SelectAll => {
+                    state.update(cx, |state, cx| state.select_all(window, cx));
                 }
             }
         }
@@ -537,6 +548,54 @@ mod tests {
         });
         assert_eq!(after_typing, "xhello");
         assert_eq!(after_undo, "hello");
+    }
+
+    /// The type cell opens its field with the current value selected, so typing starts a new type
+    /// instead of appending to the old one.
+    #[gpui_kit::test]
+    fn select_all_makes_the_next_keystroke_replace_the_value(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (handle, view) = cx.update(|cx| {
+            let field = cx
+                .new(|cx| TextInput::new(Theme::light(), "hello", TextInputOptions::default(), cx));
+            let view = cx.new(|_cx| ArrowHarness {
+                field: field.clone(),
+            });
+            let (handle, _window) = gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: Point::default(),
+                        size: size(px(400.), px(200.)),
+                    })),
+                    ..Default::default()
+                },
+                cx,
+                |_, _| view.clone(),
+            )
+            .expect("open test window");
+            (handle, view)
+        });
+        let mut cx = VisualTestContext::from_window(handle, cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.update(|window, cx| {
+            let field = view.read(cx).field.clone();
+            field.update(cx, |field, cx| {
+                field.focus_state(window, cx);
+                field.select_all(cx);
+            });
+            let _ = window.draw(cx);
+        });
+        cx.simulate_keystrokes("x");
+        let after_typing = cx.update(|_window, cx| {
+            view.read(cx)
+                .field
+                .read(cx)
+                .current_text(cx)
+                .unwrap_or_default()
+        });
+        assert_eq!(after_typing, "x");
     }
 
     /// The grid opens a read-only cell viewer so a substring of a result value can be selected

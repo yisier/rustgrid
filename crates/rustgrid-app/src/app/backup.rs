@@ -124,11 +124,14 @@ impl AppView {
 
     /// The database the Backup tab is scoped to, taken from the connection tree's selection.
     /// Backups are tied to a database, so this only resolves when the tree has a selected (or
-    /// Backups-category) database row whose connection is open and whose database is opened.
-    pub(super) fn backup_scope(&self, cx: &App) -> Option<(usize, usize)> {
+    /// Backups-category) database row whose connection is open and whose database is opened. The
+    /// third element is the schema the selection sits under, so a backup started from a schema
+    /// row only lists that schema's objects.
+    pub(super) fn backup_scope(&self, cx: &App) -> Option<(usize, usize, Option<String>)> {
         let selected = self.tree_pane.read(cx).selected.clone()?;
-        // A database, schema or category row scopes its database; backups are per database.
-        let (connection_index, database_index, _schema) = parse_tree_scope(&selected)?;
+        // A database, schema or category row scopes its database; backups are per database, and
+        // a schema row additionally narrows the object list to that schema.
+        let (connection_index, database_index, schema) = parse_tree_scope(&selected)?;
         let node = self.connections.get(connection_index)?;
         if !matches!(node.status, ConnectionStatus::Connected(_)) {
             return None;
@@ -139,12 +142,12 @@ impl AppView {
         let database = databases.get(database_index)?;
         database
             .opened
-            .then_some((connection_index, database_index))
+            .then_some((connection_index, database_index, schema))
     }
 
     /// `(connection_id, database)` of the current scope, for filtering the scanned files.
     fn backup_scope_names(&self, cx: &App) -> Option<(String, String)> {
-        let (connection_index, database_index) = self.backup_scope(cx)?;
+        let (connection_index, database_index, _) = self.backup_scope(cx)?;
         let connection_id = self.connections.get(connection_index)?.profile.id.clone();
         let database = self.database_name(connection_index, database_index)?;
         Some((connection_id, database))
@@ -1109,7 +1112,7 @@ impl AppView {
         let Some(clipboard) = self.backup_clipboard.clone() else {
             return;
         };
-        let Some((connection_index, database_index)) = self.backup_scope(cx) else {
+        let Some((connection_index, database_index, _)) = self.backup_scope(cx) else {
             return;
         };
         let Some(connection_id) = self
@@ -1318,7 +1321,7 @@ impl AppView {
 
     /// Reveal the current scope's backup folder in the OS file manager.
     pub(super) fn reveal_backup_folder(&mut self, cx: &mut Context<'_, Self>) {
-        let Some((connection_index, database_index)) = self.backup_scope(cx) else {
+        let Some((connection_index, database_index, _)) = self.backup_scope(cx) else {
             return;
         };
         let Some(connection_id) = self
@@ -1580,6 +1583,17 @@ impl AppView {
             return;
         };
         let path = file.path.clone();
+        // Archives written before the manifest stored the dialect leave it `Generic`; the backup
+        // file's connection profile still names the engine, so use that when it is available.
+        let dialect = if file.manifest.dialect != rustgrid_core::DriverDialect::Generic {
+            file.manifest.dialect
+        } else {
+            self.connections
+                .iter()
+                .position(|node| node.profile.id == file.connection_id)
+                .map(|index| self.driver_dialect(index))
+                .unwrap_or_default()
+        };
         let rows_total: usize = file
             .manifest
             .objects
@@ -1677,7 +1691,20 @@ impl AppView {
                     return;
                 }
             };
+            // Session-wide foreign-key switches (MySQL, SQLite) open the script; the matching
+            // statements are appended once every object has been written.
+            if let Some(sql) = dialect.session_foreign_keys_sql(false)
+                && let Err(error) = output.write_all(format!("{sql}\n").as_bytes())
+            {
+                let _ = this.update(cx, |app, cx| {
+                    app.finish_extract(Some(error.to_string()), cx)
+                });
+                return;
+            }
 
+            // Tables whose foreign-key enforcement is switched off per table (PostgreSQL, SQL
+            // Server), re-enabled after the last object.
+            let mut fk_tables: Vec<String> = Vec::new();
             for (kind, name) in selected {
                 if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                     break;
@@ -1727,17 +1754,45 @@ impl AppView {
                     }
                 };
                 let rows = object.data.lines().count();
-                let sql = rustgrid_backup::object_sql(&object);
+                let sql = rustgrid_backup::object_sql(&object, dialect);
                 if let Err(error) = output.write_all(sql.as_bytes()) {
                     let _ = this.update(cx, |app, cx| {
                         app.finish_extract(Some(error.to_string()), cx)
                     });
                     return;
                 }
+                if kind == BackupObjectKind::Table
+                    && dialect
+                        .table_foreign_keys_sql(&dialect.quote_table_name(&name), false)
+                        .is_some()
+                {
+                    fk_tables.push(dialect.quote_table_name(&name));
+                }
                 let message = t!("backup.log.extracted", name = name.clone()).to_string();
                 let _ = this.update(cx, |app, cx| {
                     app.record_extract_result(true, message, rows, cx)
                 });
+            }
+            // Restore enforcement now that every object has been written.
+            let mut footer = String::new();
+            for table in &fk_tables {
+                if let Some(sql) = dialect.table_foreign_keys_sql(table, true) {
+                    footer.push_str(&sql);
+                    footer.push('\n');
+                }
+            }
+            if let Some(sql) = dialect.session_foreign_keys_sql(true) {
+                footer.push('\n');
+                footer.push_str(sql);
+                footer.push('\n');
+            }
+            if !footer.is_empty()
+                && let Err(error) = output.write_all(footer.as_bytes())
+            {
+                let _ = this.update(cx, |app, cx| {
+                    app.finish_extract(Some(error.to_string()), cx)
+                });
+                return;
             }
             let _ = output.flush();
             let cancelled = cancel.load(std::sync::atomic::Ordering::Relaxed);
@@ -1813,25 +1868,13 @@ impl AppView {
         cx.notify();
     }
 
-    /// Open the extracted `.sql` file with the OS default application (the 打开 button).
-    pub(super) fn open_extract_output(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(path) = self
-            .extract_dialog
-            .as_ref()
-            .and_then(|dialog| dialog.output_path.clone())
-        else {
-            return;
-        };
-        open_with_default_app(&path);
-        cx.notify();
-    }
-
     // ----- New Backup dialog ------------------------------------------------------------------
 
     pub(super) fn open_new_backup(&mut self, cx: &mut Context<'_, Self>) {
         // A new backup belongs to the database the Backup tab is scoped to; there is nothing to
-        // choose, so warn when no database is open.
-        let Some((connection_index, database_index)) = self.backup_scope(cx) else {
+        // choose, so warn when no database is open. A schema row also narrows the object list to
+        // that schema.
+        let Some((connection_index, database_index, schema)) = self.backup_scope(cx) else {
             self.error_dialog = Some(t!("backup.no_scope").to_string());
             cx.notify();
             return;
@@ -1839,7 +1882,7 @@ impl AppView {
         let database = self
             .database_name(connection_index, database_index)
             .unwrap_or_default();
-        self.open_new_backup_dialog_with(None, Some(connection_index), database, cx);
+        self.open_new_backup_dialog_with(None, Some(connection_index), database, schema, cx);
     }
 
     /// Open the New Backup dialog for a saved configuration, pre-filling its selection.
@@ -1853,7 +1896,8 @@ impl AppView {
             .position(|node| node.profile.id == config.connection_id)
             .or_else(|| self.default_query_connection(cx));
         let database = config.database.clone();
-        self.open_new_backup_dialog_with(Some(config), connection_index, database, cx);
+        let schema = (!config.schema.is_empty()).then_some(config.schema.clone());
+        self.open_new_backup_dialog_with(Some(config), connection_index, database, schema, cx);
     }
 
     fn open_new_backup_dialog_with(
@@ -1861,6 +1905,7 @@ impl AppView {
         apply: Option<SavedBackup>,
         connection_index: Option<usize>,
         database: String,
+        schema: Option<String>,
         cx: &mut Context<'_, Self>,
     ) {
         let Some(connection_index) = connection_index.or_else(|| self.default_query_connection(cx))
@@ -1887,6 +1932,7 @@ impl AppView {
         self.new_backup_dialog = Some(NewBackupDialog {
             connection_index,
             database,
+            schema,
             tab: BackupDialogTab::Objects,
             objects: Vec::new(),
             config_name,
@@ -1931,6 +1977,7 @@ impl AppView {
         }
         let connection_index = dialog.connection_index;
         let database = dialog.database.clone();
+        let schema = dialog.schema.clone();
         if database.is_empty() {
             if let Some(dialog) = self.new_backup_dialog.as_mut() {
                 dialog.error = Some(t!("backup.no_database").to_string());
@@ -1951,6 +1998,14 @@ impl AppView {
         }
         let runtime = self.runtime.clone();
         cx.spawn(async move |this, cx| {
+            // A schema row scopes the backup: only that schema's objects are listed, not every
+            // schema of a schema-qualified database.
+            let schema_prefix = schema.map(|schema| format!("{schema}."));
+            let in_schema = |name: &str| {
+                schema_prefix
+                    .as_ref()
+                    .is_none_or(|prefix| name.starts_with(prefix))
+            };
             let tables = {
                 let connection = connection.clone();
                 let database = database.clone();
@@ -1978,6 +2033,9 @@ impl AppView {
             match tables {
                 Ok(Ok(tables)) => {
                     for table in tables {
+                        if !in_schema(&table.name) {
+                            continue;
+                        }
                         let kind = if matches!(table.kind, ObjectKind::View) {
                             BackupObjectKind::View
                         } else {
@@ -1999,6 +2057,9 @@ impl AppView {
             match routines {
                 Ok(Ok(names)) => {
                     for name in names {
+                        if !in_schema(&name) {
+                            continue;
+                        }
                         objects.push(BackupObjectEntry {
                             kind: BackupObjectKind::Function,
                             name,
@@ -2016,6 +2077,9 @@ impl AppView {
             match events {
                 Ok(Ok(names)) => {
                     for name in names {
+                        if !in_schema(&name) {
+                            continue;
+                        }
                         objects.push(BackupObjectEntry {
                             kind: BackupObjectKind::Event,
                             name,
@@ -2092,12 +2156,13 @@ impl AppView {
 
     /// Save the current object selection as a reusable configuration.
     pub(super) fn save_backup_config(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        let Some((name, connection_index, database, objects)) =
+        let Some((name, connection_index, database, schema, objects)) =
             self.new_backup_dialog.as_ref().map(|dialog| {
                 (
                     dialog.config_name.trim().to_string(),
                     dialog.connection_index,
                     dialog.database.clone(),
+                    dialog.schema.clone(),
                     dialog.objects.clone(),
                 )
             })
@@ -2124,6 +2189,7 @@ impl AppView {
             name,
             connection_id,
             database,
+            schema: schema.unwrap_or_default(),
             comment: String::new(),
             tables: rustgrid_core::SavedBackupSelection::default(),
             views: rustgrid_core::SavedBackupSelection::default(),
@@ -2146,6 +2212,7 @@ impl AppView {
             existing.name == saved.name
                 && existing.connection_id == saved.connection_id
                 && existing.database == saved.database
+                && existing.schema == saved.schema
         }) {
             self.backup_configs[index] = saved;
             self.backup_selected = Some(BackupSelection::Config(index));
@@ -2267,7 +2334,9 @@ impl AppView {
             .as_ref()
             .map(|dialog| dialog.pause.clone())
             .unwrap_or_default();
-        let writer = match rustgrid_backup::BackupWriter::create(&path, &schema, &comment) {
+        let dialect = self.driver_dialect(connection_index);
+        let writer = match rustgrid_backup::BackupWriter::create(&path, &schema, dialect, &comment)
+        {
             Ok(writer) => Arc::new(Mutex::new(writer)),
             Err(error) => {
                 if let Some(dialog) = self.new_backup_dialog.as_mut() {
@@ -2699,6 +2768,9 @@ impl AppView {
         let Some(file) = self.backup_files.get(file_index) else {
             return;
         };
+        // Restore referenced tables before the tables whose foreign keys point at them, so the
+        // constraints resolve and a parent's DROP/CREATE cannot strip a child's foreign key.
+        let selected = order_restore_objects(&file.manifest, selected);
         let path = file.path.clone();
         // Planned record count comes from the archive manifest for the selected objects.
         let rows_total: usize = file
@@ -2968,8 +3040,12 @@ impl AppView {
             .map(|file| file.name.clone())
         {
             format!("{} - {}", name, t!("backup.extract_sql"))
-        } else if self.dump_dialog.is_some() {
-            t!("sqlfile.dump_title").to_string()
+        } else if let Some(dialog) = self.dump_dialog.as_ref() {
+            let target = dialog.schema.clone().unwrap_or_else(|| {
+                self.database_name(dialog.connection_index, dialog.database_index)
+                    .unwrap_or_default()
+            });
+            format!("{} - {target}", t!("sqlfile.dump_title"))
         } else if self.run_sql_dialog.is_some() {
             t!("sqlfile.run_title").to_string()
         } else {
@@ -3366,10 +3442,15 @@ impl AppView {
             .map(|dialog| dialog.database.clone())
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| "--".to_string());
+        let schema = self
+            .new_backup_dialog
+            .as_ref()
+            .and_then(|dialog| dialog.schema.clone());
         let header = backup_target_line(
             t!("backup.target").to_string(),
             connection_name,
             database_name,
+            schema,
             theme,
         );
         let tabs = div()
@@ -3693,6 +3774,7 @@ impl AppView {
             t!("backup.restore_to").to_string(),
             connection_name,
             database_name,
+            None,
             theme,
         );
         let tabs = div()
@@ -4067,16 +4149,10 @@ impl AppView {
             .flex()
             .flex_row()
             .items_center()
-            .justify_between()
+            .justify_end()
             .w_full()
             .h(px(46.0))
             .px_4()
-            .child(self.dialog_button(
-                "extract-open",
-                t!("backup.open").to_string(),
-                false,
-                cx.listener(|this, _event, _window, cx| this.open_extract_output(cx)),
-            ))
             .child(
                 div()
                     .flex()
@@ -4272,15 +4348,16 @@ fn make_backup_name_input(
     })
 }
 
-/// The dialog's target line: a small muted label plus the fixed connection and database, shown
-/// above the tabs.
+/// The dialog's target line: a small muted label plus the fixed connection, database and (when
+/// the backup is scoped to one) schema, shown above the tabs.
 pub(super) fn backup_target_line(
     label: String,
     connection_name: String,
     database_name: String,
+    schema: Option<String>,
     theme: Theme,
 ) -> impl IntoElement {
-    div()
+    let mut line = div()
         .flex()
         .flex_row()
         .items_center()
@@ -4330,7 +4407,32 @@ pub(super) fn backup_target_line(
                         .text_color(rgb(theme.text))
                         .child(database_name),
                 ),
-        )
+        );
+    if let Some(schema) = schema {
+        line = line
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(12.5))
+                    .text_color(rgb(theme.text_muted))
+                    .child("."),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .child(tree_icon("icons/folder.svg", theme.warning))
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .text_color(rgb(theme.text))
+                            .child(schema),
+                    ),
+            );
+    }
+    line
 }
 
 /// A red alert banner shown above the dialog footer while an error is set, so the reason is
@@ -4369,7 +4471,7 @@ pub(super) fn backup_error_banner(error: String, theme: Theme) -> impl IntoEleme
 }
 
 /// A muted text-link style action, used for the picker's inline 全选 / 取消全选.
-fn backup_link_button(
+pub(super) fn backup_link_button(
     id: &'static str,
     label: String,
     theme: Theme,
@@ -4441,16 +4543,17 @@ fn backup_row_with_rect(
     super::list_ops::row_with_rect(app, row, target, key)
 }
 
-/// The shared object-selection tree of the New Backup and Restore dialogs.
+/// The shared object-selection tree of the New Backup, Restore, Extract SQL and Dump SQL dialogs.
 /// Which dialog a shared object picker belongs to, so its rows toggle the right dialog's selection.
 #[derive(Clone, Copy)]
-enum ObjectPickerAction {
+pub(super) enum ObjectPickerAction {
     Backup,
     Restore,
     Extract,
+    Dump,
 }
 
-fn render_object_picker(
+pub(super) fn render_object_picker(
     objects: &[BackupObjectEntry],
     loading: bool,
     scroll: &ScrollHandle,
@@ -4497,6 +4600,7 @@ fn render_object_picker(
                         ObjectPickerAction::Backup => this.backup_toggle_kind(kind, cx),
                         ObjectPickerAction::Restore => this.restore_toggle_kind(kind, cx),
                         ObjectPickerAction::Extract => this.extract_toggle_kind(kind, cx),
+                        ObjectPickerAction::Dump => this.dump_toggle_kind(kind, cx),
                     }))
                     .child(checkbox_box(all, theme))
                     .child(tree_icon(
@@ -4537,6 +4641,7 @@ fn render_object_picker(
                             ObjectPickerAction::Backup => this.backup_toggle_object(index, cx),
                             ObjectPickerAction::Restore => this.restore_toggle_object(index, cx),
                             ObjectPickerAction::Extract => this.extract_toggle_object(index, cx),
+                            ObjectPickerAction::Dump => this.dump_toggle_object(index, cx),
                         }))
                         .child(checkbox_box(selected, theme))
                         .child(tree_icon(
@@ -4693,14 +4798,14 @@ pub(super) fn render_backup_log(
         .into_any_element()
 }
 
-/// The scrollable `[Msg]` log box: one selectable line per entry (all sharing `handle`, so a drag
-/// selects and copies across lines) plus an always-visible vertical scrollbar — gpui paints none
-/// for an `overflow_y_scroll` container.
+/// The scrollable `[Msg]` log box: one selectable text run for the whole log (a drag selects and
+/// Ctrl+C copies across lines) plus an always-visible vertical scrollbar — gpui paints none for an
+/// `overflow_y_scroll` container.
 ///
 /// Shared by the backup/restore/extract/dump logs and the Run SQL File log, so every log view
-/// behaves the same. `select_all` tints every line as selected (the app's 全选); the caller adds
-/// the right-click menu that turns it on. Returned as a `Div` so `render_backup_log` can attach
-/// those handlers to the same panel.
+/// behaves the same. `select_all` tints the block as selected (the app's 全选); the caller adds the
+/// right-click menu that turns it on. Returned as a `Div` so `render_backup_log` can attach those
+/// handlers to the same panel.
 pub(super) fn render_log_lines(
     log: &[String],
     scroll: &ScrollHandle,
@@ -4708,7 +4813,7 @@ pub(super) fn render_log_lines(
     theme: Theme,
     select_all: bool,
 ) -> Div {
-    let mut content = div().flex().flex_col().gap_0p5().p_2().w_full();
+    let mut content = div().flex().flex_col().p_2().w_full();
     if log.is_empty() {
         content = content.child(
             div()
@@ -4717,32 +4822,38 @@ pub(super) fn render_log_lines(
                 .child("--"),
         );
     } else {
-        for (index, line) in log.iter().enumerate() {
-            let mut row = div()
-                .w_full()
-                .text_size(px(12.0))
-                .text_color(rgb(theme.text));
-            if select_all {
-                // A 全选 "selection": the kit cannot program-select across the runs, so tint
-                // every line and let 复制 take the whole log.
-                row = row
-                    .bg(rgba((theme.grid_selection_bg << 8) | 0x59))
-                    .text_color(rgb(theme.grid_selection_text));
+        // One selectable run for the whole log. A `SelectableText` per line built one element,
+        // hitbox and text layout per line and registered each in the window selection layer, so a
+        // long Run SQL log became expensive to repaint; one run keeps mouse selection and copy
+        // working across every line at a single layout's cost.
+        let mut text = String::new();
+        for line in log {
+            if !text.is_empty() {
+                text.push('\n');
             }
-            content = content.child(
-                row.child(
-                    SelectableText::with_handle(
-                        ("log-line", index as u64),
-                        handle.clone(),
-                        format!("[Msg] {line}"),
-                    )
-                    .document_order(index as u64)
-                    // A visible selection tint even when the kit's global theme selection
-                    // token is not initialised for this window.
-                    .selection_color(rgba((theme.grid_selection_bg << 8) | 0x59).into()),
-                ),
-            );
+            text.push_str("[Msg] ");
+            text.push_str(line);
         }
+        let mut block = div()
+            .w_full()
+            .text_size(px(12.0))
+            .text_color(rgb(theme.text))
+            .cursor_text();
+        if select_all {
+            // A 全选 "selection": the kit cannot program-select the run, so tint the whole block
+            // and let 复制 take the entire log.
+            block = block
+                .bg(rgba((theme.grid_selection_bg << 8) | 0x59))
+                .text_color(rgb(theme.grid_selection_text));
+        }
+        content = content.child(
+            block.child(
+                SelectableText::with_handle("log-text", handle.clone(), text)
+                    // A visible selection tint even when the kit's global theme selection token is
+                    // not initialised for this window.
+                    .selection_color(rgba((theme.grid_selection_bg << 8) | 0x59).into()),
+            ),
+        );
     }
     let mut panel = div()
         .relative()
@@ -5046,6 +5157,55 @@ fn sanitize_component(value: &str) -> String {
         .collect()
 }
 
+/// Order the restore's selected objects so tables referenced by foreign keys come first.
+///
+/// New archives store each table's references; older ones are parsed from the DDL. Tables keep the
+/// archive's order when neither source says otherwise, and non-table objects stay after them.
+fn order_restore_objects(
+    manifest: &rustgrid_backup::BackupManifest,
+    selected: Vec<(BackupObjectKind, String)>,
+) -> Vec<(BackupObjectKind, String)> {
+    let table_positions: Vec<usize> = selected
+        .iter()
+        .enumerate()
+        .filter(|(_, (kind, _))| *kind == BackupObjectKind::Table)
+        .map(|(index, _)| index)
+        .collect();
+    if table_positions.len() < 2 {
+        return selected;
+    }
+    let tables: Vec<(String, Vec<String>)> = table_positions
+        .iter()
+        .map(|&index| {
+            let name = &selected[index].1;
+            let references = manifest
+                .objects
+                .iter()
+                .find(|object| object.kind == BackupObjectKind::Table && &object.name == name)
+                .map(|object| {
+                    if object.references.is_empty() {
+                        rustgrid_backup::references_of(&object.ddl)
+                    } else {
+                        object.references.clone()
+                    }
+                })
+                .unwrap_or_default();
+            (name.clone(), references)
+        })
+        .collect();
+    let order = rustgrid_core::reference_order(&tables);
+    let mut ordered: Vec<(BackupObjectKind, String)> = order
+        .into_iter()
+        .map(|position| selected[table_positions[position]].clone())
+        .collect();
+    ordered.extend(
+        selected
+            .into_iter()
+            .filter(|(kind, _)| *kind != BackupObjectKind::Table),
+    );
+    ordered
+}
+
 /// A path for a backup named `name` under `dir` that does not collide with an existing file.
 /// Mirrors Explorer's "keep both" behaviour: `<name>.rgbak`, `<name> - 副本.rgbak`,
 /// `<name> - 副本 (2).rgbak`, ... (`suffix` is the localized "Copy" word).
@@ -5095,30 +5255,6 @@ pub(super) fn reveal_in_file_manager(path: &std::path::Path) {
     }
 }
 
-/// Open `path` with the OS default application (the Extract window's 打开 button).
-pub(super) fn open_with_default_app(path: &std::path::Path) {
-    #[cfg(target_os = "windows")]
-    {
-        // `start` is a cmd builtin; the empty "" fills its window-title slot.
-        let _ = std::process::Command::new("cmd")
-            .args(["/C", "start", ""])
-            .arg(path)
-            .spawn();
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open").arg(path).spawn();
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        let _ = std::process::Command::new("xdg-open").arg(path).spawn();
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
-    {
-        let _ = path;
-    }
-}
-
 #[cfg(test)]
 mod log_selection_tests {
     use super::*;
@@ -5131,31 +5267,37 @@ mod log_selection_tests {
     struct LogHarness {
         handle: TextSelectionHandle,
         scroll: ScrollHandle,
+        focus: gpui::FocusHandle,
     }
 
     impl Render for LogHarness {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-            div().size_full().child(render_log_lines(
-                &["hello world".to_string()],
-                &self.scroll,
-                &self.handle,
-                Theme::light(),
-                false,
-            ))
+            div()
+                .size_full()
+                .track_focus(&self.focus)
+                .child(render_log_lines(
+                    &["hello world".to_string(), "second line".to_string()],
+                    &self.scroll,
+                    &self.handle,
+                    Theme::light(),
+                    false,
+                ))
         }
     }
 
     /// Mirrors the Backup/Run-SQL window: a `gpui_kit::open_window` window (whose root is the base
-    /// `Root`, carrying the text-selection layer). A drag over the log must select its text.
+    /// `Root`, carrying the text-selection layer). A drag over the log must select its text, and
+    /// Ctrl+C must copy the selection.
     #[gpui_kit::test]
-    fn log_lines_can_be_selected(cx: &mut TestAppContext) {
+    fn log_lines_can_be_selected_and_copied(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
-        let window_handle = cx.update(|cx| {
+        let (window_handle, view) = cx.update(|cx| {
             let view = cx.new(|cx| LogHarness {
                 handle: TextSelectionHandle::new(String::new(), cx),
                 scroll: ScrollHandle::new(),
+                focus: cx.focus_handle(),
             });
-            gpui_kit::open_window(
+            let handle = gpui_kit::open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(Bounds {
                         origin: Point::default(),
@@ -5164,13 +5306,16 @@ mod log_selection_tests {
                     ..Default::default()
                 },
                 cx,
-                |_, _| view,
+                |_, _| view.clone(),
             )
             .expect("open test window")
-            .0
+            .0;
+            (handle, view)
         });
         let mut cx = VisualTestContext::from_window(window_handle, cx);
         cx.update(|window, cx| {
+            let focus = view.read(cx).focus.clone();
+            window.focus(&focus, cx);
             let _ = window.draw(cx);
         });
         cx.simulate_mouse_down(
@@ -5195,5 +5340,13 @@ mod log_selection_tests {
                 "log text should be selectable"
             );
         });
+        cx.simulate_keystrokes("ctrl-c");
+        let copied = cx
+            .update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
+            .unwrap_or_default();
+        assert!(
+            copied.contains("hello world"),
+            "Ctrl+C should copy the selected log text, copied {copied:?}"
+        );
     }
 }

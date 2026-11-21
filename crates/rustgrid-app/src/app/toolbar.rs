@@ -417,18 +417,21 @@ impl AppView {
                 .map(|index| self.driver_supports(index, DriverCapability::Routines))
                 .unwrap_or(false),
             MainTab::Backups => {
-                let index = self.backup_scope(cx).map(|(index, _)| index).or_else(|| {
-                    let selected = self.tree_pane.read(cx).selected.clone()?;
-                    parse_tree_scope(&selected)
-                        .map(|(index, _, _)| index)
-                        .or_else(|| parse_scope_id(&selected).map(|(index, _)| index))
-                        .or_else(|| {
-                            selected
-                                .strip_prefix("conn-")
-                                .and_then(|rest| rest.split('-').next())
-                                .and_then(|value| value.parse().ok())
-                        })
-                });
+                let index = self
+                    .backup_scope(cx)
+                    .map(|(index, _, _)| index)
+                    .or_else(|| {
+                        let selected = self.tree_pane.read(cx).selected.clone()?;
+                        parse_tree_scope(&selected)
+                            .map(|(index, _, _)| index)
+                            .or_else(|| parse_scope_id(&selected).map(|(index, _)| index))
+                            .or_else(|| {
+                                selected
+                                    .strip_prefix("conn-")
+                                    .and_then(|rest| rest.split('-').next())
+                                    .and_then(|value| value.parse().ok())
+                            })
+                    });
                 index.is_none_or(|index| self.driver_supports_backup(index))
             }
             _ => true,

@@ -23,6 +23,23 @@ pub(crate) async fn backup_object_metadata(
         BackupObjectKind::Table => {
             let schema = connection.table_schema(database, name).await?;
             let ddl = connection.table_schema_sql(database, name, None, &schema);
+            let (schema_name, bare) = connection.resolve_object(database, name).await?;
+            let references = schema
+                .foreign_keys
+                .iter()
+                .map(|foreign_key| {
+                    let referenced_schema = if foreign_key.referenced_schema.trim().is_empty() {
+                        schema_name.as_str()
+                    } else {
+                        foreign_key.referenced_schema.trim()
+                    };
+                    if referenced_schema.is_empty() {
+                        foreign_key.referenced_table.clone()
+                    } else {
+                        format!("{referenced_schema}.{}", foreign_key.referenced_table)
+                    }
+                })
+                .collect();
             let fields = connection
                 .columns(database, name)
                 .await?
@@ -38,19 +55,32 @@ pub(crate) async fn backup_object_metadata(
                 name: name.to_string(),
                 kind,
                 ddl,
+                drop_ddl: format!(
+                    "DROP TABLE IF EXISTS {} CASCADE",
+                    qualify(&schema_name, &bare)
+                ),
+                references,
                 fields,
                 trigger_ddl,
                 rows: Vec::new(),
             })
         }
-        BackupObjectKind::View => Ok(ObjectDump {
-            name: name.to_string(),
-            kind,
-            ddl: connection.view_details(database, name).await?.definition,
-            fields: Vec::new(),
-            trigger_ddl: Vec::new(),
-            rows: Vec::new(),
-        }),
+        BackupObjectKind::View => {
+            let (schema_name, bare) = connection.resolve_object(database, name).await?;
+            Ok(ObjectDump {
+                name: name.to_string(),
+                kind,
+                ddl: connection.view_details(database, name).await?.definition,
+                drop_ddl: format!(
+                    "DROP VIEW IF EXISTS {} CASCADE",
+                    qualify(&schema_name, &bare)
+                ),
+                references: Vec::new(),
+                fields: Vec::new(),
+                trigger_ddl: Vec::new(),
+                rows: Vec::new(),
+            })
+        }
         BackupObjectKind::Function => {
             let definition = match connection
                 .routine_details(database, RoutineKind::Procedure, name)
@@ -64,10 +94,19 @@ pub(crate) async fn backup_object_metadata(
                         .definition
                 }
             };
+            let (schema_name, bare) = connection.resolve_object(database, name).await?;
+            let keyword = if definition.to_ascii_uppercase().contains(" PROCEDURE ") {
+                "PROCEDURE"
+            } else {
+                "FUNCTION"
+            };
+            let identity = routine_drop_identity(&schema_name, &bare, &definition);
             Ok(ObjectDump {
                 name: name.to_string(),
                 kind,
                 ddl: definition,
+                drop_ddl: format!("DROP {keyword} IF EXISTS {identity}"),
+                references: Vec::new(),
                 fields: Vec::new(),
                 trigger_ddl: Vec::new(),
                 rows: Vec::new(),
@@ -77,6 +116,8 @@ pub(crate) async fn backup_object_metadata(
             name: name.to_string(),
             kind,
             ddl: String::new(),
+            drop_ddl: String::new(),
+            references: Vec::new(),
             fields: Vec::new(),
             trigger_ddl: Vec::new(),
             rows: Vec::new(),
@@ -148,9 +189,20 @@ pub(crate) async fn restore_object(
                 )));
             }
             connection
-                .run_text(Some(database), &format!("DROP TABLE IF EXISTS {qualified}"))
+                .run_text(
+                    Some(database),
+                    &format!("DROP TABLE IF EXISTS {qualified} CASCADE"),
+                )
                 .await?;
             connection.run_text(Some(database), &ddl).await?;
+            // Switch the table's triggers (including the foreign-key check triggers) off while
+            // its rows load, so a table referenced later in the restore can still receive data.
+            connection
+                .run_text(
+                    Some(database),
+                    &format!("ALTER TABLE {qualified} DISABLE TRIGGER ALL"),
+                )
+                .await?;
 
             let sequences = identity_columns(connection, database, &schema, &bare).await?;
             if !object.fields.is_empty() && !object.rows.is_empty() {
@@ -190,6 +242,13 @@ pub(crate) async fn restore_object(
                 }
             }
 
+            connection
+                .run_text(
+                    Some(database),
+                    &format!("ALTER TABLE {qualified} ENABLE TRIGGER ALL"),
+                )
+                .await?;
+
             for trigger in &object.trigger_ddl {
                 let trigger = trigger.trim().trim_end_matches(';').trim();
                 if !trigger.is_empty() {
@@ -201,7 +260,10 @@ pub(crate) async fn restore_object(
         }
         BackupObjectKind::View => {
             connection
-                .run_text(Some(database), &format!("DROP VIEW IF EXISTS {qualified}"))
+                .run_text(
+                    Some(database),
+                    &format!("DROP VIEW IF EXISTS {qualified} CASCADE"),
+                )
                 .await?;
             if !ddl.is_empty() {
                 connection.run_text(Some(database), &ddl).await?;
@@ -228,6 +290,16 @@ pub(crate) async fn restore_object(
         BackupObjectKind::Event => {}
     }
     Ok(())
+}
+
+/// The `<schema>.<name>(args)` identity for dropping a routine. PostgreSQL routine names already
+/// carry their argument list (`public.get_user(integer)`), so their brackets are kept as-is rather
+/// than re-derived from the DDL (which would add them twice).
+fn routine_drop_identity(schema: &str, bare: &str, ddl: &str) -> String {
+    if let Some((base, args)) = bare.split_once('(') {
+        return format!("{}({}", qualify(schema, base.trim_end()), args);
+    }
+    routine_identity(schema, bare, ddl)
 }
 
 /// A `schema.name(args)` identity derived from a routine's DDL, for a best-effort `DROP`.

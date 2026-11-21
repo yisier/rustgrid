@@ -1,6 +1,6 @@
-//! *Dump SQL File*: right-click a database (or a table/view) and write a portable `.sql` script
-//! for the whole database — its objects' `CREATE` DDL, its table data, or both — or for just the
-//! one table/view.
+//! *Dump SQL File*: right-click a database, schema, table or view to open an object-selection
+//! dialog — the same shape as the backup's *Extract SQL* window — and write a portable `.sql`
+//! script for the chosen objects' `CREATE` DDL, their table data, or both.
 //!
 //! The dump reuses the engine-agnostic backup primitives ([`Connection::backup_object_metadata`]
 //! and [`Connection::stream_table_rows`]) so it works for every driver without engine-specific
@@ -8,18 +8,20 @@
 //! taken from the driver's [`rustgrid_core::DriverDialect`].
 
 use std::io::Write;
-use std::path::PathBuf;
 use std::sync::Mutex;
 
-use super::backup::{backup_target_line, format_hms, log_stats, now_timestamp, render_backup_log};
+use super::backup::{
+    ObjectPickerAction, backup_link_button, format_hms, log_stats, now_timestamp,
+    render_backup_log, render_object_picker,
+};
 use super::*;
 
 /// Rows per multi-row `INSERT` statement in a dump.
 const DUMP_BATCH_ROWS: usize = 500;
 
 impl AppView {
-    /// The database context menu's 转储 SQL 文件 entry: pick the destination file through the
-    /// system save dialog, then open the dump window and start writing.
+    /// The database context menu's 转储 SQL 文件 entry: open the object-selection dialog for the
+    /// whole database.
     pub(super) fn request_dump(
         &mut self,
         connection_index: usize,
@@ -27,10 +29,29 @@ impl AppView {
         mode: DumpMode,
         cx: &mut Context<'_, Self>,
     ) {
-        self.request_dump_target(connection_index, database_index, None, mode, cx);
+        self.open_dump_dialog(connection_index, database_index, None, None, mode, cx);
     }
 
-    /// The table/view context menu's 转储 SQL 文件 entry: dump just the right-clicked object.
+    /// The schema context menu's 转储 SQL 文件 entry: open the dialog scoped to that schema.
+    pub(super) fn request_dump_schema(
+        &mut self,
+        connection_index: usize,
+        database_index: usize,
+        schema: String,
+        mode: DumpMode,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.open_dump_dialog(
+            connection_index,
+            database_index,
+            Some(schema),
+            None,
+            mode,
+            cx,
+        );
+    }
+
+    /// The table/view context menu's 转储 SQL 文件 entry: open the dialog with that object.
     pub(super) fn request_dump_table(
         &mut self,
         connection_index: usize,
@@ -45,21 +66,24 @@ impl AppView {
         } else {
             BackupObjectKind::Table
         };
-        self.request_dump_target(
+        self.open_dump_dialog(
             connection_index,
             database_index,
+            None,
             Some((kind, name)),
             mode,
             cx,
         );
     }
 
-    /// Pick the output file and open the dump window. `object` narrows the dump to one table/view;
-    /// `None` dumps the whole database.
-    fn request_dump_target(
+    /// Open the dump window on its 对象选择 page, mirroring the backup's Extract SQL dialog: the
+    /// objects are listed from the live server (or the one table/view the menu named), the user
+    /// ticks what to write, and the output file is chosen when the dump starts.
+    fn open_dump_dialog(
         &mut self,
         connection_index: usize,
         database_index: usize,
+        schema: Option<String>,
         object: Option<(BackupObjectKind, String)>,
         mode: DumpMode,
         cx: &mut Context<'_, Self>,
@@ -67,14 +91,130 @@ impl AppView {
         let Some(database) = self.database_name(connection_index, database_index) else {
             return;
         };
-        if self.connection_arc(connection_index).is_none() {
+        let Some(connection) = self.connection_arc(connection_index) else {
             self.error_dialog = Some(t!("sqlfile.not_connected").to_string());
             cx.notify();
             return;
-        }
-        let default_name = match &object {
-            Some((_, name)) => format!("{name}.sql"),
-            None => format!("{database}.sql"),
+        };
+
+        // The backup window hosts one operation at a time, so replace whatever it was showing.
+        self.new_backup_dialog = None;
+        self.restore_dialog = None;
+        self.extract_dialog = None;
+        self.run_sql_dialog = None;
+        self.dump_dialog = Some(DumpSqlDialog {
+            connection_index,
+            database_index,
+            schema: schema.clone(),
+            object: object.clone(),
+            mode,
+            objects: Vec::new(),
+            loading: true,
+            tab: BackupDialogTab::Objects,
+            output_path: None,
+            running: false,
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            log: Vec::new(),
+            log_scroll: ScrollHandle::new(),
+            total: 0,
+            success: 0,
+            failed: 0,
+            rows_total: 0,
+            rows_done: 0,
+            started: None,
+            elapsed: None,
+            error: None,
+        });
+        // The title names the database (and schema) the dump is scoped to.
+        let target = schema.clone().unwrap_or_else(|| database.clone());
+        self.open_backup_window(format!("{} - {target}", t!("sqlfile.dump_title")), cx);
+
+        let runtime = self.runtime.clone();
+        cx.spawn(async move |this, cx| {
+            let objects = match object {
+                Some(target) => Ok(vec![target]),
+                None => {
+                    let schema = schema.clone();
+                    match runtime
+                        .spawn(async move {
+                            let mut objects: Vec<(BackupObjectKind, String)> = Vec::new();
+                            for table in connection.list_tables(&database).await? {
+                                let kind = match table.kind {
+                                    rustgrid_core::ObjectKind::View => BackupObjectKind::View,
+                                    rustgrid_core::ObjectKind::Table => BackupObjectKind::Table,
+                                };
+                                objects.push((kind, table.name));
+                            }
+                            if let Ok(routines) = connection.list_routines(&database).await {
+                                for name in routines {
+                                    objects.push((BackupObjectKind::Function, name));
+                                }
+                            }
+                            if let Ok(events) = connection.list_events(&database).await {
+                                for name in events {
+                                    objects.push((BackupObjectKind::Event, name));
+                                }
+                            }
+                            // A schema menu's dump keeps only that schema's objects; their names
+                            // are schema-qualified (PostgreSQL, SQL Server, Oracle).
+                            if let Some(schema) = schema {
+                                let prefix = format!("{schema}.");
+                                objects.retain(|(_, name)| name.starts_with(&prefix));
+                            }
+                            // Tables before views before routines, so restoring the script in
+                            // order satisfies the dependencies.
+                            objects.sort_by_key(|(kind, _)| match kind {
+                                BackupObjectKind::Table => 0,
+                                BackupObjectKind::View => 1,
+                                BackupObjectKind::Function => 2,
+                                BackupObjectKind::Event => 3,
+                            });
+                            Ok::<_, Error>(objects)
+                        })
+                        .await
+                    {
+                        Ok(result) => result,
+                        Err(error) => Err(Error::other(error)),
+                    }
+                }
+            };
+            let _ = this.update(cx, |app, cx| {
+                if let Some(dialog) = app.dump_dialog.as_mut() {
+                    dialog.loading = false;
+                    match objects {
+                        Ok(objects) => {
+                            dialog.objects = objects
+                                .into_iter()
+                                .map(|(kind, name)| BackupObjectEntry {
+                                    kind,
+                                    name,
+                                    selected: true,
+                                })
+                                .collect();
+                        }
+                        Err(error) => dialog.error = Some(error.to_string()),
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Pick the dump's destination `.sql` file through the system save dialog, then start the run.
+    fn choose_dump_output(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(dialog) = self.dump_dialog.as_ref() else {
+            return;
+        };
+        let Some(database) = self.database_name(dialog.connection_index, dialog.database_index)
+        else {
+            return;
+        };
+        let default_name = match (&dialog.object, &dialog.schema) {
+            (Some((_, name)), _) => format!("{name}.sql"),
+            (None, Some(schema)) => format!("{schema}.sql"),
+            (None, None) => format!("{database}.sql"),
         };
         let title = t!("sqlfile.dump_title").to_string();
         let default_dir = super::export::default_export_dir();
@@ -92,63 +232,44 @@ impl AppView {
             };
             let path = handle.path().to_path_buf();
             let _ = this.update(cx, |app, cx| {
-                app.open_dump_window(connection_index, database_index, object, mode, path, cx);
+                if let Some(dialog) = app.dump_dialog.as_mut() {
+                    dialog.output_path = Some(path);
+                }
+                app.run_dump(cx);
             });
         })
         .detach();
     }
 
-    /// Open the dump window with the chosen output file and start the dump.
-    fn open_dump_window(
-        &mut self,
-        connection_index: usize,
-        database_index: usize,
-        object: Option<(BackupObjectKind, String)>,
-        mode: DumpMode,
-        output_path: PathBuf,
-        cx: &mut Context<'_, Self>,
-    ) {
-        // The backup window hosts one operation at a time, so replace whatever it was showing.
-        self.new_backup_dialog = None;
-        self.restore_dialog = None;
-        self.extract_dialog = None;
-        self.run_sql_dialog = None;
-        self.dump_dialog = Some(DumpSqlDialog {
-            connection_index,
-            database_index,
-            object,
-            mode,
-            output_path: Some(output_path),
-            running: false,
-            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            log: Vec::new(),
-            log_scroll: ScrollHandle::new(),
-            total: 0,
-            success: 0,
-            failed: 0,
-            rows_total: 0,
-            rows_done: 0,
-            started: None,
-            elapsed: None,
-            error: None,
-        });
-        self.open_backup_window(t!("sqlfile.dump_title").to_string(), cx);
-        self.run_dump(cx);
-        cx.notify();
-    }
-
-    /// Run the dump: enumerate the database's objects (or use the one table/view the menu named),
-    /// then write each one's DDL and/or data to the chosen file while updating the log and progress
-    /// live.
+    /// Run the dump: choose the output file when it has not been picked yet, then write every
+    /// selected object's DDL and/or data while updating the log and progress live.
     pub(super) fn run_dump(&mut self, cx: &mut Context<'_, Self>) {
         let Some(dialog) = self.dump_dialog.as_ref() else {
             return;
         };
-        if dialog.running {
+        if dialog.running || dialog.loading {
+            return;
+        }
+        let selected: Vec<(BackupObjectKind, String)> = dialog
+            .objects
+            .iter()
+            .filter(|entry| entry.selected)
+            .map(|entry| (entry.kind, entry.name.clone()))
+            .collect();
+        if selected.is_empty() {
+            if let Some(dialog) = self.dump_dialog.as_mut() {
+                dialog.error = Some(t!("backup.no_objects").to_string());
+            }
+            cx.notify();
+            return;
+        }
+        if dialog.output_path.is_none() {
+            self.choose_dump_output(cx);
             return;
         }
         let connection_index = dialog.connection_index;
         let database_index = dialog.database_index;
+        let schema = dialog.schema.clone();
         let object = dialog.object.clone();
         let mode = dialog.mode;
         let Some(path) = dialog.output_path.clone() else {
@@ -176,6 +297,7 @@ impl AppView {
 
         if let Some(dialog) = self.dump_dialog.as_mut() {
             dialog.running = true;
+            dialog.tab = BackupDialogTab::Log;
             dialog
                 .cancel
                 .store(false, std::sync::atomic::Ordering::Relaxed);
@@ -205,18 +327,20 @@ impl AppView {
             }
         };
         let mut header = format!(
-            "-- RustGrid SQL dump\n-- Server: {connection_name}\n-- Database: {database}\n{}-- Date: {}\n\n",
-            match &object {
-                Some((_, name)) => format!("-- Object: {name}\n"),
-                None => String::new(),
-            },
-            now_timestamp()
+            "-- RustGrid SQL dump\n-- Server: {connection_name}\n-- Database: {database}\n"
         );
-        // MySQL/MariaDB dumps disable foreign-key checks while the data loads (like mysqldump and
-        // Navicat), so tables can be inserted in any order without 1452 errors.
-        let foreign_keys = dialect == rustgrid_core::DriverDialect::Mysql;
-        if foreign_keys {
-            header.push_str("SET FOREIGN_KEY_CHECKS=0;\n\n");
+        if let Some(schema) = &schema {
+            header.push_str(&format!("-- Schema: {schema}\n"));
+        }
+        if let Some((_, name)) = &object {
+            header.push_str(&format!("-- Object: {name}\n"));
+        }
+        header.push_str(&format!("-- Date: {}\n\n", now_timestamp()));
+        // The script can load table data in any order and replace existing objects, so
+        // foreign-key enforcement is switched off for its duration and back on at the end.
+        if let Some(sql) = dialect.session_foreign_keys_sql(false) {
+            header.push_str(sql);
+            header.push_str("\n\n");
         }
         if let Err(error) = file.write_all(header.as_bytes()) {
             if let Some(dialog) = self.dump_dialog.as_mut() {
@@ -235,68 +359,11 @@ impl AppView {
             .unwrap_or_default();
 
         cx.spawn(async move |this, cx| {
-            // A table/view menu dumps just that object; the database menu enumerates every table
-            // and view plus the stored routines and events.
-            let objects = match object {
-                Some(target) => vec![target],
-                None => {
-                    let listing = {
-                        let connection = connection.clone();
-                        let database = database.clone();
-                        runtime
-                            .spawn(async move {
-                                let mut objects: Vec<(BackupObjectKind, String)> = Vec::new();
-                                for table in connection.list_tables(&database).await? {
-                                    let kind = match table.kind {
-                                        rustgrid_core::ObjectKind::View => BackupObjectKind::View,
-                                        rustgrid_core::ObjectKind::Table => BackupObjectKind::Table,
-                                    };
-                                    objects.push((kind, table.name));
-                                }
-                                if let Ok(routines) = connection.list_routines(&database).await {
-                                    for name in routines {
-                                        objects.push((BackupObjectKind::Function, name));
-                                    }
-                                }
-                                if let Ok(events) = connection.list_events(&database).await {
-                                    for name in events {
-                                        objects.push((BackupObjectKind::Event, name));
-                                    }
-                                }
-                                // Tables before views before routines: `SHOW CREATE VIEW` references
-                                // its base tables, and routines may reference both, so they must
-                                // already exist.
-                                objects.sort_by_key(|(kind, _)| match kind {
-                                    BackupObjectKind::Table => 0,
-                                    BackupObjectKind::View => 1,
-                                    BackupObjectKind::Function => 2,
-                                    BackupObjectKind::Event => 3,
-                                });
-                                Ok::<_, Error>(objects)
-                            })
-                            .await
-                    };
-                    match listing {
-                        Ok(Ok(objects)) => objects,
-                        Ok(Err(error)) => {
-                            let _ = this
-                                .update(cx, |app, cx| app.finish_dump(Some(error.to_string()), cx));
-                            return;
-                        }
-                        Err(error) => {
-                            let _ = this
-                                .update(cx, |app, cx| app.finish_dump(Some(error.to_string()), cx));
-                            return;
-                        }
-                    }
-                }
-            };
-
             // A data-only dump has nothing to write for views/routines/events.
             let objects: Vec<(BackupObjectKind, String)> = if mode.includes_structure() {
-                objects
+                selected
             } else {
-                objects
+                selected
                     .into_iter()
                     .filter(|(kind, _)| *kind == BackupObjectKind::Table)
                     .collect()
@@ -315,11 +382,16 @@ impl AppView {
             });
 
             let mut fatal: Option<String> = None;
+
+            // Fetch every object's metadata before writing: a table's foreign keys reference other
+            // tables, and a fresh import must create and load referenced tables first.
+            let mut loaded: Vec<(BackupObjectKind, String, Option<rustgrid_core::ObjectDump>)> =
+                Vec::with_capacity(count);
             for (kind, name) in objects {
                 if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                     break;
                 }
-                let meta = {
+                let fetched = {
                     let connection = connection.clone();
                     let database = database.clone();
                     let call_name = name.clone();
@@ -331,31 +403,82 @@ impl AppView {
                         })
                         .await
                 };
-                let meta = match meta {
-                    Ok(Ok(meta)) => meta,
+                match fetched {
+                    Ok(Ok(meta)) => loaded.push((kind, name, Some(meta))),
                     Ok(Err(error)) => {
+                        loaded.push((kind, name.clone(), None));
                         let message = t!(
                             "sqlfile.dump_object_failed",
-                            name = name.clone(),
+                            name = name,
                             error = error.to_string()
                         )
                         .to_string();
                         let _ = this
                             .update(cx, |app, cx| app.record_dump_result(false, message, 0, cx));
-                        continue;
                     }
                     Err(error) => {
+                        loaded.push((kind, name.clone(), None));
                         let message = t!(
                             "sqlfile.dump_object_failed",
-                            name = name.clone(),
+                            name = name,
                             error = error.to_string()
                         )
                         .to_string();
                         let _ = this
                             .update(cx, |app, cx| app.record_dump_result(false, message, 0, cx));
-                        continue;
                     }
+                }
+            }
+
+            // Parent tables first (foreign keys resolve), then every other object in its original
+            // order: views after the tables they select from, routines after both.
+            let table_positions: Vec<usize> = loaded
+                .iter()
+                .enumerate()
+                .filter(|(_, (kind, _, meta))| *kind == BackupObjectKind::Table && meta.is_some())
+                .map(|(index, _)| index)
+                .collect();
+            let tables: Vec<(String, Vec<String>)> = table_positions
+                .iter()
+                .map(|&index| {
+                    (
+                        loaded[index].1.clone(),
+                        loaded[index]
+                            .2
+                            .as_ref()
+                            .map(|meta| meta.references.clone())
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect();
+            let mut order: Vec<usize> = rustgrid_core::reference_order(&tables)
+                .into_iter()
+                .map(|position| table_positions[position])
+                .collect();
+            let mut placed = vec![false; loaded.len()];
+            for &index in &order {
+                placed[index] = true;
+            }
+            for index in 0..loaded.len() {
+                if !placed[index] {
+                    order.push(index);
+                }
+            }
+
+            let mut items: Vec<Option<(BackupObjectKind, String, rustgrid_core::ObjectDump)>> =
+                loaded
+                    .into_iter()
+                    .map(|(kind, name, meta)| meta.map(|meta| (kind, name, meta)))
+                    .collect();
+            // Tables whose foreign-key enforcement this script switched off, re-enabled at the end.
+            let mut fk_tables: Vec<String> = Vec::new();
+            for index in order {
+                let Some((kind, name, meta)) = items[index].take() else {
+                    continue;
                 };
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
 
                 // Structure: the object's DDL plus any trigger statements.
                 if mode.includes_structure()
@@ -363,6 +486,19 @@ impl AppView {
                 {
                     fatal = Some(error.to_string());
                     break;
+                }
+
+                // Per-table engines (PostgreSQL, SQL Server) switch foreign-key checks off right
+                // after the table exists, so its rows can load before the referenced tables'.
+                if mode.includes_data() && kind == BackupObjectKind::Table {
+                    let quoted = quote_object_name(dialect, schema_qualified, &name);
+                    if let Some(sql) = dialect.table_foreign_keys_sql(&quoted, false) {
+                        if let Err(error) = write_sql(&file, &sql) {
+                            fatal = Some(error.to_string());
+                            break;
+                        }
+                        fk_tables.push(quoted);
+                    }
                 }
 
                 // Data: stream the table's rows into batched INSERT statements.
@@ -426,11 +562,22 @@ impl AppView {
                 });
             }
 
-            if foreign_keys {
-                let _ = file
-                    .lock()
-                    .map(|mut file| file.write_all(b"\nSET FOREIGN_KEY_CHECKS=1;\n"));
+            // Restore foreign-key enforcement now that every row is in.
+            let mut footer = String::new();
+            for table in &fk_tables {
+                if let Some(sql) = dialect.table_foreign_keys_sql(table, true) {
+                    footer.push_str(&sql);
+                    footer.push('\n');
+                }
             }
+            if let Some(sql) = dialect.session_foreign_keys_sql(true) {
+                footer.push('\n');
+                footer.push_str(sql);
+                footer.push('\n');
+            }
+            let _ = file
+                .lock()
+                .map(|mut file| file.write_all(footer.as_bytes()));
             let _ = file.lock().map(|file| file.sync_all());
             let cancelled = cancel.load(std::sync::atomic::Ordering::Relaxed);
             let _ = this.update(cx, |app, cx| {
@@ -515,25 +662,14 @@ impl AppView {
         cx.notify();
     }
 
-    /// Open the dumped `.sql` file with the OS default application (the 打开 button).
-    pub(super) fn open_dump_output(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(path) = self
-            .dump_dialog
-            .as_ref()
-            .and_then(|dialog| dialog.output_path.clone())
-        else {
-            return;
-        };
-        super::backup::open_with_default_app(&path);
-        cx.notify();
-    }
-
-    /// The window body of the open dump dialog.
+    /// The window body of the open dump dialog: the destination line, the 对象选择 / 信息日志 tabs
+    /// and the selected page — the same shape as the backup's Extract SQL dialog.
     pub(super) fn dump_dialog_body(&mut self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
         let Some(dialog) = self.dump_dialog.as_ref() else {
             return div().into_any_element();
         };
+        let active = dialog.tab;
         let connection_name = self
             .connections
             .get(dialog.connection_index)
@@ -547,129 +683,333 @@ impl AppView {
             DumpMode::Structure => t!("database.dump_structure").to_string(),
             DumpMode::Data => t!("database.dump_data").to_string(),
         };
-        let object = dialog.object.as_ref().map(|(_, name)| name.clone());
+        let schema = dialog.schema.clone();
         let output = dialog
             .output_path
             .as_ref()
             .map(|path| path.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let stats = log_stats(
-            dialog.total,
-            dialog.success,
-            dialog.failed,
-            dialog.rows_total,
-            dialog.rows_done,
-            dialog.running,
-            dialog.started,
-            dialog.elapsed,
-        );
-        let log = dialog.log.clone();
-        let scroll = dialog.log_scroll.clone();
+            .unwrap_or_else(|| t!("backup.extract_no_output").to_string());
 
-        let mut body = div()
+        // The target line names the exact database (and schema) being dumped, so the popup is
+        // unambiguous about which library its object list belongs to.
+        let mut target = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_4()
+            .w_full()
+            .px_4()
+            .pb_2();
+        target = target
+            .child(dump_scope_field(
+                t!("sqlfile.server").to_string(),
+                connection_name,
+                theme,
+            ))
+            .child(dump_scope_field(
+                t!("sqlfile.database").to_string(),
+                database_name,
+                theme,
+            ));
+        if let Some(schema) = &schema {
+            target = target.child(dump_scope_field(
+                t!("sqlfile.schema").to_string(),
+                schema.clone(),
+                theme,
+            ));
+        }
+        target = target.child(dump_scope_field(
+            t!("sqlfile.mode").to_string(),
+            mode,
+            theme,
+        ));
+
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .w_full()
+            .px_4()
+            .pt_3()
+            .pb_2()
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(t!("backup.dump_to").to_string()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_size(px(12.5))
+                    .text_color(rgb(theme.text))
+                    .child(output),
+            );
+        let tabs = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_4()
+            .w_full()
+            .px_4()
+            .border_b_1()
+            .border_color(rgb(theme.border))
+            .child(self.backup_tab_button(
+                "dump-tab-objects",
+                t!("backup.tab.objects").to_string(),
+                active == BackupDialogTab::Objects,
+                cx.listener(|this, _event, _window, cx| {
+                    this.set_dump_tab(BackupDialogTab::Objects, cx)
+                }),
+            ))
+            .child(self.backup_tab_button(
+                "dump-tab-log",
+                t!("backup.tab.log").to_string(),
+                active == BackupDialogTab::Log,
+                cx.listener(|this, _event, _window, cx| {
+                    this.set_dump_tab(BackupDialogTab::Log, cx)
+                }),
+            ));
+
+        let content = match active {
+            BackupDialogTab::Objects => self.render_dump_picker_body(cx),
+            BackupDialogTab::Log => {
+                let scroll = self
+                    .dump_dialog
+                    .as_ref()
+                    .map(|dialog| dialog.log_scroll.clone())
+                    .unwrap_or_default();
+                let stats = self
+                    .dump_dialog
+                    .as_ref()
+                    .map(|dialog| {
+                        log_stats(
+                            dialog.total,
+                            dialog.success,
+                            dialog.failed,
+                            dialog.rows_total,
+                            dialog.rows_done,
+                            dialog.running,
+                            dialog.started,
+                            dialog.elapsed,
+                        )
+                    })
+                    .unwrap_or_else(|| log_stats(0, 0, 0, 0, 0, false, None, None));
+                render_backup_log(
+                    self.dump_dialog
+                        .as_ref()
+                        .map(|dialog| dialog.log.as_slice())
+                        .unwrap_or(&[]),
+                    &scroll,
+                    &self.log_handle,
+                    &stats,
+                    theme,
+                    self.log_select_all,
+                    cx,
+                )
+            }
+        };
+
+        div()
             .flex()
             .flex_col()
             .flex_1()
             .min_h(px(0.0))
-            .child(backup_target_line(
-                t!("backup.target").to_string(),
-                connection_name,
-                database_name,
-                theme,
-            ));
-        if let Some(object) = object {
-            body = body.child(field_line(t!("sqlfile.object").to_string(), object, theme));
-        }
-        body.child(field_line(t!("sqlfile.mode").to_string(), mode, theme))
-            .child(field_line(
-                t!("sqlfile.file").to_string(),
-                if output.is_empty() {
-                    t!("backup.extract_no_output").to_string()
-                } else {
-                    output
-                },
-                theme,
-            ))
-            .child(render_backup_log(
-                &log,
-                &scroll,
-                &self.log_handle,
-                &stats,
-                theme,
-                self.log_select_all,
-                cx,
-            ))
+            .w_full()
+            .child(header)
+            .child(target)
+            .child(tabs)
+            .child(content)
             .into_any_element()
     }
 
-    /// The footer of the open dump dialog: 打开 / 停止 / 关闭.
+    /// The 对象选择 page of the dump dialog (the shared backup object picker).
+    fn render_dump_picker_body(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let Some(dialog) = self.dump_dialog.as_ref() else {
+            return div().into_any_element();
+        };
+        let total = dialog.objects.len();
+        let selected = dialog.objects.iter().filter(|entry| entry.selected).count();
+        let summary = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .w_full()
+            .px_4()
+            .pt_2()
+            .pb_1()
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(
+                        t!("backup.selected_count", selected = selected, total = total).to_string(),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .child(backup_link_button(
+                        "dump-select-all",
+                        t!("backup.select_all").to_string(),
+                        theme,
+                        cx.listener(|this, _event, _window, cx| this.dump_set_all(true, cx)),
+                    ))
+                    .child(backup_link_button(
+                        "dump-select-none",
+                        t!("backup.select_none").to_string(),
+                        theme,
+                        cx.listener(|this, _event, _window, cx| this.dump_set_all(false, cx)),
+                    )),
+            );
+
+        let picker = render_object_picker(
+            &dialog.objects,
+            dialog.loading,
+            &self.backup_objects_scroll,
+            theme,
+            ObjectPickerAction::Dump,
+            cx,
+        );
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .w_full()
+            .child(summary)
+            .child(picker)
+            .into_any_element()
+    }
+
+    /// The footer of the open dump dialog: 转储 / 停止 / 关闭.
     pub(super) fn dump_dialog_footer(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let Some(dialog) = self.dump_dialog.as_ref() else {
             return div().into_any_element();
         };
         let running = dialog.running;
-        let has_output = dialog.output_path.is_some();
-        let mut footer = div()
+        div()
             .flex()
             .flex_row()
             .items_center()
             .justify_end()
-            .gap_2()
             .w_full()
+            .h(px(46.0))
             .px_4()
-            .py_3()
-            .flex_none();
-        if has_output && !running {
-            footer = footer.child(self.dialog_button(
-                "dump-open",
-                t!("backup.open").to_string(),
-                false,
-                cx.listener(|this, _event, _window, cx| this.open_dump_output(cx)),
-            ));
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(self.dialog_button(
+                        "dump-run",
+                        t!("backup.dump_button").to_string(),
+                        true,
+                        cx.listener(|this, _event, _window, cx| {
+                            if !this
+                                .dump_dialog
+                                .as_ref()
+                                .map(|dialog| dialog.running)
+                                .unwrap_or(false)
+                            {
+                                this.run_dump(cx);
+                            }
+                        }),
+                    ))
+                    .when(running, |row| {
+                        row.child(self.dialog_button(
+                            "dump-stop",
+                            t!("backup.stop").to_string(),
+                            false,
+                            cx.listener(|this, _event, _window, cx| this.dump_abort(cx)),
+                        ))
+                    })
+                    .child(self.dialog_button(
+                        "dump-close",
+                        t!("backup.close").to_string(),
+                        false,
+                        cx.listener(|this, _event, window, cx| this.close_dump(window, cx)),
+                    )),
+            )
+            .into_any_element()
+    }
+
+    /// Switch the dump dialog's tab (对象选择 / 信息日志).
+    pub(super) fn set_dump_tab(&mut self, tab: BackupDialogTab, cx: &mut Context<'_, Self>) {
+        if let Some(dialog) = self.dump_dialog.as_mut() {
+            dialog.tab = tab;
         }
-        if running {
-            footer = footer.child(self.dialog_button(
-                "dump-stop",
-                t!("backup.stop").to_string(),
-                false,
-                cx.listener(|this, _event, _window, cx| this.dump_abort(cx)),
-            ));
+        cx.notify();
+    }
+
+    /// Toggle one object in the dump dialog's selection.
+    pub(super) fn dump_toggle_object(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        if let Some(dialog) = self.dump_dialog.as_mut()
+            && let Some(entry) = dialog.objects.get_mut(index)
+        {
+            entry.selected = !entry.selected;
         }
-        footer = footer.child(self.dialog_button(
-            "dump-close",
-            t!("backup.close").to_string(),
-            false,
-            cx.listener(|this, _event, window, cx| this.close_dump(window, cx)),
-        ));
-        footer.into_any_element()
+        cx.notify();
+    }
+
+    /// Toggle every object of one kind in the dump dialog's selection.
+    pub(super) fn dump_toggle_kind(&mut self, kind: BackupObjectKind, cx: &mut Context<'_, Self>) {
+        if let Some(dialog) = self.dump_dialog.as_mut() {
+            let all = dialog
+                .objects
+                .iter()
+                .filter(|entry| entry.kind == kind)
+                .all(|entry| entry.selected);
+            for entry in dialog.objects.iter_mut().filter(|entry| entry.kind == kind) {
+                entry.selected = !all;
+            }
+        }
+        cx.notify();
+    }
+
+    pub(super) fn dump_set_all(&mut self, selected: bool, cx: &mut Context<'_, Self>) {
+        if let Some(dialog) = self.dump_dialog.as_mut() {
+            for entry in dialog.objects.iter_mut() {
+                entry.selected = selected;
+            }
+        }
+        cx.notify();
     }
 }
 
-/// A `label   value` line for the dump window's header block.
-fn field_line(label: String, value: String, theme: Theme) -> impl IntoElement {
+/// One `label value` pair of the dump window's target line.
+fn dump_scope_field(label: String, value: String, theme: Theme) -> impl IntoElement {
     div()
         .flex()
         .flex_row()
         .items_center()
-        .gap_2()
-        .w_full()
-        .px_4()
-        .pb_1()
+        .gap_1()
+        .min_w(px(0.0))
         .child(
             div()
                 .flex_none()
-                .w(px(60.0))
                 .text_size(px(12.0))
                 .text_color(rgb(theme.text_muted))
                 .child(label),
         )
         .child(
             div()
-                .flex_1()
                 .min_w(px(0.0))
                 .overflow_hidden()
                 .whitespace_nowrap()
-                .text_size(px(12.5))
+                .text_size(px(12.0))
                 .text_color(rgb(theme.text))
                 .child(value),
         )
@@ -681,6 +1021,12 @@ fn write_structure(
     meta: &rustgrid_core::ObjectDump,
 ) -> rustgrid_core::Result<()> {
     let mut output = String::new();
+    // Navicat-style: drop a same-named object first, so the dump replaces it on a re-run.
+    let drop = meta.drop_ddl.trim().trim_end_matches(';').trim_end();
+    if !drop.is_empty() {
+        output.push_str(drop);
+        output.push_str(";\n");
+    }
     let ddl = meta.ddl.trim().trim_end_matches(';').trim_end();
     if !ddl.is_empty() {
         output.push_str(ddl);
@@ -696,6 +1042,13 @@ fn write_structure(
     output.push('\n');
     let mut file = file.lock().unwrap();
     file.write_all(output.as_bytes()).map_err(Error::other)
+}
+
+/// Write one already-terminated SQL statement line to the dump file.
+fn write_sql(file: &Mutex<std::fs::File>, sql: &str) -> rustgrid_core::Result<()> {
+    let mut file = file.lock().unwrap();
+    file.write_all(sql.as_bytes()).map_err(Error::other)?;
+    file.write_all(b"\n").map_err(Error::other)
 }
 
 /// The quoted `INSERT` column list, or `None` when the object exposes no columns.
@@ -786,7 +1139,7 @@ impl InsertWriter {
 
 #[cfg(test)]
 mod tests {
-    use super::{DUMP_BATCH_ROWS, InsertWriter, quote_object_name};
+    use super::{DUMP_BATCH_ROWS, InsertWriter, quote_object_name, write_structure};
     use std::sync::Mutex;
 
     /// The generic ODBC driver reports `schema.name` even though it has no separate schema level,
@@ -802,6 +1155,35 @@ mod tests {
             quote_object_name(rustgrid_core::DriverDialect::Mysql, false, "users"),
             "`users`"
         );
+    }
+
+    /// A dump writes each object's DROP ahead of its CREATE, so re-running the script replaces the
+    /// existing objects instead of failing (Navicat's export does the same).
+    #[test]
+    fn structure_drops_before_create() {
+        let dir = std::env::temp_dir().join(format!("rustgrid-dump-drop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("structure.sql");
+        let file = Mutex::new(std::fs::File::create(&path).unwrap());
+        let meta = rustgrid_core::ObjectDump {
+            name: "users".to_string(),
+            kind: rustgrid_core::BackupObjectKind::Table,
+            ddl: "CREATE TABLE `users` (`id` int)".to_string(),
+            drop_ddl: "DROP TABLE IF EXISTS `users`".to_string(),
+            references: Vec::new(),
+            fields: Vec::new(),
+            trigger_ddl: Vec::new(),
+            rows: Vec::new(),
+        };
+        write_structure(&file, &meta).unwrap();
+        drop(file);
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.starts_with("DROP TABLE IF EXISTS `users`;\nCREATE TABLE `users`"),
+            "drop must precede the create:\n{text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Every batch of a multi-row `INSERT` must repeat the `INSERT INTO …` header; only the first
