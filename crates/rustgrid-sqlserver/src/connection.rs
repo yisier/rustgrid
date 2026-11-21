@@ -1093,23 +1093,61 @@ impl Connection for SqlServerConnection {
                     .iter()
                     .map(|trigger| trigger.statement.clone())
                     .collect();
+                let (schema_name, bare) = self
+                    .resolve_object(database, name)
+                    .await
+                    .unwrap_or_else(|_| (DEFAULT_SCHEMA.to_string(), name.to_string()));
+                let references = schema
+                    .foreign_keys
+                    .iter()
+                    .map(|foreign_key| {
+                        let referenced_schema = if foreign_key.referenced_schema.trim().is_empty() {
+                            schema_name.as_str()
+                        } else {
+                            foreign_key.referenced_schema.trim()
+                        };
+                        if referenced_schema.is_empty() {
+                            foreign_key.referenced_table.clone()
+                        } else {
+                            format!("{referenced_schema}.{}", foreign_key.referenced_table)
+                        }
+                    })
+                    .collect();
                 Ok(ObjectDump {
                     name: name.to_string(),
                     kind,
                     ddl,
+                    drop_ddl: format!(
+                        "DROP TABLE IF EXISTS {}.{}",
+                        quote_identifier(&schema_name),
+                        quote_identifier(&bare)
+                    ),
+                    references,
                     fields,
                     trigger_ddl,
                     rows: Vec::new(),
                 })
             }
-            BackupObjectKind::View => Ok(ObjectDump {
-                name: name.to_string(),
-                kind,
-                ddl: self.view_details(database, name).await?.definition,
-                fields: Vec::new(),
-                trigger_ddl: Vec::new(),
-                rows: Vec::new(),
-            }),
+            BackupObjectKind::View => {
+                let (schema_name, bare) = self
+                    .resolve_object(database, name)
+                    .await
+                    .unwrap_or_else(|_| (DEFAULT_SCHEMA.to_string(), name.to_string()));
+                Ok(ObjectDump {
+                    name: name.to_string(),
+                    kind,
+                    ddl: self.view_details(database, name).await?.definition,
+                    drop_ddl: format!(
+                        "DROP VIEW IF EXISTS {}.{}",
+                        quote_identifier(&schema_name),
+                        quote_identifier(&bare)
+                    ),
+                    references: Vec::new(),
+                    fields: Vec::new(),
+                    trigger_ddl: Vec::new(),
+                    rows: Vec::new(),
+                })
+            }
             BackupObjectKind::Function => {
                 let definition = match self
                     .routine_details(database, RoutineKind::Procedure, name)
@@ -1122,10 +1160,21 @@ impl Connection for SqlServerConnection {
                             .definition
                     }
                 };
+                let (schema_name, bare) = self
+                    .resolve_object(database, name)
+                    .await
+                    .unwrap_or_else(|_| (DEFAULT_SCHEMA.to_string(), name.to_string()));
+                let keyword = routine_keyword(&definition);
                 Ok(ObjectDump {
                     name: name.to_string(),
                     kind,
                     ddl: definition,
+                    drop_ddl: format!(
+                        "DROP {keyword} IF EXISTS {}.{}",
+                        quote_identifier(&schema_name),
+                        quote_identifier(&bare)
+                    ),
+                    references: Vec::new(),
                     fields: Vec::new(),
                     trigger_ddl: Vec::new(),
                     rows: Vec::new(),
@@ -1135,6 +1184,8 @@ impl Connection for SqlServerConnection {
                 name: name.to_string(),
                 kind,
                 ddl: String::new(),
+                drop_ddl: String::new(),
+                references: Vec::new(),
                 fields: Vec::new(),
                 trigger_ddl: Vec::new(),
                 rows: Vec::new(),
@@ -1195,6 +1246,14 @@ impl Connection for SqlServerConnection {
                 )
                 .await?;
                 run_statement(&mut client, &object.ddl, &[]).await?;
+                // Skip foreign-key checks for the rows this restore loads; the constraints are
+                // validated again once they are in.
+                run_statement(
+                    &mut client,
+                    &format!("ALTER TABLE {qualified} NOCHECK CONSTRAINT ALL"),
+                    &[],
+                )
+                .await?;
                 if !object.rows.is_empty() {
                     let has_identity = self
                         .has_identity(database, &schema, &object_name)
@@ -1209,6 +1268,12 @@ impl Connection for SqlServerConnection {
                     )
                     .await?;
                 }
+                run_statement(
+                    &mut client,
+                    &format!("ALTER TABLE {qualified} WITH CHECK CHECK CONSTRAINT ALL"),
+                    &[],
+                )
+                .await?;
             }
             BackupObjectKind::View => {
                 // `DROP VIEW` rejects a database-qualified name; `USE` was applied above.

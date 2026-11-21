@@ -4,7 +4,10 @@
 //! function list offered by completion) without the app matching on the engine id.
 
 /// The SQL dialect family a driver speaks.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
 pub enum DriverDialect {
     /// MySQL / MariaDB.
     Mysql,
@@ -64,6 +67,47 @@ impl DriverDialect {
     /// reject `OFFSET … FETCH NEXT` without one, while MySQL/SQLite/PostgreSQL page without it.
     pub fn paging_needs_order(self) -> bool {
         matches!(self, DriverDialect::SqlServer | DriverDialect::Oracle)
+    }
+
+    /// The statement(s) that switch foreign-key enforcement for a whole import session, or `None`
+    /// when the engine needs per-table statements (SQL Server, PostgreSQL) or has no safe form
+    /// (Oracle). Written around a SQL dump / extracted script so table data can be imported in any
+    /// order.
+    pub fn session_foreign_keys_sql(self, enable: bool) -> Option<&'static str> {
+        match self {
+            DriverDialect::Mysql => Some(if enable {
+                "SET FOREIGN_KEY_CHECKS=1;"
+            } else {
+                "SET FOREIGN_KEY_CHECKS=0;"
+            }),
+            // The pragma is a no-op inside a transaction, so the script must run it outside one.
+            DriverDialect::Sqlite => Some(if enable {
+                "PRAGMA foreign_keys=ON;"
+            } else {
+                "PRAGMA foreign_keys=OFF;"
+            }),
+            _ => None,
+        }
+    }
+
+    /// The statement that switches foreign-key enforcement for one table, with `table` already
+    /// quoted. `None` for engines with a session switch, or without a safe per-table form.
+    ///
+    /// PostgreSQL disables the table's triggers, which include the foreign-key check triggers (it
+    /// needs table ownership, not superuser). SQL Server uses its `NOCHECK`/`WITH CHECK` form.
+    pub fn table_foreign_keys_sql(self, table: &str, enable: bool) -> Option<String> {
+        match self {
+            DriverDialect::Postgres => Some(format!(
+                "ALTER TABLE {table} {} TRIGGER ALL;",
+                if enable { "ENABLE" } else { "DISABLE" }
+            )),
+            DriverDialect::SqlServer => Some(if enable {
+                format!("ALTER TABLE {table} WITH CHECK CHECK CONSTRAINT ALL;")
+            } else {
+                format!("ALTER TABLE {table} NOCHECK CONSTRAINT ALL;")
+            }),
+            _ => None,
+        }
     }
 
     /// The paging clause a page of `limit` rows starting at `offset` uses, in this dialect's own
@@ -935,5 +979,38 @@ mod tests {
                 .contains(&"toStartOfDay")
         );
         assert!(DriverDialect::Generic.builtin_functions().is_empty());
+    }
+
+    #[test]
+    fn foreign_key_switches_match_the_engine() {
+        assert_eq!(
+            DriverDialect::Mysql.session_foreign_keys_sql(false),
+            Some("SET FOREIGN_KEY_CHECKS=0;")
+        );
+        assert_eq!(
+            DriverDialect::Sqlite.session_foreign_keys_sql(true),
+            Some("PRAGMA foreign_keys=ON;")
+        );
+        assert!(
+            DriverDialect::Postgres
+                .session_foreign_keys_sql(false)
+                .is_none()
+        );
+        assert_eq!(
+            DriverDialect::Postgres
+                .table_foreign_keys_sql("\"public\".\"users\"", true)
+                .as_deref(),
+            Some("ALTER TABLE \"public\".\"users\" ENABLE TRIGGER ALL;")
+        );
+        assert!(
+            DriverDialect::SqlServer
+                .table_foreign_keys_sql("[dbo].[users]", false)
+                .is_some_and(|sql| sql.contains("NOCHECK CONSTRAINT ALL"))
+        );
+        assert!(
+            DriverDialect::Oracle
+                .table_foreign_keys_sql("\"S\".\"T\"", false)
+                .is_none()
+        );
     }
 }

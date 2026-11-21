@@ -120,6 +120,12 @@ pub(super) enum FieldCell {
 
 /// The height of one row of the type drop-down, so its highlight can be scrolled into view.
 pub(super) const TYPE_OPTION_HEIGHT: f32 = 20.0;
+/// The gap between two rows of the type drop-down.
+pub(super) const TYPE_OPTION_GAP: f32 = 2.0;
+/// The type drop-down's own padding (one `p_1` around the rows).
+pub(super) const TYPE_LIST_PADDING: f32 = 4.0;
+/// The tallest the type drop-down grows before its list scrolls.
+pub(super) const TYPE_LIST_MAX_HEIGHT: f32 = 300.0;
 
 /// How many rows Page Up / Page Down move in a designer grid.
 const DESIGN_PAGE_ROWS: isize = 10;
@@ -182,6 +188,143 @@ pub(super) fn next_type_highlight(
         count - 1
     } else {
         current - 1
+    })
+}
+
+/// The type names matching `query`, best matches first: substring matches, then fuzzy subsequence
+/// matches. An empty query keeps the engine's own order.
+pub(super) fn filter_type_list(types: &[&'static str], query: &str) -> Vec<&'static str> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return types.to_vec();
+    }
+    let mut substring = Vec::new();
+    let mut fuzzy = Vec::new();
+    for &data_type in types {
+        let lower = data_type.to_lowercase();
+        if lower.contains(&query) {
+            substring.push(data_type);
+        } else if is_fuzzy_subsequence(&query, &lower) {
+            fuzzy.push(data_type);
+        }
+    }
+    substring.extend(fuzzy);
+    substring
+}
+
+/// The type Enter takes from the type cell: the highlighted entry of the filtered list, or — when
+/// the text matches no listed type — the text itself, so `varchar(50)`, `int unsigned` and an
+/// engine's unlisted types can be typed freely.
+pub(super) fn chosen_type(
+    types: &[&'static str],
+    query: &str,
+    highlight: Option<usize>,
+) -> Option<String> {
+    let query = query.trim();
+    let matches = filter_type_list(types, query);
+    if !query.is_empty() && matches.is_empty() {
+        return Some(query.to_string());
+    }
+    let index = highlight.unwrap_or(0).min(matches.len().saturating_sub(1));
+    matches.get(index).copied().map(str::to_string)
+}
+
+/// The filter query Enter commits with. The field is pre-filled with the current type when the
+/// editor opens, but that is not a search: until the user changes the text (or a change is still
+/// waiting for its render), the whole list is current and the highlighted row is what Enter takes.
+pub(super) fn type_commit_query<'a>(typed: &'a str, query: &str, original: &str) -> &'a str {
+    let typed = typed.trim();
+    if query.trim().is_empty() && typed == original.trim() {
+        ""
+    } else {
+        typed
+    }
+}
+
+/// A freely typed type declaration split into the parts the designer stores in their own cells.
+struct TypedTypeParts {
+    base: String,
+    length: String,
+    decimals: String,
+    unsigned: bool,
+    zerofill: bool,
+}
+
+/// Split `varchar(50)`, `decimal(10,2) unsigned` or `int zerofill` into a base type, length,
+/// decimals and the MySQL modifiers, so typing a whole declaration lands in the same cells a
+/// list pick fills.
+///
+/// Only a plain `base(params)` (plus trailing `unsigned`/`zerofill`) is split. Anything else — a
+/// suffix such as PostgreSQL's `timestamp(6) with time zone`, a non-numeric parameter such as
+/// `geometry(point,4326)` — returns `None`; the caller then keeps the text whole and clears the
+/// length cells, so the DDL never appends a second parameter list.
+fn typed_type_parts(text: &str) -> Option<TypedTypeParts> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut words: Vec<&str> = trimmed.split_whitespace().collect();
+    let mut unsigned = false;
+    let mut zerofill = false;
+    while let Some(last) = words.last() {
+        match last.to_ascii_lowercase().as_str() {
+            "unsigned" => {
+                unsigned = true;
+                words.pop();
+            }
+            "zerofill" => {
+                zerofill = true;
+                words.pop();
+            }
+            _ => break,
+        }
+    }
+    let main = words.join(" ");
+    if main.is_empty() {
+        return None;
+    }
+    let Some(open) = main.find('(') else {
+        // A bare type is not split; only the modifiers are taken off (`int unsigned`).
+        return (unsigned || zerofill).then(|| TypedTypeParts {
+            base: main,
+            length: String::new(),
+            decimals: String::new(),
+            unsigned,
+            zerofill,
+        });
+    };
+    let close = main.rfind(')')?;
+    if close < open || !main[close + 1..].trim().is_empty() {
+        return None;
+    }
+    let base = main[..open].trim();
+    if base.is_empty() {
+        return None;
+    }
+    let params = main[open + 1..close].trim();
+    if params.is_empty() {
+        return None;
+    }
+    let (length, decimals) = if is_member_list_type(base) {
+        (params.to_string(), String::new())
+    } else if let Some((length, decimals)) = params.split_once(',') {
+        (length.trim().to_string(), decimals.trim().to_string())
+    } else {
+        (params.to_string(), String::new())
+    };
+    let numeric = |value: &str| value.chars().all(|c| c.is_ascii_digit());
+    if !is_member_list_type(base)
+        && (!(numeric(&length) || length.eq_ignore_ascii_case("max"))
+            || (!decimals.is_empty() && !numeric(&decimals)))
+    {
+        return None;
+    }
+    Some(TypedTypeParts {
+        base: base.to_string(),
+        length,
+        decimals,
+        unsigned,
+        zerofill,
     })
 }
 
@@ -796,9 +939,13 @@ pub(super) struct TableDesignView {
     pub(super) field_find: Option<Entity<TextInput>>,
     pub(super) field_find_query: String,
     pub(super) type_combo: Option<usize>,
-    /// The search field shown at the top of the type drop-down; its text filters the list.
+    /// The editable text field the type cell swaps in while its list is open. Typing filters the
+    /// list and, when nothing matches, Enter takes the typed text as the type (`varchar(50)`).
     pub(super) type_search: Option<Entity<TextInput>>,
     pub(super) type_query: String,
+    /// The column's type when the editor opened. The field shows it before anything is typed, so
+    /// Enter must read it as "no filter" and take the highlighted row, not filter by it.
+    type_original: String,
     /// Which row of the filtered type list the keyboard highlight sits on (Up/Down, Enter picks it).
     /// Reset when the drop-down opens or its search text changes.
     pub(super) type_highlight: Option<usize>,
@@ -1121,6 +1268,7 @@ impl TableDesignView {
             type_combo: None,
             type_search: None,
             type_query: String::new(),
+            type_original: String::new(),
             type_highlight: None,
             type_scroll: ScrollHandle::new(),
             combo_anchor: Rc::new(RefCell::new(BTreeMap::new())),
@@ -2160,6 +2308,7 @@ impl TableDesignView {
         self.edit = None;
         self.edit_blur = None;
         self.type_combo = None;
+        self.type_query.clear();
         self.default_menu_open = false;
         self.enum_dialog_open = false;
         self.index_edit = None;
@@ -2281,30 +2430,56 @@ impl TableDesignView {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
+        self.open_type_combo_prefilled(row, None, window, cx);
+    }
+
+    /// Opens the type cell's editor together with its list.
+    ///
+    /// With `typed` the user started typing on the cell (spreadsheet style): the field opens with
+    /// that text, the list is already filtered by it and nothing is selected, so the next keystroke
+    /// appends. With `None` the field opens on the column's current type, selected, so typing
+    /// replaces it — and clicking the cell again closes the editor.
+    fn open_type_combo_prefilled(
+        &mut self,
+        row: usize,
+        typed: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         self.edit = None;
         self.edit_blur = None;
         self.select_field_cell(row, FieldCell::Type, cx);
-        if self.type_combo == Some(row) {
+        if typed.is_none() && self.type_combo == Some(row) {
             self.type_combo = None;
+            self.type_query.clear();
             cx.notify();
             return;
         }
         self.type_combo = Some(row);
-        self.type_query.clear();
-        // Start the highlight on the type the column already has, so Up/Down walk the list from
-        // where the user is rather than from the top.
         let current = self
             .schema
             .columns
             .get(row)
             .map(|column| column.data_type.clone())
             .unwrap_or_default();
-        self.type_highlight = self
-            .filtered_types()
-            .iter()
-            .position(|data_type| *data_type == current)
-            .or(Some(0));
-        self.type_scroll.set_offset(Point::default());
+        self.type_original = current.clone();
+        let (text, query) = match typed {
+            Some(text) => (text.to_string(), text.to_string()),
+            None => (current.clone(), String::new()),
+        };
+        self.type_query = query;
+        let types = self.filtered_types();
+        // Start the highlight on the type the column already has, so Up/Down walk the list from
+        // where the user is rather than from the top. A typed prefix starts at its first match.
+        self.type_highlight = if typed.is_some() {
+            Some(0)
+        } else {
+            types
+                .iter()
+                .position(|data_type| *data_type == current)
+                .or(Some(0))
+        };
+        self.scroll_type_list_to_highlight(types.len());
         let theme = self.theme;
         let weak = self.self_weak.clone();
         let input = self
@@ -2322,9 +2497,6 @@ impl TableDesignView {
                             size: Some(Size::XSmall),
                             text_size: Some(12.0),
                             placeholder: t!("design.type_search").to_string().into(),
-                            icon: Some("icons/search.svg"),
-                            icon_color: Some(theme.text_muted),
-                            clearable: true,
                             bare: true,
                             ..Default::default()
                         },
@@ -2345,6 +2517,7 @@ impl TableDesignView {
                     .on_cancel(Rc::new(move |_window, cx| {
                         let _ = cancel.update(cx, |view, cx| {
                             view.type_combo = None;
+                            view.type_query.clear();
                             view.focus_pending = true;
                             cx.notify();
                         });
@@ -2357,10 +2530,32 @@ impl TableDesignView {
                 })
             })
             .clone();
-        input.update(cx, |input, cx| input.set_text("", cx));
+        input.update(cx, |input, cx| input.set_text(text, cx));
+        if typed.is_none() {
+            // The field shows the current type; a keystroke replaces it.
+            input.update(cx, |input, cx| input.select_all(cx));
+        }
         let focus = input.read(cx).focus_handle();
         window.focus(&focus, cx);
         cx.notify();
+    }
+
+    /// Whether a window-space press lands in the type cell whose list is open. The list is a
+    /// separate overlay, so its click-away handler would otherwise also fire for a press in the
+    /// editable field itself (positioning the caret) and dismiss it.
+    pub(super) fn type_cell_contains(&self, position: Point<Pixels>) -> bool {
+        let Some(row) = self.type_combo else {
+            return false;
+        };
+        let Some(anchor) = self.combo_anchor.borrow().get(&row).copied() else {
+            return false;
+        };
+        let left = anchor.x - px(DESIGN_CELL_INSET);
+        let top = anchor.y - px(DESIGN_ROW_HEIGHT);
+        position.x >= left
+            && position.x <= left + px(FIELD_TYPE_WIDTH)
+            && position.y >= top
+            && position.y <= anchor.y
     }
 
     /// Tab / Shift+Tab inside the designer, from its `NextDesignerCell` / `PrevDesignerCell` bindings.
@@ -2496,13 +2691,7 @@ impl TableDesignView {
             FieldCell::Name => self.begin_typed_edit(row, FieldColumn::Name, text, window, cx),
             FieldCell::Text(column) => self.begin_typed_edit(row, column, text, window, cx),
             FieldCell::Type => {
-                self.open_type_combo(row, window, cx);
-                if let Some(input) = self.type_search.clone() {
-                    let text = text.to_string();
-                    self.type_query = text.clone();
-                    self.type_highlight = Some(0);
-                    input.update(cx, |input, cx| input.set_text(text, cx));
-                }
+                self.open_type_combo_prefilled(row, Some(text), window, cx);
             }
             FieldCell::Flag(_) => {}
         }
@@ -2926,22 +3115,24 @@ impl TableDesignView {
 
     /// The type names that match the current search text, best matches first.
     pub(super) fn filtered_types(&self) -> Vec<&'static str> {
-        let query = self.type_query.trim().to_lowercase();
-        if query.is_empty() {
-            return self.column_types.clone();
-        }
-        let mut substring = Vec::new();
-        let mut fuzzy = Vec::new();
-        for &data_type in &self.column_types {
-            let lower = data_type.to_lowercase();
-            if lower.contains(&query) {
-                substring.push(data_type);
-            } else if is_fuzzy_subsequence(&query, &lower) {
-                fuzzy.push(data_type);
-            }
-        }
-        substring.extend(fuzzy);
-        substring
+        filter_type_list(&self.column_types, &self.type_query)
+    }
+
+    /// Scroll the type list so the highlighted row is visible right after it opens, before its
+    /// scroll handle has measured a viewport.
+    fn scroll_type_list_to_highlight(&self, rows: usize) {
+        let Some(index) = self.type_highlight else {
+            return;
+        };
+        let content = rows as f32 * TYPE_OPTION_HEIGHT
+            + rows.saturating_sub(1) as f32 * TYPE_OPTION_GAP
+            + 2.0 * TYPE_LIST_PADDING;
+        let viewport = content.min(TYPE_LIST_MAX_HEIGHT);
+        let top = TYPE_LIST_PADDING + index as f32 * (TYPE_OPTION_HEIGHT + TYPE_OPTION_GAP);
+        let offset =
+            (top + TYPE_OPTION_HEIGHT - viewport).clamp(0.0, (content - viewport).max(0.0));
+        self.type_scroll
+            .set_offset(Point::new(px(0.0), px(-offset)));
     }
 
     /// The cells Tab walks through, in the order the fields grid shows them: 列名, 类型, then the
@@ -3029,7 +3220,7 @@ impl TableDesignView {
             return;
         }
         let max = f32::from(self.type_scroll.max_offset().y);
-        let top = index as f32 * TYPE_OPTION_HEIGHT;
+        let top = TYPE_LIST_PADDING + index as f32 * (TYPE_OPTION_HEIGHT + TYPE_OPTION_GAP);
         let current = -f32::from(self.type_scroll.offset().y);
         let next = if top < current {
             top
@@ -3044,26 +3235,72 @@ impl TableDesignView {
         }
     }
 
-    /// The type the drop-down's highlight is on: the row the user moved to, or the first match when
-    /// the search text just narrowed the list and nothing has been moved yet.
-    fn highlighted_type(&self) -> Option<&'static str> {
-        let types = self.filtered_types();
-        let index = self
-            .type_highlight
-            .unwrap_or(0)
-            .min(types.len().checked_sub(1)?);
-        types.get(index).copied()
-    }
-
-    /// Enter in the type search: take the highlighted type (or the best match when the search just
-    /// narrowed the list).
+    /// Enter in the type cell: take the highlighted type — or the text the user typed when the
+    /// list has no match for it, so an unlisted or parameterised type (`varchar(50)`) still works.
     fn select_highlighted_type(&mut self, cx: &mut Context<'_, Self>) {
         let Some(row) = self.type_combo else {
             return;
         };
-        if let Some(data_type) = self.highlighted_type() {
-            self.select_type(row, data_type, cx);
+        let typed = self
+            .type_search
+            .as_ref()
+            .and_then(|input| input.read(cx).current_text(cx))
+            .unwrap_or_else(|| self.type_query.clone());
+        // On open the field is pre-filled with the current type so it can be edited; that text is
+        // not a search unless the user changed it (or a change is still waiting for its render).
+        let query = type_commit_query(&typed, &self.type_query, &self.type_original);
+        if let Some(data_type) = chosen_type(&self.column_types, query, self.type_highlight) {
+            self.commit_type_text(row, &data_type, cx);
         }
+    }
+
+    /// Commit a type from the editable type cell. A listed name takes the engine's spelling; a
+    /// typed declaration (`varchar(50)`, `decimal(10,2) unsigned`) is split into the type and the
+    /// length/decimals cells; anything else stays whole in the type text with those cells cleared,
+    /// so the DDL does not append a second parameter list.
+    pub(super) fn commit_type_text(&mut self, row: usize, text: &str, cx: &mut Context<'_, Self>) {
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
+        if let Some(data_type) = self
+            .column_types
+            .iter()
+            .find(|data_type| data_type.eq_ignore_ascii_case(text))
+            .copied()
+        {
+            self.select_type(row, data_type, cx);
+            return;
+        }
+        if let Some(parts) = typed_type_parts(text) {
+            let base = self
+                .column_types
+                .iter()
+                .find(|data_type| data_type.eq_ignore_ascii_case(&parts.base))
+                .copied()
+                .unwrap_or(parts.base.as_str())
+                .to_string();
+            self.select_type(row, &base, cx);
+            if let Some(column) = self.schema.columns.get_mut(row) {
+                column.length = parts.length;
+                column.decimals = parts.decimals;
+                if parts.unsigned {
+                    column.unsigned = true;
+                }
+                if parts.zerofill {
+                    column.zerofill = true;
+                }
+            }
+        } else {
+            self.select_type(row, text, cx);
+            if let Some(column) = self.schema.columns.get_mut(row) {
+                column.length.clear();
+                column.decimals.clear();
+            }
+        }
+        // The detail panel mirrors an ENUM/SET member list from `length`.
+        self.sync_selected_input(cx);
+        self.mark_dirty(cx);
     }
 
     pub(super) fn select_type(&mut self, row: usize, data_type: &str, cx: &mut Context<'_, Self>) {
@@ -5690,6 +5927,85 @@ mod tests {
         // Down wraps to its top and Up steps to the row before its last.
         assert_eq!(next_type_highlight(2, Some(7), true), Some(0));
         assert_eq!(next_type_highlight(2, Some(7), false), Some(0));
+    }
+
+    #[test]
+    fn a_type_the_list_does_not_know_is_taken_from_the_text() {
+        let types = ["int", "varchar", "nvarchar"];
+        // A parameterised declaration is not in the list, so Enter keeps what was typed.
+        assert_eq!(
+            chosen_type(&types, "varchar(50)", Some(0)).as_deref(),
+            Some("varchar(50)")
+        );
+        assert_eq!(
+            chosen_type(&types, "int unsigned", Some(0)).as_deref(),
+            Some("int unsigned")
+        );
+        // A prefix still takes the row the list narrowed to, and an exact name takes the engine's
+        // spelling (lower case here).
+        assert_eq!(
+            chosen_type(&types, "varch", Some(0)).as_deref(),
+            Some("varchar")
+        );
+        assert_eq!(chosen_type(&types, "INT", Some(0)).as_deref(), Some("int"));
+        assert_eq!(
+            chosen_type(&types, "  nvar  ", Some(0)).as_deref(),
+            Some("nvarchar")
+        );
+        // An empty field takes the highlighted row, or the list's first row.
+        assert_eq!(chosen_type(&types, "", Some(1)).as_deref(), Some("varchar"));
+        assert_eq!(chosen_type(&types, "", None).as_deref(), Some("int"));
+    }
+
+    #[test]
+    fn the_type_field_prefilled_with_the_current_type_is_not_a_filter() {
+        // Nothing typed: the whole list is current, so Enter takes the highlighted row.
+        assert_eq!(type_commit_query("nvarchar", "", "nvarchar"), "");
+        assert_eq!(
+            chosen_type(
+                &["int", "varchar", "nvarchar"],
+                type_commit_query("", "", ""),
+                Some(1)
+            )
+            .as_deref(),
+            Some("varchar")
+        );
+        // A prefix typed before the change event was flushed is still the query.
+        assert_eq!(type_commit_query("varch", "", "nvarchar"), "varch");
+        // A real edit, including one that lands on the same spelling, filters the list.
+        assert_eq!(
+            type_commit_query("nvarchar", "nvarchar", "nvarchar"),
+            "nvarchar"
+        );
+    }
+
+    #[test]
+    fn a_typed_declaration_splits_into_the_designer_cells() {
+        let nvarchar = typed_type_parts("nvarchar(100)").expect("nvarchar(100)");
+        assert_eq!(nvarchar.base, "nvarchar");
+        assert_eq!(nvarchar.length, "100");
+        assert!(nvarchar.decimals.is_empty());
+
+        let decimal = typed_type_parts("decimal(10,2) UNSIGNED").expect("decimal");
+        assert_eq!(decimal.base, "decimal");
+        assert_eq!(decimal.length, "10");
+        assert_eq!(decimal.decimals, "2");
+        assert!(decimal.unsigned);
+        assert!(!decimal.zerofill);
+
+        let int = typed_type_parts("int unsigned zerofill").expect("int modifiers");
+        assert_eq!(int.base, "int");
+        assert!(int.length.is_empty());
+        assert!(int.unsigned && int.zerofill);
+
+        let members = typed_type_parts("enum('a','b')").expect("enum members");
+        assert_eq!(members.base, "enum");
+        assert_eq!(members.length, "'a','b'");
+
+        // A suffix or a non-numeric parameter is not a designer length: the text stays whole.
+        assert!(typed_type_parts("timestamp(6) with time zone").is_none());
+        assert!(typed_type_parts("geometry(point,4326)").is_none());
+        assert!(typed_type_parts("varchar").is_none());
     }
 
     #[test]

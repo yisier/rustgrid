@@ -1,5 +1,5 @@
 use std::cell::Cell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -303,15 +303,17 @@ impl CellSelection {
         changed
     }
 
-    /// Every selected cell, de-duplicated across ranges.
+    /// Every selected cell, de-duplicated across ranges. A set keeps this linear even when
+    /// 全选 covers tens of thousands of cells.
     pub fn cells(&self) -> Vec<(usize, usize)> {
-        let mut cells: Vec<(usize, usize)> = Vec::new();
+        let mut seen = HashSet::new();
+        let mut cells = Vec::new();
         for range in &self.ranges {
             let (start_row, end_row) = range.rows();
             let (start_col, end_col) = range.cols();
             for row in start_row..=end_row {
                 for col in start_col..=end_col {
-                    if !cells.contains(&(row, col)) {
+                    if seen.insert((row, col)) {
                         cells.push((row, col));
                     }
                 }
@@ -1222,13 +1224,73 @@ fn quote_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
-/// Quote a possibly schema-qualified name (`public.users`) part by part, so the display shows
-/// `"public"."users"` rather than one identifier with a dot inside it.
-fn quote_qualified(dialect: DriverDialect, name: &str) -> String {
-    name.split('.')
-        .map(|part| dialect.quote_identifier(part))
-        .collect::<Vec<_>>()
-        .join(".")
+/// The unquoted relation a table page addresses, in `dialect`'s own naming.
+///
+/// A schema-qualified engine's table name already carries its schema (`public.users`); MySQL,
+/// SQL Server, ClickHouse and the generic dialect prefix the database, while PostgreSQL/Oracle
+/// keep it out (their connection is already scoped to the database) and SQLite's "database" is a
+/// file path that is never part of a statement.
+pub(crate) fn display_table_path(dialect: DriverDialect, database: &str, table: &str) -> String {
+    match dialect {
+        DriverDialect::Mysql
+        | DriverDialect::ClickHouse
+        | DriverDialect::SqlServer
+        | DriverDialect::Generic => {
+            if database.is_empty() {
+                table.to_string()
+            } else {
+                format!("{database}.{table}")
+            }
+        }
+        DriverDialect::Sqlite | DriverDialect::Postgres | DriverDialect::Oracle => {
+            table.to_string()
+        }
+    }
+}
+
+/// The relation a table page's statement shows, quoted `dialect`'s way.
+fn display_table_reference(dialect: DriverDialect, database: &str, table: &str) -> String {
+    match dialect {
+        // MySQL and ClickHouse address a table as `database`.`table`; their table part is one
+        // identifier and is never split on a dot.
+        DriverDialect::Mysql | DriverDialect::ClickHouse => {
+            if database.is_empty() {
+                dialect.quote_identifier(table)
+            } else {
+                format!(
+                    "{}.{}",
+                    dialect.quote_identifier(database),
+                    dialect.quote_identifier(table)
+                )
+            }
+        }
+        DriverDialect::Sqlite => dialect.quote_identifier(table),
+        DriverDialect::SqlServer => {
+            if database.is_empty() {
+                dialect.quote_table_name(table)
+            } else {
+                format!(
+                    "{}.{}",
+                    dialect.quote_identifier(database),
+                    dialect.quote_table_name(table)
+                )
+            }
+        }
+        // These engines already carry the schema in `table` (`public.users`), and the database is
+        // the connection's context, so it is never a prefix.
+        DriverDialect::Postgres | DriverDialect::Oracle => dialect.quote_table_name(table),
+        DriverDialect::Generic => {
+            if database.is_empty() {
+                dialect.quote_identifier(table)
+            } else {
+                format!(
+                    "{}.{}",
+                    dialect.quote_identifier(database),
+                    dialect.quote_identifier(table)
+                )
+            }
+        }
+    }
 }
 
 /// The `SELECT` a table page runs, written in `dialect`'s own SQL so the grid's status line is
@@ -1251,44 +1313,7 @@ pub(crate) fn page_display_sql(
     offset: u64,
     page_size: u64,
 ) -> String {
-    let relation = match dialect {
-        // ClickHouse and MySQL both qualify an object with its database, using backticks.
-        DriverDialect::Mysql | DriverDialect::ClickHouse => {
-            if database.is_empty() {
-                dialect.quote_identifier(table)
-            } else {
-                format!(
-                    "{}.{}",
-                    dialect.quote_identifier(database),
-                    dialect.quote_identifier(table)
-                )
-            }
-        }
-        DriverDialect::Sqlite => dialect.quote_identifier(table),
-        DriverDialect::SqlServer => {
-            if database.is_empty() {
-                quote_qualified(dialect, table)
-            } else {
-                format!(
-                    "{}.{}",
-                    dialect.quote_identifier(database),
-                    quote_qualified(dialect, table)
-                )
-            }
-        }
-        DriverDialect::Postgres | DriverDialect::Oracle => quote_qualified(dialect, table),
-        DriverDialect::Generic => {
-            if database.is_empty() {
-                dialect.quote_identifier(table)
-            } else {
-                format!(
-                    "{}.{}",
-                    dialect.quote_identifier(database),
-                    dialect.quote_identifier(table)
-                )
-            }
-        }
-    };
+    let relation = display_table_reference(dialect, database, table);
 
     let mut sql = format!("SELECT * FROM {relation}");
     sql.push_str(&filter_display_clause(filters, dialect));
@@ -1619,6 +1644,37 @@ mod tests {
 
     fn hidden(names: &[&str]) -> BTreeSet<String> {
         names.iter().map(|name| name.to_string()).collect()
+    }
+
+    #[test]
+    fn a_table_path_qualifies_the_database_only_where_the_engine_can_address_it() {
+        assert_eq!(
+            display_table_path(DriverDialect::Mysql, "sales", "orders"),
+            "sales.orders"
+        );
+        assert_eq!(
+            display_table_path(DriverDialect::SqlServer, "sales", "dbo.orders"),
+            "sales.dbo.orders"
+        );
+        // PostgreSQL/Oracle already scope the connection to the database, and SQLite's database
+        // is a file path, so neither may appear in the statement.
+        assert_eq!(
+            display_table_path(DriverDialect::Postgres, "sales", "public.orders"),
+            "public.orders"
+        );
+        assert_eq!(
+            display_table_path(DriverDialect::Oracle, "sales", "APP.ORDERS"),
+            "APP.ORDERS"
+        );
+        assert_eq!(
+            display_table_path(DriverDialect::Sqlite, "C:/data/app.db", "orders"),
+            "orders"
+        );
+        // An empty database never leaves a stray leading dot.
+        assert_eq!(
+            display_table_path(DriverDialect::Mysql, "", "orders"),
+            "orders"
+        );
     }
 
     #[test]

@@ -36,7 +36,7 @@ pub use model::{
     IndexColumnDef, IndexDef, ObjectCreate, ObjectDump, ObjectKind, ObjectNamespace, PageRequest,
     QueryResult, RowInsert, RowUpdate, RuleDef, SavedBackup, SavedBackupSelection, SavedQuery,
     SavedTransfer, SortColumn, TableInfo, TableOptions, TablePage, TableSchema, TableStatus,
-    TransferMode, TriggerDef, UniqueKeyDef,
+    TransferMode, TriggerDef, UniqueKeyDef, reference_order,
 };
 pub use options::{ConnectionOptions, TlsMode, TlsOptions, TunnelAuth, TunnelKind, TunnelLayer};
 pub use portable::{LogicalType, map_schema, map_table_name};

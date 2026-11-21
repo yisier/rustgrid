@@ -1618,7 +1618,12 @@ fn header_cell_text(
             .justify_center()
             .w_full()
             .min_w(px(0.0))
-            .child(div().truncate().child(name));
+            .child(
+                div()
+                    .truncate()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(name),
+            );
         if type_shown {
             lines = lines.child(
                 div()
@@ -1643,6 +1648,7 @@ fn header_cell_text(
             .w_full()
             .min_w(px(0.0))
             .truncate()
+            .font_weight(FontWeight::SEMIBOLD)
             .child(name)
             .into_any_element()
     };

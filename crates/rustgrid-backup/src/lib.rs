@@ -27,7 +27,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rustgrid_core::{BackupObjectKind, ObjectDump};
+use rustgrid_core::{BackupObjectKind, DriverDialect, ObjectDump};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 
@@ -70,6 +70,10 @@ pub struct BackupManifest {
     pub app_version: String,
     /// The database the objects were read from.
     pub schema: String,
+    /// The SQL dialect the objects came from, so an extracted script can use the engine's
+    /// foreign-key switches. Older archives default to `Generic` (no switches).
+    #[serde(default)]
+    pub dialect: DriverDialect,
     pub created_unix: u64,
     #[serde(default)]
     pub comment: String,
@@ -84,6 +88,14 @@ pub struct BackupObjectMeta {
     pub kind: BackupObjectKind,
     /// The object's `CREATE` statement.
     pub ddl: String,
+    /// The statement that drops a same-named object before the `CREATE`, so an extracted script
+    /// can initialise a fresh database (empty for archives written before it was stored).
+    #[serde(default)]
+    pub drop_ddl: String,
+    /// The tables this object's foreign keys reference, used to restore referenced tables first
+    /// (empty for archives written before it was stored).
+    #[serde(default)]
+    pub references: Vec<String>,
     #[serde(default)]
     pub fields: Vec<String>,
     #[serde(default)]
@@ -111,6 +123,8 @@ pub struct RestoredObject {
     pub name: String,
     pub kind: BackupObjectKind,
     pub ddl: String,
+    /// The stored drop statement, empty for archives written before it was recorded.
+    pub drop_ddl: String,
     pub fields: Vec<String>,
     pub trigger_ddl: Vec<String>,
     /// Raw value tuples, one per line. Empty for views/functions/events.
@@ -131,6 +145,8 @@ impl RestoredObject {
             name: self.name.clone(),
             kind: self.kind,
             ddl: self.ddl.clone(),
+            drop_ddl: self.drop_ddl.clone(),
+            references: Vec::new(),
             fields: self.fields.clone(),
             trigger_ddl: self.trigger_ddl.clone(),
             rows: self
@@ -193,6 +209,7 @@ impl BackupReader {
             name: meta.name.clone(),
             kind: meta.kind,
             ddl: meta.ddl.clone(),
+            drop_ddl: meta.drop_ddl.clone(),
             fields: meta.fields.clone(),
             trigger_ddl: meta.trigger_ddl.clone(),
             data,
@@ -211,6 +228,7 @@ pub struct BackupWriter {
     file: File,
     offset: u64,
     schema: String,
+    dialect: DriverDialect,
     comment: String,
     created_unix: u64,
     objects: Vec<BackupObjectMeta>,
@@ -222,6 +240,8 @@ struct ObjectInProgress {
     name: String,
     kind: BackupObjectKind,
     ddl: String,
+    drop_ddl: String,
+    references: Vec<String>,
     fields: Vec<String>,
     trigger_ddl: Vec<String>,
     row_count: usize,
@@ -231,7 +251,12 @@ struct ObjectInProgress {
 
 impl BackupWriter {
     /// Create the file and write its header placeholder.
-    pub fn create(path: &Path, schema: &str, comment: &str) -> Result<Self> {
+    pub fn create(
+        path: &Path,
+        schema: &str,
+        dialect: DriverDialect,
+        comment: &str,
+    ) -> Result<Self> {
         let mut file = File::create(path)?;
         file.write_all(MAGIC)?;
         file.write_all(&FORMAT_VERSION.to_le_bytes())?;
@@ -241,6 +266,7 @@ impl BackupWriter {
             file,
             offset: HEADER_LEN as u64,
             schema: schema.to_string(),
+            dialect,
             comment: comment.to_string(),
             created_unix: unix_seconds(),
             objects: Vec::new(),
@@ -260,6 +286,8 @@ impl BackupWriter {
             name: object.name.clone(),
             kind: object.kind,
             ddl: object.ddl.clone(),
+            drop_ddl: object.drop_ddl.clone(),
+            references: object.references.clone(),
             fields: object.fields.clone(),
             trigger_ddl: object.trigger_ddl.clone(),
             row_count: 0,
@@ -295,6 +323,8 @@ impl BackupWriter {
             name: current.name,
             kind: current.kind,
             ddl: current.ddl,
+            drop_ddl: current.drop_ddl,
+            references: current.references,
             fields: current.fields,
             trigger_ddl: current.trigger_ddl,
             row_count: current.row_count,
@@ -318,6 +348,7 @@ impl BackupWriter {
             backup_version: BACKUP_VERSION.to_string(),
             app_version: env!("CARGO_PKG_VERSION").to_string(),
             schema: std::mem::take(&mut self.schema),
+            dialect: self.dialect,
             created_unix: self.created_unix,
             comment: std::mem::take(&mut self.comment),
             objects: std::mem::take(&mut self.objects),
@@ -365,10 +396,11 @@ fn no_object_error() -> BackupError {
 pub fn write_backup(
     path: &Path,
     schema: &str,
+    dialect: DriverDialect,
     objects: &[ObjectDump],
     comment: &str,
 ) -> Result<()> {
-    let mut writer = BackupWriter::create(path, schema, comment)?;
+    let mut writer = BackupWriter::create(path, schema, dialect, comment)?;
     for object in objects {
         writer.begin_object(object)?;
         for row in &object.rows {
@@ -414,6 +446,7 @@ pub fn read_backup_selected(
             name: meta.name.clone(),
             kind: meta.kind,
             ddl: meta.ddl.clone(),
+            drop_ddl: meta.drop_ddl.clone(),
             fields: meta.fields.clone(),
             trigger_ddl: meta.trigger_ddl.clone(),
             data,
@@ -449,12 +482,30 @@ fn read_object_data(file: &mut File, meta: &BackupObjectMeta) -> Result<String> 
 
 /// Render a standalone SQL script for one restored object: its DDL followed by batched
 /// `INSERT` statements built from the stored tuples. Used by *Extract SQL*.
-pub fn object_sql(object: &RestoredObject) -> String {
+///
+/// `dialect` supplies the engine's foreign-key switch: a per-table statement is written between
+/// the `CREATE` and the `INSERT`s so the rows can load before the tables they reference. Session
+/// switches (MySQL, SQLite) are written by the caller around the whole script.
+pub fn object_sql(object: &RestoredObject, dialect: DriverDialect) -> String {
     let mut sql = String::new();
     let ddl = object.ddl.trim().trim_end_matches(';').trim_end();
     if !ddl.is_empty() {
+        // A script that replaces existing objects must drop them first, exactly like the SQL dump.
+        let drop = object_drop_sql(object, dialect);
+        if !drop.is_empty() {
+            sql.push_str(&drop);
+            sql.push_str(";\n");
+        }
         sql.push_str(ddl);
         sql.push_str(";\n");
+    }
+
+    if object.kind == BackupObjectKind::Table
+        && let Some(switch) =
+            dialect.table_foreign_keys_sql(&dialect.quote_table_name(&object.name), false)
+    {
+        sql.push_str(&switch);
+        sql.push('\n');
     }
 
     let rows: Vec<&str> = object
@@ -466,13 +517,15 @@ pub fn object_sql(object: &RestoredObject) -> String {
         let columns = object
             .fields
             .iter()
-            .map(|field| format!("`{}`", field.replace('`', "``")))
+            .map(|field| dialect.quote_identifier(field))
             .collect::<Vec<_>>()
             .join(", ");
-        let table = object.name.replace('`', "``");
+        // The archive is engine-agnostic, so quote with the source engine's own syntax: backticks
+        // for a MySQL archive break PostgreSQL (`42601 syntax error at or near "`"`).
+        let table = dialect.quote_table_name(&object.name);
         for batch in rows.chunks(INSERT_BATCH_ROWS) {
             sql.push_str(&format!(
-                "INSERT INTO `{table}` ({columns}) VALUES\n{}\n;\n",
+                "INSERT INTO {table} ({columns}) VALUES\n{}\n;\n",
                 batch.join(",\n")
             ));
         }
@@ -482,6 +535,102 @@ pub fn object_sql(object: &RestoredObject) -> String {
 
 /// Rows per `INSERT` statement in [`object_sql`].
 pub const INSERT_BATCH_ROWS: usize = 500;
+
+/// The tables a `CREATE TABLE` statement references, read from its `REFERENCES` clauses. Used to
+/// order a restore when the archive was written before references were stored. Best effort: a
+/// comment mentioning `REFERENCES` could add a bogus name, which only affects ordering.
+pub fn references_of(ddl: &str) -> Vec<String> {
+    let upper = ddl.to_ascii_uppercase();
+    let mut references: Vec<String> = Vec::new();
+    let mut from = 0;
+    while let Some(offset) = upper[from..].find("REFERENCES") {
+        let at = from + offset + "REFERENCES".len();
+        if let Some(name) = read_reference_name(&ddl[at..])
+            && !references
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(&name))
+        {
+            references.push(name);
+        }
+        from = at;
+    }
+    references
+}
+
+/// Read the identifier that follows `REFERENCES`: bare, `"quoted"`, `` `quoted` `` or `[quoted]`,
+/// including a dotted `schema.table` chain.
+fn read_reference_name(rest: &str) -> Option<String> {
+    let mut name = String::new();
+    let mut closer: Option<char> = None;
+    for character in rest.trim_start().chars() {
+        match closer {
+            Some(close) => {
+                name.push(character);
+                if character == close {
+                    closer = None;
+                }
+            }
+            None => match character {
+                '"' => {
+                    name.push(character);
+                    closer = Some('"');
+                }
+                '`' => {
+                    name.push(character);
+                    closer = Some('`');
+                }
+                '[' => {
+                    name.push(character);
+                    closer = Some(']');
+                }
+                c if c.is_whitespace() || c == '(' || c == ';' || c == ',' => break,
+                c => name.push(c),
+            },
+        }
+    }
+    let name = name.trim().to_string();
+    (!name.is_empty()).then_some(name)
+}
+
+/// The drop statement an extracted script writes ahead of an object's DDL: the one stored in the
+/// archive, or — for archives written before it was recorded — a `DROP … IF EXISTS` derived from
+/// the object's kind.
+fn object_drop_sql(object: &RestoredObject, dialect: DriverDialect) -> String {
+    let stored = object.drop_ddl.trim().trim_end_matches(';').trim_end();
+    if !stored.is_empty() {
+        // Archives written before PostgreSQL drops gained `CASCADE` stored the plain form; a
+        // re-import must be able to replace objects other tables/views depend on.
+        let upper = stored.to_ascii_uppercase();
+        if dialect == DriverDialect::Postgres
+            && (upper.starts_with("DROP TABLE IF EXISTS")
+                || upper.starts_with("DROP VIEW IF EXISTS"))
+            && !upper.contains(" CASCADE")
+        {
+            return format!("{stored} CASCADE");
+        }
+        return stored.to_string();
+    }
+    let upper = object.ddl.to_ascii_uppercase();
+    let verb = match object.kind {
+        BackupObjectKind::Table => "TABLE",
+        BackupObjectKind::View => "VIEW",
+        BackupObjectKind::Event => "EVENT",
+        BackupObjectKind::Function => {
+            if upper.contains(" PROCEDURE") {
+                "PROCEDURE"
+            } else {
+                "FUNCTION"
+            }
+        }
+    };
+    let name = object
+        .name
+        .split('.')
+        .map(|part| dialect.quote_identifier(part))
+        .collect::<Vec<_>>()
+        .join(".");
+    format!("DROP {verb} IF EXISTS {name}")
+}
 
 fn read_manifest_from(file: &mut File) -> Result<BackupManifest> {
     file.seek(SeekFrom::Start(0))?;
@@ -581,6 +730,8 @@ mod tests {
                 kind: BackupObjectKind::Table,
                 ddl: "CREATE TABLE `users` (\n  `id` int NOT NULL,\n  `name` varchar(20)\n)"
                     .to_string(),
+                drop_ddl: "DROP TABLE IF EXISTS `users`".to_string(),
+                references: Vec::new(),
                 fields: vec!["id".to_string(), "name".to_string()],
                 trigger_ddl: vec![
                     "CREATE TRIGGER `t` BEFORE INSERT ON `users` FOR EACH ROW SET @x = 1"
@@ -596,6 +747,8 @@ mod tests {
                 name: "active_users".to_string(),
                 kind: BackupObjectKind::View,
                 ddl: "CREATE VIEW `active_users` AS SELECT * FROM `users`".to_string(),
+                drop_ddl: "DROP VIEW IF EXISTS `active_users`".to_string(),
+                references: Vec::new(),
                 fields: Vec::new(),
                 trigger_ddl: Vec::new(),
                 rows: Vec::new(),
@@ -604,9 +757,98 @@ mod tests {
     }
 
     #[test]
+    fn extracted_sql_drops_before_create() {
+        let object = sample_objects().remove(0);
+        let restored = RestoredObject {
+            name: object.name,
+            kind: object.kind,
+            ddl: object.ddl,
+            drop_ddl: object.drop_ddl,
+            fields: object.fields,
+            trigger_ddl: object.trigger_ddl,
+            data: String::new(),
+        };
+        let sql = object_sql(&restored, DriverDialect::Mysql);
+        let drop_at = sql.find("DROP TABLE IF EXISTS `users`").expect("drop");
+        let create_at = sql.find("CREATE TABLE `users`").expect("create");
+        assert!(drop_at < create_at, "drop must precede create:\n{sql}");
+    }
+
+    /// An archive written before `drop_ddl` was stored still extracts a usable script: the drop is
+    /// derived from the object's kind.
+    #[test]
+    fn extracted_sql_derives_a_missing_drop() {
+        let restored = RestoredObject {
+            name: "dbo.users".to_string(),
+            kind: BackupObjectKind::Table,
+            ddl: "CREATE TABLE [dbo].[users] ([id] int)".to_string(),
+            drop_ddl: String::new(),
+            fields: Vec::new(),
+            trigger_ddl: Vec::new(),
+            data: String::new(),
+        };
+        let sql = object_sql(&restored, DriverDialect::Mysql);
+        assert!(
+            sql.starts_with("DROP TABLE IF EXISTS `dbo`.`users`;"),
+            "unexpected script:\n{sql}"
+        );
+    }
+
+    /// PostgreSQL and SQL Server switch foreign-key checks off per table, between the `CREATE`
+    /// and the `INSERT`s, so rows may load before the tables they reference.
+    #[test]
+    fn extracted_sql_disables_foreign_keys_per_table() {
+        let restored = RestoredObject {
+            name: "public.users".to_string(),
+            kind: BackupObjectKind::Table,
+            ddl: "CREATE TABLE \"public\".\"users\" (id int)".to_string(),
+            drop_ddl: String::new(),
+            fields: vec!["id".to_string()],
+            trigger_ddl: Vec::new(),
+            data: "(1)".to_string(),
+        };
+        let sql = object_sql(&restored, DriverDialect::Postgres);
+        let disable = sql
+            .find("ALTER TABLE \"public\".\"users\" DISABLE TRIGGER ALL;")
+            .expect("per-table foreign-key switch");
+        let insert = sql
+            .find("INSERT INTO \"public\".\"users\" (\"id\")")
+            .expect("insert");
+        assert!(
+            disable < insert,
+            "foreign-key checks must be off before the rows load:\n{sql}"
+        );
+        assert!(
+            !sql.contains('`'),
+            "a PostgreSQL script must not use MySQL backticks:\n{sql}"
+        );
+    }
+
+    /// Older archives do not store references; the DDL parser still sees them so a restore can
+    /// put the referenced tables first.
+    #[test]
+    fn parses_references_from_ddl() {
+        let ddl = "CREATE TABLE \"public\".\"child\" (\n  CONSTRAINT \"fk\" FOREIGN KEY (\"p\") \
+                   REFERENCES \"public\".\"parent\" (\"id\")\n)";
+        assert_eq!(references_of(ddl), vec!["\"public\".\"parent\""]);
+        assert_eq!(
+            references_of("CREATE TABLE [dbo].[c] (id int REFERENCES [dbo].[p] (id))"),
+            vec!["[dbo].[p]"]
+        );
+        assert!(references_of("CREATE TABLE t (id int)").is_empty());
+    }
+
+    #[test]
     fn round_trips_an_archive() {
         let path = temp_path();
-        write_backup(&path, "demo", &sample_objects(), "hello").unwrap();
+        write_backup(
+            &path,
+            "demo",
+            DriverDialect::Mysql,
+            &sample_objects(),
+            "hello",
+        )
+        .unwrap();
 
         let manifest = read_manifest(&path).unwrap();
         assert_eq!(manifest.format_version, FORMAT_VERSION);
@@ -639,7 +881,8 @@ mod tests {
     fn streaming_writer_round_trips() {
         let path = temp_path();
         {
-            let mut writer = BackupWriter::create(&path, "demo", "streamed").unwrap();
+            let mut writer =
+                BackupWriter::create(&path, "demo", DriverDialect::Mysql, "streamed").unwrap();
             for object in sample_objects() {
                 writer.begin_object(&object).unwrap();
                 for row in &object.rows {
@@ -662,7 +905,7 @@ mod tests {
     #[test]
     fn reads_a_selected_subset() {
         let path = temp_path();
-        write_backup(&path, "demo", &sample_objects(), "").unwrap();
+        write_backup(&path, "demo", DriverDialect::Mysql, &sample_objects(), "").unwrap();
 
         let selected = vec![(BackupObjectKind::View, "active_users".to_string())];
         let archive = read_backup_selected(&path, Some(&selected)).unwrap();
@@ -675,7 +918,7 @@ mod tests {
     #[test]
     fn reader_reads_one_object_on_demand() {
         let path = temp_path();
-        write_backup(&path, "demo", &sample_objects(), "").unwrap();
+        write_backup(&path, "demo", DriverDialect::Mysql, &sample_objects(), "").unwrap();
 
         let reader = BackupReader::open(&path).unwrap();
         assert_eq!(reader.manifest().objects.len(), 2);
@@ -716,7 +959,7 @@ mod tests {
     #[test]
     fn checksums_are_sha1_hex() {
         let path = temp_path();
-        write_backup(&path, "demo", &sample_objects(), "").unwrap();
+        write_backup(&path, "demo", DriverDialect::Mysql, &sample_objects(), "").unwrap();
         let manifest = read_manifest(&path).unwrap();
         for object in &manifest.objects {
             for chunk in &object.chunks {
