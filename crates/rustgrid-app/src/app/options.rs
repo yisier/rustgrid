@@ -235,13 +235,16 @@ pub(super) fn settings_card(theme: Theme) -> Div {
         .overflow_hidden()
 }
 
-/// One setting row: the title (and an optional one-line hint) on the left, its control on the
-/// right. `divider` draws the hairline to the next row; the last row of a card passes `false`.
+/// One setting row: the title on the left, its control on the right. `divider` draws the hairline
+/// to the next row; the last row of a card passes `false`.
+///
+/// The row deliberately carries no description line: the Options window stays compact and every
+/// option's meaning is documented on the website's Settings page (`site/guide/settings.md`).
 pub(super) fn setting_row(
     id: &'static str,
     theme: Theme,
     title: String,
-    hint: Option<String>,
+    _hint: Option<String>,
     control: AnyElement,
     divider: bool,
 ) -> Stateful<Div> {
@@ -271,14 +274,7 @@ pub(super) fn setting_row(
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(rgb(theme.text))
                         .child(title),
-                )
-                .children(hint.map(|hint| {
-                    div()
-                        .text_size(px(11.5))
-                        .line_height(px(16.0))
-                        .text_color(rgb(theme.text_muted))
-                        .child(hint)
-                })),
+                ),
         )
         .child(
             div()
@@ -894,51 +890,26 @@ impl AppView {
             .into_any_element()
     }
 
-    /// The centred settings column: the page title (and its one-line description) above the
-    /// section cards. Its width is capped so the rows stay readable on a maximised window.
+    /// The centred settings column: the page title above the section cards. Its width is capped so
+    /// the rows stay readable on a maximised window. The pages carry no descriptive paragraphs:
+    /// the website's Settings page documents every option.
     fn options_page(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
-        let (title, description) = match self.options_section {
-            OptionsSection::General => (
-                t!("options.general").to_string(),
-                Some(t!("options.general.description").to_string()),
-            ),
-            OptionsSection::Editor => (
-                t!("options.editor").to_string(),
-                Some(t!("options.editor.description").to_string()),
-            ),
-            OptionsSection::Shortcuts => (
-                t!("options.shortcuts").to_string(),
-                Some(t!("options.shortcuts.description").to_string()),
-            ),
-            OptionsSection::Data => (
-                t!("options.data").to_string(),
-                Some(t!("options.data.description").to_string()),
-            ),
-            OptionsSection::Mcp => (t!("options.mcp.title").to_string(), None),
-            OptionsSection::About => (
-                t!("options.about").to_string(),
-                Some(t!("options.about.description").to_string()),
-            ),
+        let title = match self.options_section {
+            OptionsSection::General => t!("options.general").to_string(),
+            OptionsSection::Editor => t!("options.editor").to_string(),
+            OptionsSection::Shortcuts => t!("options.shortcuts").to_string(),
+            OptionsSection::Data => t!("options.data").to_string(),
+            OptionsSection::Mcp => t!("options.mcp.title").to_string(),
+            OptionsSection::About => t!("options.about").to_string(),
         };
-        let header = div()
-            .flex()
-            .flex_col()
-            .gap_0p5()
-            .mb(px(18.0))
-            .child(
-                div()
-                    .text_size(px(15.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(theme.text))
-                    .child(title),
-            )
-            .children(description.map(|description| {
-                div()
-                    .text_size(px(12.0))
-                    .text_color(rgb(theme.text_muted))
-                    .child(description)
-            }));
+        let header = div().flex().flex_col().gap_0p5().mb(px(18.0)).child(
+            div()
+                .text_size(px(15.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(theme.text))
+                .child(title),
+        );
 
         let column = div()
             .flex()
@@ -1249,8 +1220,7 @@ impl AppView {
             );
         }
 
-        // Only the search box stays put; the hint and the command cards scroll together
-        // beneath it.
+        // Only the search box stays put; the command cards scroll together beneath it.
         div()
             .flex()
             .flex_col()
@@ -1262,13 +1232,6 @@ impl AppView {
                 self.options_shortcut_search
                     .clone()
                     .map(|search| div().flex_none().w_full().child(search)),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .text_size(px(11.5))
-                    .text_color(rgb(theme.text_muted))
-                    .child(t!("options.shortcuts.hint").to_string()),
             )
             .child(list)
     }
