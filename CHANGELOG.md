@@ -10,6 +10,36 @@ UI labels are quoted as the app shows them, so this file quotes the English stri
 [`CHANGELOG_zh.md`](CHANGELOG_zh.md) and [`CHANGELOG_ru.md`](CHANGELOG_ru.md) quote the 简体中文 and
 Russian ones.
 
+## [0.1.16] - 2026-11-22
+
+### Added
+
+- Backup: Dump SQL File opens an object picker (Object Selection / Info Log tabs) for the database,
+  a schema or a single table.
+- Table designer: `ENUM` and `SET` values are edited in a member-list editor and offered as defaults
+  ([#67](https://github.com/yisier/rustgrid/issues/67)).
+- Table designer: the type cell accepts a typed type, such as `varchar(50)` or `int unsigned`.
+- Query: Run SQL File is also available on a schema node and runs in that schema
+  ([#70](https://github.com/yisier/rustgrid/issues/70)).
+- Documentation: a website with English and Chinese guides and a benchmark report.
+
+### Changed
+
+- Backup: dump, extract and restore scripts drop objects before creating them, put referenced tables
+  first and switch foreign-key checks off while data loads.
+- Backup: extracted SQL is quoted with its own engine's dialect.
+- Grid: a single pasted value fills every selected cell.
+- Backup: logs are one selectable block, so Ctrl+C copies them across lines.
+- Query: running a long SQL file keeps the window responsive, and the connection's objects refresh
+  when it finishes.
+- Options: each setting is listed without a description; the website's Settings page documents every
+  option.
+
+### Fixed
+
+- Backup: a new backup stays on the schema selected in the connection tree.
+- Table designer: `ENUM`/`SET` fields no longer show a length or decimals value.
+
 ## [0.1.15] - 2026-11-18
 
 ### Added
