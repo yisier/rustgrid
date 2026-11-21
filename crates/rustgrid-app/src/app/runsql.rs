@@ -394,6 +394,10 @@ impl AppView {
     }
 
     fn finish_run_sql(&mut self, fatal: Option<String>, cx: &mut Context<'_, Self>) {
+        let connection_index = self
+            .run_sql_dialog
+            .as_ref()
+            .map(|dialog| dialog.connection_index);
         if let Some(dialog) = self.run_sql_dialog.as_mut() {
             dialog.running = false;
             if let Some(error) = &fatal {
@@ -416,6 +420,12 @@ impl AppView {
                 .to_string(),
             );
             dialog.log_scroll.scroll_to_bottom();
+        }
+        // A script may have created, dropped or altered objects (the usual reason to run a file),
+        // so reload the connection's databases/objects once it finishes. Open table grids are not
+        // touched: they may hold staged edits.
+        if let Some(connection_index) = connection_index {
+            self.load_databases(connection_index, cx);
         }
         cx.notify();
     }

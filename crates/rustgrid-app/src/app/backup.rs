@@ -124,11 +124,14 @@ impl AppView {
 
     /// The database the Backup tab is scoped to, taken from the connection tree's selection.
     /// Backups are tied to a database, so this only resolves when the tree has a selected (or
-    /// Backups-category) database row whose connection is open and whose database is opened.
-    pub(super) fn backup_scope(&self, cx: &App) -> Option<(usize, usize)> {
+    /// Backups-category) database row whose connection is open and whose database is opened. The
+    /// third element is the schema the selection sits under, so a backup started from a schema
+    /// row only lists that schema's objects.
+    pub(super) fn backup_scope(&self, cx: &App) -> Option<(usize, usize, Option<String>)> {
         let selected = self.tree_pane.read(cx).selected.clone()?;
-        // A database, schema or category row scopes its database; backups are per database.
-        let (connection_index, database_index, _schema) = parse_tree_scope(&selected)?;
+        // A database, schema or category row scopes its database; backups are per database, and
+        // a schema row additionally narrows the object list to that schema.
+        let (connection_index, database_index, schema) = parse_tree_scope(&selected)?;
         let node = self.connections.get(connection_index)?;
         if !matches!(node.status, ConnectionStatus::Connected(_)) {
             return None;
@@ -139,12 +142,12 @@ impl AppView {
         let database = databases.get(database_index)?;
         database
             .opened
-            .then_some((connection_index, database_index))
+            .then_some((connection_index, database_index, schema))
     }
 
     /// `(connection_id, database)` of the current scope, for filtering the scanned files.
     fn backup_scope_names(&self, cx: &App) -> Option<(String, String)> {
-        let (connection_index, database_index) = self.backup_scope(cx)?;
+        let (connection_index, database_index, _) = self.backup_scope(cx)?;
         let connection_id = self.connections.get(connection_index)?.profile.id.clone();
         let database = self.database_name(connection_index, database_index)?;
         Some((connection_id, database))
@@ -1109,7 +1112,7 @@ impl AppView {
         let Some(clipboard) = self.backup_clipboard.clone() else {
             return;
         };
-        let Some((connection_index, database_index)) = self.backup_scope(cx) else {
+        let Some((connection_index, database_index, _)) = self.backup_scope(cx) else {
             return;
         };
         let Some(connection_id) = self
@@ -1318,7 +1321,7 @@ impl AppView {
 
     /// Reveal the current scope's backup folder in the OS file manager.
     pub(super) fn reveal_backup_folder(&mut self, cx: &mut Context<'_, Self>) {
-        let Some((connection_index, database_index)) = self.backup_scope(cx) else {
+        let Some((connection_index, database_index, _)) = self.backup_scope(cx) else {
             return;
         };
         let Some(connection_id) = self
@@ -1869,8 +1872,9 @@ impl AppView {
 
     pub(super) fn open_new_backup(&mut self, cx: &mut Context<'_, Self>) {
         // A new backup belongs to the database the Backup tab is scoped to; there is nothing to
-        // choose, so warn when no database is open.
-        let Some((connection_index, database_index)) = self.backup_scope(cx) else {
+        // choose, so warn when no database is open. A schema row also narrows the object list to
+        // that schema.
+        let Some((connection_index, database_index, schema)) = self.backup_scope(cx) else {
             self.error_dialog = Some(t!("backup.no_scope").to_string());
             cx.notify();
             return;
@@ -1878,7 +1882,7 @@ impl AppView {
         let database = self
             .database_name(connection_index, database_index)
             .unwrap_or_default();
-        self.open_new_backup_dialog_with(None, Some(connection_index), database, cx);
+        self.open_new_backup_dialog_with(None, Some(connection_index), database, schema, cx);
     }
 
     /// Open the New Backup dialog for a saved configuration, pre-filling its selection.
@@ -1892,7 +1896,8 @@ impl AppView {
             .position(|node| node.profile.id == config.connection_id)
             .or_else(|| self.default_query_connection(cx));
         let database = config.database.clone();
-        self.open_new_backup_dialog_with(Some(config), connection_index, database, cx);
+        let schema = (!config.schema.is_empty()).then_some(config.schema.clone());
+        self.open_new_backup_dialog_with(Some(config), connection_index, database, schema, cx);
     }
 
     fn open_new_backup_dialog_with(
@@ -1900,6 +1905,7 @@ impl AppView {
         apply: Option<SavedBackup>,
         connection_index: Option<usize>,
         database: String,
+        schema: Option<String>,
         cx: &mut Context<'_, Self>,
     ) {
         let Some(connection_index) = connection_index.or_else(|| self.default_query_connection(cx))
@@ -1926,6 +1932,7 @@ impl AppView {
         self.new_backup_dialog = Some(NewBackupDialog {
             connection_index,
             database,
+            schema,
             tab: BackupDialogTab::Objects,
             objects: Vec::new(),
             config_name,
@@ -1970,6 +1977,7 @@ impl AppView {
         }
         let connection_index = dialog.connection_index;
         let database = dialog.database.clone();
+        let schema = dialog.schema.clone();
         if database.is_empty() {
             if let Some(dialog) = self.new_backup_dialog.as_mut() {
                 dialog.error = Some(t!("backup.no_database").to_string());
@@ -1990,6 +1998,14 @@ impl AppView {
         }
         let runtime = self.runtime.clone();
         cx.spawn(async move |this, cx| {
+            // A schema row scopes the backup: only that schema's objects are listed, not every
+            // schema of a schema-qualified database.
+            let schema_prefix = schema.map(|schema| format!("{schema}."));
+            let in_schema = |name: &str| {
+                schema_prefix
+                    .as_ref()
+                    .is_none_or(|prefix| name.starts_with(prefix))
+            };
             let tables = {
                 let connection = connection.clone();
                 let database = database.clone();
@@ -2017,6 +2033,9 @@ impl AppView {
             match tables {
                 Ok(Ok(tables)) => {
                     for table in tables {
+                        if !in_schema(&table.name) {
+                            continue;
+                        }
                         let kind = if matches!(table.kind, ObjectKind::View) {
                             BackupObjectKind::View
                         } else {
@@ -2038,6 +2057,9 @@ impl AppView {
             match routines {
                 Ok(Ok(names)) => {
                     for name in names {
+                        if !in_schema(&name) {
+                            continue;
+                        }
                         objects.push(BackupObjectEntry {
                             kind: BackupObjectKind::Function,
                             name,
@@ -2055,6 +2077,9 @@ impl AppView {
             match events {
                 Ok(Ok(names)) => {
                     for name in names {
+                        if !in_schema(&name) {
+                            continue;
+                        }
                         objects.push(BackupObjectEntry {
                             kind: BackupObjectKind::Event,
                             name,
@@ -2131,12 +2156,13 @@ impl AppView {
 
     /// Save the current object selection as a reusable configuration.
     pub(super) fn save_backup_config(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        let Some((name, connection_index, database, objects)) =
+        let Some((name, connection_index, database, schema, objects)) =
             self.new_backup_dialog.as_ref().map(|dialog| {
                 (
                     dialog.config_name.trim().to_string(),
                     dialog.connection_index,
                     dialog.database.clone(),
+                    dialog.schema.clone(),
                     dialog.objects.clone(),
                 )
             })
@@ -2163,6 +2189,7 @@ impl AppView {
             name,
             connection_id,
             database,
+            schema: schema.unwrap_or_default(),
             comment: String::new(),
             tables: rustgrid_core::SavedBackupSelection::default(),
             views: rustgrid_core::SavedBackupSelection::default(),
@@ -2185,6 +2212,7 @@ impl AppView {
             existing.name == saved.name
                 && existing.connection_id == saved.connection_id
                 && existing.database == saved.database
+                && existing.schema == saved.schema
         }) {
             self.backup_configs[index] = saved;
             self.backup_selected = Some(BackupSelection::Config(index));
@@ -3414,10 +3442,15 @@ impl AppView {
             .map(|dialog| dialog.database.clone())
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| "--".to_string());
+        let schema = self
+            .new_backup_dialog
+            .as_ref()
+            .and_then(|dialog| dialog.schema.clone());
         let header = backup_target_line(
             t!("backup.target").to_string(),
             connection_name,
             database_name,
+            schema,
             theme,
         );
         let tabs = div()
@@ -3741,6 +3774,7 @@ impl AppView {
             t!("backup.restore_to").to_string(),
             connection_name,
             database_name,
+            None,
             theme,
         );
         let tabs = div()
@@ -4314,15 +4348,16 @@ fn make_backup_name_input(
     })
 }
 
-/// The dialog's target line: a small muted label plus the fixed connection and database, shown
-/// above the tabs.
+/// The dialog's target line: a small muted label plus the fixed connection, database and (when
+/// the backup is scoped to one) schema, shown above the tabs.
 pub(super) fn backup_target_line(
     label: String,
     connection_name: String,
     database_name: String,
+    schema: Option<String>,
     theme: Theme,
 ) -> impl IntoElement {
-    div()
+    let mut line = div()
         .flex()
         .flex_row()
         .items_center()
@@ -4372,7 +4407,32 @@ pub(super) fn backup_target_line(
                         .text_color(rgb(theme.text))
                         .child(database_name),
                 ),
-        )
+        );
+    if let Some(schema) = schema {
+        line = line
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(12.5))
+                    .text_color(rgb(theme.text_muted))
+                    .child("."),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .child(tree_icon("icons/folder.svg", theme.warning))
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .text_color(rgb(theme.text))
+                            .child(schema),
+                    ),
+            );
+    }
+    line
 }
 
 /// A red alert banner shown above the dialog footer while an error is set, so the reason is

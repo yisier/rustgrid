@@ -830,6 +830,10 @@ pub struct SavedBackup {
     /// The `ConnectionProfile::id` the configuration belongs to.
     pub connection_id: String,
     pub database: String,
+    /// The schema the configuration is scoped to on schema-qualified engines. Empty backs up the
+    /// whole database.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub schema: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub comment: String,
     #[serde(default)]

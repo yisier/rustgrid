@@ -614,6 +614,9 @@ struct BackupRenameEdit {
 struct NewBackupDialog {
     connection_index: usize,
     database: String,
+    /// The schema the object list is scoped to on schema-qualified engines; `None` covers the
+    /// whole database (the schema-less engines always use `None`).
+    schema: Option<String>,
     tab: BackupDialogTab,
     objects: Vec<BackupObjectEntry>,
     /// Name the configuration is saved under by the *Save* button.
