@@ -388,9 +388,6 @@ impl AppView {
         self.options_single_click_open = self.single_click_open;
         self.options_stop_on_error = self.stop_on_error;
         self.set_options_max_statements(self.max_statements_per_run.to_string(), cx);
-        self.mcp_options = options_mcp::McpOptionsState::load(&self.config);
-        self.options_mcp_max_rows_input = None;
-        self.options_mcp_timeout_input = None;
         self.recording_shortcut = None;
         self.ensure_shortcut_search(cx);
         self.ensure_language_combo(cx);
@@ -701,32 +698,6 @@ impl AppView {
         if let Ok(limit) = self.options_max_statements.trim().parse::<u32>() {
             self.max_statements_per_run = limit;
         }
-        // The MCP settings are one file, saved on 确定 like the rest of the page. Read the live
-        // field values first because an input's change callback is dispatched on its next render.
-        if let Some(input) = self.options_mcp_max_rows_input.clone()
-            && let Some(text) = input.read(cx).current_text(cx)
-        {
-            self.mcp_options.max_rows = text.chars().filter(char::is_ascii_digit).collect();
-        }
-        if let Some(input) = self.options_mcp_timeout_input.clone()
-            && let Some(text) = input.read(cx).current_text(cx)
-        {
-            self.mcp_options.timeout_seconds = text.chars().filter(char::is_ascii_digit).collect();
-        }
-        // Permissions for deleted connections must not linger in mcp.json.
-        let known: std::collections::BTreeSet<String> = self
-            .connections
-            .iter()
-            .map(|node| node.profile.id.clone())
-            .collect();
-        self.mcp_options
-            .permissions
-            .retain(|profile_id, _| known.contains(profile_id));
-        if let Err(error) = self.mcp_options.save(&self.config) {
-            self.mcp_options.error = Some(format!("Failed to save the AI / MCP settings: {error}"));
-            self.options_section = OptionsSection::Mcp;
-            return false;
-        }
         self.recording_shortcut = None;
         // Re-bind every command: the previously bound keystrokes are shadowed by a `NoAction`
         // so a changed or cleared shortcut stops firing.
@@ -915,7 +886,6 @@ impl AppView {
                 t!("options.data").to_string(),
                 Some(t!("options.data.description").to_string()),
             ),
-            OptionsSection::Mcp => (t!("options.mcp.title").to_string(), None),
             OptionsSection::About => (
                 t!("options.about").to_string(),
                 Some(t!("options.about.description").to_string()),
@@ -1130,19 +1100,6 @@ impl AppView {
             )
             .child(
                 self.options_nav_item(
-                    "options-mcp",
-                    "icons/zap.svg",
-                    t!("options.mcp.title").to_string(),
-                    self.options_section == OptionsSection::Mcp,
-                )
-                .on_click(cx.listener(|this, _event, _window, cx| {
-                    this.options_section = OptionsSection::Mcp;
-                    this.recording_shortcut = None;
-                    cx.notify();
-                })),
-            )
-            .child(
-                self.options_nav_item(
                     "options-about",
                     "icons/info.svg",
                     t!("options.about").to_string(),
@@ -1161,7 +1118,6 @@ impl AppView {
             OptionsSection::Editor => self.options_editor_body(cx).into_any_element(),
             OptionsSection::Shortcuts => self.options_shortcuts_body(cx).into_any_element(),
             OptionsSection::Data => self.options_data_body(cx).into_any_element(),
-            OptionsSection::Mcp => self.options_mcp_body(cx).into_any_element(),
             OptionsSection::About => self.options_about_body(cx).into_any_element(),
         }
     }
@@ -2052,7 +2008,6 @@ fn options_section_label(section: OptionsSection) -> String {
         OptionsSection::Editor => t!("options.editor"),
         OptionsSection::Shortcuts => t!("options.shortcuts"),
         OptionsSection::Data => t!("options.data"),
-        OptionsSection::Mcp => t!("options.mcp.title"),
         OptionsSection::About => t!("options.about"),
     }
     .to_string()

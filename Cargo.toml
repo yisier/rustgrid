@@ -16,7 +16,6 @@ members = [
     "crates/rustgrid-tunnel",
     "crates/rustgrid-odbc",
     "crates/rustgrid-config",
-    "crates/rustgrid-mcp",
     "crates/rustgrid-app",
     "tools/rgbench",
 ]
@@ -47,7 +46,6 @@ rustgrid-odbc = { path = "crates/rustgrid-odbc" }
 rustgrid-redis = { path = "crates/rustgrid-redis" }
 rustgrid-mongodb = { path = "crates/rustgrid-mongodb" }
 rustgrid-config = { path = "crates/rustgrid-config" }
-rustgrid-mcp = { path = "crates/rustgrid-mcp" }
 
 async-trait = "0.1"
 chrono = "0.4"

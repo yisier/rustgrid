@@ -26,7 +26,6 @@ rustgrid-redis.workspace = true
 rustgrid-mongodb.workspace = true
 rustgrid-odbc = { workspace = true, optional = true }
 rustgrid-config.workspace = true
-rustgrid-mcp.workspace = true
 gpui.workspace = true
 gpui-kit.workspace = true
 lsp-types.workspace = true

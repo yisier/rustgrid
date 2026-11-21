@@ -1,11 +1,5 @@
-pub mod mcp;
 mod secrets;
 pub mod transfer;
-
-pub use mcp::{
-    DEFAULT_MCP_MAX_ROWS, DEFAULT_MCP_TIMEOUT_SECONDS, MCP_CONFIG_FILE, MCP_CONFIG_VERSION,
-    McpConfig, McpConnectionPermission,
-};
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -562,8 +556,8 @@ impl ConfigStore {
     /// The normal per-user configuration directory.
     ///
     /// `RUSTGRID_CONFIG_DIR` overrides it. The app itself does not need the override; it exists so
-    /// tests (and a portable install) can point the whole store — connections, secrets, session and
-    /// `mcp.json` — at a temporary directory instead of the user's real one.
+    /// tests (and a portable install) can point the whole store — connections, secrets and
+    /// session — at a temporary directory instead of the user's real one.
     pub fn new() -> ConfigResult<Self> {
         if let Some(root) = std::env::var_os("RUSTGRID_CONFIG_DIR")
             && !root.is_empty()
@@ -597,47 +591,6 @@ impl ConfigStore {
 
     pub fn session_path(&self) -> PathBuf {
         self.root.join(SESSION_FILE)
-    }
-
-    pub fn mcp_path(&self) -> PathBuf {
-        self.root.join(MCP_CONFIG_FILE)
-    }
-
-    /// The MCP settings. A missing file is the safe default (disabled), and an unknown/older
-    /// version is migrated in place. A malformed file is reported instead of being replaced by a
-    /// default, so a bad edit cannot silently grant access.
-    pub fn load_mcp(&self) -> ConfigResult<McpConfig> {
-        let path = self.mcp_path();
-        if !path.exists() {
-            return Ok(McpConfig::default());
-        }
-        let contents = fs::read_to_string(&path)?;
-        let mut config: McpConfig = serde_json::from_str(&contents)?;
-        if config.version < MCP_CONFIG_VERSION {
-            config.version = MCP_CONFIG_VERSION;
-            self.save_mcp(&config)?;
-        }
-        Ok(config)
-    }
-
-    /// Save the MCP settings atomically, with the current schema version. On Unix the file is
-    /// restricted to the owner: it names every connection an AI client may reach.
-    pub fn save_mcp(&self, config: &McpConfig) -> ConfigResult<()> {
-        fs::create_dir_all(&self.root)?;
-        let mut config = config.clone();
-        config.version = MCP_CONFIG_VERSION;
-        let contents = serde_json::to_string_pretty(&config)?;
-        let temporary = self.root.join(format!("{MCP_CONFIG_FILE}.tmp"));
-        fs::write(&temporary, contents)?;
-        fs::rename(&temporary, self.mcp_path())?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(self.mcp_path(), fs::Permissions::from_mode(0o600));
-        }
-
-        Ok(())
     }
 
     /// The last saved workspace session; empty when there is none or it cannot be read (a damaged

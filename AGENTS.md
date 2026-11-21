@@ -193,28 +193,9 @@ not a later refactor.
   OS config dir (`connections.json`, `settings.json`, `secrets.json`). Its `transfer` module owns
   connection import/export: the RustGrid `.rgc` bundle, the Navicat `.ncx` reader (XML plus the
   `libcckeylibcckey` AES-128-CBC password scheme DBX also reads) and the DBX plain-JSON reader,
-  all mapped onto a common `TransferConnection`.
-  `mcp.json` (versioned `McpConfig`) is the machine-local AI permission file: the MCP global
-  switch, default row cap/operation timeout, and a per-profile read-only/full-access switch.
-  Advanced `allowed_databases`/`blacklisted_tables`/`context_prompt` fields remain in the file for
-  hand-editing but are not exposed by the simplified Options page. It is deliberately separate from
-  `connections.json`, so exporting a connection cannot grant AI access. `ConfigStore::new`
-  honours `RUSTGRID_CONFIG_DIR` (tests/portable installs) and `with_root` builds one at an
+  all mapped onto a common `TransferConnection`. `ConfigStore::new` honours
+  `RUSTGRID_CONFIG_DIR` (tests/portable installs) and `with_root` builds one at an
   explicit directory.
-- `crates/rustgrid-mcp` — the built-in **Model Context Protocol** server, stdio transport. An AI
-  client launches the app as `RustGrid --mcp-stdio`; the flag is handled before the single-instance
-  lock and never initializes GPUI, stdout is exclusively newline-delimited JSON-RPC, and all
-  logging goes to stderr. The five tools are `list_connections`, `get_schema`, `describe_table`,
-  `sample_data` and `execute_query`. `execute_query` is read-only by default: one
-  `SELECT`/`WITH … SELECT`/`EXPLAIN SELECT` parsed with `sqlparser` in the connection's
-  `Driver::dialect_for` dialect, with locking reads, `SELECT … INTO`, MySQL executable comments,
-  quoted dangerous functions and external table functions refused; writes are only possible on a
-  connection whose user turned on the Options page's full-access switch. This guard is a
-  **best-effort boundary**, not a security guarantee — the database account's grants are what
-  actually protect the data, so
-  the UI recommends a read-only account. Database scope and the sensitive-table blacklist are
-  checked for every metadata tool and for parsed queries; they are advanced `mcp.json` fields (the
-  Options page only edits the read-only/full-access switch). See `docs/mcp.md`.
 - `crates/rustgrid-app` — GPUI binary `RustGrid`: `src/app/` is the view/render layer, split
   by feature (`mod.rs` holds `AppView`, its state, the `Render` entry, free helpers and
   tests; the rest are `impl AppView` submodules: `tree`, `database`, `db_dialog`, `objects`,
@@ -297,10 +278,6 @@ not a later refactor.
   iterating; finish with `cargo build`. Debug builds do not need the shader toolchain below.
 - `cargo check --workspace` / `cargo build`
 - `cargo run -p rustgrid-app` (produced binary is `RustGrid`)
-- MCP stdio mode: `RustGrid --mcp-stdio` reads newline-delimited JSON-RPC on stdin and writes
-  responses on stdout (the app binary itself; no second executable). `cargo test -p rustgrid-mcp`
-  covers the protocol/validator, and `cargo test -p rustgrid-app --test mcp_stdio` runs the real
-  binary against a temporary config + SQLite database.
 - The generic ODBC driver is a **default feature** (see the `rustgrid-odbc` crate bullet); disable it with
   `--no-default-features`. Either way there is no build dependency: the ODBC driver manager is loaded
   at runtime and is only needed if a user actually connects through ODBC.
@@ -1173,19 +1150,6 @@ shadcn chrome described above. Implemented today:
     result, Up the last (falling back to the first/last row when only a branch matched) — and the
     tree keeps the focus, so its arrows, Page Up/Down and Enter work from there. Esc or the field's
     ✕ clears the filter and restores the saved tree; 无匹配项 is shown when nothing matches.
-
-22. Built-in MCP server (stdio, `crates/rustgrid-mcp` + `app/options_mcp.rs`): an AI client launches
-    `RustGrid --mcp-stdio` (handled before the single-instance lock and without GPUI; stdout is
-    JSON-RPC only). It exposes `list_connections`, `get_schema`, `describe_table`, `sample_data` and
-    `execute_query`. Options → AI / MCP is deliberately minimal: the global switch, return-row cap
-    (default 0 = unlimited), operation timeout, a read-only stdio access-method row, horizontally
-    tabbed client snippets, and one read-only/full-access switch per saved connection. When the
-    global switch is on every connection is read-only; the switch grants full (read-write) access.
-    Permissions live only in `mcp.json`, keyed by profile id; advanced database scope, sensitive
-    tables and business context remain hand-editable fields. Read-only `execute_query` parses one
-    SELECT/EXPLAIN SELECT with `sqlparser` in the driver's own dialect and rejects writes, locking
-    reads, `SELECT … INTO`, executable comments, dangerous/external functions and out-of-scope
-    relations; it is a guardrail, with the database account as the real boundary. See `docs/mcp.md`.
 
 Still out of scope: engines other than MySQL, MariaDB, SQLite, SQL Server, PostgreSQL, Oracle,
 ClickHouse and Redis, and the disabled placeholder UI

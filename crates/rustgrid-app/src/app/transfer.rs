@@ -364,15 +364,7 @@ impl AppView {
                 port: node.profile.port,
                 username: node.profile.username.clone(),
                 database: node.profile.database.clone(),
-                // MCP permission is machine-local (`mcp.json`); a stale copy in an older profile
-                // must not travel with an exported connection and enable AI access elsewhere.
-                options: node
-                    .profile
-                    .options
-                    .iter()
-                    .filter(|(key, _)| !key.starts_with("mcp."))
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect(),
+                options: node.profile.options.clone(),
                 settings: node.profile.settings.clone(),
                 password: if include_passwords {
                     node.password.clone()

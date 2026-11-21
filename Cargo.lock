@@ -7688,7 +7688,6 @@ dependencies = [
  "rustgrid-core",
  "rustgrid-export",
  "rustgrid-import",
- "rustgrid-mcp",
  "rustgrid-mongodb",
  "rustgrid-mysql",
  "rustgrid-odbc",
@@ -7783,19 +7782,6 @@ dependencies = [
  "encoding_rs",
  "rustgrid-core",
  "thiserror 2.0.20",
-]
-
-[[package]]
-name = "rustgrid-mcp"
-version = "0.1.15"
-dependencies = [
- "anyhow",
- "rustgrid-config",
- "rustgrid-core",
- "serde",
- "serde_json",
- "sqlparser",
- "tokio",
 ]
 
 [[package]]
@@ -8770,18 +8756,6 @@ checksum = "13c6d1b651dc4edf07eead2a0c6c78016ce971bc2c10da5266861b13f25e7cec"
 dependencies = [
  "log",
  "recursive",
- "sqlparser_derive",
-]
-
-[[package]]
-name = "sqlparser_derive"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6dd45d8fc1c79299bfbb7190e42ccbbdf6a5f52e4a6ad98d92357ea965bd289"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]
