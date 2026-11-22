@@ -21,14 +21,15 @@ remembers a manual choice from the language menu in `localStorage`.
 | Path | Page |
 | --- | --- |
 | `site/README.md`, `site/zh/README.md` | Home: hero, benchmark report (`BenchReport.vue`) |
-| `site/guide/*.md`, `site/zh/guide/*.md` | Connections, Tables, Functions, Queries, Backup, Sync, Settings, Engines, Shortcuts |
+| `site/guide/*.md`, `site/zh/guide/*.md` | Install, Workspace, Connections, Tables, Table designer, Queries, Import & export, Backup, Sync, Views, Functions, Users, Engines, Settings, Shortcuts |
 | `site/.vuepress/components/BenchReport.vue` | Size + performance report |
 | `site/.vuepress/data/bench.json` | Benchmark results consumed by the report |
 | `site/.vuepress/data/releases.json` | Release archive sizes + runtime figures |
-| `site/guide/assets/{en,zh}/` | Screenshots (kept beside the pages so Vite fingerprints them) |
+| `site/guide/assets/en/`, `site/zh/guide/assets/zh/` | Screenshots (kept beside the pages so Vite fingerprints them) |
 
 Screenshots are referenced relatively (`./assets/en/tables.png`); a bare `assets/...` path
-is treated as a package specifier by Vite and fails to resolve.
+is treated as a package specifier by Vite and fails to resolve. The English and Chinese pages
+use their own screenshot set, so a UI label in a figure always matches the page language.
 
 ## Refreshing the benchmark
 

@@ -1,40 +1,40 @@
-# Quick start
+# Install & first launch
 
-Download the archive for your platform from [Releases](https://github.com/yisier/rustgrid/releases/latest), unpack it and run `RustGrid`. There is no installer and no runtime to install; the Windows build is a single `RustGrid.exe`.
+RustGrid is a single native executable: there is no installer and no runtime to add. Download the archive for your platform from [Releases](https://github.com/yisier/rustgrid/releases/latest), unpack it and start `RustGrid`.
 
-![Connection tree](./assets/en/connections.png)
+![Choose an engine when creating the first connection](./assets/en/engines.png)
 
-## Connect
+## Choose your build
 
-1. Click **New Connection** and pick an engine.
-2. Enter the host, port, user name and password. SQLite takes a file path; ODBC takes a driver or connection string.
-3. **Test Connection**, then **Save & Connect**.
+| Platform | Package | Notes |
+| --- | --- | --- |
+| Windows 10/11 | `.zip` (x64 or arm64) | One `RustGrid.exe`; the ODBC driver manager is loaded only when needed. |
+| macOS 13+ | `.tar.gz` (contains `RustGrid.app`, Intel and Apple Silicon) | Unsigned build; the first launch uses the context menu → **Open**. |
+| Linux x64 / arm64 | `.tar.gz` | One binary; no libraries beyond the desktop's normal GTK setup. |
 
-The password is only stored when **Remember password** is on, and it goes to the encrypted secret store rather than the connection profile. A missing password opens the prompt when the connection is used.
+The download is around 10 MB. Themes, connections, saved queries and backups live in the OS configuration directory, not beside the executable.
+
+## Make the first connection
+
+1. Click **New Connection** in the toolbar and pick an engine. MySQL is a good first choice.
+2. Enter the host, port and user name. The database is optional; SQLite takes a file path instead, and ODBC takes a driver or a connection string.
+3. Use **Test Connection** to check the settings, then **Save & Connect**. If the password is not remembered, RustGrid asks for it when the connection opens.
+
+The password is stored only when **Remember password** is on, and it goes to the encrypted secret store, never to the connection profile. The full form is described on [Connections](./connections.html).
 
 ## First steps
 
-- Open a database in the tree, pick a table and double-click it to page the rows.
+- Open a database in the tree, select a table and double-click it. The table opens in its own tab as a paged grid.
 - Press **New Query** to run SQL against the selected connection and database.
-- Open **Backups** to take a `.rgbak` backup before making large changes.
-- **Sync** compares two databases and previews the differences before writing.
+- Open **Backups** and take a `.rgbak` file before a large change.
+- Use **Sync** to compare two databases and preview every difference before writing.
 
-## Engines
+## Updates and removal
 
-| Type | Engines |
-| --- | --- |
-| SQL | MySQL, MariaDB, PostgreSQL, SQL Server, Oracle, SQLite, ClickHouse |
-| NoSQL | Redis, MongoDB |
-| Generic | ODBC (DB2, 达梦, other ODBC drivers) |
+Open **Options → About** to see the current version, check GitHub for a newer release and read that release's changelog. The app downloads the asset that matches the current platform and installs it in place.
 
-Details and limitations are on the [Supported engines](./engines.html) page.
+To remove RustGrid, delete the executable or the `.app` bundle. The configuration directory can be removed separately if you also want to delete connections, saved queries and backups.
 
-## Platforms
-
-Windows 10+, macOS 13+ (Intel and Apple Silicon) and Linux x64 / arm64.
-
-- **macOS**: the build is unsigned, so the first launch needs the context menu → **Open**. The app can update itself; a quarantined copy asks to be moved out of quarantine first.
-- **Linux**: the archive contains the binary; no system libraries beyond the desktop's normal GTK setup.
-- **Updates**: **Settings → About** checks the latest release and shows its changelog. The app downloads the matching asset for the current platform.
-
-To uninstall, delete the executable or the `.app` bundle. Settings, connections and backups live in the OS configuration directory and can be removed separately.
+::: tip Platform notes
+The macOS build is unsigned, so a quarantined download needs **Open** from the context menu once. A quarantined copy cannot update itself until it is moved out of quarantine. Linux builds need no extra services, and Windows needs no ODBC installation unless you actually create an ODBC connection.
+:::

@@ -31,4 +31,4 @@ footer: Apache-2.0 · 版权所有 © 2026 yisier
 
 ---
 
-**继续阅读：** [连接](guide/connections.md) · [表](guide/tables.md) · [函数](guide/functions.md) · [查询](guide/queries.md) · [备份](guide/backup.md) · [同步](guide/sync.md) · [设置](guide/settings.md) · [快捷键](guide/shortcuts.md)
+**继续阅读：** [安装](guide/install.md) · [主界面](guide/workspace.md) · [连接](guide/connections.md) · [表](guide/tables.md) · [表设计器](guide/table-designer.md) · [查询](guide/queries.md) · [导入与导出](guide/import-export.md) · [备份](guide/backup.md) · [同步](guide/sync.md) · [视图](guide/views.md) · [函数](guide/functions.md) · [用户](guide/users.md) · [设置](guide/settings.md) · [快捷键](guide/shortcuts.md)

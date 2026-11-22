@@ -20,14 +20,19 @@ export default defineUserConfig({
       '',
       'index.html',
       'guide/install.html',
+      'guide/workspace.html',
       'guide/connections.html',
-      'guide/settings.html',
       'guide/tables.html',
-      'guide/functions.html',
+      'guide/table-designer.html',
       'guide/queries.html',
+      'guide/import-export.html',
       'guide/backup.html',
       'guide/sync.html',
+      'guide/views.html',
+      'guide/functions.html',
+      'guide/users.html',
       'guide/engines.html',
+      'guide/settings.html',
       'guide/shortcuts.html'
     ];
     var path = window.location.pathname;
@@ -82,23 +87,38 @@ export default defineUserConfig({
           text: 'Getting Started',
           children: [
             '/guide/install.html',
+            '/guide/workspace.html',
             '/guide/connections.html',
-            '/guide/settings.html',
           ],
         },
         {
-          text: 'Modules',
+          text: 'Data',
           children: [
             '/guide/tables.html',
-            '/guide/functions.html',
+            '/guide/table-designer.html',
             '/guide/queries.html',
-            '/guide/backup.html',
-            '/guide/sync.html',
+            '/guide/import-export.html',
+          ],
+        },
+        {
+          text: 'Operations',
+          children: ['/guide/backup.html', '/guide/sync.html'],
+        },
+        {
+          text: 'Objects',
+          children: [
+            '/guide/views.html',
+            '/guide/functions.html',
+            '/guide/users.html',
           ],
         },
         {
           text: 'Reference',
-          children: ['/guide/engines.html', '/guide/shortcuts.html'],
+          children: [
+            '/guide/engines.html',
+            '/guide/settings.html',
+            '/guide/shortcuts.html',
+          ],
         },
       ],
     },
@@ -118,23 +138,38 @@ export default defineUserConfig({
               text: 'Getting Started',
               children: [
                 '/guide/install.html',
+                '/guide/workspace.html',
                 '/guide/connections.html',
-                '/guide/settings.html',
               ],
             },
             {
-              text: 'Modules',
+              text: 'Data',
               children: [
                 '/guide/tables.html',
-                '/guide/functions.html',
+                '/guide/table-designer.html',
                 '/guide/queries.html',
-                '/guide/backup.html',
-                '/guide/sync.html',
+                '/guide/import-export.html',
+              ],
+            },
+            {
+              text: 'Operations',
+              children: ['/guide/backup.html', '/guide/sync.html'],
+            },
+            {
+              text: 'Objects',
+              children: [
+                '/guide/views.html',
+                '/guide/functions.html',
+                '/guide/users.html',
               ],
             },
             {
               text: 'Reference',
-              children: ['/guide/engines.html', '/guide/shortcuts.html'],
+              children: [
+                '/guide/engines.html',
+                '/guide/settings.html',
+                '/guide/shortcuts.html',
+              ],
             },
           ],
         },
@@ -154,23 +189,38 @@ export default defineUserConfig({
               text: '开始使用',
               children: [
                 '/zh/guide/install.html',
+                '/zh/guide/workspace.html',
                 '/zh/guide/connections.html',
-                '/zh/guide/settings.html',
               ],
             },
             {
-              text: '功能模块',
+              text: '数据',
               children: [
                 '/zh/guide/tables.html',
-                '/zh/guide/functions.html',
+                '/zh/guide/table-designer.html',
                 '/zh/guide/queries.html',
-                '/zh/guide/backup.html',
-                '/zh/guide/sync.html',
+                '/zh/guide/import-export.html',
+              ],
+            },
+            {
+              text: '运维',
+              children: ['/zh/guide/backup.html', '/zh/guide/sync.html'],
+            },
+            {
+              text: '对象',
+              children: [
+                '/zh/guide/views.html',
+                '/zh/guide/functions.html',
+                '/zh/guide/users.html',
               ],
             },
             {
               text: '参考',
-              children: ['/zh/guide/engines.html', '/zh/guide/shortcuts.html'],
+              children: [
+                '/zh/guide/engines.html',
+                '/zh/guide/settings.html',
+                '/zh/guide/shortcuts.html',
+              ],
             },
           ],
         },

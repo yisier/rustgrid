@@ -31,4 +31,4 @@ footer: Apache-2.0 · Copyright © 2026 yisier
 
 ---
 
-**Read the guide:** [Connections](guide/connections.md) · [Tables](guide/tables.md) · [Functions](guide/functions.md) · [Queries](guide/queries.md) · [Backup](guide/backup.md) · [Sync](guide/sync.md) · [Settings](guide/settings.md) · [Keyboard shortcuts](guide/shortcuts.md)
+**Read the guide:** [Install](guide/install.md) · [The main window](guide/workspace.md) · [Connections](guide/connections.md) · [Tables](guide/tables.md) · [Table designer](guide/table-designer.md) · [Queries](guide/queries.md) · [Import & export](guide/import-export.md) · [Backup](guide/backup.md) · [Sync](guide/sync.md) · [Views](guide/views.md) · [Functions](guide/functions.md) · [Users](guide/users.md) · [Settings](guide/settings.md) · [Shortcuts](guide/shortcuts.md)
