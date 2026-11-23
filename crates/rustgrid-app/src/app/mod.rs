@@ -64,6 +64,14 @@ use ui::{
     scrollbar_fractions, scrollbar_thumb, toolbar_separator,
 };
 
+/// The application identifier every window reports to the platform.
+///
+/// Wayland's `xdg_toplevel.set_app_id` (and X11's `WM_CLASS`) is what GNOME matches a window
+/// against a `.desktop` file, so without it the shell groups the window under a generic
+/// "Unknown" app and paints the default gear icon. It matches the `StartupWMClass` that desktop
+/// entries use for the app.
+pub(crate) const WINDOW_APP_ID: &str = "RustGrid";
+
 // Cell-navigation actions for the in-place grid editor. gpui-kit's `Root` binds `tab`/`shift-tab`
 // to focus traversal in the `"Root"` context, and key bindings run before `on_key_down`; binding
 // the same keys in a deeper context (the editing cell) takes precedence and moves the editor.
