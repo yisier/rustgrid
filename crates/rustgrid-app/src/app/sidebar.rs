@@ -828,6 +828,19 @@ impl TreePane {
                 }
             });
         }
+        // A keyboard move onto a query/backup leaf must also select that row in its list, or the
+        // tree paints the cursor's leaf and the list's previous selection. Deferred: this runs
+        // inside the tree's own update and the list selection updates the tree back.
+        if (id.starts_with("bak-") || id.starts_with("qry-"))
+            && let Some(app) = self.app.upgrade()
+        {
+            let leaf = id.clone();
+            cx.defer(move |cx| {
+                let _ = app.update(cx, |app, cx| {
+                    app.sync_list_selection_for_tree_leaf(&leaf, cx);
+                });
+            });
+        }
         self.reveal(&id);
         self.nav_generation += 1;
         let generation = self.nav_generation;
@@ -2367,6 +2380,13 @@ impl TreePane {
                 this.selected_table = None;
                 let click_count = event.click_count();
                 let _ = app.update(cx, |app, cx| {
+                    app.select_object_from_tree(
+                        connection_index,
+                        database_index,
+                        &click_name,
+                        None,
+                        cx,
+                    );
                     if app.click_is_plain(click_count) {
                         app.set_info_routine(
                             connection_index,
@@ -2506,6 +2526,13 @@ impl TreePane {
                 this.selected = Some(click_id.clone());
                 let click_count = event.click_count();
                 let _ = app.update(cx, |app, cx| {
+                    app.select_object_from_tree(
+                        connection_index,
+                        database_index,
+                        &table_name,
+                        Some(is_view),
+                        cx,
+                    );
                     if app.click_opens(click_count, event.modifiers()) {
                         app.select_table(
                             connection_index,

@@ -246,13 +246,65 @@ impl AppView {
     /// Keep the single-selection mirror (`backup_selected`) in step with the multi-selection.
     /// It resolves through the visible entries (see [`Self::selected_backup_entries`]), so the
     /// mirror never names a file the list is not showing.
-    fn sync_backup_selected(&mut self, cx: &App) {
+    fn sync_backup_selected(&mut self, cx: &mut Context<'_, Self>) {
         let (files, configs) = self.selected_backup_entries(cx);
         self.backup_selected = match (files.as_slice(), configs.as_slice()) {
             ([file], []) => Some(BackupSelection::File(*file)),
             ([], [config]) => Some(BackupSelection::Config(*config)),
             _ => None,
         };
+        self.sync_backup_tree_cursor(cx);
+    }
+
+    /// Move the connection tree's cursor onto the backup the list has selected.
+    ///
+    /// A backup leaf paints selected when it is either the tree's own cursor or part of
+    /// `backups_selection`. Leaving the cursor on the row the user clicked in the tree while the
+    /// list selects another file painted **two** rows as selected, which read as a multi-selection
+    /// even though only one file was picked.
+    fn sync_backup_tree_cursor(&mut self, cx: &mut Context<'_, Self>) {
+        let (files, configs) = self.selected_backup_entries(cx);
+        let cursor = match (files.first(), configs.first()) {
+            (Some(index), _) => Some((*index, false)),
+            (None, Some(index)) => Some((*index, true)),
+            _ => None,
+        };
+        let Some((index, is_config)) = cursor else {
+            return;
+        };
+        let (connection_id, database) = if is_config {
+            let Some(config) = self.backup_configs.get(index) else {
+                return;
+            };
+            (config.connection_id.clone(), config.database.clone())
+        } else {
+            let Some(file) = self.backup_files.get(index) else {
+                return;
+            };
+            (file.connection_id.clone(), file.database.clone())
+        };
+        let Some(connection_index) = self
+            .connections
+            .iter()
+            .position(|node| node.profile.id == connection_id)
+        else {
+            return;
+        };
+        let Some(database_index) = self.database_index_by_name(connection_index, &database) else {
+            return;
+        };
+        let id = format!(
+            "bak-{connection_index}-{database_index}-{}-{index}",
+            if is_config { 'c' } else { 'f' }
+        );
+        let pane = self.tree_pane.clone();
+        pane.update(cx, |pane, cx| {
+            if pane.selected.as_deref() != Some(id.as_str()) {
+                pane.selected = Some(id);
+                pane.selected_table = None;
+                cx.notify();
+            }
+        });
     }
 
     /// Whether one of the backup window's runs is in progress. The log summary measures the
@@ -784,7 +836,7 @@ impl AppView {
                 cx.stop_propagation();
                 if !this.backups_selection.contains(&menu_key) {
                     this.backups_selection.select_one(menu_key.clone());
-                    this.backup_selected = Some(BackupSelection::File(index));
+                    this.sync_backup_selected(cx);
                 }
                 this.context_menu = Some(ContextMenu {
                     target: ContextTarget::BackupFile { index },
@@ -889,7 +941,7 @@ impl AppView {
                 cx.stop_propagation();
                 if !this.backups_selection.contains(&menu_key) {
                     this.backups_selection.select_one(menu_key.clone());
-                    this.backup_selected = Some(BackupSelection::Config(index));
+                    this.sync_backup_selected(cx);
                 }
                 this.context_menu = Some(ContextMenu {
                     target: ContextTarget::BackupConfig { index },
@@ -1143,7 +1195,7 @@ impl AppView {
     /// the multi-selection (the highlighted row and the toolbar's 删除备份) and the
     /// single-selection mirror (the info pane) name it. The file only becomes selectable once it
     /// is part of the visible scope's list, which is what the toolbar reads.
-    fn select_backup_file(&mut self, path: &std::path::Path, cx: &App) {
+    fn select_backup_file(&mut self, path: &std::path::Path, cx: &mut Context<'_, Self>) {
         let Some(index) = self.backup_files.iter().position(|file| file.path == path) else {
             return;
         };
@@ -1249,7 +1301,7 @@ impl AppView {
         }
         match edit.target {
             BackupSelection::File(index) => self.submit_backup_file_rename(index, new_name, cx),
-            BackupSelection::Config(index) => self.submit_backup_config_rename(index, new_name),
+            BackupSelection::Config(index) => self.submit_backup_config_rename(index, new_name, cx),
         }
         cx.notify();
     }
@@ -1276,18 +1328,27 @@ impl AppView {
         match std::fs::rename(&old_path, &new_path) {
             Ok(()) => {
                 self.refresh_backups(cx);
-                self.backup_selected = self
+                if let Some(index) = self
                     .backup_files
                     .iter()
                     .position(|file| file.path == new_path)
-                    .map(BackupSelection::File);
+                {
+                    let key = backup_file_key(&self.backup_files[index].name);
+                    self.backups_selection.select_one(key);
+                    self.sync_backup_selected(cx);
+                }
             }
             Err(error) => self.error_dialog = Some(error.to_string()),
         }
     }
 
     /// Rename a saved backup configuration (the name is its key, kept unique per scope).
-    fn submit_backup_config_rename(&mut self, index: usize, new_name: String) {
+    fn submit_backup_config_rename(
+        &mut self,
+        index: usize,
+        new_name: String,
+        cx: &mut Context<'_, Self>,
+    ) {
         let Some(config) = self.backup_configs.get(index) else {
             return;
         };
@@ -1309,7 +1370,9 @@ impl AppView {
         }
         self.backup_configs[index].name = new_name;
         let _ = self.config.save_backups(&self.backup_configs);
-        self.backup_selected = Some(BackupSelection::Config(index));
+        let key = backup_config_key(&self.backup_configs[index].name);
+        self.backups_selection.select_one(key);
+        self.sync_backup_selected(cx);
     }
 
     /// Reveal a backup file in the OS file manager.

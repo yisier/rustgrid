@@ -1890,35 +1890,50 @@ impl AppView {
                     grid.state.is_view,
                     grid.state.connection.clone(),
                     grid.state.database.clone(),
+                    grid.state.table.clone(),
+                    grid.state.key_status.is_some(),
                 ))
             });
-        if let Some((is_view, connection, database)) = object_tab {
+        if let Some((is_view, connection, database, table, is_key)) = object_tab {
             self.main_tab = if is_view {
                 MainTab::Views
             } else {
                 MainTab::Tables
             };
-            // Bring the connection tree to the tab's database: with tables open from several
-            // databases, the highlight must follow the tab on screen rather than stay where the
-            // last tree click left it.
+            // Bring the connection tree's cursor to the tab's object: with tables open from
+            // several databases, the selection must follow the tab on screen rather than stay
+            // where the last tree click left it. Nothing is expanded — a list/tab selection never
+            // opens the tree (the query and backup lists follow the same rule).
             if let Some(connection_index) = self.connection_index_of(&connection) {
-                if let Some(node) = self.connections.get_mut(connection_index) {
-                    node.expanded = true;
-                }
                 if let Some(database_index) =
                     self.database_index_by_name(connection_index, &database)
                 {
                     self.tree_selection.clear();
-                    // A tab opened from the connection tree runs inside that pane's own update
-                    // (a table row's double-click / Enter). Selecting the database row here would
-                    // borrow the tree a second time and abort the app, so defer one cycle, like
-                    // the tree's other rows whose action updates it.
-                    let pane = self.tree_pane.clone();
-                    cx.defer(move |cx| {
-                        pane.update(cx, |pane, cx| {
-                            pane.select_database(connection_index, database_index, cx);
+                    // A table/view tab highlights its own leaf; a key grid (Redis) has no leaf in
+                    // the tree, so it falls back to the database row. A tab opened from the
+                    // connection tree runs inside that pane's own update, so the tree cursor
+                    // update is deferred by `reveal_object_in_tree`.
+                    let kind = if is_view {
+                        objects::ObjectLeafKind::View
+                    } else {
+                        objects::ObjectLeafKind::Table
+                    };
+                    let revealed = !is_key
+                        && self.reveal_object_in_tree(
+                            connection_index,
+                            database_index,
+                            &table,
+                            kind,
+                            cx,
+                        );
+                    if !revealed {
+                        let pane = self.tree_pane.clone();
+                        cx.defer(move |cx| {
+                            pane.update(cx, |pane, cx| {
+                                pane.select_database(connection_index, database_index, cx);
+                            });
                         });
-                    });
+                    }
                 }
             }
         }

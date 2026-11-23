@@ -1324,6 +1324,7 @@ impl AppView {
                 cx.stop_propagation();
                 if !this.query_selection.contains(&menu_key) {
                     this.select_query_one(index);
+                    this.sync_query_tree_cursor(cx);
                 }
                 this.context_menu = Some(ContextMenu {
                     target: ContextTarget::QueryFile { index },
@@ -1459,6 +1460,7 @@ impl AppView {
                 cx.stop_propagation();
                 if !this.query_selection.contains(&menu_key) {
                     this.select_query_one(index);
+                    this.sync_query_tree_cursor(cx);
                 }
                 this.context_menu = Some(ContextMenu {
                     target: ContextTarget::QueryFile { index },

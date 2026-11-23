@@ -2402,6 +2402,7 @@ impl AppView {
         self.refresh_query_files(cx);
         if let Some(index) = self.query_files.iter().position(|file| file.path == path) {
             self.select_query_one(index);
+            self.sync_query_tree_cursor(cx);
         }
         cx.notify();
     }
@@ -2618,6 +2619,7 @@ impl AppView {
                 .position(|file| file.path == saved_path)
             {
                 self.select_query_one(index);
+                self.sync_query_tree_cursor(cx);
             }
             if let Some(tab) = self.queries.get_mut(tab_index) {
                 tab.name = Some(name);
@@ -2668,6 +2670,7 @@ impl AppView {
             .position(|file| file.path == saved_path)
         {
             self.select_query_one(index);
+            self.sync_query_tree_cursor(cx);
         }
 
         if let Some(tab) = self.queries.get_mut(tab_index) {
@@ -2763,6 +2766,47 @@ impl AppView {
         });
     }
 
+    /// Move the connection tree's cursor onto the saved query the list has selected.
+    ///
+    /// A query leaf paints selected when it is either the tree's own cursor or part of
+    /// `query_selection`. Leaving the cursor on the row the user clicked in the tree while the
+    /// list selects another file painted **two** rows as selected (the same problem backups had).
+    pub(super) fn sync_query_tree_cursor(&mut self, cx: &mut Context<'_, Self>) {
+        let index = self.saved_query_selected.or_else(|| {
+            self.query_selection.items().iter().find_map(|key| {
+                self.query_files
+                    .iter()
+                    .position(|file| &query_file_key(file) == key)
+            })
+        });
+        let Some(index) = index else {
+            return;
+        };
+        let Some(file) = self.query_files.get(index) else {
+            return;
+        };
+        let Some(connection_index) = self
+            .connections
+            .iter()
+            .position(|node| node.profile.id == file.connection_id)
+        else {
+            return;
+        };
+        let Some(database_index) = self.database_index_by_name(connection_index, &file.database)
+        else {
+            return;
+        };
+        let id = format!("qry-{connection_index}-{database_index}-{index}");
+        let pane = self.tree_pane.clone();
+        pane.update(cx, |pane, cx| {
+            if pane.selected.as_deref() != Some(id.as_str()) {
+                pane.selected = Some(id);
+                pane.selected_table = None;
+                cx.notify();
+            }
+        });
+    }
+
     /// Replace the query selection with one file (used by right-click and programmatic selects).
     pub(super) fn select_query_one(&mut self, index: usize) {
         if let Some(file) = self.query_files.get(index) {
@@ -2790,6 +2834,7 @@ impl AppView {
                 .hit(&visible, key, selection_mode(modifiers));
         }
         self.sync_query_selected();
+        self.sync_query_tree_cursor(cx);
         cx.notify();
     }
 
@@ -3012,6 +3057,7 @@ impl AppView {
         let visible = self.query_visible_keys(cx);
         self.query_selection.select_all(&visible);
         self.sync_query_selected();
+        self.sync_query_tree_cursor(cx);
         cx.notify();
     }
 
@@ -3155,6 +3201,7 @@ impl AppView {
                 self.refresh_query_files(cx);
                 if let Some(index) = self.query_files.iter().position(|file| file.path == dest) {
                     self.select_query_one(index);
+                    self.sync_query_tree_cursor(cx);
                 }
             }
             Err(error) => self.error_dialog = Some(error.to_string()),
@@ -3278,6 +3325,7 @@ impl AppView {
                     .position(|file| file.path == new_path)
                 {
                     self.select_query_one(index);
+                    self.sync_query_tree_cursor(cx);
                 }
             }
             Err(error) => self.error_dialog = Some(error.to_string()),
@@ -3315,6 +3363,7 @@ impl AppView {
     /// Open the object-info pane for a query file.
     pub(super) fn open_query_info(&mut self, index: usize, cx: &mut Context<'_, Self>) {
         self.select_query_one(index);
+        self.sync_query_tree_cursor(cx);
         self.set_info_open(true, cx);
         cx.notify();
     }

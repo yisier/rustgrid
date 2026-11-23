@@ -179,6 +179,55 @@ impl AppView {
         Some(bounds)
     }
 
+    /// Select the query/backup list entry a tree leaf stands for.
+    ///
+    /// Mouse clicks on a leaf already call `hit_backup` / `hit_query`; the keyboard moves the
+    /// tree's cursor without touching the list, so the tree painted both its cursor and the
+    /// list's previous selection. Keep them in step from either input.
+    pub(super) fn sync_list_selection_for_tree_leaf(
+        &mut self,
+        id: &str,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(rest) = id.strip_prefix("bak-") {
+            let mut parts = rest.splitn(4, '-');
+            let (Some(_connection), Some(_database), Some(kind), Some(index)) =
+                (parts.next(), parts.next(), parts.next(), parts.next())
+            else {
+                return;
+            };
+            let Some(index) = index.parse::<usize>().ok() else {
+                return;
+            };
+            let key = match kind {
+                "f" => self
+                    .backup_files
+                    .get(index)
+                    .map(|file| backup::backup_file_key(&file.name)),
+                "c" => self
+                    .backup_configs
+                    .get(index)
+                    .map(|config| backup::backup_config_key(&config.name)),
+                _ => None,
+            };
+            if let Some(key) = key {
+                self.hit_backup(&key, 1, Modifiers::default(), cx);
+            }
+            return;
+        }
+        let Some(rest) = id.strip_prefix("qry-") else {
+            return;
+        };
+        let mut parts = rest.splitn(3, '-');
+        let (_connection, _database, index) = (parts.next(), parts.next(), parts.next());
+        let Some(index) = index.and_then(|value| value.parse::<usize>().ok()) else {
+            return;
+        };
+        if let Some(key) = self.query_files.get(index).map(query::query_file_key) {
+            self.hit_query(&key, 1, Modifiers::default(), cx);
+        }
+    }
+
     /// Hook for a list whose selection just changed (e.g. to resync a toolbar).
     pub(super) fn on_selection_changed(
         &mut self,
@@ -194,6 +243,7 @@ impl AppView {
         }
         if target == MarqueeTarget::Queries {
             self.sync_query_selected();
+            self.sync_query_tree_cursor(cx);
         }
         if target == MarqueeTarget::Objects {
             // The object list's single-selection mirror lives on its child pane, so push the new

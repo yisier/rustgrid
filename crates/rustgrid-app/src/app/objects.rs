@@ -261,7 +261,90 @@ fn object_nav_target(
     (target != index).then_some(target)
 }
 
+/// The tree leaf an object list row stands for, so selecting the row can move the connection
+/// tree's cursor onto the same object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ObjectLeafKind {
+    Table,
+    View,
+    Routine,
+}
+
 impl AppView {
+    /// Put the connection tree's cursor on an object list row's leaf. Returns `false` when the
+    /// database is not loaded (the caller may fall back to the database row).
+    pub(super) fn reveal_object_in_tree(
+        &mut self,
+        connection_index: usize,
+        database_index: usize,
+        name: &str,
+        kind: ObjectLeafKind,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        let Some(node) = self.connections.get(connection_index) else {
+            return false;
+        };
+        let Loadable::Loaded(databases) = &node.databases else {
+            return false;
+        };
+        let Some(database) = databases.get(database_index) else {
+            return false;
+        };
+        // Only an object the tree actually lists has a leaf to highlight: a tab restored before
+        // the catalog loaded (or one whose object was dropped) falls back to the database row.
+        let present = match kind {
+            ObjectLeafKind::Table | ObjectLeafKind::View => {
+                let want_view = matches!(kind, ObjectLeafKind::View);
+                matches!(
+                    &database.tables,
+                    Loadable::Loaded(tables) if tables.iter().any(|table| {
+                        table.name == name
+                            && matches!(table.kind, rustgrid_core::ObjectKind::View) == want_view
+                    })
+                )
+            }
+            ObjectLeafKind::Routine => matches!(
+                &database.routines,
+                Loadable::Loaded(routines) if routines.iter().any(|routine| routine.name == name)
+            ),
+        };
+        if !present {
+            return false;
+        }
+        // Do not expand anything: selecting a row in a list never opens the tree. The cursor
+        // moves, and the leaf only paints where the user already has its path expanded — the
+        // same rule the query and backup lists follow.
+        let id = match kind {
+            ObjectLeafKind::Table | ObjectLeafKind::View => {
+                format!("tbl-{connection_index}-{database_index}-{name}")
+            }
+            ObjectLeafKind::Routine => format!("rtn-{connection_index}-{database_index}-{name}"),
+        };
+        let selected_table = match kind {
+            ObjectLeafKind::Table | ObjectLeafKind::View => Some((
+                connection_index,
+                database_index,
+                name.to_string(),
+                kind == ObjectLeafKind::View,
+            )),
+            ObjectLeafKind::Routine => None,
+        };
+        // The cursor update touches the tree entity, which may already be updating when this is
+        // reached from a tree row's own listener; defer it like the tree's other row actions.
+        let pane = self.tree_pane.clone();
+        cx.defer(move |cx| {
+            pane.update(cx, |pane, cx| {
+                if pane.selected.as_deref() != Some(id.as_str()) {
+                    pane.selected = Some(id);
+                    pane.selected_table = selected_table;
+                    cx.notify();
+                }
+            });
+        });
+        cx.notify();
+        true
+    }
+
     /// The Redis key-list toolbar, laid out like the prototype's: a filled 新建键, an outlined
     /// 删除, plain 设置 TTL / 刷新 actions, and the active namespace chip.
     fn render_key_object_toolbar(
@@ -1347,6 +1430,61 @@ impl AppView {
                     && in_schema(&table.name)
             })
             .count()
+    }
+
+    /// Mirror a table/view/routine leaf click from the connection tree into the object list: select
+    /// the same row and bring it into view, so the tree and the list show one cursor.
+    ///
+    /// Only a pane already listing that database and category can highlight it; a pane showing a
+    /// different category (or database) keeps its own selection, exactly as it does for the other
+    /// object lists.
+    pub(super) fn select_object_from_tree(
+        &mut self,
+        connection_index: usize,
+        database_index: usize,
+        name: &str,
+        kind: Option<bool>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(pane) = self.object_pane.as_ref() else {
+            return;
+        };
+        let (pane_connection, pane_database, pane_category, pane_schema) = {
+            let pane = pane.read(cx);
+            (
+                pane.connection_index,
+                pane.database_index,
+                pane.category,
+                pane.schema.clone(),
+            )
+        };
+        if pane_connection != connection_index || pane_database != database_index {
+            return;
+        }
+        // A schema-qualified engine lists one schema at a time; a leaf from another schema has no
+        // row here to move the cursor to.
+        if pane_schema.as_deref() != schema_of(name) {
+            return;
+        }
+        let shows_it = match kind {
+            Some(is_view) => match pane_category {
+                Category::Tables => !is_view,
+                Category::Views => is_view,
+                _ => false,
+            },
+            None => pane_category == Category::Functions,
+        };
+        if !shows_it {
+            return;
+        }
+        self.objects_selection.select_one(name.to_string());
+        let pane = self.object_pane.clone();
+        if let Some(pane) = pane {
+            cx.defer(move |cx| {
+                pane.update(cx, |pane, cx| pane.select_from_tree(cx));
+            });
+        }
+        cx.notify();
     }
 }
 
@@ -2923,6 +3061,12 @@ impl ObjectPane {
         if changed {
             let connection_index = self.connection_index;
             let database_index = self.database_index;
+            let leaf = match self.category {
+                Category::Views => Some(ObjectLeafKind::View),
+                Category::Functions => Some(ObjectLeafKind::Routine),
+                Category::Tables if !self.key_value => Some(ObjectLeafKind::Table),
+                _ => None,
+            };
             app.update(cx, |app, _| match (single, kind) {
                 (Some(name), Some(kind)) => {
                     app.set_info_routine(connection_index, database_index, name, kind);
@@ -2932,6 +3076,33 @@ impl ObjectPane {
                 }
                 (None, _) => app.clear_info_selection(),
             });
+            // Selecting a table/view/routine in the object list puts the tree's cursor on the same
+            // leaf, so opening it (double-click or 单击模式) highlights the object there too.
+            if let (Some(name), Some(kind)) = (self.selected.clone(), leaf) {
+                app.update(cx, |app, cx| {
+                    app.reveal_object_in_tree(connection_index, database_index, &name, kind, cx);
+                });
+            }
+        }
+        cx.notify();
+    }
+
+    /// Apply a connection-tree leaf click: `AppView` already put the row's key into
+    /// `objects_selection`, so mirror it into this pane's cursor and reveal the row.
+    pub(super) fn select_from_tree(&mut self, cx: &mut Context<'_, Self>) {
+        self.sync_single_from_app(cx);
+        let Some(key) = self.selected.clone() else {
+            return;
+        };
+        let bounds = self
+            .app
+            .upgrade()
+            .and_then(|app| app.read(cx).objects_row_rects.get(&key).copied());
+        if let Some(bounds) = bounds {
+            match self.mode {
+                ViewMode::Detail => self.detail_scroll.reveal(bounds),
+                ViewMode::Grid => self.grid.reveal(bounds),
+            }
         }
         cx.notify();
     }
@@ -2973,6 +3144,15 @@ impl ObjectPane {
                 let Some(database) = app.database_name(connection_index, database_index) else {
                     return;
                 };
+                // Opening a routine keeps its leaf as the tree's cursor, even when the row was
+                // already selected (a click on it would not change the selection again).
+                app.reveal_object_in_tree(
+                    connection_index,
+                    database_index,
+                    &name,
+                    ObjectLeafKind::Routine,
+                    cx,
+                );
                 app.open_routine_by_name(connection_index, database, name, kind, cx);
             });
         }
