@@ -4954,7 +4954,11 @@ impl AppView {
 
     /// The window's fixed bottom status bar: the active view's status in the middle and the
     /// side-pane toggles in the bottom-right corner.
-    fn render_status_bar(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+    fn render_status_bar(
+        &self,
+        radii: gpui::Corners<Pixels>,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
         let theme = self.theme;
         let center: AnyElement = if self.main_tab == MainTab::Backups {
             let count = self.visible_backup_files(cx).len() + self.visible_backup_configs(cx).len();
@@ -5004,6 +5008,8 @@ impl AppView {
             .flex_none()
             .px_2()
             .bg(rgb(theme.toolbar_bg))
+            .rounded_bl(radii.bottom_left)
+            .rounded_br(radii.bottom_right)
             .border_t_1()
             .border_color(rgb(theme.border))
             .text_size(px(12.0))
@@ -5437,12 +5443,17 @@ impl Render for AppView {
             body = body.child(self.info_pane.clone());
         }
 
+        let window_radii = gpui_kit::component::window_corner_radii(window);
         let mut root = div()
             .relative()
             .flex()
             .flex_col()
             .size_full()
             .bg(rgb(theme.window_bg))
+            .rounded_tl(window_radii.top_left)
+            .rounded_tr(window_radii.top_right)
+            .rounded_bl(window_radii.bottom_left)
+            .rounded_br(window_radii.bottom_right)
             .text_color(rgb(theme.text))
             .text_size(px(12.5))
             // A file dragged onto the window opens through the generic drop frame (SQLite today).
@@ -5521,7 +5532,7 @@ impl Render for AppView {
             .child(self.render_titlebar(cx))
             .child(self.render_main_toolbar(cx))
             .child(body)
-            .child(self.render_status_bar(cx));
+            .child(self.render_status_bar(window_radii, cx));
 
         if self.theme_menu_open {
             root = root.child(self.render_theme_menu(cx));

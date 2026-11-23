@@ -54,6 +54,12 @@ not a later refactor.
   statement never goes through the proxy's SQL parser, and keeps the greeting's full
   `server_version_string` so the driver can recognise UDAL before sending a prepare. See
   `vendor/sqlx-mysql/RUSTGRID_PATCHES.md`; remove it once upstream behaves the same.
+- `vendor/gpui-component` — the published `gpui-component` 0.8.1 (the UI layer behind
+  `gpui-kit`'s `component` re-export), patched through `[patch.crates-io]`. Its title bar renders
+  the window controls from the desktop's `button-layout` (gpui's `App::button_layout`, fed by the
+  XDG portal) instead of a fixed right-hand group, and it can round an opted-in client-side frame
+  on Wayland (`set_window_rounded` / `window_corner_radii`). See
+  `vendor/gpui-component/RUSTGRID_PATCHES.md`; remove it once upstream ships both.
 - `crates/rustgrid-sqlserver` — the **Microsoft SQL Server** driver, built on **tiberius** (pure-Rust
   async TDS) with a **bb8** connection pool (`pool.rs`). It is not sqlx-based (sqlx 0.9 has no MSSQL
   driver). `driver.rs` builds the tiberius `Config` (host/port, SQL authentication, TLS, timeouts) and
@@ -516,8 +522,15 @@ touching UI code.
   `gpui_kit::component::TitleBar`: `ui::window_options(title)` sets the transparent titlebar and
   `app_owns_titlebar_drag`, `ui::title_bar(theme)` applies the app palette, `ui::bar_title` adds
   the logo + title, and `ui::window_title_bar` is the child-window bar. The kit draws the window
-  controls itself (native caption buttons on Windows, window-manager controls on Linux, native
-  traffic lights on macOS), so do not add app-drawn min/max/close buttons back. The main window's
+  controls itself (native caption buttons on Windows, window-manager controls on Linux — placed on
+  the side the desktop's button layout asks for — and native traffic lights on macOS), so do not
+  add app-drawn min/max/close buttons back. The main window opts into the kit's rounded
+  client-side frame by calling `gpui_kit::component::set_window_rounded(window, true)` when it is
+  built, and every edge it paints itself rounds with
+  `gpui_kit::component::window_corner_radii(window)` (the root's window background and the status
+  bar's bottom corners). Child windows stay square: their content roots paint their own corners,
+  which GPUI's rectangular content mask cannot clip, so opt one in only after rounding the corners
+  its content paints. The main window's
   theme/GitHub/update/settings cluster must stay inside `ui::action_cluster`: it occludes the kit
   bar's full-width `WindowControlArea::Drag` hitbox, without which Windows hit-tests those buttons
   as `HTCAPTION` and they never receive a click. Closing goes through the platform close path and

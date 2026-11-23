@@ -1,9 +1,12 @@
 // From:
 // https://github.com/zed-industries/zed/blob/56daba28d40301ee4c05546fadb691d070b7b2b6/crates/gpui/examples/window_shadow.rs
+use std::cell::RefCell;
+use std::collections::HashSet;
+
 use gpui::{
-    AnyElement, App, CursorStyle, Decorations, Edges, Hsla, InteractiveElement as _, IntoElement,
-    MouseButton, ParentElement, Pixels, Point, RenderOnce, ResizeEdge, Size, Styled as _, Tiling,
-    Window, div, point, prelude::FluentBuilder as _, px,
+    AnyElement, App, Corners, CursorStyle, Decorations, Edges, Hsla, InteractiveElement as _,
+    IntoElement, MouseButton, ParentElement, Pixels, Point, RenderOnce, ResizeEdge, Size,
+    Styled as _, Tiling, Window, WindowId, div, point, prelude::FluentBuilder as _, px,
 };
 
 use crate::ActiveTheme;
@@ -15,11 +18,77 @@ pub(crate) const SHADOW_SIZE: Pixels = px(20.0);
 const BORDER_SIZE: Pixels = px(1.0);
 /// Half-width of the resize hit band on each side of the visible frame (inner border).
 const RESIZE_HIT_SIZE: Pixels = px(4.0);
+
+/// Corner radius of an opted-in client-decorated window.
 ///
-/// GPUI currently clips overflowing children to a rectangular content mask. A non-zero
-/// radius here would round the frame itself but leave child backgrounds visible in the
-/// corners, so keep the generic window wrapper square until rounded content masks exist.
-pub(crate) const BORDER_RADIUS: Pixels = px(0.0);
+/// Rounded corners need the surface to be composited with alpha. The Wayland backend already
+/// does that for client-decorated windows; X11 has no such guarantee, so the frame stays square
+/// there. Windows the app has not opted in (via [`set_window_rounded`]) are never rounded: their
+/// content may paint square corners of its own, which would cover a rounded frame.
+#[cfg(target_os = "linux")]
+const WINDOW_RADIUS: Pixels = px(12.0);
+#[cfg(not(target_os = "linux"))]
+const WINDOW_RADIUS: Pixels = px(0.0);
+
+thread_local! {
+    static ROUNDED_WINDOWS: RefCell<HashSet<WindowId>> = RefCell::new(HashSet::new());
+}
+
+/// Opts `window` in (or out) of the rounded client-side frame.
+///
+/// Returns whether the setting changed, so a caller can schedule the repaint that makes the
+/// new frame geometry visible.
+pub fn set_window_rounded(window: &Window, rounded: bool) -> bool {
+    let id = window.window_handle().window_id();
+    ROUNDED_WINDOWS.with(|windows| {
+        let mut windows = windows.borrow_mut();
+        if rounded {
+            windows.insert(id)
+        } else {
+            windows.remove(&id)
+        }
+    })
+}
+
+fn is_window_rounded(window: &Window) -> bool {
+    ROUNDED_WINDOWS.with(|windows| {
+        windows
+            .borrow()
+            .contains(&window.window_handle().window_id())
+    })
+}
+
+/// The window's current corner radii: [`WINDOW_RADIUS`] for every corner of an opted-in,
+/// client-decorated window that is not maximized, fullscreen or next to a tiled edge; zero
+/// otherwise.
+///
+/// GPUI clips overflowing children to a rectangular content mask, so this only rounds the frame.
+/// Elements with a background that touch a window corner (the root surface, [`crate::TitleBar`],
+/// an application's bottom bar) must round that corner too, with these same radii.
+pub fn window_corner_radii(window: &Window) -> Corners<Pixels> {
+    #[cfg(target_os = "linux")]
+    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+    #[cfg(not(target_os = "linux"))]
+    let wayland = false;
+    if WINDOW_RADIUS == px(0.0)
+        || !wayland
+        || !is_window_rounded(window)
+        || window.is_maximized()
+        || window.is_fullscreen()
+    {
+        return Corners::default();
+    }
+    let Decorations::Client { tiling } = window.window_decorations() else {
+        return Corners::default();
+    };
+    let corner = |rounded: bool| if rounded { WINDOW_RADIUS } else { px(0.0) };
+    Corners {
+        top_left: corner(!tiling.top && !tiling.left),
+        top_right: corner(!tiling.top && !tiling.right),
+        bottom_left: corner(!tiling.bottom && !tiling.left),
+        bottom_right: corner(!tiling.bottom && !tiling.right),
+    }
+}
 
 /// Create a new window border.
 pub fn window_border() -> WindowBorder {
@@ -168,6 +237,7 @@ impl RenderOnce for WindowBorder {
         let resize_hit_size = self.resize_hit_size;
         window.set_client_inset(platform_inset);
         let window_size = window.window_bounds().get_bounds().size;
+        let radii = window_corner_radii(window);
         let is_window_active = window.is_window_active();
         let border_color = if cx.theme().is_dark() {
             Hsla {
@@ -192,10 +262,16 @@ impl RenderOnce for WindowBorder {
             .flex_col()
             .overflow_hidden()
             .when(!(tiling.top || tiling.right), |div| {
-                div.rounded_tr(BORDER_RADIUS)
+                div.rounded_tr(radii.top_right)
             })
             .when(!(tiling.top || tiling.left), |div| {
-                div.rounded_tl(BORDER_RADIUS)
+                div.rounded_tl(radii.top_left)
+            })
+            .when(!(tiling.bottom || tiling.right), |div| {
+                div.rounded_br(radii.bottom_right)
+            })
+            .when(!(tiling.bottom || tiling.left), |div| {
+                div.rounded_bl(radii.bottom_left)
             })
             .when(!tiling.top, |div| div.pt(visual_shadow))
             .when(!tiling.bottom, |div| div.pb(visual_shadow))
@@ -229,10 +305,16 @@ impl RenderOnce for WindowBorder {
                     .min_w_0()
                     .overflow_hidden()
                     .when(!(tiling.top || tiling.right), |div| {
-                        div.rounded_tr(BORDER_RADIUS)
+                        div.rounded_tr(radii.top_right)
                     })
                     .when(!(tiling.top || tiling.left), |div| {
-                        div.rounded_tl(BORDER_RADIUS)
+                        div.rounded_tl(radii.top_left)
+                    })
+                    .when(!(tiling.bottom || tiling.right), |div| {
+                        div.rounded_br(radii.bottom_right)
+                    })
+                    .when(!(tiling.bottom || tiling.left), |div| {
+                        div.rounded_bl(radii.bottom_left)
                     })
                     .border_color(border_color)
                     .when(!tiling.top, |div| div.border_t(BORDER_SIZE))

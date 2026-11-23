@@ -2,8 +2,8 @@
 //!
 //! Everything user-facing that is not a one-off view belongs here so the classic
 //! Win32/Navicat look stays consistent and a future UI-library swap only has to touch this
-//! module. The rules (square corners, `Theme` colors, `ButtonKind` variants) are described in
-//! `AGENTS.md` under "UI conventions".
+//! module. The rules (compact control metrics, `Theme` colors, `ButtonKind` variants) are
+//! described in `AGENTS.md` under "UI conventions".
 
 use gpui::{
     AnyView, App, BoxShadow, ClickEvent, CursorStyle, Div, FontWeight, IntoElement, Point,

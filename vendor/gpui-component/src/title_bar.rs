@@ -371,6 +371,7 @@ impl RenderOnce for TitleBar {
         });
         let layout = title_bar_layout(cx);
         let has_left_controls = layout.left.iter().any(Option::is_some);
+        let radii = crate::window_border::window_corner_radii(window);
 
         div().flex_shrink_0().child(
             div()
@@ -380,6 +381,8 @@ impl RenderOnce for TitleBar {
                 .items_center()
                 .justify_between()
                 .h(TITLE_BAR_HEIGHT)
+                .rounded_tl(radii.top_left)
+                .rounded_tr(radii.top_right)
                 .pl(if has_left_controls {
                     px(0.0)
                 } else {

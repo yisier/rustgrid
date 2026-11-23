@@ -173,9 +173,9 @@ windows = { version = "0.61", features = [
 # older than 5.5 accept the login. Drop this once an upstream sqlx release carries them.
 [patch.crates-io]
 sqlx-mysql = { path = "vendor/sqlx-mysql" }
-# gpui-component 0.8.1 draws the Linux window controls in a fixed right-hand group. This
-# copy reads the desktop's window-button layout instead (see
-# `vendor/gpui-component/RUSTGRID_PATCHES.md`).
+# gpui-component 0.8.1 draws the Linux window controls in a fixed right-hand group and keeps
+# the client-side frame square. This copy follows the desktop's window-button layout and can
+# round an opted-in Wayland frame (see `vendor/gpui-component/RUSTGRID_PATCHES.md`).
 gpui-component = { path = "vendor/gpui-component" }
 # libsqlite3-sys 0.37.0 (the version sqlx-sqlite 0.9 accepts) builds SQLCipher only against
 # OpenSSL. This patched copy builds it with libtomcrypt, so SQLCipher support needs no Perl or

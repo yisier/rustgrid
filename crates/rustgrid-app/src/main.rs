@@ -109,6 +109,10 @@ fn main() {
             },
             cx,
             move |window, cx| {
+                // The main window draws the kit's rounded client-side frame. Child windows are
+                // left square: their content roots paint their own corners, which a rounded
+                // frame cannot clip (GPUI's content mask is rectangular).
+                gpui_kit::component::set_window_rounded(window, true);
                 #[cfg(target_os = "windows")]
                 win_resize::install(window);
                 let view = cx
