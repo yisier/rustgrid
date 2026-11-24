@@ -19,7 +19,7 @@ Sync compares a source database with a target database and writes only the diffe
 
 ## Run the sync
 
-- **Sync** applies the selected mode to the target. Review the SQL preview first when the target contains production data.
+- **Sync** applies the selected mode to the target. Review the SQL preview first when the target contains production data. The table filter also scopes the run: the button's count, the confirmation and the tables written include only the rows the list currently shows.
 - The configuration name at the bottom can be saved and reopened later, like a backup configuration.
 - A table without a primary key has no reliable row identity. Sync warns instead of guessing, so add a key before syncing such tables.
 

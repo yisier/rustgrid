@@ -1992,12 +1992,15 @@ impl AppView {
         let weak = cx.weak_entity();
         let input = make_backup_name_input(self.theme, config_name.clone(), &weak, cx);
         self.backup_name_input = Some(input);
+        let object_search_input = make_backup_object_search_input(self.theme, &weak, cx);
         self.new_backup_dialog = Some(NewBackupDialog {
             connection_index,
             database,
             schema,
             tab: BackupDialogTab::Objects,
             objects: Vec::new(),
+            object_search: String::new(),
+            object_search_input: Some(object_search_input),
             config_name,
             apply,
             editing: apply_is_edit,
@@ -2194,25 +2197,60 @@ impl AppView {
         cx: &mut Context<'_, Self>,
     ) {
         if let Some(dialog) = self.new_backup_dialog.as_mut() {
-            let all = dialog
+            // A category row acts on the rows the search currently shows, like 全选 / 取消全选,
+            // so a filter never flips a checkbox the user cannot see.
+            let visible: Vec<usize> = dialog
                 .objects
                 .iter()
+                .enumerate()
+                .filter(|(_, entry)| backup_object_visible(entry, &dialog.object_search))
+                .map(|(index, _)| index)
+                .collect();
+            let all = visible
+                .iter()
+                .filter_map(|index| dialog.objects.get(*index))
                 .filter(|entry| entry.kind == kind)
                 .all(|entry| entry.selected);
-            for entry in dialog.objects.iter_mut().filter(|entry| entry.kind == kind) {
-                entry.selected = !all;
+            let mut touched = false;
+            for index in visible {
+                let Some(entry) = dialog.objects.get_mut(index) else {
+                    continue;
+                };
+                if entry.kind == kind {
+                    entry.selected = !all;
+                    touched = true;
+                }
             }
-            dialog.config_saved = false;
+            if touched {
+                dialog.config_saved = false;
+            }
         }
         cx.notify();
     }
 
     pub(super) fn backup_set_all(&mut self, selected: bool, cx: &mut Context<'_, Self>) {
         if let Some(dialog) = self.new_backup_dialog.as_mut() {
-            for entry in dialog.objects.iter_mut() {
+            // 全选 / 取消全选 follow the search, so they never select objects the filtered list
+            // is hiding.
+            for entry in dialog
+                .objects
+                .iter_mut()
+                .filter(|entry| backup_object_visible(entry, &dialog.object_search))
+            {
                 entry.selected = selected;
             }
             dialog.config_saved = false;
+        }
+        cx.notify();
+    }
+
+    /// Clear the New Backup object search (Esc in its box) and show the whole list again.
+    pub(super) fn clear_backup_object_search(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(dialog) = self.new_backup_dialog.as_mut() {
+            dialog.object_search.clear();
+            if let Some(input) = dialog.object_search_input.clone() {
+                input.update(cx, |input, cx| input.set_text(String::new(), cx));
+            }
         }
         cx.notify();
     }
@@ -3600,6 +3638,39 @@ impl AppView {
         };
         let total = dialog.objects.len();
         let selected = dialog.objects.iter().filter(|entry| entry.selected).count();
+        let search = dialog.object_search.clone();
+        let visible = dialog
+            .objects
+            .iter()
+            .filter(|entry| backup_object_visible(entry, &search))
+            .count();
+        let shown = if search.trim().is_empty() {
+            String::new()
+        } else {
+            t!(
+                "backup.object_search_count",
+                visible = visible,
+                total = total
+            )
+            .to_string()
+        };
+        let mut right = div().flex().flex_row().items_center().gap_3();
+        if let Some(input) = dialog.object_search_input.clone() {
+            right = right.child(div().w(px(210.0)).child(input));
+        }
+        let right = right
+            .child(backup_link_button(
+                "backup-select-all",
+                t!("backup.select_all").to_string(),
+                theme,
+                cx.listener(|this, _event, _window, cx| this.backup_set_all(true, cx)),
+            ))
+            .child(backup_link_button(
+                "backup-select-none",
+                t!("backup.select_none").to_string(),
+                theme,
+                cx.listener(|this, _event, _window, cx| this.backup_set_all(false, cx)),
+            ));
         let summary = div()
             .flex()
             .flex_row()
@@ -3611,31 +3682,27 @@ impl AppView {
             .pb_1()
             .child(
                 div()
-                    .text_size(px(12.0))
-                    .text_color(rgb(theme.text_muted))
-                    .child(
-                        t!("backup.selected_count", selected = selected, total = total).to_string(),
-                    ),
-            )
-            .child(
-                div()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_3()
-                    .child(backup_link_button(
-                        "backup-select-all",
-                        t!("backup.select_all").to_string(),
-                        theme,
-                        cx.listener(|this, _event, _window, cx| this.backup_set_all(true, cx)),
-                    ))
-                    .child(backup_link_button(
-                        "backup-select-none",
-                        t!("backup.select_none").to_string(),
-                        theme,
-                        cx.listener(|this, _event, _window, cx| this.backup_set_all(false, cx)),
-                    )),
-            );
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(theme.text_muted))
+                            .child(
+                                t!("backup.selected_count", selected = selected, total = total)
+                                    .to_string(),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(theme.text_muted))
+                            .child(shown),
+                    ),
+            )
+            .child(right);
 
         let picker = render_object_picker(
             &dialog.objects,
@@ -3643,6 +3710,7 @@ impl AppView {
             &self.backup_objects_scroll,
             theme,
             ObjectPickerAction::Backup,
+            &search,
             cx,
         );
 
@@ -3967,6 +4035,7 @@ impl AppView {
             &self.backup_objects_scroll,
             theme,
             ObjectPickerAction::Restore,
+            "",
             cx,
         );
 
@@ -4193,6 +4262,7 @@ impl AppView {
             &self.backup_objects_scroll,
             theme,
             ObjectPickerAction::Extract,
+            "",
             cx,
         );
 
@@ -4411,6 +4481,45 @@ fn make_backup_name_input(
     })
 }
 
+/// The New Backup window's object-list search box: filters the tables/views/functions/events list
+/// by name while every checkbox keeps its state.
+fn make_backup_object_search_input(
+    theme: Theme,
+    app: &WeakEntity<AppView>,
+    cx: &mut Context<'_, AppView>,
+) -> Entity<TextInput> {
+    let change = app.clone();
+    let cancel = app.clone();
+    cx.new(move |cx| {
+        TextInput::new(
+            theme,
+            "",
+            TextInputOptions {
+                placeholder: t!("backup.object_search").to_string().into(),
+                icon: Some("icons/search.svg"),
+                icon_color: Some(theme.text_muted),
+                clearable: true,
+                text_size: Some(12.0),
+                size: Some(gpui_kit::component::Size::XSmall),
+                ..Default::default()
+            },
+            cx,
+        )
+        .on_change(Rc::new(move |text, _window, cx| {
+            let _ = change.update(cx, |app, cx| {
+                if let Some(dialog) = app.new_backup_dialog.as_mut() {
+                    dialog.object_search = text.to_string();
+                }
+                cx.notify();
+            });
+        }))
+        // Esc clears the filter and leaves the whole object list visible again.
+        .on_cancel(Rc::new(move |_window, cx| {
+            let _ = cancel.update(cx, |app, cx| app.clear_backup_object_search(cx));
+        }))
+    })
+}
+
 /// The dialog's target line: a small muted label plus the fixed connection, database and (when
 /// the backup is scoped to one) schema, shown above the tabs.
 pub(super) fn backup_target_line(
@@ -4616,15 +4725,26 @@ pub(super) enum ObjectPickerAction {
     Dump,
 }
 
+/// Whether the object list's search shows this entry: a case-insensitive substring of its name, or
+/// the whole list while the box is empty.
+pub(super) fn backup_object_visible(entry: &BackupObjectEntry, search: &str) -> bool {
+    let needle = search.trim().to_lowercase();
+    needle.is_empty() || entry.name.to_lowercase().contains(&needle)
+}
+
 pub(super) fn render_object_picker(
     objects: &[BackupObjectEntry],
     loading: bool,
     scroll: &ScrollHandle,
     theme: Theme,
     action: ObjectPickerAction,
+    search: &str,
     cx: &mut Context<'_, AppView>,
 ) -> AnyElement {
     let mut list = div().flex().flex_col().py_1();
+    let empty = objects
+        .iter()
+        .all(|entry| !backup_object_visible(entry, search));
     if loading {
         list = list.child(
             div()
@@ -4633,12 +4753,20 @@ pub(super) fn render_object_picker(
                 .text_color(rgb(theme.text_muted))
                 .child(t!("common.loading").to_string()),
         );
+    } else if empty && !objects.is_empty() {
+        list = list.child(
+            div()
+                .p_3()
+                .text_size(px(12.0))
+                .text_color(rgb(theme.text_muted))
+                .child(t!("backup.object_search_none").to_string()),
+        );
     } else {
         for (kind_index, kind) in BackupObjectKind::ALL.into_iter().enumerate() {
             let items: Vec<(usize, &BackupObjectEntry)> = objects
                 .iter()
                 .enumerate()
-                .filter(|(_, entry)| entry.kind == kind)
+                .filter(|(_, entry)| entry.kind == kind && backup_object_visible(entry, search))
                 .collect();
             if items.is_empty() {
                 continue;

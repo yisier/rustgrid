@@ -605,7 +605,7 @@ fn binary_json_value(text: &str) -> serde_json::Value {
 /// Normalize clipboard text for the "is this our own copy?" comparison. Windows and clipboard
 /// managers may hand CRLF (or a trailing line break) back for text written with LF; without this
 /// the own block is skipped and its `NULL` cells are re-read from text as empty strings.
-fn normalize_clipboard_text(text: &str) -> String {
+pub(super) fn normalize_clipboard_text(text: &str) -> String {
     text.replace("\r\n", "\n")
         .replace('\r', "\n")
         .trim_end_matches('\n')

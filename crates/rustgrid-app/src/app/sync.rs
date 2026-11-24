@@ -1018,12 +1018,15 @@ impl AppView {
         .detach();
     }
 
-    /// The checked tables a run would actually write: unchanged tables are skipped, and
-    /// 只同步目标已存在的表 drops the ones the target does not have.
-    fn planned_sync_tables(&self) -> usize {
+    /// The checked tables a run would actually write, in list order: only the rows the table list
+    /// currently shows (the search filter), unchanged tables are skipped, and 只同步目标已存在的表
+    /// drops the ones the target does not have. The run and the toolbar's count share this list, so
+    /// 同步 (N) always names exactly what pressing it will write — a filter that hides a checked
+    /// table hides it from the run too instead of syncing something the user cannot see.
+    fn planned_sync_indices(&self) -> Vec<usize> {
         let cross_engine = !self.sync_same_engine();
         self.sync
-            .checked_indices()
+            .visible_indices(self.sync.mode, !cross_engine, self.sync.hide_same)
             .into_iter()
             .filter(|index| {
                 self.sync.tables.get(*index).is_some_and(|table| {
@@ -1033,7 +1036,12 @@ impl AppView {
                     table.has_changes(self.sync.mode, !cross_engine)
                 })
             })
-            .count()
+            .collect()
+    }
+
+    /// The checked tables a run would actually write (see [`Self::planned_sync_indices`]).
+    fn planned_sync_tables(&self) -> usize {
+        self.planned_sync_indices().len()
     }
 
     /// Whether both sides of the transfer are connected, so a comparison can run.
@@ -2272,11 +2280,10 @@ impl AppView {
         let source_dialect = self.driver_dialect(source_index);
         let target_dialect = self.driver_dialect(target_index);
         let plans: Vec<SyncPlan> = self
-            .sync
-            .checked_indices()
+            .planned_sync_indices()
             .into_iter()
             .filter_map(|index| self.sync.tables.get(index))
-            .filter(|table| table.has_changes(mode, same_engine))
+            .filter(|table| table.checked && table.has_changes(mode, same_engine))
             .map(|table| SyncPlan {
                 name: table.name.clone(),
                 target_name: table.target_name.clone(),

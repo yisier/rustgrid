@@ -551,8 +551,11 @@ impl TableDesignView {
             .into_any_element()
     }
 
-    fn render_fields(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+    fn render_fields(&mut self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
+        // The 列名 header's search box: created on the first fields render and kept, so Ctrl+F and
+        // the visible field both put the caret in the same field.
+        let field_find = self.ensure_field_find_input(cx);
         // 列名 and 类型 lead every engine's field list; the cells after them are the engine's own
         // (长度/小数位/虚拟 for MySQL, 大小/比例/计算列/排序规则/稀疏 for SQL Server).
         let spec_columns = self.designer.field_columns.clone();
@@ -762,7 +765,7 @@ impl TableDesignView {
                 .min_h(px(0.0)),
             );
 
-        let header = self.render_field_header(theme, &widths);
+        let header = self.render_field_header(theme, &widths, &field_find);
         let grid = self.render_grid_scaffold(cx, header, list, content_width);
 
         div()
@@ -770,72 +773,17 @@ impl TableDesignView {
             .flex_col()
             .flex_1()
             .min_h(px(0.0))
-            .children(self.render_field_find(cx))
             .child(grid)
             .child(self.render_detail())
             .into_any_element()
     }
 
-    /// The Ctrl+F field search: the search box, "2 of 5" (or "No match"), and a close button.
-    fn render_field_find(&self, cx: &mut Context<'_, Self>) -> Option<AnyElement> {
-        let input = self.field_find.clone()?;
-        let theme = self.theme;
-        let matches = self.field_find_matches();
-        let status = if self.field_find_query.trim().is_empty() {
-            String::new()
-        } else if matches.is_empty() {
-            t!("design.find_none").to_string()
-        } else {
-            let current = self
-                .selected_field
-                .and_then(|row| matches.iter().position(|candidate| *candidate == row))
-                .map(|index| index + 1)
-                .unwrap_or(0);
-            t!(
-                "design.find_count",
-                current = current,
-                total = matches.len()
-            )
-            .to_string()
-        };
-        let none = !self.field_find_query.trim().is_empty() && matches.is_empty();
-        Some(
-            div()
-                .flex()
-                .flex_row()
-                .flex_none()
-                .items_center()
-                .gap_2()
-                .px_2()
-                .py_1()
-                .border_b_1()
-                .border_color(rgb(theme.border))
-                .bg(rgb(theme.header_bg))
-                .child(div().w(px(240.0)).child(input))
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(rgb(if none { theme.danger } else { theme.text_muted }))
-                        .child(status),
-                )
-                .child(div().flex_1())
-                .child(
-                    div()
-                        .id("design-find-close")
-                        .px_1()
-                        .cursor_pointer()
-                        .text_color(rgb(theme.text_muted))
-                        .hover(move |style| style.bg(rgb(theme.button_hover_bg)))
-                        .on_click(cx.listener(|this, _event, window, cx| {
-                            this.close_field_find(window, cx);
-                        }))
-                        .child("✕"),
-                )
-                .into_any_element(),
-        )
-    }
-
-    fn render_field_header(&self, theme: Theme, widths: &[f32]) -> Div {
+    fn render_field_header(
+        &self,
+        theme: Theme,
+        widths: &[f32],
+        field_find: &Entity<TextInput>,
+    ) -> Div {
         let mut labels: Vec<&'static str> = vec!["design.col.name", "design.col.type"];
         labels.extend(
             self.designer
@@ -861,20 +809,35 @@ impl TableDesignView {
                     .border_color(rgb(theme.grid_line)),
             );
         for (index, key) in labels.iter().enumerate() {
-            header = header.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .h(px(DESIGN_HEADER_HEIGHT))
-                    .w(px(widths[index]))
-                    .flex_none()
-                    .px(px(DESIGN_CELL_INSET))
-                    .whitespace_nowrap()
-                    .overflow_hidden()
-                    .border_r_1()
-                    .border_color(rgb(theme.grid_line))
-                    .child(t!(*key).to_string()),
-            );
+            let mut cell = div()
+                .flex()
+                .items_center()
+                .h(px(DESIGN_HEADER_HEIGHT))
+                .w(px(widths[index]))
+                .flex_none()
+                .px(px(DESIGN_CELL_INSET))
+                .whitespace_nowrap()
+                .overflow_hidden()
+                .border_r_1()
+                .border_color(rgb(theme.grid_line))
+                .child(
+                    div()
+                        .flex_none()
+                        .when(index == 0, |label| label.mr(px(6.0)))
+                        .child(t!(*key).to_string()),
+                );
+            if index == 0 {
+                // The 列名 header carries the field search: typing in it selects and reveals each
+                // matching field (Ctrl+F puts the caret here at any time).
+                cell = cell.child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .child(field_find.clone()),
+                );
+            }
+            header = header.child(cell);
         }
         header
     }
@@ -3002,9 +2965,7 @@ impl TableDesignView {
                 if this.type_cell_contains(event.position) {
                     return;
                 }
-                this.type_combo = None;
-                this.type_query.clear();
-                cx.notify();
+                this.finish_type_edit(cx);
             }))
             .child(options);
         deferred(popup).with_priority(100).into_any_element()
@@ -3761,7 +3722,7 @@ impl TableDesignView {
         }
         // Scrolling ends an in-place edit, exactly as it does in the table grid: the editor's text
         // is already in the working copy, and a focused editor must not scroll out of view.
-        self.clear_editors();
+        self.clear_editors(cx);
         // One notch moves a single row, whatever the OS reports for it.
         let step: isize = if delta > 0.0 { -1 } else { 1 };
         let current = self.selected_design_row();

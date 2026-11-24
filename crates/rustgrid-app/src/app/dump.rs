@@ -879,6 +879,7 @@ impl AppView {
             &self.backup_objects_scroll,
             theme,
             ObjectPickerAction::Dump,
+            "",
             cx,
         );
 

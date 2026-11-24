@@ -1,3 +1,4 @@
+use super::grid_menu::normalize_clipboard_text;
 use super::*;
 
 use std::collections::BTreeSet;
@@ -453,8 +454,23 @@ pub(super) struct FieldEdit {
     pub(super) row: usize,
     pub(super) column: FieldColumn,
     pub(super) input: Entity<TextInput>,
-    /// The cell's text before this edit, restored by Esc.
-    pub(super) original: String,
+    /// Every cell this edit writes: the cell that opened the editor plus the cells of the same
+    /// column the selection covers, so typing over a range changes the whole range like the table
+    /// grid's multi-cell edit.
+    pub(super) cells: Vec<(usize, FieldColumn)>,
+    /// Each cell's text before this edit, aligned with `cells`, restored by Esc.
+    pub(super) originals: Vec<String>,
+}
+
+/// The field clipboard shared by the open designers.
+#[derive(Default)]
+pub(super) struct DesignClipboard {
+    /// The copied columns with their full `ColumnDef`s, so a paste keeps the exact definition.
+    pub(super) columns: Vec<ColumnDef>,
+    /// The TSV [`TableDesignView::copy_field_selection`] wrote to the system clipboard. A paste
+    /// compares it with what the clipboard currently holds, so text copied elsewhere fills the
+    /// selected cells instead of appending duplicate fields.
+    pub(super) text: String,
 }
 
 /// The editable text columns of the unique-key grid. Its field list is picked through the same
@@ -1003,7 +1019,7 @@ pub(super) struct TableDesignView {
     /// The shared field clipboard (see `AppView::design_clipboard`): 复制 stores the copied
     /// columns here and 粘贴 reads them back, so a field can move between two designers while
     /// keeping its exact `ColumnDef` rather than a lossy TSV round-trip.
-    design_clipboard: Rc<RefCell<Vec<ColumnDef>>>,
+    design_clipboard: Rc<RefCell<DesignClipboard>>,
 }
 
 /// A case-insensitive subsequence test used by the type drop-down's search field.
@@ -1134,6 +1150,18 @@ fn pasted_columns(copied: Vec<ColumnDef>, existing: &mut Vec<String>) -> Vec<Col
         .collect()
 }
 
+/// Parse pasted text into rows of cells: newline-separated rows, tab-separated columns. Unlike the
+/// data grid's parser a cell is always text — a field's name may legitimately be `NULL`.
+fn parse_field_clipboard(text: &str) -> Vec<Vec<String>> {
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .trim_end_matches('\n')
+        .split('\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| line.split('\t').map(str::to_string).collect())
+        .collect()
+}
+
 impl TableDesignView {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
@@ -1148,7 +1176,7 @@ impl TableDesignView {
         app: WeakEntity<AppView>,
         runtime: Arc<Runtime>,
         theme: Theme,
-        design_clipboard: Rc<RefCell<Vec<ColumnDef>>>,
+        design_clipboard: Rc<RefCell<DesignClipboard>>,
         cx: &mut Context<'_, Self>,
     ) -> Self {
         let weak = cx.weak_entity();
@@ -1819,6 +1847,20 @@ impl TableDesignView {
         field_column_value(column_def, column)
     }
 
+    /// Write one field cell's model value without any panel bookkeeping, so a multi-cell edit or a
+    /// paste can change several cells in one gesture.
+    fn write_field_value(&mut self, row: usize, column: FieldColumn, text: &str) {
+        if let Some(column_def) = self.schema.columns.get_mut(row) {
+            match column {
+                FieldColumn::Name => column_def.name = text.to_string(),
+                FieldColumn::Length => column_def.length = text.to_string(),
+                FieldColumn::Decimals => column_def.decimals = text.to_string(),
+                FieldColumn::Comment => column_def.comment = text.to_string(),
+            }
+            self.dirty = true;
+        }
+    }
+
     fn set_field_value(
         &mut self,
         row: usize,
@@ -1826,22 +1868,29 @@ impl TableDesignView {
         text: &str,
         cx: &mut Context<'_, Self>,
     ) {
-        if let Some(column_def) = self.schema.columns.get_mut(row) {
-            match column {
-                FieldColumn::Name => column_def.name = text.to_string(),
-                FieldColumn::Length => {
-                    column_def.length = text.to_string();
-                    if Some(row) == self.selected_field
-                        && is_member_list_type(&column_def.data_type)
-                    {
-                        self.enum_values_input
-                            .update(cx, |input, cx| input.set_text(text.to_string(), cx));
-                    }
-                }
-                FieldColumn::Decimals => column_def.decimals = text.to_string(),
-                FieldColumn::Comment => column_def.comment = text.to_string(),
-            }
-            self.dirty = true;
+        self.write_field_value(row, column, text);
+        if column == FieldColumn::Length
+            && Some(row) == self.selected_field
+            && self
+                .schema
+                .columns
+                .get(row)
+                .is_some_and(|column| is_member_list_type(&column.data_type))
+        {
+            self.enum_values_input
+                .update(cx, |input, cx| input.set_text(text.to_string(), cx));
+        }
+        cx.notify();
+    }
+
+    /// Apply one edit's text to every cell it covers — the active cell plus the selected cells of
+    /// the same column — mirroring the table grid's multi-cell edit.
+    fn set_field_edit_value(&mut self, text: &str, cx: &mut Context<'_, Self>) {
+        let Some(cells) = self.edit.as_ref().map(|edit| edit.cells.clone()) else {
+            return;
+        };
+        for (row, column) in cells {
+            self.write_field_value(row, column, text);
         }
         cx.notify();
     }
@@ -1987,28 +2036,59 @@ impl TableDesignView {
             }
             lines.push(values.join("\t"));
         }
-        cx.write_to_clipboard(ClipboardItem::new_string(lines.join("\n")));
+        let text = lines.join("\n");
+        cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
         // Also keep the whole copied columns (not just the selected cells) in the shared field
         // clipboard, so 粘贴 in another designer reproduces each field exactly. A multi-range
-        // selection must not carry the unselected gap rows inside its bounding rectangle.
-        *self.design_clipboard.borrow_mut() = copied_columns(&self.schema.columns, &selection);
+        // selection must not carry the unselected gap rows inside its bounding rectangle. The TSV
+        // is remembered too: a paste only appends fields while the system clipboard still holds
+        // this exact text, so text copied anywhere else fills cells instead.
+        *self.design_clipboard.borrow_mut() = DesignClipboard {
+            columns: copied_columns(&self.schema.columns, &selection),
+            text,
+        };
         cx.notify();
     }
 
-    /// Ctrl/Cmd+V in the 字段 grid: append the columns copied in any designer (see
-    /// [`Self::copy_field_selection`]) to the end of the field list. Each pasted field keeps its
-    /// copied definition but drops the primary-key, auto-increment and identity flags, so it never
-    /// collides with the target table's own key, and takes a unique name when the target already has
-    /// that column.
+    /// Ctrl/Cmd+V in the 字段 grid.
+    ///
+    /// A clipboard that no longer holds this designer's own copied field block is ordinary text:
+    /// it fills the selected cells like the table grid's paste, which is what a user selecting a
+    /// cell and pasting a value expects. Only the matching field block appends whole fields to the
+    /// end of the list — each pasted field keeps its copied definition but drops the primary-key,
+    /// auto-increment and identity flags, so it never collides with the target table's own key,
+    /// and takes a unique name when the target already has that column.
     pub(super) fn paste_fields(&mut self, cx: &mut Context<'_, Self>) {
         // The schema load replaces `columns` wholesale, so a paste while it runs would vanish.
         if self.tab != DesignerTab::Fields || self.loading {
             return;
         }
-        let copied: Vec<ColumnDef> = self.design_clipboard.borrow().clone();
-        if copied.is_empty() {
+        let clipboard = self.design_clipboard.borrow();
+        let copied = clipboard.columns.clone();
+        let own_text = clipboard.text.clone();
+        drop(clipboard);
+        let system_text = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .filter(|text| !text.is_empty());
+        // The two copies compare after line-ending normalisation: Windows and clipboard managers
+        // hand CRLF (or a trailing line break) back for text written with LF.
+        let own_field_block = match &system_text {
+            Some(text) => normalize_clipboard_text(text) == normalize_clipboard_text(&own_text),
+            // No readable clipboard (or empty): fall back to the field block, like the grid.
+            None => true,
+        };
+        if own_field_block && !copied.is_empty() {
+            self.append_copied_fields(copied, cx);
             return;
         }
+        if let Some(text) = system_text {
+            self.paste_field_text(&text, cx);
+        }
+    }
+
+    /// Append the whole columns copied in any designer (see [`Self::copy_field_selection`]).
+    fn append_copied_fields(&mut self, copied: Vec<ColumnDef>, cx: &mut Context<'_, Self>) {
         let at = self.schema.columns.len();
         let mut existing: Vec<String> = self
             .schema
@@ -2026,6 +2106,71 @@ impl TableDesignView {
         self.reveal_design_row(last);
         self.sync_selected_input(cx);
         self.mark_dirty(cx);
+    }
+
+    /// Paste clipboard text into the fields grid: one value fills every selected cell of the
+    /// active column, a block maps from the selection's top-left cell. Cells of another kind
+    /// (check boxes) are left alone, and the text a cell cannot hold is skipped.
+    fn paste_field_text(&mut self, text: &str, cx: &mut Context<'_, Self>) {
+        let block = parse_field_clipboard(text);
+        let Some(first) = block.first() else {
+            return;
+        };
+        if block.len() == 1 && first.len() == 1 {
+            let value = first[0].clone();
+            let cells = self
+                .field_selection
+                .as_ref()
+                .map(CellSelection::cells)
+                .filter(|cells| !cells.is_empty())
+                .unwrap_or_else(|| {
+                    self.selected_cell
+                        .map(|(row, cell)| vec![(row, self.field_cell_column(cell))])
+                        .unwrap_or_default()
+                });
+            let Some(anchor) = cells.first().copied() else {
+                return;
+            };
+            // A single value fills the selection, but only where the source cell's kind can take
+            // a text value: a name must not overwrite a check box.
+            for (row, column) in cells.into_iter().filter(|(_, column)| *column == anchor.1) {
+                self.set_field_cell_text(row, column, &value);
+            }
+        } else {
+            let (start_row, start_col) = self
+                .field_selection
+                .as_ref()
+                .map(|selection| (selection.active().rows().0, selection.active().cols().0))
+                .or_else(|| {
+                    self.selected_cell
+                        .map(|(row, cell)| (row, self.field_cell_column(cell)))
+                })
+                .unwrap_or((0, 0));
+            for (row_offset, values) in block.iter().enumerate() {
+                for (col_offset, value) in values.iter().enumerate() {
+                    self.set_field_cell_text(start_row + row_offset, start_col + col_offset, value);
+                }
+            }
+        }
+        self.sync_selected_input(cx);
+        self.mark_dirty(cx);
+    }
+
+    /// Write one pasted value into a fields-grid cell, when that cell holds editable text. A
+    /// check-box cell keeps its value: a pasted word is not a flag.
+    fn set_field_cell_text(&mut self, row: usize, display_column: usize, text: &str) {
+        let Some(cell) = self.field_cell_at(display_column) else {
+            return;
+        };
+        if row >= self.schema.columns.len() {
+            return;
+        }
+        match cell {
+            FieldCell::Name => self.write_field_value(row, FieldColumn::Name, text),
+            FieldCell::Type => self.apply_type_text(row, text),
+            FieldCell::Text(column) => self.write_field_value(row, column, text),
+            FieldCell::Flag(_) => {}
+        }
     }
 
     /// The text a fields-grid cell contributes to a copy: the edited value for text cells, `1`
@@ -2063,7 +2208,7 @@ impl TableDesignView {
         }
         self.edit = None;
         self.edit_blur = None;
-        self.type_combo = None;
+        self.finish_type_edit(cx);
         self.default_menu_open = false;
         let rows = self.schema.columns.len();
         let last_column = self.field_column_count().saturating_sub(1);
@@ -2106,7 +2251,7 @@ impl TableDesignView {
             .type_combo
             .is_some_and(|open| open != row || column != 1)
         {
-            self.type_combo = None;
+            self.finish_type_edit(cx);
         }
         self.default_menu_open = false;
         self.field_cell_dragged = false;
@@ -2151,7 +2296,7 @@ impl TableDesignView {
         }
         self.edit = None;
         self.edit_blur = None;
-        self.type_combo = None;
+        self.finish_type_edit(cx);
         self.default_menu_open = false;
         self.field_cell_dragged = false;
         self.field_cell_press = None;
@@ -2303,8 +2448,10 @@ impl TableDesignView {
     }
 
     /// Drop every in-place editor and transient popup state of the designer. Scrolling and switching
-    /// tabs both end an edit this way (the text is already in the working copy).
-    pub(super) fn clear_editors(&mut self) {
+    /// tabs both end an edit this way (the text is already in the working copy). A type still being
+    /// typed in the 类型 drop-down is committed first, exactly as leaving its cell would.
+    pub(super) fn clear_editors(&mut self, cx: &mut Context<'_, Self>) {
+        self.finish_type_edit(cx);
         self.edit = None;
         self.edit_blur = None;
         self.type_combo = None;
@@ -2342,11 +2489,12 @@ impl TableDesignView {
     }
 
     pub(super) fn select_tab(&mut self, tab: DesignerTab, cx: &mut Context<'_, Self>) {
+        self.finish_type_edit(cx);
         self.tab = tab;
         self.field_selecting = false;
         self.field_cell_press = None;
         self.field_cell_dragged = false;
-        self.clear_editors();
+        self.clear_editors(cx);
         if matches!(tab, DesignerTab::Options | DesignerTab::Comment) {
             self.sync_option_inputs(cx);
         }
@@ -2373,7 +2521,7 @@ impl TableDesignView {
             return;
         }
         let value = self.field_value(row, column);
-        let original = value.clone();
+        let (cells, originals) = self.field_edit_cells(row, column);
         let weak = self.self_weak.clone();
         let submit = weak.clone();
         let cancel = weak.clone();
@@ -2390,7 +2538,7 @@ impl TableDesignView {
                 cx,
             )
             .on_change(Rc::new(move |text, _window, cx| {
-                let _ = weak.update(cx, |view, cx| view.set_field_value(row, column, text, cx));
+                let _ = weak.update(cx, |view, cx| view.set_field_edit_value(text, cx));
             }))
             // Enter only leaves editing and keeps the cell, as it does in the table grid.
             .on_submit(Rc::new(move |window, cx| {
@@ -2412,10 +2560,49 @@ impl TableDesignView {
             row,
             column,
             input,
-            original,
+            cells,
+            originals,
         });
         window.focus(&focus, cx);
         cx.notify();
+    }
+
+    /// The cells one text edit writes: the cell it opened on plus the selected cells of the same
+    /// column, with each cell's text before the edit (Esc restores them). The table grid stages a
+    /// typed value into every selected cell; the designer does the same for its text columns, so a
+    /// vertical range of 长度 cells changes in one go.
+    fn field_edit_cells(
+        &self,
+        row: usize,
+        column: FieldColumn,
+    ) -> (Vec<(usize, FieldColumn)>, Vec<String>) {
+        let display_column = self.field_cell_column(field_cell_of(column));
+        let mut rows = self
+            .field_selection
+            .as_ref()
+            .filter(|selection| selection.contains(row, display_column))
+            .map(|selection| {
+                selection
+                    .cells()
+                    .into_iter()
+                    .filter(|(_, column)| *column == display_column)
+                    .map(|(row, _)| row)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if !rows.contains(&row) {
+            rows.push(row);
+        }
+        rows.sort_unstable();
+        rows.dedup();
+        let originals = rows
+            .iter()
+            .map(|row| self.field_value(*row, column))
+            .collect();
+        (
+            rows.into_iter().map(|row| (row, column)).collect(),
+            originals,
+        )
     }
 
     fn finish_edit(&mut self, cx: &mut Context<'_, Self>) {
@@ -2448,11 +2635,17 @@ impl TableDesignView {
     ) {
         self.edit = None;
         self.edit_blur = None;
+        // The list may be open on another row (its chevron was clicked): keep what was typed there
+        // before the selection moves to this cell.
+        if self
+            .type_combo
+            .is_some_and(|open| open != row || typed.is_some())
+        {
+            self.finish_type_edit(cx);
+        }
         self.select_field_cell(row, FieldCell::Type, cx);
         if typed.is_none() && self.type_combo == Some(row) {
-            self.type_combo = None;
-            self.type_query.clear();
-            cx.notify();
+            self.finish_type_edit(cx);
             return;
         }
         self.type_combo = Some(row);
@@ -2503,13 +2696,7 @@ impl TableDesignView {
                         cx,
                     )
                     .on_change(Rc::new(move |text, _window, cx| {
-                        let _ = change.update(cx, |view, cx| {
-                            view.type_query = text.to_string();
-                            // The filtered list changed under the highlight: start from its top.
-                            view.type_highlight = Some(0);
-                            view.type_scroll.set_offset(Point::default());
-                            cx.notify();
-                        });
+                        let _ = change.update(cx, |view, cx| view.type_query_changed(text, cx));
                     }))
                     .on_submit(Rc::new(move |_window, cx| {
                         let _ = submit.update(cx, |view, cx| view.select_highlighted_type(cx));
@@ -2707,7 +2894,7 @@ impl TableDesignView {
         cx: &mut Context<'_, Self>,
     ) {
         self.begin_edit(row, column, window, cx);
-        self.set_field_value(row, column, text, cx);
+        self.set_field_edit_value(text, cx);
         if let Some(edit) = self.edit.as_ref() {
             let input = edit.input.clone();
             let text = text.to_string();
@@ -2724,11 +2911,14 @@ impl TableDesignView {
         }
     }
 
-    /// Esc in a fields-grid cell editor: put the text back as it was and leave editing.
+    /// Esc in a fields-grid cell editor: put every cell this edit changed back as it was and leave
+    /// editing.
     pub(super) fn cancel_field_edit(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         self.edit_blur = None;
         if let Some(edit) = self.edit.take() {
-            self.set_field_value(edit.row, edit.column, &edit.original, cx);
+            for ((row, column), original) in edit.cells.iter().zip(edit.originals.iter()) {
+                self.set_field_value(*row, *column, original, cx);
+            }
             window.focus(&self.focus, cx);
             cx.notify();
         }
@@ -2872,18 +3062,30 @@ impl TableDesignView {
         cx.notify();
     }
 
-    /// Ctrl+F: open the field search over the fields grid (or put the caret back in it).
+    /// Ctrl+F: put the caret in the fields grid's search box (creating it on first use, though the
+    /// 列名 header normally renders it first).
     pub(super) fn open_field_find(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         if self.tab != DesignerTab::Fields {
             self.select_tab(DesignerTab::Fields, cx);
         }
         self.edit = None;
         self.edit_blur = None;
-        self.type_combo = None;
+        self.finish_type_edit(cx);
+        let input = self.ensure_field_find_input(cx);
+        let focus = input.read(cx).focus_handle();
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    /// The field search box that sits in the 列名 header. It keeps itself across renders; the
+    /// callbacks drive the same find-and-reveal the Ctrl+F bar used.
+    pub(super) fn ensure_field_find_input(
+        &mut self,
+        cx: &mut Context<'_, Self>,
+    ) -> Entity<TextInput> {
         let theme = self.theme;
         let weak = self.self_weak.clone();
-        let input = self
-            .field_find
+        self.field_find
             .get_or_insert_with(|| {
                 let change = weak.clone();
                 let submit = weak.clone();
@@ -2919,21 +3121,20 @@ impl TableDesignView {
                             view.find_field(if down { 1 } else { -1 }, cx)
                         });
                     }))
-                    // Esc closes the search and leaves the caret on the field it found.
+                    // Esc clears the search and leaves the caret on the field it found.
                     .on_cancel(Rc::new(move |window, cx| {
                         let _ = cancel.update(cx, |view, cx| view.close_field_find(window, cx));
                     }))
                 })
             })
-            .clone();
-        let focus = input.read(cx).focus_handle();
-        window.focus(&focus, cx);
-        cx.notify();
+            .clone()
     }
 
-    /// Close the field search and give the keys back to the grid.
+    /// Clear the field search and give the keys back to the grid.
     pub(super) fn close_field_find(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        self.field_find = None;
+        if let Some(input) = self.field_find.clone() {
+            input.update(cx, |input, cx| input.set_text(String::new(), cx));
+        }
         self.field_find_query.clear();
         window.focus(&self.focus, cx);
         cx.notify();
@@ -3185,10 +3386,11 @@ impl TableDesignView {
         cx: &mut Context<'_, Self>,
     ) {
         // Moving on ends the editor we came from: its text already reached the working copy through
-        // `on_change`, and the drop-down we came from must not stay open over the next cell.
+        // `on_change`, and the drop-down we came from must not stay open over the next cell. A type
+        // typed into that drop-down is kept before it closes.
         self.edit = None;
         self.edit_blur = None;
-        self.type_combo = None;
+        self.finish_type_edit(cx);
         match cell {
             FieldCell::Name => self.begin_edit(row, FieldColumn::Name, window, cx),
             FieldCell::Type => self.open_type_combo(row, window, cx),
@@ -3235,6 +3437,87 @@ impl TableDesignView {
         }
     }
 
+    /// Typing in the type cell: filter the list and highlight the entry the text names exactly, so
+    /// Enter or leaving the field takes the type that was typed instead of the column's previous
+    /// one. A partial or custom text waits for Enter or the field's blur.
+    pub(super) fn type_query_changed(&mut self, text: &str, cx: &mut Context<'_, Self>) {
+        self.type_query = text.to_string();
+        self.type_highlight = self.exact_type_highlight();
+        self.type_scroll.set_offset(Point::default());
+        cx.notify();
+    }
+
+    /// The filtered list's row the typed text names exactly, or its first row otherwise.
+    fn exact_type_highlight(&self) -> Option<usize> {
+        let query = self.type_query.trim();
+        if query.is_empty() {
+            return Some(0);
+        }
+        self.filtered_types()
+            .iter()
+            .position(|data_type| data_type.eq_ignore_ascii_case(query))
+            .or(Some(0))
+    }
+
+    /// Leaving the type cell without Enter — a click elsewhere, Tab to the next cell — keeps the
+    /// type the typed text names (the matching entry or the text itself) instead of dropping back
+    /// to the column's previous type. Opening the list and clicking away without typing changes
+    /// nothing.
+    pub(super) fn finish_type_edit(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(row) = self.type_combo else {
+            return;
+        };
+        let typed = self
+            .type_search
+            .as_ref()
+            .and_then(|input| input.read(cx).current_text(cx))
+            .unwrap_or_else(|| self.type_query.clone());
+        let query = type_commit_query(&typed, &self.type_query, &self.type_original)
+            .trim()
+            .to_string();
+        self.type_combo = None;
+        self.type_query.clear();
+        if query.is_empty() {
+            cx.notify();
+            return;
+        }
+        self.apply_type_query(row, &query);
+        self.selected_cell = Some((row, FieldCell::Type));
+        self.sync_selected_input(cx);
+        self.mark_dirty(cx);
+    }
+
+    /// The field rows a type change covers: the edited row plus the selected rows of the 类型
+    /// column, so typing a type over a range changes the whole range like the table grid.
+    fn type_target_rows(&self, row: usize) -> Vec<usize> {
+        let mut rows = self
+            .field_selection
+            .as_ref()
+            .filter(|selection| selection.contains(row, 1))
+            .map(|selection| {
+                selection
+                    .cells()
+                    .into_iter()
+                    .filter(|(_, column)| *column == 1)
+                    .map(|(row, _)| row)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if !rows.contains(&row) {
+            rows.push(row);
+        }
+        rows.sort_unstable();
+        rows.dedup();
+        rows
+    }
+
+    /// Apply a type cell's text to every row the cell covers.
+    fn apply_type_query(&mut self, row: usize, text: &str) {
+        for target in self.type_target_rows(row) {
+            self.apply_type_text(target, text);
+        }
+    }
+
     /// Enter in the type cell: take the highlighted type — or the text the user typed when the
     /// list has no match for it, so an unlisted or parameterised type (`varchar(50)`) still works.
     fn select_highlighted_type(&mut self, cx: &mut Context<'_, Self>) {
@@ -3263,13 +3546,29 @@ impl TableDesignView {
         if text.is_empty() {
             return;
         }
+        self.apply_type_query(row, text);
+        self.type_combo = None;
+        self.selected_cell = Some((row, FieldCell::Type));
+        self.sync_selected_input(cx);
+        // The popup's search field goes away with the list; hand the keys back to the designer so
+        // the arrow keys keep moving the selected cell.
+        self.focus_pending = true;
+        self.mark_dirty(cx);
+    }
+
+    /// Write one type (or a typed declaration) into one field.
+    fn apply_type_text(&mut self, row: usize, text: &str) {
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
         if let Some(data_type) = self
             .column_types
             .iter()
             .find(|data_type| data_type.eq_ignore_ascii_case(text))
             .copied()
         {
-            self.select_type(row, data_type, cx);
+            self.apply_type(row, data_type);
             return;
         }
         if let Some(parts) = typed_type_parts(text) {
@@ -3280,7 +3579,7 @@ impl TableDesignView {
                 .copied()
                 .unwrap_or(parts.base.as_str())
                 .to_string();
-            self.select_type(row, &base, cx);
+            self.apply_type(row, &base);
             if let Some(column) = self.schema.columns.get_mut(row) {
                 column.length = parts.length;
                 column.decimals = parts.decimals;
@@ -3292,18 +3591,16 @@ impl TableDesignView {
                 }
             }
         } else {
-            self.select_type(row, text, cx);
+            self.apply_type(row, text);
             if let Some(column) = self.schema.columns.get_mut(row) {
                 column.length.clear();
                 column.decimals.clear();
             }
         }
-        // The detail panel mirrors an ENUM/SET member list from `length`.
-        self.sync_selected_input(cx);
-        self.mark_dirty(cx);
     }
 
-    pub(super) fn select_type(&mut self, row: usize, data_type: &str, cx: &mut Context<'_, Self>) {
+    /// Write one chosen type into one field (no UI bookkeeping).
+    fn apply_type(&mut self, row: usize, data_type: &str) {
         if let Some(column) = self.schema.columns.get_mut(row) {
             let was_member_list = is_member_list_type(&column.data_type);
             column.data_type = data_type.to_string();
@@ -3326,6 +3623,12 @@ impl TableDesignView {
                 // Leaving ENUM/SET drops the quoted member list, which would read as a length.
                 column.length.clear();
             }
+        }
+    }
+
+    pub(super) fn select_type(&mut self, row: usize, data_type: &str, cx: &mut Context<'_, Self>) {
+        for target in self.type_target_rows(row) {
+            self.apply_type(target, data_type);
         }
         self.type_combo = None;
         self.selected_cell = Some((row, FieldCell::Type));
@@ -5265,7 +5568,7 @@ impl TableDesignView {
             // second time must not look like a dropped click: close the edit that asked for the save
             // and say there was nothing to do.
             self.dirty = false;
-            self.clear_editors();
+            self.clear_editors(cx);
             self.request_focus(cx);
             if let Some(app) = self.app.upgrade() {
                 app.update(cx, |app, cx| {
@@ -5315,7 +5618,7 @@ impl TableDesignView {
                         // toolbar's 保存 does not move focus off it — and the reload below replaces
                         // the working copy under it, so close the editor first (the text is already
                         // in the working copy; every editor writes on change).
-                        view.clear_editors();
+                        view.clear_editors(cx);
                         view.request_focus(cx);
                         view.load_schema(cx);
                     }
@@ -5376,7 +5679,7 @@ impl TableDesignView {
                         view.dirty = false;
                         // Same as an existing table's save: close the in-place editor before the
                         // reload replaces the working copy, and keep Ctrl+S working afterwards.
-                        view.clear_editors();
+                        view.clear_editors(cx);
                         view.request_focus(cx);
                         view.load_schema(cx);
                     }
@@ -6105,6 +6408,27 @@ mod tests {
                 "id_copy2".to_string(),
                 "id_copy3".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn pasted_text_is_split_into_rows_and_cells() {
+        assert_eq!(
+            parse_field_clipboard("id\tbigint\r\nname\tvarchar\r\n"),
+            vec![
+                vec!["id".to_string(), "bigint".to_string()],
+                vec!["name".to_string(), "varchar".to_string()],
+            ]
+        );
+        // A lone value stays one cell, and blank rows are dropped.
+        assert_eq!(
+            parse_field_clipboard("created_at\n\n"),
+            vec![vec!["created_at".to_string()]]
+        );
+        // A field name that happens to read like SQL NULL is still a name.
+        assert_eq!(
+            parse_field_clipboard("NULL"),
+            vec![vec!["NULL".to_string()]]
         );
     }
 

@@ -8,7 +8,7 @@ RustGrid's own backup format is `.rgbak`: one file holding the schema and the ro
 
 1. Select a database and open the **Backups** main tab.
 2. Click **New Backup**. The window targets that connection and database.
-3. On **Object Selection**, tick tables, views and routines. **Select All** / **Deselect All** speed up a large schema.
+3. On **Object Selection**, tick tables, views and routines. **Select All** / **Deselect All** speed up a large schema; the search box filters the list by name, so the two buttons (and a category checkbox) act on what it shows.
 4. Optionally name the configuration so the same selection can be rerun, then click **Start**.
 
 The **Info Log** tab shows object and record counts, live messages, elapsed time and the final success / failure totals. The progress bar turns green when the run completes.

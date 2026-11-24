@@ -461,7 +461,7 @@ touching UI code.
   type list, and Down on the last field appends a new one (`appended_field`), which Up removes again
   while it is still unnamed. The other designer grids (indexes, foreign keys, unique keys, checks,
   exclusions, triggers) take Up/Down/Home/End/Page Up/Page Down and Enter/F2 (`designer_list_key`).
-  Commands in the keymap: `designer.find` (Ctrl+F, the field search bar `field_find`),
+  Commands in the keymap: `designer.find` (Ctrl+F, whose box sits permanently in the 列名 header),
   `designer.insert_row` (Insert), `designer.delete_rows` (Ctrl+Delete, through the delete
   confirmation), `designer.move_up` / `designer.move_down` (Ctrl+Up/Down) and `designer.details`
   (F6, grid ⇄ detail panel). An empty or repeated field name is underlined in the grid
@@ -479,12 +479,19 @@ touching UI code.
   row the selection touches (`selected_field_rows`); `move_field` moves those rows one slot as a
   group (`moved_field_rows`), keeping their internal order. Ctrl+C (`designer.copy`) copies the
   selected cells as TSV, using the table grid's convention: the selection's bounding rectangle,
-  with unselected cells in it empty. Tab must be claimed by a key binding
+  with unselected cells in it empty. Typing over a range writes the same value into every selected
+  cell of that column (`FieldEdit::cells`), and Ctrl+V pastes ordinary clipboard text into the
+  selection (one value fills it, a block maps from its top-left cell). The full field definitions
+  copied by `designer.copy` are appended as new fields only while the system clipboard still holds
+  that exact TSV (`DesignClipboard::text`), so text copied anywhere else can never duplicate a row.
+  Tab must be claimed by a key binding
   rather than an element's `on_key_down` (`ui::TextInput::on_tab`
   never fires for it: gpui dispatches a keystroke a binding matches as an action, and `Root` binds
   `tab`). The 类型 drop-down is driven from the keyboard: `type_highlight` marks a row, Up/Down
   (`ui::TextInput::on_arrow`) move it and `keep_type_highlight_visible` scrolls it in, Enter takes
   the highlighted type and a search that narrows the list restarts the highlight at its top.
+  An exactly named type is highlighted while typing, and leaving the field (Tab, a click elsewhere)
+  commits the typed type through `finish_type_edit` instead of reverting to the old one.
 - **Internationalization.** Route every user-facing string through `t!`. Keys live in
   `crates/rustgrid-app/locales/{en,zh-CN}.yml` and must be added to **all** locale files.
   `t!` returns `Cow<'_, str>`; call `.to_string()` before handing it to a gpui element.
