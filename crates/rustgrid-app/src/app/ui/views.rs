@@ -28,7 +28,8 @@ use gpui::{
 
 use super::{hscrollbar_track, scrollbar_fractions, scrollbar_thumb, vscrollbar_track};
 use crate::theme::Theme;
-use gpui_kit::component::{Icon, IconName};
+use gpui_kit::component::tag::Tag;
+use gpui_kit::component::{Icon, IconName, Sizable as _, Size};
 
 /// The height of one item row of a 平铺网格 column. This is the single shared row metric: every
 /// page's 平铺网格 uses it so the layouts look identical.
@@ -1322,18 +1323,12 @@ pub(crate) fn rename_field(theme: Theme, input: impl IntoElement + 'static) -> i
         .child(div().flex_1().min_w(px(0.0)).h_full().child(input))
 }
 
-/// A small muted chip, e.g. the `SQL` tag beside a saved query's name.
-pub(crate) fn tag_chip(label: String, theme: Theme) -> impl IntoElement {
-    div()
-        .flex()
-        .items_center()
-        .h(px(16.0))
-        .px_1()
+/// A small muted chip, e.g. the `SQL` tag beside a saved query's name. Backed by the kit's `Tag`
+/// at its compact size so it shares the status-tag chrome.
+pub(crate) fn tag_chip(label: String, _theme: Theme) -> impl IntoElement {
+    Tag::secondary()
+        .with_size(Size::XSmall)
         .flex_none()
-        .rounded(px(4.0))
-        .bg(rgb(theme.button_bg))
-        .text_color(rgb(theme.text_muted))
-        .text_size(px(10.0))
         .child(label)
 }
 

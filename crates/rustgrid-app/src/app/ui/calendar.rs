@@ -8,7 +8,7 @@
 //! today/range flags) still lives in `CalendarState`; if gpui-kit changes its item API, this is
 //! the only file to touch.
 
-use chrono::Weekday;
+use chrono::{Datelike, NaiveDate, NaiveTime, Timelike};
 
 use gpui::{
     AnyElement, App, Entity, IntoElement, ParentElement, SharedString, Window, prelude::*, px,
@@ -25,11 +25,29 @@ const DAY_H: f32 = 20.0;
 /// Weekday header / prev-next cell height.
 const WEEKDAY_H: f32 = 16.0;
 
+/// gpui-kit 0.11's `CalendarState` and `TimeFieldState` hold `jiff` civil values, while the app
+/// (and every driver) keeps `chrono`. The pickers convert at this boundary only.
+pub(crate) fn picker_date(date: NaiveDate) -> jiff::civil::Date {
+    jiff::civil::Date::new(date.year() as i16, date.month() as i8, date.day() as i8)
+        .unwrap_or_default()
+}
+
+/// The `jiff` counterpart of a `chrono` civil time, for [`TimeFieldState::set_time`].
+pub(crate) fn picker_time(time: NaiveTime) -> jiff::civil::Time {
+    jiff::civil::Time::new(
+        time.hour() as i8,
+        time.minute() as i8,
+        time.second() as i8,
+        0,
+    )
+    .unwrap_or_default()
+}
+
 /// The kit's calendar at the app's dense metrics, Monday-first.
 pub(crate) fn compact_calendar(state: &Entity<CalendarState>) -> impl IntoElement {
     Calendar::new(("compact-calendar", state.entity_id()), state)
         .w_full()
-        .first_day_of_week(Weekday::Mon)
+        .first_day_of_week(jiff::civil::Weekday::Monday)
         .gap_1()
         .label(label)
         .item(render_item)
@@ -123,6 +141,17 @@ fn render_item(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The kit's calendar speaks jiff; the picker boundary must preserve the civil date/time
+    /// exactly (including a leap day), so confirmed values are not silently shifted.
+    #[test]
+    fn picker_values_round_trip() {
+        let date = picker_date(NaiveDate::from_ymd_opt(2024, 2, 29).expect("a valid leap day"));
+        assert_eq!((date.year(), date.month(), date.day()), (2024, 2, 29));
+
+        let time = picker_time(NaiveTime::from_hms_opt(23, 59, 58).expect("a valid time"));
+        assert_eq!((time.hour(), time.minute(), time.second()), (23, 59, 58));
+    }
 
     /// The header labels use dynamic `t!` keys; guard against them silently falling back to the
     /// raw key string.

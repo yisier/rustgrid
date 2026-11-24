@@ -12,12 +12,16 @@ impl GridView {
         let calendar = picker.calendar.clone();
         let time_field = picker.time_field.clone();
         if let Some(today) = NaiveDate::from_ymd_opt(now.year(), now.month(), now.day()) {
-            calendar.update(cx, |calendar, cx| calendar.set_date(today, window, cx));
+            calendar.update(cx, |calendar, cx| {
+                calendar.set_date(picker_date(today), window, cx)
+            });
         }
         if let Some(field) = time_field
             && let Some(time) = NaiveTime::from_hms_opt(now.hour(), now.minute(), now.second())
         {
-            field.update(cx, |field, cx| field.set_time(time, window, cx));
+            field.update(cx, |field, cx| {
+                field.set_time(picker_time(time), window, cx)
+            });
         }
         cx.notify();
     }

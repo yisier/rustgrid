@@ -7,14 +7,15 @@ use std::time::Duration;
 use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 
 use gpui::{
-    Anchor, Animation, AnimationExt, AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context,
-    CursorStyle, DispatchPhase, Div, DragMoveEvent, Entity, ExternalPaths, FocusHandle, FontWeight,
-    HighlightStyle, ImageSource, KeyBinding, KeyDownEvent, Keystroke, ListHorizontalSizingBehavior,
-    Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, OperatingSystem, Pixels,
-    Point, Render, Resource, ScrollDelta, ScrollEvent, ScrollHandle, ScrollStrategy, SharedString,
-    Stateful, StyledText, Subscription, Svg, TextLayout, UniformListScrollHandle, WeakEntity,
-    Window, WindowBounds, WindowHandle, WindowId, WindowOptions, anchored, canvas, deferred, div,
-    img, prelude::*, px, relative, rgb, rgba, size, svg, uniform_list,
+    Animation, AnimationExt, AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context,
+    CursorStyle, DismissEvent, DispatchPhase, Div, DragMoveEvent, Entity, ExternalPaths,
+    FocusHandle, FontWeight, HighlightStyle, ImageSource, KeyBinding, KeyDownEvent, Keystroke,
+    ListHorizontalSizingBehavior, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, OperatingSystem, Pixels, Point, Render, Resource, ScrollDelta, ScrollEvent,
+    ScrollHandle, ScrollStrategy, SharedString, Stateful, StyledText, Subscription, Svg,
+    TextLayout, UniformListScrollHandle, WeakEntity, Window, WindowBounds, WindowHandle, WindowId,
+    WindowOptions, canvas, deferred, div, img, prelude::*, px, relative, rgb, rgba, size, svg,
+    uniform_list,
 };
 use rustgrid_config::{
     AppSettings, ConfigStore, ConnectionGroup, DEFAULT_EDITOR_FONT_SIZE, FieldLayout, GroupEntry,
@@ -55,13 +56,15 @@ use crate::theme::{ConnectionColor, Theme};
 use gpui_kit::component::Sizable;
 use gpui_kit::component::calendar::CalendarState;
 use gpui_kit::component::kbd::Kbd;
+use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::time_field::{TimeField, TimeFieldState, TimePrecision};
+use gpui_kit::component::{ResizableState, h_resizable, resizable_panel};
 
 use ui::{
     ButtonKind, ColumnGrid, ComboBox, ComboOption, DetailColumns, DetailScroll, DetailSort,
-    SortKey, TextInput, TextInputOptions, ViewMode, checkbox_box, main_separator,
-    scrollbar_fractions, scrollbar_thumb, toolbar_separator,
+    SortKey, TextInput, TextInputOptions, ViewMode, checkbox_box, main_separator, picker_date,
+    picker_time, scrollbar_fractions, scrollbar_thumb, toolbar_separator,
 };
 
 // Cell-navigation actions for the in-place grid editor. gpui-kit's `Root` binds `tab`/`shift-tab`
@@ -1442,6 +1445,7 @@ enum TestStatus {
     Failed(String),
 }
 
+#[derive(Clone, PartialEq, Eq)]
 enum ContextTarget {
     Connection(usize),
     /// A connection group in the tree (新建连接 / 删除分组 / 重命名 / 刷新).
@@ -1541,6 +1545,7 @@ enum ContextTarget {
     },
 }
 
+#[derive(Clone)]
 struct ContextMenu {
     target: ContextTarget,
     position: Point<Pixels>,
@@ -2522,16 +2527,8 @@ pub struct AppView {
     dump_dialog: Option<DumpSqlDialog>,
     /// The open "Run SQL File" dialog, if any.
     run_sql_dialog: Option<RunSqlDialog>,
-    /// The 转储 SQL 文件 flyout target while open: the connection and database, plus the table or
-    /// schema the dump covers (`None` for the database menu's whole-database dump).
-    dump_submenu: Option<(usize, usize, Option<String>, Option<String>)>,
-    /// The 转储 SQL 文件 flyout's zone while it is shown. The flyout overflows past the menu
-    /// panel, so the panel's `on_mouse_down_out` would otherwise close the menu on a click that
-    /// actually lands on the flyout (before the item's click can complete); it also keeps the
-    /// flyout up while the pointer moves between the trigger row and the flyout.
-    dump_zone: Rc<RefCell<SubmenuZone>>,
     /// Whether the 导入连接 submenu (in the New Connection dropdown and the tree's blank menu) is
-    /// open, and the zone of its flyout (mirrors `dump_zone`).
+    /// open, and the zone of its flyout.
     import_submenu: bool,
     import_zone: Rc<RefCell<SubmenuZone>>,
     /// The configuration-name field of the "new backup" dialog.
@@ -2617,10 +2614,9 @@ pub struct AppView {
     query_database_combo: Option<Entity<ComboBox>>,
     query_schema_combo: Option<Entity<ComboBox>>,
     /// The query page's bottom result-panel height, set by dragging the splitter between the
-    /// editor and the 结果 tabs.
+    /// editor and the 结果 tabs. The kit `v_resizable` group keeps the live size; this is the
+    /// initial value (and the value the group reports back on mouse-up).
     query_result_height: f32,
-    /// `(pointer y, panel height)` captured while that splitter is being dragged.
-    query_split_drag: Option<(f32, f32)>,
     /// Column metadata keyed by `(connection index, database, table)`, loaded on demand for
     /// completion.
     query_column_cache:
@@ -2633,7 +2629,22 @@ pub struct AppView {
     editing: Option<usize>,
     test_status: TestStatus,
     context_menu: Option<ContextMenu>,
+    /// The target the cached `context_menu_view` was built for, so opening another target rebuilds
+    /// it even if the old entity was not dismissed yet.
+    context_menu_key: Option<ContextTarget>,
+    /// The kit menu entity an open context menu is drawn from, and its dismiss subscription. The
+    /// entity is built when the menu opens (never per frame), so hover, keyboard navigation and
+    /// submenus keep their state until the kit dismisses it.
+    context_menu_view: Option<Entity<PopupMenu>>,
+    context_menu_sub: Option<Subscription>,
     tab_menu: Option<TabMenu>,
+    tab_menu_key: Option<TabTarget>,
+    tab_menu_view: Option<Entity<PopupMenu>>,
+    tab_menu_sub: Option<Subscription>,
+    /// The main window's sidebar/content/info pane group. Its sizes drive the two side panes and
+    /// the tab strip's width, so a live drag notifies the tab bar.
+    main_panes: Option<Entity<ResizableState>>,
+    main_panes_sub: Option<Subscription>,
     /// Whether the titlebar theme dropdown is open, and where its button sits (so the popup can be
     /// anchored under it).
     theme_menu_open: bool,
@@ -2936,15 +2947,6 @@ pub struct AppView {
     group_rename_focus_pending: bool,
     /// The group a to-be-created connection is filed under (set by the group menu's 新建连接).
     pending_group: Option<u64>,
-    /// The connection whose 管理分组 flyout is open, if any.
-    move_submenu: Option<usize>,
-    /// The 管理分组 flyout's zone while it is shown, so an outside click is not mistaken for a
-    /// click on the flyout (mirrors `dump_zone`).
-    move_zone: Rc<RefCell<SubmenuZone>>,
-    /// The connection whose 颜色 flyout is open, if any.
-    color_submenu: Option<usize>,
-    /// The 颜色 flyout's zone while it is shown (mirrors `move_zone`).
-    color_zone: Rc<RefCell<SubmenuZone>>,
     /// When the New Connection engine picker was opened from a group, the group the new connection
     /// should be filed under. `None` when opened from the toolbar.
     connect_menu_group: Option<u64>,
@@ -3472,8 +3474,6 @@ impl AppView {
             extract_dialog: None,
             dump_dialog: None,
             run_sql_dialog: None,
-            dump_submenu: None,
-            dump_zone: Rc::new(RefCell::new(SubmenuZone::default())),
             import_submenu: false,
             import_zone: Rc::new(RefCell::new(SubmenuZone::default())),
             backup_name_input: None,
@@ -3549,7 +3549,6 @@ impl AppView {
             query_database_combo: None,
             query_schema_combo: None,
             query_result_height: QUERY_RESULT_DEFAULT_HEIGHT,
-            query_split_drag: None,
             query_column_cache: RefCell::new(std::collections::HashMap::new()),
             completion_generation: 0,
             active_grid: None,
@@ -3558,7 +3557,15 @@ impl AppView {
             editing: None,
             test_status: TestStatus::Idle,
             context_menu: None,
+            context_menu_key: None,
+            context_menu_view: None,
+            context_menu_sub: None,
             tab_menu: None,
+            tab_menu_key: None,
+            tab_menu_view: None,
+            tab_menu_sub: None,
+            main_panes: None,
+            main_panes_sub: None,
             theme_menu_open: false,
             theme_menu_anchor: Rc::new(RefCell::new(Point::default())),
             connect_menu_open: false,
@@ -3796,10 +3803,6 @@ impl AppView {
             group_rename: None,
             group_rename_focus_pending: false,
             pending_group: None,
-            move_submenu: None,
-            move_zone: Rc::new(RefCell::new(SubmenuZone::default())),
-            color_submenu: None,
-            color_zone: Rc::new(RefCell::new(SubmenuZone::default())),
             connect_menu_group: None,
             tree_press: None,
             tree_drag: None,
@@ -5155,12 +5158,26 @@ fn install_editor_highlight_theme(theme: Theme, cx: &mut App) {
     use gpui_kit::component::highlighter::HighlightTheme;
 
     let dark = theme.is_dark();
-    let base = if dark {
+    // 0.9 made the theme structs `#[non_exhaustive]`, so the kit's own theme is cloned and its
+    // fields assigned instead of built with a struct literal.
+    let highlight = if dark {
         HighlightTheme::default_dark()
     } else {
         HighlightTheme::default_light()
     };
-    let mut style_set = base.style.clone();
+    let mut highlight = (*highlight).clone();
+    highlight.name = if dark {
+        "RustGrid Dark"
+    } else {
+        "RustGrid Light"
+    }
+    .to_string();
+    highlight.appearance = if dark {
+        ThemeMode::Dark
+    } else {
+        ThemeMode::Light
+    };
+    let style_set = &mut highlight.style;
     style_set.editor_background = Some(Hsla::from(rgb(theme.editor_bg)));
     style_set.editor_foreground = Some(Hsla::from(rgb(theme.text)));
     style_set.editor_line_number = Some(Hsla::from(rgb(theme.text_muted)));
@@ -5193,20 +5210,7 @@ fn install_editor_highlight_theme(theme: Theme, cx: &mut App) {
     // Redis itself (see `ui::sql_editor::syntax_style`), so tuning the JSON palette here cannot
     // recolour them.
 
-    gpui_kit::component::Theme::global_mut(cx).highlight_theme = Arc::new(HighlightTheme {
-        name: if dark {
-            "RustGrid Dark"
-        } else {
-            "RustGrid Light"
-        }
-        .to_string(),
-        appearance: if dark {
-            ThemeMode::Dark
-        } else {
-            ThemeMode::Light
-        },
-        style: style_set,
-    });
+    gpui_kit::component::Theme::global_mut(cx).highlight_theme = Arc::new(highlight);
 }
 
 impl Render for AppView {
@@ -5420,14 +5424,60 @@ impl Render for AppView {
         // The wrapped gpui-kit editor owns its own caret blink, so the app no longer tracks an
         // editor blink loop here.
 
-        let mut body = div().flex().flex_row().flex_1().w_full().overflow_hidden();
-        if self.sidebar_open {
-            body = body.child(self.sidebar_host.clone());
-        }
-        body = body.child(self.render_content(window, cx));
-        if self.info_open || self.form_open {
-            body = body.child(self.info_pane.clone());
-        }
+        // The three main panes are one kit horizontal resizable group: the side panes keep a
+        // user-dragged width (and their own min/max), the content pane takes the rest, and the
+        // group owns the dividers. Hidden panes stay in the group so its state is not reset when
+        // the sidebar or info pane is toggled.
+        let panes = match self.main_panes.clone() {
+            Some(state) => state,
+            None => {
+                let state = cx.new(|_| ResizableState::default());
+                let sub = cx.observe(&state, |this, state, cx| {
+                    let sizes = state.read(cx).sizes().clone();
+                    if let (Some(sidebar), Some(info)) =
+                        (sizes.first().copied(), sizes.get(2).copied())
+                    {
+                        this.sidebar_host
+                            .update(cx, |pane, cx| pane.set_width(f32::from(sidebar), cx));
+                        this.info_pane
+                            .update(cx, |pane, cx| pane.set_width(f32::from(info), cx));
+                    }
+                    // The content pane's width (and with it the tab strip's) changes during the
+                    // drag, and the group does not re-render `AppView`.
+                    this.notify_tab_bar(cx);
+                });
+                self.main_panes = Some(state.clone());
+                self.main_panes_sub = Some(sub);
+                state
+            }
+        };
+        let body = div()
+            .flex()
+            .flex_1()
+            .w_full()
+            .min_h(px(0.0))
+            .overflow_hidden()
+            .child(
+                h_resizable("main-panes")
+                    .with_state(&panes)
+                    .child(
+                        resizable_panel()
+                            .visible(self.sidebar_open)
+                            .size(px(self.sidebar_host.read(cx).width()))
+                            .size_range(px(SIDEBAR_MIN_WIDTH)..px(SIDEBAR_MAX_WIDTH))
+                            .fixed()
+                            .child(self.sidebar_host.clone()),
+                    )
+                    .child(resizable_panel().child(self.render_content(window, cx)))
+                    .child(
+                        resizable_panel()
+                            .visible(self.info_open || self.form_open)
+                            .size(px(self.info_pane.read(cx).width()))
+                            .size_range(px(INFO_MIN_WIDTH)..px(INFO_MAX_WIDTH))
+                            .fixed()
+                            .child(self.info_pane.clone()),
+                    ),
+            );
 
         let mut root = div()
             .relative()
@@ -5456,26 +5506,7 @@ impl Render for AppView {
             .on_drop::<ExternalPaths>(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
                 this.file_drop_submitted(paths, cx);
             }))
-            // A side-pane divider sits on its pane's edge, so the pointer leaves the pane while
-            // dragging. These root-level handlers keep the drag alive anywhere in the window and
-            // update only the pane entities, so the whole app does not re-render per mouse move.
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
-                let host = this.sidebar_host.clone();
-                let sidebar_resizing = host.update(cx, |host, cx| {
-                    host.drag_move(event, cx);
-                    host.resizing()
-                });
-                let pane = this.info_pane.clone();
-                let pane_resizing = pane.update(cx, |pane, cx| {
-                    pane.drag_move(event, cx);
-                    pane.resizing()
-                });
-                if sidebar_resizing || pane_resizing {
-                    // The panes resize without `AppView` re-rendering, but the content pane's
-                    // width (and with it the tab strip's) changes along with them.
-                    this.notify_tab_bar(cx);
-                }
-                this.drag_query_split(event, cx);
                 this.tree_drag_move(event, cx);
                 this.drag_tree_marquee(event, cx);
                 // A cancelled platform drag does not always deliver `FileDropEvent::Exited`; the
@@ -5487,22 +5518,6 @@ impl Render for AppView {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
-                    let host = this.sidebar_host.clone();
-                    let sidebar_resizing = host.update(cx, |host, cx| {
-                        let resizing = host.resizing();
-                        host.end_drag(cx);
-                        resizing
-                    });
-                    let pane = this.info_pane.clone();
-                    let pane_resizing = pane.update(cx, |pane, cx| {
-                        let resizing = pane.resizing();
-                        pane.end_drag(cx);
-                        resizing
-                    });
-                    if sidebar_resizing || pane_resizing {
-                        this.notify_tab_bar(cx);
-                    }
-                    this.end_query_split_drag(cx);
                     this.tree_drag_end(cx);
                     this.end_tree_marquee(cx);
                     if this.file_drop_active {
@@ -5515,6 +5530,10 @@ impl Render for AppView {
             .child(body)
             .child(self.render_status_bar(cx));
 
+        // Build (once) the kit menu entities for an open context/tab menu before drawing them.
+        self.sync_context_menu(window, cx);
+        self.sync_tab_menu(window, cx);
+
         if self.theme_menu_open {
             root = root.child(self.render_theme_menu(cx));
         }
@@ -5523,8 +5542,10 @@ impl Render for AppView {
             root = root.child(self.render_connect_menu(cx));
         }
 
-        if let Some(menu) = self.context_menu.as_ref() {
-            root = root.child(self.render_context_menu(menu, window, cx));
+        if let (Some(menu), Some(view)) =
+            (self.context_menu.as_ref(), self.context_menu_view.as_ref())
+        {
+            root = root.child(ui::popup_menu_layer(view.clone(), menu.position));
         }
 
         // The connection-tree drag-and-drop drop indicator, drawn in window coordinates so it
@@ -5540,8 +5561,8 @@ impl Render for AppView {
             ));
         }
 
-        if let Some(menu) = self.tab_menu.as_ref() {
-            root = root.child(self.render_tab_menu(menu, cx));
+        if let (Some(menu), Some(view)) = (self.tab_menu.as_ref(), self.tab_menu_view.as_ref()) {
+            root = root.child(ui::popup_menu_layer(view.clone(), menu.position));
         }
 
         // The SQLite file-drag scrim sits above every pane (but under `Root`'s dialogs).

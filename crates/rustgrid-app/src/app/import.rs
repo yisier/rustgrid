@@ -1198,20 +1198,30 @@ impl AppView {
         let Some(wizard) = self.import_wizard.as_ref() else {
             return div().into_any_element();
         };
-        let (page, total) = wizard.step.index();
-        let heading_key = match wizard.step {
-            ImportStep::Format => "import.step.format",
-            ImportStep::Source => "import.step.source",
-            ImportStep::Mapping => "import.step.mapping",
-            ImportStep::Run => "import.step.run",
-        };
-        let heading = div()
-            .px_3()
-            .py_3()
-            .flex_none()
-            .text_size(px(13.0))
-            .text_color(rgb(theme.grid_selection_bg))
-            .child(format!("{} ({page}/{total})", t!(heading_key)));
+        let (page, _total) = wizard.step.index();
+        let current = page.saturating_sub(1);
+        let labels = [
+            t!("import.step.format").to_string(),
+            t!("import.step.source").to_string(),
+            t!("import.step.mapping").to_string(),
+            t!("import.step.run").to_string(),
+        ];
+        let heading = ui::wizard_steps(
+            "import-steps",
+            &labels,
+            current,
+            cx.listener(move |this, index: &usize, _window, cx| {
+                let step = match index {
+                    0 => ImportStep::Format,
+                    1 => ImportStep::Source,
+                    2 => ImportStep::Mapping,
+                    _ => ImportStep::Run,
+                };
+                if *index < current {
+                    this.set_import_step(step, cx);
+                }
+            }),
+        );
         let body = match wizard.step {
             ImportStep::Format => self.render_import_format_page(cx),
             ImportStep::Source => self.render_import_source_page(cx),

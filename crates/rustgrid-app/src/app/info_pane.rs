@@ -230,12 +230,12 @@ struct FormResize {
 
 // ----- Left sidebar ---------------------------------------------------------------------------
 
-/// The connection-tree pane: the cached tree plus a drag handle on its right edge.
+/// The connection-tree pane. The main window's kit `h_resizable` group owns its width; the host
+/// only remembers the last width for the group's initial panel size and the form's truncation
+/// metrics.
 pub(super) struct SidebarHost {
     app: WeakEntity<AppView>,
     width: f32,
-    /// `(pointer x, width)` captured when the drag started.
-    drag: Option<(f32, f32)>,
     /// Keeps the host observing `AppView` so theme changes propagate.
     _subscription: Subscription,
 }
@@ -243,6 +243,15 @@ pub(super) struct SidebarHost {
 impl SidebarHost {
     pub(super) fn width(&self) -> f32 {
         self.width
+    }
+
+    /// Record the width the resizable group settled on, so the pane's layout/truncation follows
+    /// it (the group does not re-render this entity).
+    pub(super) fn set_width(&mut self, width: f32, cx: &mut Context<'_, Self>) {
+        if self.width != width {
+            self.width = width;
+            cx.notify();
+        }
     }
 
     pub(super) fn new(
@@ -254,35 +263,7 @@ impl SidebarHost {
         Self {
             app,
             width: SIDEBAR_DEFAULT_WIDTH,
-            drag: None,
             _subscription: subscription,
-        }
-    }
-
-    /// Whether the tree's divider is being dragged. `AppView` re-renders the tab bar while it is,
-    /// because the content pane's width (and with it the tab strip's) changes without `AppView`
-    /// itself re-rendering.
-    pub(super) fn resizing(&self) -> bool {
-        self.drag.is_some()
-    }
-
-    pub(super) fn drag_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<'_, Self>) {
-        let Some((start_x, start_width)) = self.drag else {
-            return;
-        };
-        if event.pressed_button != Some(MouseButton::Left) {
-            self.drag = None;
-            cx.notify();
-            return;
-        }
-        let delta = f32::from(event.position.x) - start_x;
-        self.width = (start_width + delta).clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
-        cx.notify();
-    }
-
-    pub(super) fn end_drag(&mut self, cx: &mut Context<'_, Self>) {
-        if self.drag.take().is_some() {
-            cx.notify();
         }
     }
 }
@@ -301,18 +282,11 @@ impl Render for SidebarHost {
             None => return div().into_any_element(),
         };
 
-        let start = cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-            this.drag = Some((f32::from(event.position.x), this.width));
-            cx.notify();
-        });
-
         // Right-clicking the blank space below the tree opens the tree's blank-area context menu.
         // Rows stop propagation, so only the blank area reaches here.
         let menu = cx.listener(|this, event: &MouseDownEvent, _window, cx| {
             if let Some(app) = this.app.upgrade() {
                 app.update(cx, |app, cx| {
-                    app.dump_submenu = None;
-                    app.move_submenu = None;
                     app.context_menu = Some(ContextMenu {
                         target: ContextTarget::TreeBlank,
                         position: event.position,
@@ -323,52 +297,35 @@ impl Render for SidebarHost {
         });
 
         div()
+            .id("sidebar-column")
             .flex()
-            .flex_row()
-            .h_full()
-            .flex_none()
+            .flex_col()
+            .size_full()
+            .bg(rgb(theme.sidebar_bg))
+            .border_r_1()
+            .border_color(rgb(theme.border))
+            .on_mouse_down(MouseButton::Right, menu)
+            // The connection tree's search box sits at the top of the sidebar (Navicat's
+            // layout): it filters 连接 → 数据库 → 模式 → 表 (see `sidebar`), and belongs
+            // here rather than inside the scroll area so it stays put while the tree
+            // scrolls.
             .child(
                 div()
-                    .id("sidebar-column")
-                    .flex()
-                    .flex_col()
-                    .w(px(self.width))
-                    .h_full()
                     .flex_none()
-                    // Keep the tree's vertical scrollbar clear of the resize divider: the
-                    // scrollbar is painted at this column's content edge, and without the gutter
-                    // it overlapped the separator.
-                    .pr(px(6.0))
-                    .bg(rgb(theme.sidebar_bg))
-                    .border_r_1()
-                    .border_color(rgb(theme.border))
-                    .on_mouse_down(MouseButton::Right, menu)
-                    // The connection tree's search box sits at the top of the sidebar (Navicat's
-                    // layout): it filters 连接 → 数据库 → 模式 → 表 (see `sidebar`), and belongs
-                    // here rather than inside the scroll area so it stays put while the tree
-                    // scrolls.
-                    .child(
-                        div()
-                            .flex_none()
-                            .w_full()
-                            .px_1()
-                            .pt_1()
-                            // The tree's blank-area right-click menu belongs to the tree below, not
-                            // to the search field above it.
-                            .on_mouse_down(
-                                MouseButton::Right,
-                                cx.listener(|_, _, _, cx| cx.stop_propagation()),
-                            )
-                            .child(div().w_full().h(px(24.0)).child(search)),
+                    .w_full()
+                    .px_1()
+                    .pt_1()
+                    // The tree's blank-area right-click menu belongs to the tree below, not
+                    // to the search field above it.
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|_, _, _, cx| cx.stop_propagation()),
                     )
-                    .child(tree.cached(cached_style(|d| {
-                        d.flex().flex_col().flex_1().min_h(px(0.0)).w_full()
-                    }))),
+                    .child(div().w_full().h(px(24.0)).child(search)),
             )
-            .child(
-                ui::pane_resize_divider("pane-divider-sidebar", theme)
-                    .on_mouse_down(MouseButton::Left, start),
-            )
+            .child(tree.cached(cached_style(|d| {
+                d.flex().flex_col().flex_1().min_h(px(0.0)).w_full()
+            })))
             .into_any_element()
     }
 }
@@ -389,9 +346,9 @@ enum FormMode {
 
 pub(super) struct InfoPane {
     app: WeakEntity<AppView>,
+    /// The last width the main window's resizable group settled on. It feeds the form's
+    /// truncation metrics (the group owns the actual layout width).
     width: f32,
-    /// `(pointer x, width)` captured when the drag started.
-    drag: Option<(f32, f32)>,
     /// Keeps the info pane observing `AppView` and the connection tree, so selection changes
     /// refresh it.
     _subscription: Subscription,
@@ -449,7 +406,6 @@ impl InfoPane {
         Self {
             app,
             width: INFO_DEFAULT_WIDTH,
-            drag: None,
             _subscription: subscription,
             _tree_subscription: tree_subscription,
             form_grid: None,
@@ -469,28 +425,11 @@ impl InfoPane {
         }
     }
 
-    pub(super) fn drag_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<'_, Self>) {
-        let Some((start_x, start_width)) = self.drag else {
-            return;
-        };
-        if event.pressed_button != Some(MouseButton::Left) {
-            self.drag = None;
-            cx.notify();
-            return;
-        }
-        // The divider is on the pane's left edge, so dragging right narrows the pane.
-        let delta = f32::from(event.position.x) - start_x;
-        self.width = (start_width - delta).clamp(INFO_MIN_WIDTH, INFO_MAX_WIDTH);
-        cx.notify();
-    }
-
-    /// Whether the info pane's divider is being dragged (see [`SidebarHost::resizing`]).
-    pub(super) fn resizing(&self) -> bool {
-        self.drag.is_some()
-    }
-
-    pub(super) fn end_drag(&mut self, cx: &mut Context<'_, Self>) {
-        if self.drag.take().is_some() {
+    /// Record the width the resizable group settled on, so the pane's layout/truncation follows
+    /// it (the group does not re-render this entity).
+    pub(super) fn set_width(&mut self, width: f32, cx: &mut Context<'_, Self>) {
+        if self.width != width {
+            self.width = width;
             cx.notify();
         }
     }
@@ -1195,7 +1134,7 @@ impl InfoPane {
             .unwrap_or_else(|| chrono::Local::now().date_naive());
         let calendar = cx.new(|cx| {
             let mut state = CalendarState::new(window, cx);
-            state.set_date(date, window, cx);
+            state.set_date(picker_date(date), window, cx);
             state
         });
         let time_field = has_time.then(|| {
@@ -1203,7 +1142,7 @@ impl InfoPane {
                 .unwrap_or_default();
             cx.new(|cx| {
                 let mut state = TimeFieldState::new(window, cx).precision(TimePrecision::Second);
-                state.set_time(time, window, cx);
+                state.set_time(picker_time(time), window, cx);
                 state
             })
         });
@@ -1250,14 +1189,16 @@ impl InfoPane {
             return;
         };
         if let Some(date) = NaiveDate::from_ymd_opt(now.year(), now.month(), now.day()) {
-            picker
-                .calendar
-                .update(cx, |calendar, cx| calendar.set_date(date, window, cx));
+            picker.calendar.update(cx, |calendar, cx| {
+                calendar.set_date(picker_date(date), window, cx)
+            });
         }
         if let Some(field) = picker.time_field.as_ref()
             && let Some(time) = NaiveTime::from_hms_opt(now.hour(), now.minute(), now.second())
         {
-            field.update(cx, |field, cx| field.set_time(time, window, cx));
+            field.update(cx, |field, cx| {
+                field.set_time(picker_time(time), window, cx)
+            });
         }
         cx.notify();
     }
@@ -1287,53 +1228,43 @@ impl Render for InfoPane {
         let theme = app_entity.read(cx).theme;
         let (body, self_scrolling) = self.pane_body(&app_entity, window, cx);
 
-        let start = cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-            this.drag = Some((f32::from(event.position.x), this.width));
-            cx.notify();
-        });
-
         // The row form scrolls only its field list, under a fixed header. The details pane keeps
-        // scrolling as a whole.
+        // scrolling as a whole. The main window's resizable group owns the pane's width; these
+        // wrappers fill it. The mouse handlers keep the JSON editor's bottom-grip resize alive
+        // when the pointer leaves the pane.
         let pane_body: AnyElement = if self_scrolling {
             div()
-                .w(px(self.width))
-                .h_full()
-                .flex_none()
+                .size_full()
                 .flex()
                 .flex_col()
                 .bg(rgb(theme.editor_bg))
+                .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                    this.form_resize_move(event, cx);
+                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _event, _window, cx| this.form_resize_end(cx)),
+                )
                 .child(body)
                 .into_any_element()
         } else {
             div()
                 .id("info-scroll")
-                .w(px(self.width))
-                .h_full()
-                .flex_none()
+                .size_full()
                 .overflow_y_scroll()
                 .bg(rgb(theme.editor_bg))
+                .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                    this.form_resize_move(event, cx);
+                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _event, _window, cx| this.form_resize_end(cx)),
+                )
                 .child(body)
                 .into_any_element()
         };
 
-        div()
-            .flex()
-            .flex_row()
-            .h_full()
-            .flex_none()
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
-                this.form_resize_move(event, cx);
-            }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _event, _window, cx| this.form_resize_end(cx)),
-            )
-            .child(
-                ui::pane_resize_divider("pane-divider-info", theme)
-                    .on_mouse_down(MouseButton::Left, start),
-            )
-            .child(pane_body)
-            .into_any_element()
+        pane_body
     }
 }
 

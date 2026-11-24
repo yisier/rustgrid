@@ -3217,7 +3217,7 @@ impl AppView {
             .flex_col()
             .w(px(170.0))
             .p_0p5()
-            .child(self.context_item(
+            .child(self.menu_row(
                 "log-menu-copy",
                 t!("backup.copy").to_string(),
                 cx.listener(move |app, _event, window, cx| {
@@ -3233,7 +3233,7 @@ impl AppView {
                     cx.notify();
                 }),
             ))
-            .child(self.context_item(
+            .child(self.menu_row(
                 "log-menu-select-all",
                 t!("backup.select_all").to_string(),
                 cx.listener(|app, _event, _window, cx| {

@@ -952,7 +952,7 @@ impl GridView {
             .unwrap_or_else(|| chrono::Local::now().date_naive());
         let calendar = cx.new(|cx| {
             let mut state = CalendarState::new(window, cx);
-            state.set_date(date, window, cx);
+            state.set_date(picker_date(date), window, cx);
             state
         });
         // `TimePrecision::Second` matches MySQL's rendered `datetime`/`timestamp`; a `date` column
@@ -962,7 +962,7 @@ impl GridView {
                 .unwrap_or_default();
             Some(cx.new(|cx| {
                 let mut state = TimeFieldState::new(window, cx).precision(TimePrecision::Second);
-                state.set_time(time, window, cx);
+                state.set_time(picker_time(time), window, cx);
                 state
             }))
         } else {

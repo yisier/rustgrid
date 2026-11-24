@@ -769,6 +769,36 @@ impl AppView {
         self.submenu_row(row, self.import_zone.clone())
     }
 
+    /// The same 导入连接 submenu as a kit `PopupMenu` item, for the context menus. The New
+    /// Connection dropdown still uses [`Self::import_connections_submenu_item`]'s custom row.
+    pub(super) fn import_connections_menu_item(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> PopupMenuItem {
+        let entries = [
+            ConnectionImportKind::RustGrid,
+            ConnectionImportKind::Navicat,
+            ConnectionImportKind::Dbx,
+        ];
+        let mut items = Vec::new();
+        for kind in entries {
+            items.push(
+                PopupMenuItem::new(t!(kind.label_key()).to_string()).on_click(cx.listener(
+                    move |this, _event, _window, cx| this.start_connection_import(kind, cx),
+                )),
+            );
+        }
+        let menu = PopupMenu::build(window, cx, move |menu, _, _| {
+            let mut menu = menu.min_w(px(200.0));
+            for item in items {
+                menu = menu.item(item);
+            }
+            menu
+        });
+        PopupMenuItem::submenu(t!("connection.import_connection").to_string(), menu)
+    }
+
     fn import_connections_flyout(&self, theme: Theme, cx: &mut Context<'_, Self>) -> AnyElement {
         let entries = [
             (

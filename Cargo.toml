@@ -49,6 +49,9 @@ rustgrid-config = { path = "crates/rustgrid-config" }
 
 async-trait = "0.1"
 chrono = "0.4"
+# gpui-kit 0.11's calendar and time field take jiff civil types; the app bridges its own chrono
+# values to them at the picker boundary.
+jiff = "1"
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` keeps a JSON object's field order, which MongoDB command documents require
 # (the command name must be the first key). Indexmap is already in the lock file.
@@ -105,10 +108,10 @@ sys-locale = "0.3"
 # gpui-kit's `gpui-fast` feature makes the kit re-export `gpui-fast`, so this alias must point at
 # gpui-fast too (a mismatched pair is two GPUI cores with incompatible element types). Note that
 # gpui-kit still depends on gpui-pre unconditionally, so both engines are compiled; the alternative
-# is the upstream backend: `gpui = { package = "gpui-pre", version = "0.3.10" }` with
-# `gpui-kit = { version = "0.8", features = ["tree-sitter-sql"] }`.
-gpui = { package = "gpui-fast", version = "0.1.12" }
-gpui-kit = { version = "0.8", features = ["tree-sitter-sql", "gpui-fast"] }
+# is the upstream backend: `gpui = { package = "gpui-pre", version = "0.3.14" }` with
+# `gpui-kit = { version = "0.11", features = ["tree-sitter-sql"] }`.
+gpui = { package = "gpui-fast", version = "0.1.19" }
+gpui-kit = { version = "0.11", features = ["tree-sitter-sql", "gpui-fast"] }
 # macOS-only: the Dock icon (`rustgrid-app/src/dock_icon.rs`). Every version below is already in the
 # lock file through `gpui-fast-macos`, so this adds no new crates to the tree — which is why the
 # features are listed here rather than at the (single) use site.

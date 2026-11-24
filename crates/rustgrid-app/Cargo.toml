@@ -36,6 +36,7 @@ rust-i18n.workspace = true
 sqlparser.workspace = true
 sqlformat.workspace = true
 chrono.workspace = true
+jiff.workspace = true
 dtparse.workspace = true
 encoding_rs.workspace = true
 base64.workspace = true

@@ -1313,8 +1313,6 @@ impl TreePane {
                                 position: event.position,
                             });
                         }
-                        app.move_submenu = None;
-                        app.color_submenu = None;
                         cx.notify();
                     });
                 }),
@@ -1522,7 +1520,6 @@ impl TreePane {
                     cx.stop_propagation();
                     this.selected = Some(format!("db-{connection_index}-{database_index}"));
                     let _ = menu_app.update(cx, |app, cx| {
-                        app.dump_submenu = None;
                         app.context_menu = Some(ContextMenu {
                             target: ContextTarget::Database {
                                 connection_index,
@@ -3041,7 +3038,6 @@ impl TreePane {
                     this.selected_table = None;
                     if let Some(app) = menu_app.upgrade() {
                         app.update(cx, |app, cx| {
-                            app.move_submenu = None;
                             if multi {
                                 app.context_menu = Some(ContextMenu {
                                     target: ContextTarget::TreeSelection,
@@ -3347,9 +3343,6 @@ impl Render for TreePane {
                             if let Some(app) = this.app.upgrade() {
                                 app.update(cx, |app, cx| {
                                     app.tree_selection.clear();
-                                    app.dump_submenu = None;
-                                    app.move_submenu = None;
-                                    app.color_submenu = None;
                                     app.context_menu = Some(ContextMenu {
                                         target: ContextTarget::TreeBlank,
                                         position: event.position,

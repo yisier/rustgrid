@@ -440,13 +440,16 @@ impl Render for ComboBox {
         }
 
         // gpui-kit defaults the popup's search field to an untranslated "Search...". Every
-        // dropdown in the app gets the current language's placeholder instead.
+        // dropdown in the app gets the current language's placeholder instead. Since 0.10 a
+        // searchable list can also emphasise what the query matched, which every app dropdown
+        // opts into so filtering reads at a glance.
         let search_placeholder = SharedString::from(t!("common.search_placeholder").to_string());
         let control = match &state {
             ComboBacking::Single(state) => {
                 let mut select = Select::new(state)
                     .placeholder(self.placeholder.clone())
                     .search_placeholder(search_placeholder.clone())
+                    .highlight_matches(true)
                     .menu_width(px(self.width))
                     .cleanable(false)
                     .disabled(!self.enabled)
@@ -470,6 +473,7 @@ impl Render for ComboBox {
                 let mut combo = Combobox::new(state)
                     .placeholder(self.placeholder.clone())
                     .search_placeholder(search_placeholder.clone())
+                    .highlight_matches(true)
                     .menu_width(px(self.width))
                     .cleanable(false)
                     .disabled(!self.enabled)

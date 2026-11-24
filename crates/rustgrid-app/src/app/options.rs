@@ -954,12 +954,12 @@ impl AppView {
             .flex_col()
             .w(px(190.0))
             .p_0p5()
-            .child(self.context_item(
+            .child(self.menu_row(
                 "options-copy-name",
                 t!("options.copy_name").to_string(),
                 copy(label),
             ))
-            .child(self.context_item(
+            .child(self.menu_row(
                 "options-copy-path",
                 t!("options.copy_path").to_string(),
                 copy(path),

@@ -1,6 +1,7 @@
 use super::query::query_file_key;
 use super::*;
 use gpui_kit::component::spinner::Spinner;
+use gpui_kit::component::{resizable_panel, v_resizable};
 
 impl AppView {
     pub(super) fn render_query_view(
@@ -268,8 +269,7 @@ impl AppView {
             let mut panel = div()
                 .flex()
                 .flex_col()
-                .flex_none()
-                .h(px(self.query_result_height))
+                .size_full()
                 .min_h(px(0.0))
                 .overflow_hidden()
                 .bg(rgb(theme.editor_bg));
@@ -285,30 +285,45 @@ impl AppView {
                     .overflow_hidden()
                     .child(result_body),
             );
+            // The kit's vertical resizable group owns the editor/result split and its divider;
+            // the result panel keeps the height the user drags it to (and its own min/max), and
+            // the editor takes the rest.
+            let editor_panel = resizable_panel()
+                .size_range(px(QUERY_EDITOR_MIN_HEIGHT)..Pixels::MAX)
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .size_full()
+                        .overflow_hidden()
+                        .child(editor),
+                );
+            let result_panel = resizable_panel()
+                .size(px(self.query_result_height))
+                .size_range(px(QUERY_RESULT_MIN_HEIGHT)..px(QUERY_RESULT_MAX_HEIGHT))
+                .fixed()
+                .child(panel);
+            let app = cx.entity().downgrade();
+            let split = v_resizable("query-split")
+                .on_resize(move |state, _window, cx| {
+                    let Some(height) = state.read(cx).sizes().get(1).copied() else {
+                        return;
+                    };
+                    if let Some(app) = app.upgrade() {
+                        app.update(cx, |this, _| {
+                            this.query_result_height = f32::from(height);
+                        });
+                    }
+                })
+                .child(editor_panel)
+                .child(result_panel);
             div()
                 .flex()
                 .flex_col()
                 .flex_1()
                 .min_h(px(0.0))
                 .overflow_hidden()
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .min_h(px(QUERY_EDITOR_MIN_HEIGHT))
-                        .overflow_hidden()
-                        .child(editor),
-                )
-                .child(
-                    ui::pane_resize_divider_h("query-result-divider", theme).on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                            this.begin_query_split_drag(event.position.y, cx);
-                        }),
-                    ),
-                )
-                .child(panel)
+                .child(split)
                 .into_any_element()
         };
 
@@ -1505,39 +1520,6 @@ impl AppView {
             .as_ref()
             .filter(|edit| edit.index == index)
             .map(|edit| edit.input.clone())
-    }
-
-    /// Begin dragging the splitter between the query editor and its result panel, capturing the
-    /// pointer y and the panel height it started at.
-    pub(super) fn begin_query_split_drag(&mut self, pointer_y: Pixels, cx: &mut Context<'_, Self>) {
-        self.query_split_drag = Some((f32::from(pointer_y), self.query_result_height));
-        cx.notify();
-    }
-
-    /// Continue dragging the result splitter. Routed from the window root, so the drag survives
-    /// the pointer leaving the 5px divider.
-    pub(super) fn drag_query_split(&mut self, event: &MouseMoveEvent, cx: &mut Context<'_, Self>) {
-        let Some((start_y, start_height)) = self.query_split_drag else {
-            return;
-        };
-        if event.pressed_button != Some(MouseButton::Left) {
-            self.query_split_drag = None;
-            cx.notify();
-            return;
-        }
-        // The divider sits on the panel's top edge, so dragging up grows the panel (a negative
-        // pointer delta must increase the height, not shrink it).
-        let delta = f32::from(event.position.y) - start_y;
-        self.query_result_height =
-            (start_height - delta).clamp(QUERY_RESULT_MIN_HEIGHT, QUERY_RESULT_MAX_HEIGHT);
-        cx.notify();
-    }
-
-    /// Finish dragging the result splitter.
-    pub(super) fn end_query_split_drag(&mut self, cx: &mut Context<'_, Self>) {
-        if self.query_split_drag.take().is_some() {
-            cx.notify();
-        }
     }
 }
 

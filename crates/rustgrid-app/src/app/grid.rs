@@ -1831,7 +1831,7 @@ impl GridView {
             .unwrap_or_else(|| chrono::Local::now().date_naive());
         let calendar = cx.new(|cx| {
             let mut state = CalendarState::new(window, cx);
-            state.set_date(date, window, cx);
+            state.set_date(picker_date(date), window, cx);
             state
         });
         // `TimePrecision::Second` matches the grid's cell picker and MySQL's rendered
@@ -1841,7 +1841,7 @@ impl GridView {
                 .unwrap_or_default();
             Some(cx.new(|cx| {
                 let mut state = TimeFieldState::new(window, cx).precision(TimePrecision::Second);
-                state.set_time(time, window, cx);
+                state.set_time(picker_time(time), window, cx);
                 state
             }))
         } else {
@@ -1923,14 +1923,16 @@ impl GridView {
             return;
         };
         if let Some(today) = NaiveDate::from_ymd_opt(now.year(), now.month(), now.day()) {
-            picker
-                .calendar
-                .update(cx, |calendar, cx| calendar.set_date(today, window, cx));
+            picker.calendar.update(cx, |calendar, cx| {
+                calendar.set_date(picker_date(today), window, cx)
+            });
         }
         if let Some(field) = picker.time_field.as_ref()
             && let Some(time) = NaiveTime::from_hms_opt(now.hour(), now.minute(), now.second())
         {
-            field.update(cx, |field, cx| field.set_time(time, window, cx));
+            field.update(cx, |field, cx| {
+                field.set_time(picker_time(time), window, cx)
+            });
         }
         cx.notify();
     }

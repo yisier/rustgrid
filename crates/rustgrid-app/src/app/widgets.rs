@@ -1,6 +1,30 @@
 use super::*;
-use gpui::ElementId;
+use gpui::{ElementId, Focusable as _};
 use gpui_kit::base::SelectableText;
+
+/// The ordered rows of a context menu before they are handed to the kit's `PopupMenu`. Keeping a
+/// `child`/builder shape lets the target match below read like the old hand-drawn `div` chain.
+struct MenuItemList(Vec<PopupMenuItem>);
+
+impl MenuItemList {
+    fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    fn child(mut self, item: PopupMenuItem) -> Self {
+        self.0.push(item);
+        self
+    }
+}
+
+impl IntoIterator for MenuItemList {
+    type Item = PopupMenuItem;
+    type IntoIter = std::vec::IntoIter<PopupMenuItem>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
 
 impl AppView {
     pub(super) fn render_selectable_text(
@@ -97,16 +121,18 @@ impl AppView {
         ui::toolbar_item(id, icon, label, enabled, self.theme, on_click)
     }
 
-    pub(super) fn render_context_menu(
+    /// The context menu's items, in order. Every context menu is a kit `PopupMenu` built when it
+    /// opens, so rows, separators and submenus are its items instead of hand-drawn divs.
+    fn context_menu_items(
         &self,
-        menu: &ContextMenu,
-        _window: &Window,
+        target: &ContextTarget,
+        position: Point<Pixels>,
+        window: &mut Window,
         cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
-        let theme = self.theme;
-        let mut items = div().flex().flex_col().w(px(170.0)).p_0p5();
+    ) -> MenuItemList {
+        let mut items = MenuItemList::new();
 
-        match &menu.target {
+        match target {
             ContextTarget::Connection(index) => {
                 let index = *index;
                 let status = self.connections.get(index).map(|node| &node.status);
@@ -170,9 +196,9 @@ impl AppView {
                             this.open_copy_form(index, window, cx);
                         }),
                     ))
-                    .child(self.color_submenu_item(index, cx))
-                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
-                    .child(self.manage_group_submenu_item(index, cx));
+                    .child(self.color_submenu_item(index, window, cx))
+                    .child(PopupMenuItem::separator())
+                    .child(self.manage_group_submenu_item(index, window, cx));
 
                 // Creating a database and refreshing the list both need a live connection, but stay
                 // visible (greyed out) when disconnected. Engines without database management
@@ -205,7 +231,7 @@ impl AppView {
                     }),
                 ));
 
-                items = items.child(div().h(px(1.0)).my_1().bg(rgb(theme.border)));
+                items = items.child(PopupMenuItem::separator());
                 items =
                     if connected {
                         items.child(self.context_item(
@@ -225,7 +251,7 @@ impl AppView {
             }
             ContextTarget::Group { id } => {
                 let id = *id;
-                let menu_position = menu.position;
+                let menu_position = position;
                 items = items
                     .child(self.context_item(
                         "group-new-query",
@@ -242,7 +268,7 @@ impl AppView {
                             this.new_connection_in_group(id, menu_position, cx);
                         }),
                     ))
-                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(PopupMenuItem::separator())
                     .child(self.context_item(
                         "group-rename",
                         t!("group.rename").to_string(),
@@ -260,7 +286,7 @@ impl AppView {
                             cx.notify();
                         }),
                     ))
-                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(PopupMenuItem::separator())
                     .child(self.context_item(
                         "group-refresh",
                         t!("connection.refresh").to_string(),
@@ -294,13 +320,11 @@ impl AppView {
                             this.connect_tree_selection(cx);
                         }),
                     )
-                    .into_any_element()
                 } else {
                     self.context_item_disabled(
                         "tree-sel-connect",
                         t!("connection.connect").to_string(),
                     )
-                    .into_any_element()
                 });
                 items = items.child(if any_open {
                     self.context_item(
@@ -311,15 +335,13 @@ impl AppView {
                             this.request_disconnect_tree_selection(cx);
                         }),
                     )
-                    .into_any_element()
                 } else {
                     self.context_item_disabled(
                         "tree-sel-disconnect",
                         t!("connection.disconnect").to_string(),
                     )
-                    .into_any_element()
                 });
-                items = items.child(self.import_connections_submenu_item(cx));
+                items = items.child(self.import_connections_menu_item(window, cx));
                 items = items.child(if deletable {
                     self.context_item(
                         "tree-sel-delete",
@@ -335,16 +357,14 @@ impl AppView {
                             cx.notify();
                         }),
                     )
-                    .into_any_element()
                 } else {
                     self.context_item_disabled(
                         "tree-sel-delete",
                         t!("connection.delete_connection").to_string(),
                     )
-                    .into_any_element()
                 });
                 items = items
-                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(PopupMenuItem::separator())
                     .child(self.context_item(
                         "tree-sel-refresh",
                         t!("connection.refresh").to_string(),
@@ -364,8 +384,8 @@ impl AppView {
                             this.add_group(window, cx);
                         }),
                     ))
-                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
-                    .child(self.import_connections_submenu_item(cx))
+                    .child(PopupMenuItem::separator())
+                    .child(self.import_connections_menu_item(window, cx))
                     .child(self.context_item(
                         "tree-export-connections",
                         t!("connection.export_connection").to_string(),
@@ -375,7 +395,7 @@ impl AppView {
                             this.open_export_connections_window(cx);
                         }),
                     ))
-                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(PopupMenuItem::separator())
                     .child(self.context_item(
                         "tree-refresh",
                         t!("connection.refresh").to_string(),
@@ -469,7 +489,7 @@ impl AppView {
                     ));
                 }
                 items = items
-                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(PopupMenuItem::separator())
                     .child(self.context_item(
                         "db-new-query",
                         t!("main.new_query").to_string(),
@@ -503,15 +523,15 @@ impl AppView {
                             t!("database.run_sql_file").to_string(),
                             cx.listener(move |this, _event, _window, cx| {
                                 this.context_menu = None;
-                                this.dump_submenu = None;
                                 this.open_run_sql_file(ci, di, None, cx);
                             }),
                         ));
                         // A schema-qualified engine dumps one schema at a time, so 转储 SQL 文件
                         // lives on the schema row (the schema menu) instead of the database row.
                         if !schema_engine {
-                            items = items
-                                .child(self.dump_sql_submenu_item(ci, di, None, None, false, cx));
+                            items = items.child(
+                                self.dump_sql_submenu_item(ci, di, None, None, false, window, cx),
+                            );
                         }
                     }
                     items = items.child(self.context_item(
@@ -525,7 +545,7 @@ impl AppView {
                 }
                 if self.driver_supports(ci, DriverCapability::Schemas) {
                     items = items
-                        .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                        .child(PopupMenuItem::separator())
                         .child(self.context_item(
                             "db-new-schema",
                             t!("database.new_schema").to_string(),
@@ -603,7 +623,7 @@ impl AppView {
                     ));
                 }
                 items = items
-                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(PopupMenuItem::separator())
                     .child(self.context_item(
                         "schema-new",
                         t!("database.new_schema").to_string(),
@@ -627,7 +647,6 @@ impl AppView {
                             let schema = schema.clone();
                             move |this, _event, _window, cx| {
                                 this.context_menu = None;
-                                this.dump_submenu = None;
                                 this.open_run_sql_file(ci, di, Some(schema.clone()), cx);
                             }
                         }),
@@ -638,9 +657,10 @@ impl AppView {
                         None,
                         Some(schema.clone()),
                         false,
+                        window,
                         cx,
                     ))
-                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(PopupMenuItem::separator())
                     .child(self.context_item(
                         "schema-delete",
                         t!("database.delete_schema").to_string(),
@@ -714,7 +734,7 @@ impl AppView {
                                 this.open_view(ci, database, view_design_name.clone(), cx);
                             }),
                         ))
-                        .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                        .child(PopupMenuItem::separator())
                         .child(self.context_item(
                             "view-export",
                             t!("object.export_wizard").to_string(),
@@ -728,7 +748,7 @@ impl AppView {
                                 );
                             }),
                         ))
-                        .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                        .child(PopupMenuItem::separator())
                         .child(self.context_item(
                             "view-drop",
                             t!("view.delete").to_string(),
@@ -766,7 +786,7 @@ impl AppView {
                     // TTL, delete and rename, matching the key list's own toolbar.
                     let ttl_name = name.clone();
                     items = items
-                        .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                        .child(PopupMenuItem::separator())
                         .child(self.context_item(
                             "key-ttl",
                             t!("redis.tools.key_apply_ttl").to_string(),
@@ -775,7 +795,7 @@ impl AppView {
                                 this.start_key_ttl_dialog(ci, di, ttl_name.clone(), cx);
                             }),
                         ))
-                        .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                        .child(PopupMenuItem::separator())
                         .child(self.context_item(
                             "table-drop",
                             t!("redis.key.delete").to_string(),
@@ -818,7 +838,7 @@ impl AppView {
                         ));
                 } else if !is_view {
                     items = items
-                        .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                        .child(PopupMenuItem::separator())
                         .child(self.context_item(
                             "table-export",
                             t!("object.export_wizard").to_string(),
@@ -840,7 +860,7 @@ impl AppView {
                                 this.open_import_wizard(ci, di, Some(import_target.clone()), cx);
                             }),
                         ))
-                        .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                        .child(PopupMenuItem::separator())
                         .child(
                             self.context_item(
                                 "table-drop",
@@ -952,7 +972,7 @@ impl AppView {
                                 }),
                             ),
                         )
-                        .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                        .child(PopupMenuItem::separator())
                         .child(
                             self.context_item(
                                 "table-rename",
@@ -989,11 +1009,12 @@ impl AppView {
                         Some(name.clone()),
                         None,
                         is_view,
+                        window,
                         cx,
                     ));
                 }
                 items = items
-                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(PopupMenuItem::separator())
                     .child(self.context_item(
                         "table-refresh",
                         t!("connection.refresh").to_string(),
@@ -1041,7 +1062,7 @@ impl AppView {
                                 this.open_new_collection(ci, di, cx);
                             }),
                         ))
-                        .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)));
+                        .child(PopupMenuItem::separator());
                 } else if self.driver_supports_table_designer(ci) {
                     items = items
                         .child(self.context_item(
@@ -1055,7 +1076,7 @@ impl AppView {
                                 this.open_new_table(ci, database, cx);
                             }),
                         ))
-                        .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)));
+                        .child(PopupMenuItem::separator());
                 }
                 items = items
                     .child(self.context_item(
@@ -1074,7 +1095,7 @@ impl AppView {
                             this.open_export_wizard(ci, di, &[], cx);
                         }),
                     ))
-                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(PopupMenuItem::separator())
                     .child(self.context_item(
                         "tablecat-refresh",
                         t!("connection.refresh").to_string(),
@@ -1140,7 +1161,7 @@ impl AppView {
                             this.run_routine_by_name(ci, database, kind, run_name.clone(), cx);
                         }),
                     ))
-                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(PopupMenuItem::separator())
                     .child(self.context_item(
                         "routine-delete",
                         t!("routine.delete").to_string(),
@@ -1149,7 +1170,7 @@ impl AppView {
                             this.confirm_delete_routine(ci, di, drop_name.clone(), kind, cx);
                         }),
                     ))
-                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(PopupMenuItem::separator())
                     .child(self.context_item(
                         "routine-refresh",
                         t!("connection.refresh").to_string(),
@@ -1217,7 +1238,7 @@ impl AppView {
                             this.confirm_delete_backup(cx);
                         }),
                     ))
-                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(PopupMenuItem::separator())
                     .child(self.context_item(
                         "backup-ctx-extract",
                         t!("backup.extract_sql").to_string(),
@@ -1226,7 +1247,7 @@ impl AppView {
                             this.open_extract_sql(index, cx);
                         }),
                     ))
-                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(PopupMenuItem::separator())
                     .child(self.context_item(
                         "backup-ctx-copy",
                         t!("backup.copy").to_string(),
@@ -1244,7 +1265,7 @@ impl AppView {
                             this.begin_backup_rename(BackupSelection::File(index), window, cx);
                         }),
                     ))
-                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(PopupMenuItem::separator())
                     .child(self.context_item(
                         "backup-ctx-reveal",
                         t!("backup.reveal").to_string(),
@@ -1254,7 +1275,7 @@ impl AppView {
                             cx.notify();
                         }),
                     ))
-                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(PopupMenuItem::separator())
                     .child(self.context_item(
                         "backup-ctx-refresh",
                         t!("connection.refresh").to_string(),
@@ -1292,7 +1313,7 @@ impl AppView {
                             this.begin_backup_rename(BackupSelection::Config(index), window, cx);
                         }),
                     ))
-                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(PopupMenuItem::separator())
                     .child(self.context_item(
                         "backup-config-ctx-refresh",
                         t!("connection.refresh").to_string(),
@@ -1341,7 +1362,7 @@ impl AppView {
                             this.confirm_delete_saved_query(index, cx);
                         }),
                     ))
-                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(PopupMenuItem::separator())
                     .child(self.context_item(
                         "queryfile-ctx-copy",
                         t!("backup.copy").to_string(),
@@ -1359,7 +1380,7 @@ impl AppView {
                             this.begin_rename_query(index, window, cx);
                         }),
                     ))
-                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(PopupMenuItem::separator())
                     .child(self.context_item(
                         "queryfile-ctx-reveal",
                         t!("backup.reveal").to_string(),
@@ -1369,7 +1390,7 @@ impl AppView {
                             cx.notify();
                         }),
                     ))
-                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(PopupMenuItem::separator())
                     .child(self.context_item(
                         "queryfile-ctx-refresh",
                         t!("connection.refresh").to_string(),
@@ -1398,7 +1419,7 @@ impl AppView {
                             this.open_transfer_config(index, cx);
                         }),
                     ))
-                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(PopupMenuItem::separator())
                     .child(self.context_item(
                         "transfer-ctx-delete",
                         t!("sync.delete").to_string(),
@@ -1410,7 +1431,7 @@ impl AppView {
                             this.confirm_delete_transfer(cx);
                         }),
                     ))
-                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(PopupMenuItem::separator())
                     .child(self.context_item(
                         "transfer-ctx-refresh",
                         t!("connection.refresh").to_string(),
@@ -1430,7 +1451,7 @@ impl AppView {
                             this.open_new_transfer(cx);
                         }),
                     ))
-                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(PopupMenuItem::separator())
                     .child(self.context_item(
                         "transferlist-ctx-refresh",
                         t!("connection.refresh").to_string(),
@@ -1450,7 +1471,7 @@ impl AppView {
                             this.open_new_backup(cx);
                         }),
                     ))
-                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(PopupMenuItem::separator())
                     .child(self.context_item(
                         "backuplist-ctx-reveal",
                         t!("backup.reveal").to_string(),
@@ -1459,7 +1480,7 @@ impl AppView {
                             this.reveal_backup_folder(cx);
                         }),
                     ))
-                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(PopupMenuItem::separator())
                     .child(self.context_item(
                         "backuplist-ctx-refresh",
                         t!("connection.refresh").to_string(),
@@ -1489,7 +1510,7 @@ impl AppView {
                             this.open_new_query(cx);
                         }),
                     ))
-                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(PopupMenuItem::separator())
                     .child(self.context_item(
                         "querylist-ctx-reveal",
                         t!("backup.reveal").to_string(),
@@ -1498,7 +1519,7 @@ impl AppView {
                             this.reveal_query_folder(cx);
                         }),
                     ))
-                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(PopupMenuItem::separator())
                     .child(self.context_item(
                         "querylist-ctx-refresh",
                         t!("connection.refresh").to_string(),
@@ -1557,7 +1578,7 @@ impl AppView {
                                     cx.notify();
                                 }),
                             ))
-                            .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)));
+                            .child(PopupMenuItem::separator());
                     }
                     items = items.child(if deletable {
                         self.context_item(
@@ -1578,10 +1599,8 @@ impl AppView {
                                 cx.notify();
                             }),
                         )
-                        .into_any_element()
                     } else {
                         self.context_item_disabled("grid-ctx-delete", delete_label)
-                            .into_any_element()
                     });
                     if !key_value {
                         items = items.child(if deletable {
@@ -1595,13 +1614,11 @@ impl AppView {
                                     cx.notify();
                                 }),
                             )
-                            .into_any_element()
                         } else {
                             self.context_item_disabled(
                                 "grid-ctx-duplicate",
                                 t!("grid.duplicate_row").to_string(),
                             )
-                            .into_any_element()
                         });
                     }
                     items = items.child(if has_selection {
@@ -1614,10 +1631,8 @@ impl AppView {
                                 cx.notify();
                             }),
                         )
-                        .into_any_element()
                     } else {
                         self.context_item_disabled("grid-ctx-copy", t!("grid.copy").to_string())
-                            .into_any_element()
                     });
                     if !key_value {
                         items = items.child(if has_selection {
@@ -1631,13 +1646,11 @@ impl AppView {
                                     cx.notify();
                                 }),
                             )
-                            .into_any_element()
                         } else {
                             self.context_item_disabled(
                                 "grid-ctx-copy-insert",
                                 t!("grid.copy_insert").to_string(),
                             )
-                            .into_any_element()
                         });
                     }
                     items = items.child(if editable {
@@ -1650,10 +1663,8 @@ impl AppView {
                                 cx.notify();
                             }),
                         )
-                        .into_any_element()
                     } else {
                         self.context_item_disabled("grid-ctx-paste", t!("grid.paste").to_string())
-                            .into_any_element()
                     });
                     if !key_value {
                         items = items.child(if editable && has_selection {
@@ -1666,17 +1677,15 @@ impl AppView {
                                     cx.notify();
                                 }),
                             )
-                            .into_any_element()
                         } else {
                             self.context_item_disabled(
                                 "grid-ctx-null",
                                 t!("grid.set_null").to_string(),
                             )
-                            .into_any_element()
                         });
                     }
                     items = items
-                        .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                        .child(PopupMenuItem::separator())
                         .child(self.context_item(
                             "grid-ctx-refresh",
                             t!("grid.refresh").to_string(),
@@ -1734,15 +1743,13 @@ impl AppView {
                                 cx.notify();
                             }),
                         )
-                        .into_any_element()
                     } else {
                         self.context_item_disabled(
                             "grid-head-filter",
                             t!("grid.filter").to_string(),
                         )
-                        .into_any_element()
                     });
-                    items = items.child(div().h(px(1.0)).my_1().bg(rgb(theme.border)));
+                    items = items.child(PopupMenuItem::separator());
                     // 冻结列 / 取消冻结 are one item: the frozen column itself offers 取消冻结,
                     // every other column offers 冻结列.
                     items = items.child(if on_frozen_column {
@@ -1756,7 +1763,6 @@ impl AppView {
                                 cx.notify();
                             }),
                         )
-                        .into_any_element()
                     } else if valid {
                         self.context_item(
                             "grid-head-freeze",
@@ -1767,13 +1773,11 @@ impl AppView {
                                 cx.notify();
                             }),
                         )
-                        .into_any_element()
                     } else {
                         self.context_item_disabled(
                             "grid-head-freeze",
                             t!("grid.freeze_column").to_string(),
                         )
-                        .into_any_element()
                     });
                     items = items.child(if has_frozen {
                         self.context_item(
@@ -1786,13 +1790,11 @@ impl AppView {
                                 cx.notify();
                             }),
                         )
-                        .into_any_element()
                     } else {
                         self.context_item_disabled(
                             "grid-head-unfreeze-all",
                             t!("grid.unfreeze_all_columns").to_string(),
                         )
-                        .into_any_element()
                     });
                     items = items.child(if valid && can_hide {
                         self.context_item(
@@ -1827,16 +1829,14 @@ impl AppView {
                                 cx.notify();
                             }),
                         )
-                        .into_any_element()
                     } else {
                         self.context_item_disabled(
                             "grid-head-hide",
                             t!("grid.hide_column").to_string(),
                         )
-                        .into_any_element()
                     });
                     items = items
-                        .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                        .child(PopupMenuItem::separator())
                         .child(self.context_item(
                             "grid-head-refresh",
                             t!("grid.refresh").to_string(),
@@ -1853,50 +1853,49 @@ impl AppView {
             }
         }
 
-        // The panel places itself from the pointer through `anchored`, which measures the menu
-        // after layout: a menu opened near the bottom edge switches its anchor corner and grows
-        // upward from the click instead of being clamped by a guessed height; the old fixed
-        // estimate pushed a short menu far above the row it belonged to.
-        anchored()
-            .position(menu.position)
-            .anchor(Anchor::TopLeft)
-            .child(
-                ui::popup_panel(theme)
-                    .relative()
-                    .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                        // The 转储 SQL 文件, 管理分组, 颜色 and 导入连接 flyouts overflow past this
-                        // panel, so a click on one also reads as "outside" here. Keep the menu
-                        // alive when the click is on a flyout (their zones are only populated
-                        // while they are shown).
-                        let on_flyout = [
-                            &this.dump_zone,
-                            &this.move_zone,
-                            &this.color_zone,
-                            &this.import_zone,
-                        ]
-                        .iter()
-                        .any(|zone| zone.borrow().contains(&event.position));
-                        if on_flyout {
-                            return;
-                        }
-                        this.context_menu = None;
-                        this.dump_submenu = None;
-                        this.move_submenu = None;
-                        this.color_submenu = None;
-                        this.import_submenu = false;
-                        cx.notify();
-                    }))
-                    .child(items),
-            )
+        items
     }
 
-    pub(super) fn render_tab_menu(
-        &self,
-        menu: &TabMenu,
-        cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
-        let theme = self.theme;
-        let target = menu.target;
+    /// Build the kit menu for the open context menu when its target changed (or it was dismissed
+    /// and reopened), and remember it until its `DismissEvent`. Menu entities are never rebuilt
+    /// per frame: hover, keyboard navigation and submenus keep their state until the kit dismisses
+    /// it. Called once per render.
+    pub(super) fn sync_context_menu(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let Some(menu) = self.context_menu.clone() else {
+            self.context_menu_key = None;
+            return;
+        };
+        if self.context_menu_key.as_ref() == Some(&menu.target) && self.context_menu_view.is_some()
+        {
+            return;
+        }
+        let items = self.context_menu_items(&menu.target, menu.position, window, cx);
+        let view = PopupMenu::build(window, cx, move |menu, _, _| {
+            let mut menu = menu
+                .min_w(px(170.0))
+                .max_w(px(420.0))
+                .max_h(px(560.0))
+                .scrollable(true);
+            for item in items {
+                menu = menu.item(item);
+            }
+            menu
+        });
+        view.focus_handle(cx).focus(window, cx);
+        let subscription = cx.subscribe(&view, |this, _, _: &DismissEvent, cx| {
+            this.context_menu = None;
+            this.context_menu_key = None;
+            this.context_menu_view = None;
+            this.context_menu_sub = None;
+            cx.notify();
+        });
+        self.context_menu_key = Some(menu.target);
+        self.context_menu_view = Some(view);
+        self.context_menu_sub = Some(subscription);
+    }
+
+    /// The tab context menu's items, built as a kit `PopupMenu` when the menu opens.
+    fn tab_menu_items(&self, target: TabTarget, cx: &mut Context<'_, Self>) -> MenuItemList {
         // 关闭右侧 is only useful while something sits to the right of the clicked tab.
         let order = self.ordered_tabs(cx);
         let tabs_to_the_right = order
@@ -1904,11 +1903,7 @@ impl AppView {
             .position(|tab| *tab == target)
             .map(|position| order.len() - position - 1)
             .unwrap_or(0);
-        let mut items = div()
-            .flex()
-            .flex_col()
-            .w(px(200.0))
-            .p_0p5()
+        let mut items = MenuItemList::new()
             .child(self.context_item_shortcut(
                 "tab-close",
                 t!("tab.close").to_string(),
@@ -1932,25 +1927,48 @@ impl AppView {
                 self.context_item_disabled("tab-close-right", t!("tab.close_right").to_string()),
             )
         };
-        let items = items.child(self.context_item_shortcut(
+        items.child(self.context_item_shortcut(
             "tab-close-all",
             t!("tab.close_all").to_string(),
             self.command_shortcut_label("general.close_all_tabs", cx.platform_info().os),
             cx.listener(|this, _event, _window, cx| this.close_all_tabs(cx)),
-        ));
+        ))
+    }
 
-        anchored()
-            .position(menu.position)
-            .anchor(Anchor::TopLeft)
-            .child(
-                ui::popup_panel(theme)
-                    .relative()
-                    .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
-                        this.tab_menu = None;
-                        cx.notify();
-                    }))
-                    .child(items),
-            )
+    /// Build the tab context menu when its target changed (or it was dismissed), mirroring
+    /// [`AppView::sync_context_menu`].
+    pub(super) fn sync_tab_menu(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let Some(target) = self.tab_menu.as_ref().map(|menu| menu.target) else {
+            self.tab_menu_key = None;
+            return;
+        };
+        if self.tab_menu_key == Some(target) && self.tab_menu_view.is_some() {
+            return;
+        }
+        // A context menu and a tab menu are mutually exclusive; drop the old menu's entity.
+        self.context_menu = None;
+        self.context_menu_key = None;
+        self.context_menu_view = None;
+        self.context_menu_sub = None;
+        let items = self.tab_menu_items(target, cx);
+        let view = PopupMenu::build(window, cx, move |menu, _, _| {
+            let mut menu = menu.min_w(px(200.0)).max_w(px(360.0)).max_h(px(480.0));
+            for item in items {
+                menu = menu.item(item);
+            }
+            menu
+        });
+        view.focus_handle(cx).focus(window, cx);
+        let subscription = cx.subscribe(&view, |this, _, _: &DismissEvent, cx| {
+            this.tab_menu = None;
+            this.tab_menu_key = None;
+            this.tab_menu_view = None;
+            this.tab_menu_sub = None;
+            cx.notify();
+        });
+        self.tab_menu_key = Some(target);
+        self.tab_menu_view = Some(view);
+        self.tab_menu_sub = Some(subscription);
     }
 
     /// Wraps a submenu trigger row so its window-space rectangle can be recorded into the
@@ -1972,18 +1990,20 @@ impl AppView {
             .child(row)
     }
 
-    pub(super) fn context_item(
+    /// A row of a hand-drawn dropdown (the New Connection engine menu, log copy menu, ...). The
+    /// context menus use [`AppView::context_item`]'s kit menu items instead; these small anchored
+    /// panels still build their rows directly.
+    pub(super) fn menu_row(
         &self,
         id: impl Into<ElementId>,
         label: String,
         on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> impl IntoElement {
-        self.context_item_shortcut(id, label, None, on_click)
+        self.menu_row_shortcut(id, label, None, on_click)
     }
 
-    /// [`AppView::context_item`] with the command's configured shortcut on the right, as the tab
-    /// menu shows it; `None` (an unbound command) leaves the row as a plain item.
-    pub(super) fn context_item_shortcut(
+    /// [`AppView::menu_row`] with a shortcut label on the right.
+    pub(super) fn menu_row_shortcut(
         &self,
         id: impl Into<ElementId>,
         label: String,
@@ -2018,9 +2038,8 @@ impl AppView {
             }))
     }
 
-    /// A context-menu row that stays visible but is greyed out and non-interactive, used for
-    /// actions that need a live connection the menu was opened on.
-    pub(super) fn context_item_disabled(
+    /// A greyed-out, non-interactive row of a hand-drawn dropdown.
+    pub(super) fn menu_row_disabled(
         &self,
         id: impl Into<ElementId>,
         label: String,
@@ -2038,11 +2057,67 @@ impl AppView {
             .child(label)
     }
 
-    /// The 转储 SQL 文件 row: a submenu trigger that reveals a right-hand flyout with the dump
-    /// modes. The database menu dumps the whole database (`table`/`schema` both `None`); a table/view
-    /// menu dumps just that object (a view offers 仅结构 only, since it has no rows of its own); a
-    /// schema menu dumps that schema's objects (`schema: Some(..)`). The flyout is a child of this
-    /// row, positioned just past the menu's right edge, so it reads like Navicat's submenu.
+    /// One row of a context menu. The `id` is kept in the signature so the many call sites read
+    /// the same; the kit menu tracks rows by index and hover, so no element id is needed.
+    pub(super) fn context_item(
+        &self,
+        _id: impl Into<ElementId>,
+        label: String,
+        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> PopupMenuItem {
+        PopupMenuItem::new(label).on_click(on_click)
+    }
+
+    /// [`AppView::context_item`] with the command's configured shortcut on the right, as the tab
+    /// menu shows it; `None` (an unbound command) leaves the row as a plain item.
+    pub(super) fn context_item_shortcut(
+        &self,
+        _id: impl Into<ElementId>,
+        label: String,
+        shortcut: Option<String>,
+        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> PopupMenuItem {
+        let Some(shortcut) = shortcut else {
+            return PopupMenuItem::new(label).on_click(on_click);
+        };
+        let muted = self.theme.text_muted;
+        PopupMenuItem::element(move |_, _| {
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .w_full()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .truncate()
+                        .child(label.clone()),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(11.0))
+                        .text_color(rgb(muted))
+                        .child(shortcut.clone()),
+                )
+        })
+        .on_click(on_click)
+    }
+
+    /// A context-menu row that stays visible but is greyed out and non-interactive, used for
+    /// actions that need a live connection the menu was opened on.
+    pub(super) fn context_item_disabled(
+        &self,
+        _id: impl Into<ElementId>,
+        label: String,
+    ) -> PopupMenuItem {
+        PopupMenuItem::new(label).disabled(true)
+    }
+
+    /// The 转储 SQL 文件 submenu: the dump modes, each starting a `.sql` dump of the database,
+    /// the schema, or the table/view the menu was opened on.
     fn dump_sql_submenu_item(
         &self,
         connection_index: usize,
@@ -2050,572 +2125,159 @@ impl AppView {
         table: Option<String>,
         schema: Option<String>,
         is_view: bool,
+        window: &mut Window,
         cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
-        let theme = self.theme;
-        let key = (
-            connection_index,
-            database_index,
-            table.clone(),
-            schema.clone(),
-        );
-        let open = self.dump_submenu == Some(key.clone());
-        let zone = self.dump_zone.clone();
-        let bounds_slot = self.dump_zone.clone();
-        let trigger_id = match (&table, &schema) {
-            (Some(_), _) => "table-dump-sql",
-            (None, Some(_)) => "schema-dump-sql",
-            (None, None) => "db-dump-sql",
-        };
-        let mut base = div()
-            .relative()
-            .flex()
-            .items_center()
-            .w_full()
-            .h(px(26.0))
-            .px_3()
-            .gap_1()
-            .text_size(px(12.5));
-        if open {
-            // The flyout panel is this row's last child; its rectangle is what an outside click
-            // must be tested against (the flyout overflows the menu panel).
-            base = base.on_children_prepainted(move |bounds, _window, _cx| {
-                bounds_slot.borrow_mut().flyout = bounds.last().copied();
-            });
+    ) -> PopupMenuItem {
+        let labels = if table.is_none() || !is_view {
+            vec![
+                t!("database.dump_structure_and_data").to_string(),
+                t!("database.dump_structure").to_string(),
+                t!("database.dump_data").to_string(),
+            ]
         } else {
-            // Drop the stale flyout rectangle so a later outside click closes the menu normally.
-            bounds_slot.borrow_mut().flyout = None;
+            // A view has no rows of its own, so only its script can be dumped.
+            vec![t!("database.dump_structure").to_string()]
+        };
+        let modes = if table.is_none() || !is_view {
+            vec![
+                DumpMode::StructureAndData,
+                DumpMode::Structure,
+                DumpMode::Data,
+            ]
+        } else {
+            vec![DumpMode::Structure]
+        };
+        let mut items = Vec::new();
+        for (label, mode) in labels.into_iter().zip(modes) {
+            let target = table.clone();
+            let target_schema = schema.clone();
+            items.push(PopupMenuItem::new(label).on_click(cx.listener(
+                move |this, _event, _window, cx| match &target {
+                    Some(name) => this.request_dump_table(
+                        connection_index,
+                        database_index,
+                        name.clone(),
+                        is_view,
+                        mode,
+                        cx,
+                    ),
+                    None => match &target_schema {
+                        Some(schema) => this.request_dump_schema(
+                            connection_index,
+                            database_index,
+                            schema.clone(),
+                            mode,
+                            cx,
+                        ),
+                        None => this.request_dump(connection_index, database_index, mode, cx),
+                    },
+                },
+            )));
         }
-        let hover_key = key.clone();
-        let click_key = key.clone();
-        let row = base
-            .id(trigger_id)
-            .cursor_pointer()
-            .hover(move |style| {
-                style
-                    .bg(rgb(theme.tree_hover_bg))
-                    .text_color(rgb(theme.tree_selected_text))
-            })
-            .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
-                // Open the flyout when the row is hovered (Navicat's submenu behaviour), and close
-                // it again once the pointer leaves the row and the flyout beside it.
-                if zone.borrow().stays_open(*hovered, window) {
-                    if this.dump_submenu.as_ref() != Some(&hover_key) {
-                        this.dump_submenu = Some(hover_key.clone());
-                        cx.notify();
-                    }
-                } else if this.dump_submenu.as_ref() == Some(&hover_key) {
-                    this.dump_submenu = None;
-                    cx.notify();
-                }
-            }))
-            .on_click(cx.listener(move |this, _event, _window, cx| {
-                this.dump_submenu = Some(click_key.clone());
-                cx.notify();
-            }))
-            .child(
-                div()
-                    .flex_1()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .child(t!("database.dump_sql").to_string()),
-            )
-            .child(
-                svg()
-                    .path("icons/chevron-right.svg")
-                    .w(px(12.0))
-                    .h(px(12.0))
-                    .flex_none()
-                    .text_color(rgb(theme.text_muted)),
-            );
-        let row = if open {
-            row.child(dump_sql_flyout(
-                connection_index,
-                database_index,
-                table,
-                schema,
-                is_view,
-                theme,
-                self.dump_zone.clone(),
-                cx,
-            ))
-        } else {
-            row
-        };
-        self.submenu_row(row, self.dump_zone.clone())
+        let menu = PopupMenu::build(window, cx, move |menu, _, _| {
+            let mut menu = menu.min_w(px(170.0));
+            for item in items {
+                menu = menu.item(item);
+            }
+            menu
+        });
+        PopupMenuItem::submenu(t!("database.dump_sql").to_string(), menu)
     }
 
-    /// The connection context menu's 管理分组 row: a submenu trigger that reveals a right-hand
-    /// flyout listing 移动到 (every group, nested by indentation) and 从分组内排除.
+    /// The connection context menu's 管理分组 submenu: 移动到 (every group, nested by indentation)
+    /// and 从分组内排除.
     fn manage_group_submenu_item(
         &self,
         index: usize,
+        window: &mut Window,
         cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
-        let theme = self.theme;
-        let open = self.move_submenu == Some(index);
-        let zone = self.move_zone.clone();
-        let bounds_slot = self.move_zone.clone();
-        let mut base = div()
-            .relative()
-            .flex()
-            .items_center()
-            .w_full()
-            .h(px(26.0))
-            .px_3()
-            .gap_1()
-            .text_size(px(12.5));
-        if open {
-            base = base.on_children_prepainted(move |bounds, _window, _cx| {
-                bounds_slot.borrow_mut().flyout = bounds.last().copied();
-            });
-        } else {
-            bounds_slot.borrow_mut().flyout = None;
-        }
-        let row = base
-            .id("ctx-manage-group")
-            .cursor_pointer()
-            .hover(move |style| {
-                style
-                    .bg(rgb(theme.tree_hover_bg))
-                    .text_color(rgb(theme.tree_selected_text))
-            })
-            .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
-                // Open on hover, and close again once the pointer leaves the row and its flyout.
-                if zone.borrow().stays_open(*hovered, window) {
-                    if this.move_submenu != Some(index) {
-                        this.dump_submenu = None;
-                        this.color_submenu = None;
-                        this.move_submenu = Some(index);
-                        cx.notify();
-                    }
-                } else if this.move_submenu == Some(index) {
-                    this.move_submenu = None;
-                    cx.notify();
-                }
-            }))
-            .on_click(cx.listener(move |this, _event, _window, cx| {
-                this.dump_submenu = None;
-                this.color_submenu = None;
-                this.move_submenu = Some(index);
-                cx.notify();
-            }))
-            .child(
-                div()
-                    .flex_1()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .child(t!("group.manage").to_string()),
-            )
-            .child(
-                svg()
-                    .path("icons/chevron-right.svg")
-                    .w(px(12.0))
-                    .h(px(12.0))
-                    .flex_none()
-                    .text_color(rgb(theme.text_muted)),
-            );
-        let row = if open {
-            row.child(self.manage_group_flyout(index, theme, cx))
-        } else {
-            row
-        };
-        self.submenu_row(row, self.move_zone.clone())
-    }
-
-    /// The 管理分组 flyout: a 移动到 header, the nested group list, and 从分组内排除 (enabled only
-    /// while the connection is in a group).
-    fn manage_group_flyout(
-        &self,
-        index: usize,
-        theme: Theme,
-        cx: &mut Context<'_, Self>,
-    ) -> AnyElement {
-        let zone = self.move_zone.clone();
-        let mut flyout = ui::popup_panel(theme)
-            // Abut the trigger row so the pointer never crosses a gap on its way to the flyout.
-            .left(relative(1.0))
-            .top(px(0.0))
-            .w(px(190.0))
-            .p_0p5()
-            .id("ctx-manage-group-flyout")
-            .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
-                if !zone.borrow().stays_open(*hovered, window) && this.move_submenu == Some(index) {
-                    this.move_submenu = None;
-                    cx.notify();
-                }
-            }));
-        flyout = flyout.child(
-            div()
-                .px_3()
-                .py_1()
-                .text_size(px(11.0))
-                .text_color(rgb(theme.text_muted))
-                .child(t!("group.move_to").to_string()),
-        );
+    ) -> PopupMenuItem {
         let groups = self.groups_flat();
+        let mut items = vec![PopupMenuItem::label(t!("group.move_to").to_string())];
         if groups.is_empty() {
-            flyout = flyout.child(
-                div()
-                    .px_3()
-                    .h(px(24.0))
-                    .text_size(px(12.0))
-                    .text_color(rgb(theme.text_muted))
-                    .child(t!("group.none").to_string()),
-            );
+            items.push(PopupMenuItem::new(t!("group.none").to_string()).disabled(true));
         }
         for (id, depth) in groups {
             let name = self
                 .group(id)
                 .map(|group| group.name.clone())
                 .unwrap_or_default();
-            flyout = flyout.child(
-                div()
-                    .id(SharedString::from(format!("move-group-{id}")))
-                    .flex()
-                    .items_center()
-                    .w_full()
-                    .h(px(26.0))
-                    .pr_2()
-                    .pl(px(12.0 + depth as f32 * 12.0))
-                    .text_size(px(12.5))
-                    .cursor_pointer()
-                    .hover(move |style| {
-                        style
-                            .bg(rgb(theme.tree_hover_bg))
-                            .text_color(rgb(theme.tree_selected_text))
-                    })
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.context_menu = None;
-                        this.move_submenu = None;
-                        this.move_connection_to_group(index, id, cx);
-                    }))
-                    .child(name),
-            );
+            let label = format!("{}{name}", "  ".repeat(depth as usize));
+            items.push(PopupMenuItem::new(label).on_click(cx.listener(
+                move |this, _event, _window, cx| {
+                    this.move_connection_to_group(index, id, cx);
+                },
+            )));
         }
-        flyout = flyout.child(div().h(px(1.0)).my_1().bg(rgb(theme.border)));
-        if self.connection_group(index).is_some() {
-            flyout = flyout.child(
-                div()
-                    .id("ctx-exclude-group")
-                    .flex()
-                    .items_center()
-                    .w_full()
-                    .h(px(26.0))
-                    .px_3()
-                    .text_size(px(12.5))
-                    .cursor_pointer()
-                    .hover(move |style| {
-                        style
-                            .bg(rgb(theme.tree_hover_bg))
-                            .text_color(rgb(theme.tree_selected_text))
-                    })
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.context_menu = None;
-                        this.move_submenu = None;
-                        this.exclude_connection_from_group(index, cx);
-                    }))
-                    .child(t!("group.exclude").to_string()),
-            );
+        items.push(PopupMenuItem::separator());
+        let exclude = PopupMenuItem::new(t!("group.exclude").to_string());
+        items.push(if self.connection_group(index).is_some() {
+            exclude.on_click(cx.listener(move |this, _event, _window, cx| {
+                this.exclude_connection_from_group(index, cx);
+            }))
         } else {
-            flyout = flyout.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .w_full()
-                    .h(px(26.0))
-                    .px_3()
-                    .text_size(px(12.5))
-                    .text_color(rgb(theme.text_muted))
-                    .child(t!("group.exclude").to_string()),
-            );
-        }
-        flyout.into_any_element()
+            exclude.disabled(true)
+        });
+        let menu = PopupMenu::build(window, cx, move |menu, _, _| {
+            let mut menu = menu.min_w(px(190.0));
+            for item in items {
+                menu = menu.item(item);
+            }
+            menu
+        });
+        PopupMenuItem::submenu(t!("group.manage").to_string(), menu)
     }
 
-    /// The connection context menu's 颜色 row: a submenu trigger opening the red/green/blue
-    /// environment picker. Mirrors [`AppView::manage_group_submenu_item`].
-    fn color_submenu_item(&self, index: usize, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let theme = self.theme;
-        let open = self.color_submenu == Some(index);
-        let zone = self.color_zone.clone();
-        let bounds_slot = self.color_zone.clone();
-        let mut base = div()
-            .relative()
-            .flex()
-            .items_center()
-            .w_full()
-            .h(px(26.0))
-            .px_3()
-            .gap_1()
-            .text_size(px(12.5));
-        if open {
-            // The flyout panel is this row's last child; its rectangle is what an outside click
-            // must be tested against (the flyout overflows the menu panel).
-            base = base.on_children_prepainted(move |bounds, _window, _cx| {
-                bounds_slot.borrow_mut().flyout = bounds.last().copied();
-            });
-        } else {
-            bounds_slot.borrow_mut().flyout = None;
-        }
-        let row = base
-            .id("ctx-connection-color")
-            .cursor_pointer()
-            .hover(move |style| {
-                style
-                    .bg(rgb(theme.tree_hover_bg))
-                    .text_color(rgb(theme.tree_selected_text))
-            })
-            .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
-                // Open on hover (Navicat's behaviour), and close again once the pointer leaves the
-                // row and the flyout beside it.
-                if zone.borrow().stays_open(*hovered, window) {
-                    if this.color_submenu != Some(index) {
-                        this.dump_submenu = None;
-                        this.move_submenu = None;
-                        this.color_submenu = Some(index);
-                        cx.notify();
-                    }
-                } else if this.color_submenu == Some(index) {
-                    this.color_submenu = None;
-                    cx.notify();
-                }
-            }))
-            .on_click(cx.listener(move |this, _event, _window, cx| {
-                this.dump_submenu = None;
-                this.move_submenu = None;
-                this.color_submenu = Some(index);
-                cx.notify();
-            }))
-            .child(
-                div()
-                    .flex_1()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .child(t!("connection.color").to_string()),
-            )
-            .child(
-                svg()
-                    .path("icons/chevron-right.svg")
-                    .w(px(12.0))
-                    .h(px(12.0))
-                    .flex_none()
-                    .text_color(rgb(theme.text_muted)),
-            );
-        let row = if open {
-            row.child(self.color_flyout(index, theme, cx))
-        } else {
-            row
-        };
-        self.submenu_row(row, self.color_zone.clone())
-    }
-
-    /// The 颜色 flyout: one row per colour, with a coloured dot on the left and a check on the
-    /// active one. Clicking the active colour clears it.
-    fn color_flyout(&self, index: usize, theme: Theme, cx: &mut Context<'_, Self>) -> AnyElement {
+    /// The connection context menu's 颜色 submenu: the red/yellow/green environment picker, with
+    /// the active colour checked. Clicking the active colour clears it.
+    fn color_submenu_item(
+        &self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> PopupMenuItem {
         let current = self.connection_color(index);
-        let zone = self.color_zone.clone();
-        let mut flyout = ui::popup_panel(theme)
-            // Abut the trigger row (100% of the row's padding box) so the pointer never crosses a
-            // dead gap between the row and the flyout, which would close the submenu on the way in.
-            .left(relative(1.0))
-            .top(px(0.0))
-            .w(px(150.0))
-            .p_0p5()
-            // Leaving the flyout closes the submenu unless the pointer moved onto its trigger row
-            // (which re-opens it); together with the row's own handler this keeps the flyout up
-            // exactly while the pointer is inside the row-and-flyout zone.
-            .id("ctx-connection-color-flyout")
-            .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
-                if !zone.borrow().stays_open(*hovered, window) && this.color_submenu == Some(index)
-                {
-                    this.color_submenu = None;
-                    cx.notify();
-                }
-            }));
+        let theme = self.theme;
+        let mut items = Vec::new();
         for color in ConnectionColor::ALL {
             let selected = current == Some(color);
-            flyout = flyout.child(
-                div()
-                    .id(SharedString::from(format!("conn-color-{}", color.id())))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .w_full()
-                    .h(px(26.0))
-                    .px_3()
-                    .text_size(px(12.5))
-                    .cursor_pointer()
-                    .hover(move |style| {
-                        style
-                            .bg(rgb(theme.tree_hover_bg))
-                            .text_color(rgb(theme.tree_selected_text))
-                    })
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.context_menu = None;
-                        this.color_submenu = None;
-                        let next = if this.connection_color(index) == Some(color) {
-                            None
-                        } else {
-                            Some(color)
-                        };
-                        this.set_connection_color(index, next, cx);
-                    }))
-                    .child(
-                        div()
-                            .w(px(10.0))
-                            .h(px(10.0))
-                            .rounded_full()
-                            .flex_none()
-                            .bg(rgb(color.accent(theme))),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .child(t!(color.label_key()).to_string()),
-                    )
-                    .child(
-                        svg()
-                            .path("icons/check.svg")
-                            .w(px(12.0))
-                            .h(px(12.0))
-                            .flex_none()
-                            .text_color(rgb(color.accent(theme)))
-                            .opacity(if selected { 1.0 } else { 0.0 }),
-                    ),
+            let accent = color.accent(theme);
+            let label = t!(color.label_key()).to_string();
+            items.push(
+                PopupMenuItem::element(move |_, _| {
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .w_full()
+                        .child(
+                            div()
+                                .w(px(10.0))
+                                .h(px(10.0))
+                                .rounded_full()
+                                .flex_none()
+                                .bg(rgb(accent)),
+                        )
+                        .child(div().flex_1().overflow_hidden().child(label.clone()))
+                })
+                .checked(selected)
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    let next = if this.connection_color(index) == Some(color) {
+                        None
+                    } else {
+                        Some(color)
+                    };
+                    this.set_connection_color(index, next, cx);
+                })),
             );
         }
-        flyout.into_any_element()
-    }
-}
-
-/// The 转储 SQL 文件 flyout: the dump modes, each starting a `.sql` dump of the database, the
-/// schema, or the table/view the menu was opened on.
-fn dump_sql_flyout(
-    connection_index: usize,
-    database_index: usize,
-    table: Option<String>,
-    schema: Option<String>,
-    is_view: bool,
-    theme: Theme,
-    zone: Rc<RefCell<SubmenuZone>>,
-    cx: &mut Context<'_, AppView>,
-) -> AnyElement {
-    let key = (
-        connection_index,
-        database_index,
-        table.clone(),
-        schema.clone(),
-    );
-    let mut modes: Vec<(&'static str, String, DumpMode)> = Vec::new();
-    if table.is_none() {
-        // The database and the schema menu offer the same three modes; the ids stay distinct so
-        // each row identifies its own menu.
-        let ids = if schema.is_some() {
-            (
-                "schema-dump-all",
-                "schema-dump-structure",
-                "schema-dump-data",
-            )
-        } else {
-            ("db-dump-all", "db-dump-structure", "db-dump-data")
-        };
-        modes.push((
-            ids.0,
-            t!("database.dump_structure_and_data").to_string(),
-            DumpMode::StructureAndData,
-        ));
-        modes.push((
-            ids.1,
-            t!("database.dump_structure").to_string(),
-            DumpMode::Structure,
-        ));
-        modes.push((ids.2, t!("database.dump_data").to_string(), DumpMode::Data));
-    } else if is_view {
-        // A view has no rows of its own, so only its script can be dumped.
-        modes.push((
-            "view-dump-structure",
-            t!("database.dump_structure").to_string(),
-            DumpMode::Structure,
-        ));
-    } else {
-        modes.push((
-            "tbl-dump-all",
-            t!("database.dump_structure_and_data").to_string(),
-            DumpMode::StructureAndData,
-        ));
-        modes.push((
-            "tbl-dump-structure",
-            t!("database.dump_structure").to_string(),
-            DumpMode::Structure,
-        ));
-        modes.push((
-            "tbl-dump-data",
-            t!("database.dump_data").to_string(),
-            DumpMode::Data,
-        ));
-    }
-    let mut flyout = ui::popup_panel(theme)
-        // Abut the trigger row so the pointer never crosses a gap on its way to the flyout.
-        .left(relative(1.0))
-        .top(px(0.0))
-        .w(px(150.0))
-        .p_0p5()
-        .id("dump-sql-flyout")
-        .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
-            if !zone.borrow().stays_open(*hovered, window)
-                && this.dump_submenu.as_ref() == Some(&key)
-            {
-                this.dump_submenu = None;
-                cx.notify();
+        let menu = PopupMenu::build(window, cx, move |menu, _, _| {
+            let mut menu = menu.min_w(px(150.0));
+            for item in items {
+                menu = menu.item(item);
             }
-        }));
-    for (id, label, mode) in modes {
-        let target = table.clone();
-        let target_schema = schema.clone();
-        flyout = flyout.child(
-            div()
-                .id(id)
-                .flex()
-                .items_center()
-                .w_full()
-                .h(px(26.0))
-                .px_3()
-                .text_size(px(12.5))
-                .cursor_pointer()
-                .hover(move |style| {
-                    style
-                        .bg(rgb(theme.tree_hover_bg))
-                        .text_color(rgb(theme.tree_selected_text))
-                })
-                .on_click(cx.listener(move |this, _event, _window, cx| {
-                    this.context_menu = None;
-                    this.dump_submenu = None;
-                    match &target {
-                        Some(name) => this.request_dump_table(
-                            connection_index,
-                            database_index,
-                            name.clone(),
-                            is_view,
-                            mode,
-                            cx,
-                        ),
-                        None => match &target_schema {
-                            Some(schema) => this.request_dump_schema(
-                                connection_index,
-                                database_index,
-                                schema.clone(),
-                                mode,
-                                cx,
-                            ),
-                            None => this.request_dump(connection_index, database_index, mode, cx),
-                        },
-                    }
-                }))
-                .child(label),
-        );
+            menu
+        });
+        PopupMenuItem::submenu(t!("connection.color").to_string(), menu)
     }
-    flyout.into_any_element()
 }

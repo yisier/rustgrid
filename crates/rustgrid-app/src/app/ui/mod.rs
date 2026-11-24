@@ -6,11 +6,14 @@
 //! `AGENTS.md` under "UI conventions".
 
 use gpui::{
-    AnyView, App, BoxShadow, ClickEvent, CursorStyle, Div, FontWeight, IntoElement, Point,
-    SharedString, Stateful, Window, div, prelude::*, px, relative, rgb, rgba, svg,
+    Anchor, AnyView, App, BoxShadow, ClickEvent, CursorStyle, Div, Entity, FontWeight, IntoElement,
+    Pixels, Point, SharedString, Stateful, Window, anchored, deferred, div, prelude::*, px,
+    relative, rgb, rgba, svg,
 };
 
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::menu::PopupMenu;
+use gpui_kit::component::stepper::{Stepper, StepperItem};
 use gpui_kit::component::{Disableable, Sizable, Size};
 
 use crate::theme::Theme;
@@ -23,7 +26,7 @@ mod text_input;
 mod titlebar;
 mod views;
 
-pub(crate) use calendar::compact_calendar;
+pub(crate) use calendar::{compact_calendar, picker_date, picker_time};
 pub(crate) use combo::{ComboBox, ComboOption};
 pub(crate) use sql_editor::{SqlEditor, SqlEditorOptions, syntax_style};
 pub(crate) use text_area::{TextArea, TextAreaOptions};
@@ -165,6 +168,47 @@ pub(super) fn toolbar_item(
                 .text_color(rgb(color))
                 .child(label),
         )
+}
+
+/// The step strip at the top of the export/import wizards: the kit's `Stepper` at the app's
+/// compact size. A step before the current one is clickable (it navigates back); later steps are
+/// disabled, because moving forward runs each page's validation through its own button.
+pub(super) fn wizard_steps(
+    id: &'static str,
+    labels: &[String],
+    current: usize,
+    on_click: impl Fn(&usize, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let items = labels.iter().enumerate().map(|(index, label)| {
+        let item = StepperItem::new().child(label.clone());
+        item.disabled(index > current)
+    });
+    Stepper::new(id)
+        .xsmall()
+        .selected_index(current)
+        .items(items)
+        .on_click(on_click)
+        .w_full()
+        .flex_none()
+        .px_3()
+        .py_2()
+}
+
+/// Paint a kit `PopupMenu` at the pointer that opened it. `anchored` measures the menu after
+/// layout, so a menu opened near an edge flips its anchor corner instead of being clamped by a
+/// guessed height; `deferred` keeps it above the panes it overlays, like the kit's own menus.
+pub(super) fn popup_menu_layer(
+    view: Entity<PopupMenu>,
+    position: Point<Pixels>,
+) -> impl IntoElement {
+    deferred(
+        anchored()
+            .position(position)
+            .snap_to_window_with_margin(px(8.0))
+            .anchor(Anchor::TopLeft)
+            .child(view),
+    )
+    .with_priority(gpui_kit::base::POPUP_PRIORITY)
 }
 
 /// A small square icon button, the shared chrome for the filter/sort builders' row actions.
@@ -336,35 +380,9 @@ pub(super) fn toolbar_separator(theme: Theme) -> impl IntoElement {
     separator(theme, 16.0)
 }
 
-/// A 5px pane resize divider: the shared splitter handle between two side-by-side panes. The
-/// pane/window that owns the boundary attaches the mouse-down handler; the enclosing window then
-/// routes mouse move/up back to that owner, so the drag survives the pointer leaving the divider.
-pub(super) fn pane_resize_divider(id: impl Into<SharedString>, theme: Theme) -> Stateful<Div> {
-    div()
-        .id(id.into())
-        .flex_none()
-        .w(px(super::PANE_DIVIDER_WIDTH))
-        .h_full()
-        .cursor(CursorStyle::ResizeLeftRight)
-        .bg(rgb(theme.border))
-        .hover(move |style| style.bg(rgb(theme.primary)))
-}
-
-/// The top/bottom counterpart of [`pane_resize_divider`]: the splitter between the query editor
-/// and its result panel. Same shared drag contract, laid out horizontally.
-pub(super) fn pane_resize_divider_h(id: impl Into<SharedString>, theme: Theme) -> Stateful<Div> {
-    div()
-        .id(id.into())
-        .flex_none()
-        .h(px(super::PANE_DIVIDER_WIDTH))
-        .w_full()
-        .cursor(CursorStyle::ResizeUpDown)
-        .bg(rgb(theme.border))
-        .hover(move |style| style.bg(rgb(theme.primary)))
-}
-
-/// Like [`pane_resize_divider`] but invisible until hovered, for surfaces (the filter builder)
-/// where an always-on divider reads as a scrollbar.
+/// Like a pane divider but invisible until hovered, for surfaces (the filter builder) where an
+/// always-on divider reads as a scrollbar. The main window's pane dividers are the kit
+/// `h_resizable`/`v_resizable` handles now, not this.
 pub(super) fn hover_resize_divider(id: impl Into<SharedString>, theme: Theme) -> Stateful<Div> {
     div()
         .id(id.into())

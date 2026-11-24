@@ -221,11 +221,11 @@ not a later refactor.
 
 - Rust **stable**, **edition 2024** (`rust-toolchain.toml` pins `stable`; workspace
   `rust-version = "1.94"`).
-- UI: **`gpui-kit = "0.8"`** (crates.io). It is the facade over a published GPUI snapshot plus
+- UI: **`gpui-kit = "0.11"`** (crates.io). It is the facade over a published GPUI snapshot plus
   `gpui-base` and the shadcn-styled `gpui-component`, and it re-exports the engine itself. The
-  workspace enables its **`gpui-fast`** feature, so the engine is **`gpui-fast = "0.1.12"`** —
+  workspace enables its **`gpui-fast`** feature, so the engine is **`gpui-fast = "0.1.19"`** —
   Longbridge's rendering/layout-optimised fork of `gpui-pre` — and the alias the ~40 view files
-  import is `gpui = { package = "gpui-fast", version = "0.1.12" }`. **The two lines must move in
+  import is `gpui = { package = "gpui-fast", version = "0.1.19" }`. **The two lines must move in
   lockstep**: the kit re-exports whichever engine the feature selects, so a mismatch is two GPUI
   cores with incompatible element types. `gpui-kit` still depends on `gpui-pre` unconditionally, so
   that crate (and `gpui-pre-windows`' build script) is compiled too — see Gotchas. Do **not**
@@ -624,27 +624,38 @@ touching UI code.
   `absolute` + `.occlude()` + the dialog face/border/shadow, so scrolling inside a popup never
   scrolls the view underneath. Never hand-roll a `div().absolute()` popup; build it on
   `popup_panel`. gpui-kit's own `Combobox`/`Select`/`Popover` already occlude, so they are fine.
-- **A menu that opens at the pointer is positioned by gpui's `anchored`, never by a guessed
-  height.** `render_context_menu` / `render_tab_menu` wrap their `popup_panel` in
-  `anchored().position(pointer).anchor(Anchor::TopLeft)` and leave `left`/`top` to it (the wrapped
-  panel is `.relative()` inside it). `anchored` measures the menu after layout and, when it would
-  overflow, switches its anchor corner — growing up/left from the pointer — falling back to snapping
-  it to the window edge. A fixed height estimate used to clamp a menu opened on the last row far
-  above the click, so the menu floated in the middle of the pane instead of under the row. The
-  flyouts' `left(relative(1.0))` still resolves against the panel (it is the nearest positioned
-  ancestor), so their placement is unaffected.
-- **A hover-opened submenu flyout closes through a two-rectangle zone, not through its trigger
-  row's hover alone.** The menu's flyouts (颜色, 管理分组, 转储 SQL 文件, 导入连接) open while the
-  pointer is on their row, but a flyout built on `popup_panel` occludes the row behind it, so the
-  row immediately reports `hovered = false` once the pointer crosses onto the flyout — a row-only
-  `on_hover(false)` therefore cannot tell that from "the pointer left the menu" (the flyout used to
-  stay up until the whole menu was dismissed). Each flyout's `SubmenuZone` keeps the flyout's rect
-  (recorded by the row's `on_children_prepainted`) *and* the row's, recorded by wrapping the row in
+- **A menu that opens at the pointer is a kit `PopupMenu` painted by `ui::popup_menu_layer`.**
+  `AppView` keeps the menu state (`context_menu` / `tab_menu`) and builds the `Entity<PopupMenu>`
+  once per target (`sync_context_menu` / `sync_tab_menu`, called from `render`); the layer wraps it
+  in `deferred(anchored().position(pointer).snap_to_window_with_margin(px(8.0)))` at
+  `POPUP_PRIORITY`. Never rebuild the menu per frame: hover, keyboard navigation, submenus and the
+  click-outside dismissal all live in the entity. The kit owns row styling, separators, checked
+  rows, submenu placement, edge flipping and Escape/click-away; the old hand-drawn `popup_panel`
+  menus are gone. Only the New Connection dropdown's 导入连接 flyout is still hand-drawn (it is a
+  left-click dropdown, not a context menu).
+- **A hand-drawn hover-opened submenu flyout closes through a two-rectangle zone, not through its
+  trigger row's hover alone.** This now applies only to the New Connection dropdown's 导入连接
+  flyout: it opens while the pointer is on its row, but the flyout built on `popup_panel` occludes
+  the row behind it, so the row immediately reports `hovered = false` once the pointer crosses onto
+  the flyout — a row-only `on_hover(false)` therefore cannot tell that from "the pointer left the
+  menu". The flyout's `SubmenuZone` keeps the flyout's rect (recorded by the row's
+  `on_children_prepainted`) *and* the row's, recorded by wrapping the row in
   `AppView::submenu_row`, and the row **and** the flyout both close/open from
   `SubmenuZone::stays_open`, which consults the pointer position: the flyout stays up while the
   pointer is inside either rectangle and closes as soon as it leaves both. Keep the two flyout
   positions (`left(relative(1.0))`, i.e. 100% of the row's padding box) abutting the row: a gap
   between them would be inside neither rectangle, so crossing it would close the submenu.
+- **The main window's panes and the query editor/result split are kit resizable groups.**
+  `h_resizable("main-panes")` holds the sidebar, content and info panes (`resizable_panel()`,
+  the side panes `.fixed()` with their default/min/max widths); hidden panes stay in the group
+  (`.visible(false)`) so toggling one does not reset its state. `AppView` owns the group's
+  `Entity<ResizableState>` and observes it: the observer records each side pane's width (for the
+  form's truncation metrics) and notifies the tab bar, because the content pane's width changes
+  during the drag without `AppView` re-rendering. The query page uses `v_resizable("query-split")`
+  with an auto editor panel and a `.fixed()` result panel (`QUERY_RESULT_MIN_HEIGHT ..
+  QUERY_RESULT_MAX_HEIGHT`); the user window's 权限 page uses `h_resizable("user-create-grants")`
+  the same way. Do not bring back hand-rolled divider divs plus window-level mouse-move routing for
+  these panes; the kit handle owns the pointer, cursor and drag.
 - **Dropdowns share one style: search on top, a check mark on the selected row.** gpui-kit's
   `Combobox` (via `ui::ComboBox`) already renders a searchable list and a right-aligned check that
   is invisible when unselected (so rows never shift). `ui::ComboBox` defaults to the kit's
@@ -699,8 +710,8 @@ the root `Cargo.toml`; a mismatch gives two GPUI copies and incompatible element
 `gpui-fast` feature is what makes the two agree — bump both, and re-check that the feature is still
 called that. Two kinds of upgrade:
 
-- **A patch bump (no code):** `cargo update -p gpui-fast -p gpui-kit -p gpui-pre`. The `"0.1.12"` /
-  `"0.8"` ranges in the root `Cargo.toml` keep this in-family (the `-p gpui-pre` is only there
+- **A patch bump (no code):** `cargo update -p gpui-fast -p gpui-kit -p gpui-pre`. The `"0.1.19"` /
+  `"0.11"` ranges in the root `Cargo.toml` keep this in-family (the `-p gpui-pre` is only there
   because the kit pins it too).
 - **A breaking bump (e.g. `gpui-kit 0.9`, a new `gpui-fast` snapshot):** edit both lines in the root
   `Cargo.toml`, then fix the fallout. It is localized by design:
@@ -723,6 +734,17 @@ called that. Two kinds of upgrade:
     (`shortcut_label` now takes `OperatingSystem`, and `keymap::conflicts` takes it too), and
     `Modifiers::secondary()`/`secondary_key()` likewise take `&App`. The only other delta was
     `ScrollWheelEvent`, renamed to `ScrollEvent` (with a new `source: ScrollSource` field).
+  - `0.8.1` → `0.11.0` (gpui-fast 0.1.12 → 0.1.19, gpui-pre 0.3.10 → 0.3.14) needed three kinds of
+    change. (1) The kit's `CalendarState`/`TimeFieldState` now hold **jiff** civil values instead of
+    chrono ones, so the date/time pickers convert at one boundary (`ui/calendar.rs::picker_date` /
+    `picker_time`; the app keeps chrono everywhere else, including the drivers). (2) 0.9 made the
+    public theme structs `#[non_exhaustive]`, so the app's `HighlightTheme` build clones the kit's
+    default and assigns fields instead of using a struct literal. (3) Upstream GPUI gives every
+    `Element` a blanket `IntoElement` (drop any own `impl IntoElement for X`), `Path` is no longer
+    generic, `WindowBounds::centered` takes `Option<DisplayId>`, and `FillOptions::tolerance` is
+    gone; none of those were used here. 0.11 also makes **Linux X11 an opt-in default feature**
+    (`gpui-kit/x11`, on by default — keep it unless a Wayland-only build is wanted) and replaces the
+    kit's own `chrono` use with `jiff 1`.
   - `Cargo.lock` is committed, so pin exactly what built.
 
 ## Dependency policy
@@ -747,7 +769,10 @@ called that. Two kinds of upgrade:
   the date and an `Option<Entity<TimeFieldState>>` (`gpui_kit::component::time_field`, precision
   `Second`) for `datetime`/`timestamp` columns; `grid_cell.rs::render_date_picker` renders both
   and only app-draws the today/OK/Cancel footer. Do not hand-roll the calendar or the time
-  spinners again. Picking a date/time does **not** mirror into the cell editor; the picker's 确定
+  spinners again. Since gpui-kit 0.11 both states take **jiff** civil values (`jiff::civil::Date` /
+  `Time`), while the app keeps chrono: convert at the picker boundary only, through
+  `ui::picker_date` / `ui::picker_time` (`ui/calendar.rs`), never by pulling jiff into feature code.
+  Picking a date/time does **not** mirror into the cell editor; the picker's 确定
   (`date_picker_ok`) syncs once, closes the popup and returns focus to the in-place editor, so a
   temporal cell stages its value exactly like every other cell editor — on blur or Enter (saved by
   the grid editing flow below), never by confirming the picker. 取消/Esc discard. While a temporal cell is in edit mode
@@ -1502,6 +1527,11 @@ make more engines cheap later — do not build those features early.
   `TextAlign` + `Option<Pixels>`; `BoxShadow` gained an `inset` field; `uniform_list`'s
   `track_scroll` takes `&handle`; `Entity::update` returns `R` directly while
   `WeakEntity::update` returns `Result<R>`.
+- **gpui-fast 0.1.14+ reuses the previous frame for a view that was not notified.** A state
+  mutation only reaches the screen through `cx.notify()` (or an entity update that notifies);
+  rendering again no longer rebuilds a view just because something changed. Every app mutation
+  notifies today — keep it that way when adding state, especially in listeners that write the
+  model and then rely on a repaint.
 - **gpui-kit stateful widgets need a `Window` at construction** (`InputState::new`,
   `ComboboxState::new`, `TableState::new` all take `&mut Window`). The app builds its entities
   while there is no window yet, so `ui/text_input.rs` and `ui/combo.rs` create the inner state
@@ -1541,7 +1571,7 @@ make more engines cheap later — do not build those features early.
   display-cycle flush — no app frames on the stack, which is why 保存并连接 (saving closes the
   connection window) crashed the user in issue #4. Upstream knows (zed-industries/zed#64819,
   longbridge/gpui-kit#3192) and the fix — replacing the subclassing adapter,
-  zed-industries/zed#65186 — is **not merged yet**, so no released `gpui-fast` (0.1.12 is newest)
+  zed-industries/zed#65186 — is **not merged yet**, so no released `gpui-fast` (0.1.19 is newest)
   carries it. Skipping `a11y_init` is the only in-process way to avoid it; the cost is that
   VoiceOver cannot read the app on macOS. **Remove the macOS arm of `application()` as soon as
   `gpui-fast` ships the fix.**

@@ -466,7 +466,6 @@ impl AppView {
         cx: &mut Context<'_, Self>,
     ) {
         self.context_menu = None;
-        self.move_submenu = None;
         self.connect_menu_group = Some(id);
         *self.connect_menu_anchor.borrow_mut() = position;
         self.connect_menu_open = true;

@@ -1637,20 +1637,32 @@ impl AppView {
         let Some(wizard) = self.export_wizard.as_ref() else {
             return div().into_any_element();
         };
-        let (page, total) = wizard.step.index();
-        let heading_key = match wizard.step {
-            ExportStep::Format => "export.step.format",
-            ExportStep::Tables => "export.step.tables",
-            ExportStep::Fields => "export.step.fields",
-            ExportStep::Options => "export.step.options",
-        };
-        let heading = div()
-            .px_3()
-            .py_3()
-            .flex_none()
-            .text_size(px(13.0))
-            .text_color(rgb(theme.grid_selection_bg))
-            .child(format!("{} ({page}/{total})", t!(heading_key)));
+        let (page, _total) = wizard.step.index();
+        let current = page.saturating_sub(1);
+        // The step strip replaces the old "title (n/4)" line. Backward steps are clickable, later
+        // ones stay disabled so a page's own 下一步 validation is never bypassed.
+        let labels = [
+            t!("export.step.format").to_string(),
+            t!("export.step.tables").to_string(),
+            t!("export.step.fields").to_string(),
+            t!("export.step.options").to_string(),
+        ];
+        let heading = ui::wizard_steps(
+            "export-steps",
+            &labels,
+            current,
+            cx.listener(move |this, index: &usize, _window, cx| {
+                let step = match index {
+                    0 => ExportStep::Format,
+                    1 => ExportStep::Tables,
+                    2 => ExportStep::Fields,
+                    _ => ExportStep::Options,
+                };
+                if *index < current {
+                    this.set_export_step(step, cx);
+                }
+            }),
+        );
         let body = match wizard.step {
             ExportStep::Format => self.render_export_format_page(cx),
             ExportStep::Tables => self.render_export_tables_page(cx),

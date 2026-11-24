@@ -305,7 +305,7 @@ impl AppView {
             let label = name;
             if enabled {
                 let driver = id.clone();
-                items = items.child(self.context_item(
+                items = items.child(self.menu_row(
                     id.as_str().to_string(),
                     label,
                     cx.listener(move |this, _event, window, cx| {
@@ -317,7 +317,7 @@ impl AppView {
                 ));
             } else {
                 items = items.child(
-                    self.context_item_disabled(id.as_str().to_string(), label)
+                    self.menu_row_disabled(id.as_str().to_string(), label)
                         .tooltip(ui::text_tooltip(t!("main.engine_planned").to_string())),
                 );
             }
@@ -348,7 +348,7 @@ impl AppView {
         items = items
             .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
             .child(self.import_connections_submenu_item(cx))
-            .child(self.context_item(
+            .child(self.menu_row(
                 "connect-export-connections",
                 t!("connection.export_connection").to_string(),
                 cx.listener(|this, _event, _window, cx| {
