@@ -671,6 +671,9 @@ struct RestoreBackupDialog {
     database: String,
     tab: BackupDialogTab,
     objects: Vec<BackupObjectEntry>,
+    /// The object list's search text and its box in the picker's toolbar.
+    object_search: String,
+    object_search_input: Option<Entity<TextInput>>,
     running: bool,
     /// Set by 停止 to abort the run loop early (checked between objects/rows).
     cancel: Arc<std::sync::atomic::AtomicBool>,
@@ -696,6 +699,9 @@ struct ExtractSqlDialog {
     file_index: usize,
     tab: BackupDialogTab,
     objects: Vec<BackupObjectEntry>,
+    /// The object list's search text and its box in the picker's toolbar.
+    object_search: String,
+    object_search_input: Option<Entity<TextInput>>,
     /// The `.sql` file the extract writes to, chosen through the system save dialog.
     output_path: Option<std::path::PathBuf>,
     running: bool,
@@ -751,6 +757,9 @@ struct DumpSqlDialog {
     mode: DumpMode,
     /// The objects listed on the dialog's 对象选择 page, all selected when it opens.
     objects: Vec<BackupObjectEntry>,
+    /// The object list's search text and its box in the picker's toolbar.
+    object_search: String,
+    object_search_input: Option<Entity<TextInput>>,
     /// Whether the object list is still being read from the server.
     loading: bool,
     tab: BackupDialogTab,
@@ -4042,14 +4051,28 @@ impl AppView {
         for grid in &self.grids {
             grid.update(cx, |grid, cx| grid.sync_search_placeholder(cx));
         }
-        // The table designer's 列名 search box and the New Backup window's object search are
+        // The table designer's 列名 search box and the backup windows' object searches are
         // likewise built once with each designer/dialog, so an open one keeps the old language
         // unless it is retranslated here.
         for design in &self.designs {
             design.update(cx, |design, cx| design.sync_search_placeholder(cx));
         }
-        if let Some(dialog) = self.new_backup_dialog.as_ref()
-            && let Some(input) = dialog.object_search_input.clone()
+        for input in [
+            self.new_backup_dialog
+                .as_ref()
+                .and_then(|dialog| dialog.object_search_input.clone()),
+            self.restore_dialog
+                .as_ref()
+                .and_then(|dialog| dialog.object_search_input.clone()),
+            self.extract_dialog
+                .as_ref()
+                .and_then(|dialog| dialog.object_search_input.clone()),
+            self.dump_dialog
+                .as_ref()
+                .and_then(|dialog| dialog.object_search_input.clone()),
+        ]
+        .into_iter()
+        .flatten()
         {
             input.update(cx, |input, cx| {
                 input.set_placeholder(t!("backup.object_search").to_string(), cx);

@@ -15,8 +15,8 @@ The **Info Log** tab shows object and record counts, live messages, elapsed time
 
 ## Restore and extract
 
-- **Restore Backup** writes the selected backup back to the chosen database. Existing objects are recreated; rows are inserted through the engine's normal write path.
-- **Extract SQL** turns a backup into a readable script, useful for review or for moving the data through another tool.
+- **Restore Backup** writes the selected backup back to the chosen database. Existing objects are recreated; rows are inserted through the engine's normal write path. Its object list has the same name search box as a new backup.
+- **Extract SQL** turns a backup into a readable script, useful for review or for moving the data through another tool (its object list searches the same way).
 - A saved configuration keeps the target and object selection. Reopen it from the list to run the same job again.
 
 ## The backup list

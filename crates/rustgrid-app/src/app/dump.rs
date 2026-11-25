@@ -11,8 +11,9 @@ use std::io::Write;
 use std::sync::Mutex;
 
 use super::backup::{
-    ObjectPickerAction, backup_link_button, format_hms, log_stats, now_timestamp,
-    render_backup_log, render_object_picker,
+    ObjectPickerAction, format_hms, log_stats, make_object_picker_search_input, now_timestamp,
+    object_picker_toolbar, render_backup_log, render_object_picker, select_visible_objects,
+    toggle_visible_object_kind,
 };
 use super::*;
 
@@ -102,6 +103,7 @@ impl AppView {
         self.restore_dialog = None;
         self.extract_dialog = None;
         self.run_sql_dialog = None;
+        let weak = cx.weak_entity();
         self.dump_dialog = Some(DumpSqlDialog {
             connection_index,
             database_index,
@@ -109,6 +111,13 @@ impl AppView {
             object: object.clone(),
             mode,
             objects: Vec::new(),
+            object_search: String::new(),
+            object_search_input: Some(make_object_picker_search_input(
+                self.theme,
+                &weak,
+                ObjectPickerAction::Dump,
+                cx,
+            )),
             loading: true,
             tab: BackupDialogTab::Objects,
             output_path: None,
@@ -834,44 +843,17 @@ impl AppView {
         let Some(dialog) = self.dump_dialog.as_ref() else {
             return div().into_any_element();
         };
-        let total = dialog.objects.len();
-        let selected = dialog.objects.iter().filter(|entry| entry.selected).count();
-        let summary = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .w_full()
-            .px_4()
-            .pt_2()
-            .pb_1()
-            .child(
-                div()
-                    .text_size(px(12.0))
-                    .text_color(rgb(theme.text_muted))
-                    .child(
-                        t!("backup.selected_count", selected = selected, total = total).to_string(),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_3()
-                    .child(backup_link_button(
-                        "dump-select-all",
-                        t!("backup.select_all").to_string(),
-                        theme,
-                        cx.listener(|this, _event, _window, cx| this.dump_set_all(true, cx)),
-                    ))
-                    .child(backup_link_button(
-                        "dump-select-none",
-                        t!("backup.select_none").to_string(),
-                        theme,
-                        cx.listener(|this, _event, _window, cx| this.dump_set_all(false, cx)),
-                    )),
-            );
+        let search = dialog.object_search.clone();
+        let summary = object_picker_toolbar(
+            &dialog.objects,
+            &search,
+            dialog.object_search_input.clone(),
+            theme,
+            "dump-select-all",
+            "dump-select-none",
+            cx.listener(|this, _event, _window, cx| this.dump_set_all(true, cx)),
+            cx.listener(|this, _event, _window, cx| this.dump_set_all(false, cx)),
+        );
 
         let picker = render_object_picker(
             &dialog.objects,
@@ -879,7 +861,7 @@ impl AppView {
             &self.backup_objects_scroll,
             theme,
             ObjectPickerAction::Dump,
-            "",
+            &search,
             cx,
         );
 
@@ -968,23 +950,14 @@ impl AppView {
     /// Toggle every object of one kind in the dump dialog's selection.
     pub(super) fn dump_toggle_kind(&mut self, kind: BackupObjectKind, cx: &mut Context<'_, Self>) {
         if let Some(dialog) = self.dump_dialog.as_mut() {
-            let all = dialog
-                .objects
-                .iter()
-                .filter(|entry| entry.kind == kind)
-                .all(|entry| entry.selected);
-            for entry in dialog.objects.iter_mut().filter(|entry| entry.kind == kind) {
-                entry.selected = !all;
-            }
+            toggle_visible_object_kind(&mut dialog.objects, kind, &dialog.object_search);
         }
         cx.notify();
     }
 
     pub(super) fn dump_set_all(&mut self, selected: bool, cx: &mut Context<'_, Self>) {
         if let Some(dialog) = self.dump_dialog.as_mut() {
-            for entry in dialog.objects.iter_mut() {
-                entry.selected = selected;
-            }
+            select_visible_objects(&mut dialog.objects, selected, &dialog.object_search);
         }
         cx.notify();
     }
