@@ -480,11 +480,11 @@ touching UI code.
   group (`moved_field_rows`), keeping their internal order. Ctrl+C (`designer.copy`) copies the
   selected cells as TSV, using the table grid's convention: the selection's bounding rectangle,
   with unselected cells in it empty. Typing over a range writes the same value into every selected
-  cell of that column (`FieldEdit::cells`), and Ctrl+V pastes ordinary clipboard text into the
-  selection (one value fills it, a block maps from its top-left cell). The full field definitions
-  copied by `designer.copy` are appended as new fields only while the system clipboard still holds
-  that exact TSV (`DesignClipboard::text`), so text copied anywhere else can never duplicate a row.
-  Tab must be claimed by a key binding
+  cell of that column (`FieldEdit::cells`), and Ctrl+V pastes clipboard text into the selection
+  (one value fills it, a block maps from its top-left cell). 复制字段 (`duplicate_fields`, the
+  fields toolbar's item after 删除字段) appends a copy of every selected field row: the copied
+  definitions drop the key, auto-increment and identity flags and take unique names
+  (`pasted_columns`), and the new rows are selected and revealed. Tab must be claimed by a key binding
   rather than an element's `on_key_down` (`ui::TextInput::on_tab`
   never fires for it: gpui dispatches a keystroke a binding matches as an action, and `Root` binds
   `tab`). The 类型 drop-down is driven from the keyboard: `type_highlight` marks a row, Up/Down

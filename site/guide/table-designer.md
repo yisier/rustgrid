@@ -9,7 +9,7 @@ The designer edits a table's structure and shows the exact SQL before anything r
 - The top tabs are the parts of the table: **Fields**, **Indexes**, **Foreign Keys**, **Checks**, **Triggers**, **Partition**, **Options**, **Comment** and **SQL Preview**. An engine only shows the tabs it can honour.
 - The field grid is the main editor: name, type, length, decimals, `NOT NULL`, virtual, primary key and comment.
 - The detail panel under the grid edits the selected field's default, auto-increment, unsigned and zero-fill flags. MySQL/MariaDB add the enum member editor and collation.
-- The toolbar offers **Add Field**, **Insert Field**, **Delete Field**, **Primary Key**, **Move Up** and **Move Down**. A new field is appended below the selection.
+- The toolbar offers **Add Field**, **Insert Field**, **Delete Field**, **Copy Field**, **Primary Key**, **Move Up** and **Move Down**. A new field is appended below the selection.
 
 ## Fields
 
@@ -18,7 +18,7 @@ The designer edits a table's structure and shows the exact SQL before anything r
 3. Fill in length / decimals, then tick `NOT NULL`, primary key or the engine's options.
 4. **Save** compiles the differences into `ALTER TABLE` statements. An unchanged design reports **No changes to apply**.
 
-The search box in the **Name** header finds a field by name (**Ctrl+F** puts the caret in it). Typing over a selected range writes the same value into every selected cell of that column, and pasting text fills the selection the same way.
+The search box in the **Name** header finds a field by name (**Ctrl+F** puts the caret in it). Typing over a selected range writes the same value into every selected cell of that column, and pasting text fills the selection the same way. **Copy Field** appends a copy of the selected fields (they get unique names and no key/auto-increment flags).
 
 An empty or duplicated field name is underlined and stops Save with a message. A pure reorder is detected too, so moving fields produces `MODIFY COLUMN ... FIRST / AFTER` instead of being ignored.
 

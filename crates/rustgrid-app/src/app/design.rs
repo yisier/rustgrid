@@ -1,4 +1,3 @@
-use super::grid_menu::normalize_clipboard_text;
 use super::*;
 
 use std::collections::BTreeSet;
@@ -460,17 +459,6 @@ pub(super) struct FieldEdit {
     pub(super) cells: Vec<(usize, FieldColumn)>,
     /// Each cell's text before this edit, aligned with `cells`, restored by Esc.
     pub(super) originals: Vec<String>,
-}
-
-/// The field clipboard shared by the open designers.
-#[derive(Default)]
-pub(super) struct DesignClipboard {
-    /// The copied columns with their full `ColumnDef`s, so a paste keeps the exact definition.
-    pub(super) columns: Vec<ColumnDef>,
-    /// The TSV [`TableDesignView::copy_field_selection`] wrote to the system clipboard. A paste
-    /// compares it with what the clipboard currently holds, so text copied elsewhere fills the
-    /// selected cells instead of appending duplicate fields.
-    pub(super) text: String,
 }
 
 /// The editable text columns of the unique-key grid. Its field list is picked through the same
@@ -1016,10 +1004,6 @@ pub(super) struct TableDesignView {
     /// position and selection survive.
     pub(super) preview_editor: Option<Entity<ui::SqlEditor>>,
     pub(super) self_weak: WeakEntity<TableDesignView>,
-    /// The shared field clipboard (see `AppView::design_clipboard`): 复制 stores the copied
-    /// columns here and 粘贴 reads them back, so a field can move between two designers while
-    /// keeping its exact `ColumnDef` rather than a lossy TSV round-trip.
-    design_clipboard: Rc<RefCell<DesignClipboard>>,
 }
 
 /// A case-insensitive subsequence test used by the type drop-down's search field.
@@ -1119,20 +1103,9 @@ fn unique_column_name(base: &str, existing: &mut Vec<String>) -> String {
     candidate
 }
 
-/// The whole field definitions a 复制 keeps for 粘贴: every row the selection touches, not the
-/// empty gap rows inside its bounding rectangle (a Ctrl/Cmd-click selection may have several
-/// ranges), cloned so later edits to the source designer cannot change the clipboard.
-fn copied_columns(columns: &[ColumnDef], selection: &CellSelection) -> Vec<ColumnDef> {
-    selection
-        .row_indices()
-        .into_iter()
-        .filter_map(|row| columns.get(row).cloned())
-        .collect()
-}
-
-/// The columns a 粘贴 appends: each copied definition with its primary-key, auto-increment and
-/// identity flags cleared, so it cannot collide with the target table's own key, and a name that
-/// avoids every column already in the target and every earlier field in this same paste.
+/// The columns 复制字段 appends: each copied definition with its primary-key, auto-increment and
+/// identity flags cleared, so it cannot collide with the table's own key, and a name that avoids
+/// every column already in the table and every earlier field in this same duplication.
 fn pasted_columns(copied: Vec<ColumnDef>, existing: &mut Vec<String>) -> Vec<ColumnDef> {
     copied
         .into_iter()
@@ -1176,7 +1149,6 @@ impl TableDesignView {
         app: WeakEntity<AppView>,
         runtime: Arc<Runtime>,
         theme: Theme,
-        design_clipboard: Rc<RefCell<DesignClipboard>>,
         cx: &mut Context<'_, Self>,
     ) -> Self {
         let weak = cx.weak_entity();
@@ -1228,7 +1200,6 @@ impl TableDesignView {
             is_view,
             is_new,
             designer,
-            design_clipboard,
             schema: TableSchema::default(),
             original: None,
             tab: DesignerTab::Fields,
@@ -2008,7 +1979,8 @@ impl TableDesignView {
 
     /// Copy the selected cells as TSV, like the table grid: the selection's bounding rectangle,
     /// with cells outside every range left empty. The text of one cell is what its editor shows
-    /// (a toggle contributes `1` when checked).
+    /// (a toggle contributes `1` when checked). Copying cells does not touch the field list;
+    /// duplicating fields is the toolbar's 复制字段.
     pub(super) fn copy_field_selection(&mut self, cx: &mut Context<'_, Self>) {
         if self.tab != DesignerTab::Fields {
             return;
@@ -2036,58 +2008,47 @@ impl TableDesignView {
             }
             lines.push(values.join("\t"));
         }
-        let text = lines.join("\n");
-        cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-        // Also keep the whole copied columns (not just the selected cells) in the shared field
-        // clipboard, so 粘贴 in another designer reproduces each field exactly. A multi-range
-        // selection must not carry the unselected gap rows inside its bounding rectangle. The TSV
-        // is remembered too: a paste only appends fields while the system clipboard still holds
-        // this exact text, so text copied anywhere else fills cells instead.
-        *self.design_clipboard.borrow_mut() = DesignClipboard {
-            columns: copied_columns(&self.schema.columns, &selection),
-            text,
-        };
+        cx.write_to_clipboard(ClipboardItem::new_string(lines.join("\n")));
         cx.notify();
     }
 
-    /// Ctrl/Cmd+V in the 字段 grid.
-    ///
-    /// A clipboard that no longer holds this designer's own copied field block is ordinary text:
-    /// it fills the selected cells like the table grid's paste, which is what a user selecting a
-    /// cell and pasting a value expects. Only the matching field block appends whole fields to the
-    /// end of the list — each pasted field keeps its copied definition but drops the primary-key,
-    /// auto-increment and identity flags, so it never collides with the target table's own key,
-    /// and takes a unique name when the target already has that column.
-    pub(super) fn paste_fields(&mut self, cx: &mut Context<'_, Self>) {
+    /// Ctrl/Cmd+V in the 字段 grid: paste the clipboard text into the selection, exactly like the
+    /// table grid (one value fills every selected cell, a block maps from the top-left cell).
+    pub(super) fn paste_selection(&mut self, cx: &mut Context<'_, Self>) {
         // The schema load replaces `columns` wholesale, so a paste while it runs would vanish.
         if self.tab != DesignerTab::Fields || self.loading {
             return;
         }
-        let clipboard = self.design_clipboard.borrow();
-        let copied = clipboard.columns.clone();
-        let own_text = clipboard.text.clone();
-        drop(clipboard);
-        let system_text = cx
+        let Some(text) = cx
             .read_from_clipboard()
             .and_then(|item| item.text())
-            .filter(|text| !text.is_empty());
-        // The two copies compare after line-ending normalisation: Windows and clipboard managers
-        // hand CRLF (or a trailing line break) back for text written with LF.
-        let own_field_block = match &system_text {
-            Some(text) => normalize_clipboard_text(text) == normalize_clipboard_text(&own_text),
-            // No readable clipboard (or empty): fall back to the field block, like the grid.
-            None => true,
-        };
-        if own_field_block && !copied.is_empty() {
-            self.append_copied_fields(copied, cx);
+            .filter(|text| !text.is_empty())
+        else {
             return;
-        }
-        if let Some(text) = system_text {
-            self.paste_field_text(&text, cx);
-        }
+        };
+        self.paste_field_text(&text, cx);
     }
 
-    /// Append the whole columns copied in any designer (see [`Self::copy_field_selection`]).
+    /// 复制字段: append a copy of every selected field row to the end of the list, keeping the
+    /// definition but dropping the primary-key, auto-increment and identity flags (so it never
+    /// collides with the table's own key) and taking a unique name when the table already has that
+    /// column.
+    pub(super) fn duplicate_fields(&mut self, cx: &mut Context<'_, Self>) {
+        if self.tab != DesignerTab::Fields || self.loading {
+            return;
+        }
+        let copied: Vec<ColumnDef> = self
+            .selected_field_rows()
+            .into_iter()
+            .filter_map(|row| self.schema.columns.get(row).cloned())
+            .collect();
+        if copied.is_empty() {
+            return;
+        }
+        self.append_copied_fields(copied, cx);
+    }
+
+    /// Append the whole field definitions given to the end of the field list.
     fn append_copied_fields(&mut self, copied: Vec<ColumnDef>, cx: &mut Context<'_, Self>) {
         let at = self.schema.columns.len();
         let mut existing: Vec<String> = self
@@ -3128,6 +3089,16 @@ impl TableDesignView {
                 })
             })
             .clone()
+    }
+
+    /// Re-translate the 列名 search box after a language change: `ui::TextInput` bakes its
+    /// placeholder in when the box is created, and an open designer survives the locale switch.
+    pub(super) fn sync_search_placeholder(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(input) = self.field_find.clone() {
+            input.update(cx, |input, cx| {
+                input.set_placeholder(t!("design.find_field").to_string(), cx);
+            });
+        }
     }
 
     /// Clear the field search and give the keys back to the grid.
@@ -5774,7 +5745,6 @@ impl AppView {
         let runtime = self.runtime.clone();
         let theme = self.theme;
         let designer = self.table_designer(connection_index);
-        let design_clipboard = self.design_clipboard.clone();
         let entity = cx.new(|cx| {
             TableDesignView::new(
                 id,
@@ -5788,7 +5758,6 @@ impl AppView {
                 app,
                 runtime,
                 theme,
-                design_clipboard,
                 cx,
             )
         });
@@ -5830,7 +5799,6 @@ impl AppView {
         let runtime = self.runtime.clone();
         let theme = self.theme;
         let designer = self.table_designer(connection_index);
-        let design_clipboard = self.design_clipboard.clone();
         let entity = cx.new(|cx| {
             TableDesignView::new(
                 id,
@@ -5844,7 +5812,6 @@ impl AppView {
                 app,
                 runtime,
                 theme,
-                design_clipboard,
                 cx,
             )
         });
@@ -6348,31 +6315,8 @@ mod tests {
         assert!(!selection.contains(3, 0));
     }
 
-    fn named_columns(names: &[&str]) -> Vec<ColumnDef> {
-        names
-            .iter()
-            .map(|name| ColumnDef {
-                name: name.to_string(),
-                ..ColumnDef::default()
-            })
-            .collect()
-    }
-
     #[test]
-    fn a_copy_skips_the_gap_rows_of_a_multi_range_selection() {
-        let columns = named_columns(&["id", "name", "email", "created_at"]);
-        // Ctrl/Cmd-click on rows 0 and 2: row 1 is inside the bounding rectangle but not selected.
-        let selection = CellSelection {
-            ranges: vec![CellRange::new(0, 0), CellRange::new(2, 0)],
-            active: 0,
-        };
-        let copied = copied_columns(&columns, &selection);
-        let names: Vec<&str> = copied.iter().map(|column| column.name.as_str()).collect();
-        assert_eq!(names, ["id", "email"]);
-    }
-
-    #[test]
-    fn a_paste_clears_key_flags_and_avoids_taken_names() {
+    fn a_duplicate_clears_key_flags_and_avoids_taken_names() {
         let copied = vec![
             ColumnDef {
                 name: "id".to_string(),

@@ -2781,11 +2781,6 @@ pub struct AppView {
     error_dialog: Option<String>,
     /// The cell clipboard every grid shares (see [`GridClipboard`]).
     grid_clipboard: Rc<RefCell<GridClipboard>>,
-    /// The field clipboard every table designer shares: the last columns copied in a designer's
-    /// 字段 grid, so a field copied in one table can be pasted into another with its exact
-    /// definition (see `TableDesignView::paste_fields`). It also keeps the copied TSV, so a paste
-    /// can tell that block from unrelated text copied elsewhere.
-    design_clipboard: Rc<RefCell<design::DesignClipboard>>,
     /// Transient notifications queued for the next frame, which has the window needed to hand
     /// them to `Root`.
     pending_toasts: Vec<(ToastKind, String)>,
@@ -3723,7 +3718,6 @@ impl AppView {
             delete_confirm: None,
             error_dialog: None,
             grid_clipboard: Rc::new(RefCell::new(GridClipboard::default())),
-            design_clipboard: Rc::new(RefCell::new(design::DesignClipboard::default())),
             pending_toasts: Vec::new(),
             refresh_toasts: Vec::new(),
             refresh_object_feedback: None,
@@ -4047,6 +4041,19 @@ impl AppView {
         // up a locale change by itself either.
         for grid in &self.grids {
             grid.update(cx, |grid, cx| grid.sync_search_placeholder(cx));
+        }
+        // The table designer's 列名 search box and the New Backup window's object search are
+        // likewise built once with each designer/dialog, so an open one keeps the old language
+        // unless it is retranslated here.
+        for design in &self.designs {
+            design.update(cx, |design, cx| design.sync_search_placeholder(cx));
+        }
+        if let Some(dialog) = self.new_backup_dialog.as_ref()
+            && let Some(input) = dialog.object_search_input.clone()
+        {
+            input.update(cx, |input, cx| {
+                input.set_placeholder(t!("backup.object_search").to_string(), cx);
+            });
         }
     }
 

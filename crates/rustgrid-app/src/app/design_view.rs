@@ -58,7 +58,7 @@ impl TableDesignView {
             .on_action(
                 cx.listener(|this, _: &DesignerCopy, _window, cx| this.copy_field_selection(cx)),
             )
-            .on_action(cx.listener(|this, _: &DesignerPaste, _window, cx| this.paste_fields(cx)))
+            .on_action(cx.listener(|this, _: &DesignerPaste, _window, cx| this.paste_selection(cx)))
             .on_action(
                 cx.listener(|this, _: &DesignerFind, window, cx| this.open_field_find(window, cx)),
             )
@@ -224,6 +224,14 @@ impl TableDesignView {
                     cx.listener(|this, _event, _window, cx| {
                         this.request_delete(DesignDeleteKind::Fields, cx)
                     }),
+                ))
+                .child(ui::toolbar_item(
+                    "design-copy-field",
+                    "icons/copy.svg",
+                    t!("design.copy_field").to_string(),
+                    fields && has_selected_rows,
+                    theme,
+                    cx.listener(|this, _event, _window, cx| this.duplicate_fields(cx)),
                 ))
                 .child(toolbar_separator(theme))
                 .child(ui::toolbar_item(
