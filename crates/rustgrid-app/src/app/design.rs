@@ -1135,6 +1135,25 @@ fn parse_field_clipboard(text: &str) -> Vec<Vec<String>> {
         .collect()
 }
 
+/// The current field rows that differ from the saved schema: a changed definition or a field the
+/// saved table did not have. The designer paints these rows with the table grid's edit background
+/// until the design is saved.
+fn changed_field_rows(original: &TableSchema, current: &TableSchema) -> BTreeSet<usize> {
+    current
+        .columns
+        .iter()
+        .enumerate()
+        .filter(|(_, column)| {
+            original
+                .columns
+                .iter()
+                .find(|candidate| candidate.name == column.name)
+                .is_none_or(|existing| existing != *column)
+        })
+        .map(|(row, _)| row)
+        .collect()
+}
+
 impl TableDesignView {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
@@ -3182,6 +3201,18 @@ impl TableDesignView {
     /// [`Self::invalid_field_names`], instead of waiting for the server's error.
     pub(super) fn invalid_member_lists(&self) -> BTreeMap<usize, String> {
         member_list_errors(&self.schema.columns)
+    }
+
+    /// The field rows that differ from the table the designer opened on (or last saved): a changed
+    /// definition or a field the table did not have. The grid paints them with the table grid's
+    /// edit background until 保存, so an edit is visibly pending rather than looking saved.
+    pub(super) fn modified_field_rows(&self) -> BTreeSet<usize> {
+        // A brand-new table has no saved state to compare against; its whole design is new.
+        self.original
+            .as_ref()
+            .map_or_else(BTreeSet::new, |original| {
+                changed_field_rows(original, &self.schema)
+            })
     }
 
     /// Bring an invalid field into view and say why its save cannot run.
@@ -6374,6 +6405,49 @@ mod tests {
             parse_field_clipboard("NULL"),
             vec![vec!["NULL".to_string()]]
         );
+    }
+
+    #[test]
+    fn changed_fields_are_the_edited_and_added_rows() {
+        let original = TableSchema {
+            columns: vec![
+                ColumnDef {
+                    name: "id".to_string(),
+                    data_type: "bigint".to_string(),
+                    ..ColumnDef::default()
+                },
+                ColumnDef {
+                    name: "name".to_string(),
+                    data_type: "varchar".to_string(),
+                    length: "50".to_string(),
+                    ..ColumnDef::default()
+                },
+                ColumnDef {
+                    name: "email".to_string(),
+                    data_type: "varchar".to_string(),
+                    ..ColumnDef::default()
+                },
+            ],
+            ..TableSchema::default()
+        };
+        // Nothing changed.
+        assert!(changed_field_rows(&original, &original).is_empty());
+        // An edited definition marks only its row.
+        let mut edited = original.clone();
+        edited.columns[1].length = "80".to_string();
+        assert_eq!(changed_field_rows(&original, &edited), BTreeSet::from([1]));
+        // A field the saved table did not have is new (a rename reads the same way).
+        let mut grown = original.clone();
+        grown.columns.push(ColumnDef {
+            name: "created_at".to_string(),
+            data_type: "datetime".to_string(),
+            ..ColumnDef::default()
+        });
+        assert_eq!(changed_field_rows(&original, &grown), BTreeSet::from([3]));
+        // Moving a field changes its position, not its definition.
+        let mut moved = original.clone();
+        moved.columns.swap(0, 1);
+        assert!(changed_field_rows(&original, &moved).is_empty());
     }
 
     #[test]

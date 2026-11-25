@@ -492,6 +492,11 @@ touching UI code.
   the highlighted type and a search that narrows the list restarts the highlight at its top.
   An exactly named type is highlighted while typing, and leaving the field (Tab, a click elsewhere)
   commits the typed type through `finish_type_edit` instead of reverting to the old one.
+  Field rows whose definition differs from the saved schema (`changed_field_rows`) — edited or
+  newly added — are painted with the table grid's edit background (`theme.cell_edit_bg`) until
+  保存; a moved field is not, since its definition did not change. Nothing is auto-saved: the
+  designer's working copy is only written to the server by 保存 / Ctrl+S, which reloads the schema
+  and so clears the highlights.
 - **Internationalization.** Route every user-facing string through `t!`. Keys live in
   `crates/rustgrid-app/locales/{en,zh-CN}.yml` and must be added to **all** locale files.
   `t!` returns `Cow<'_, str>`; call `.to_string()` before handing it to a gpui element.

@@ -18,7 +18,7 @@ The designer edits a table's structure and shows the exact SQL before anything r
 3. Fill in length / decimals, then tick `NOT NULL`, primary key or the engine's options.
 4. **Save** compiles the differences into `ALTER TABLE` statements. An unchanged design reports **No changes to apply**.
 
-The search box in the **Name** header finds a field by name (**Ctrl+F** puts the caret in it). Typing over a selected range writes the same value into every selected cell of that column, and pasting text fills the selection the same way. **Copy Field** appends a copy of the selected fields (they get unique names and no key/auto-increment flags).
+The search box in the **Name** header finds a field by name (**Ctrl+F** puts the caret in it). Typing over a selected range writes the same value into every selected cell of that column, and pasting text fills the selection the same way. **Copy Field** appends a copy of the selected fields (they get unique names and no key/auto-increment flags). Edited and newly added fields are highlighted until you save; the designer never saves on its own — only **Save** / **Ctrl+S** writes to the server.
 
 An empty or duplicated field name is underlined and stops Save with a message. A pure reorder is detected too, so moving fields produces `MODIFY COLUMN ... FIRST / AFTER` instead of being ignored.
 

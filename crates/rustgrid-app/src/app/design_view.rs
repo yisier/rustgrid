@@ -587,6 +587,9 @@ impl TableDesignView {
         let combo_anchor = self.combo_anchor.clone();
         let row_widths = widths.clone();
         let last_column = self.field_column_count().saturating_sub(1);
+        // Fields changed since the designer opened (or last saved) carry the table grid's edit
+        // background, so a pending change never looks saved.
+        let modified_rows = self.modified_field_rows();
         // A new, still empty field is not flagged until the caret has left it.
         let mut invalid_names = self.invalid_field_names();
         if let Some(row) = self.selected_field
@@ -629,7 +632,10 @@ impl TableDesignView {
                                 }
                                 let column = &columns[row];
                                 let row_active = selected == Some(row);
-                                let row_background = if row % 2 == 1 {
+                                let row_modified = modified_rows.contains(&row);
+                                let row_background = if row_modified {
+                                    theme.cell_edit_bg
+                                } else if row % 2 == 1 {
                                     theme.row_alt_bg
                                 } else {
                                     theme.editor_bg
