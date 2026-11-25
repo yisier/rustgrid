@@ -202,7 +202,10 @@ impl TableDesignView {
                 t!("design.undo").to_string(),
                 self.can_undo(),
                 theme,
-                cx.listener(|this, _event, _window, cx| this.undo(cx)),
+                cx.listener(|this, _event, window, cx| {
+                    this.undo(cx);
+                    window.focus(&this.focus, cx);
+                }),
             ))
             .child(toolbar_separator(theme));
 
@@ -240,7 +243,11 @@ impl TableDesignView {
                     t!("design.copy_field").to_string(),
                     fields && has_selected_rows,
                     theme,
-                    cx.listener(|this, _event, _window, cx| this.duplicate_fields(cx)),
+                    cx.listener(|this, _event, window, cx| {
+                        this.duplicate_fields(cx);
+                        // Keep the keys (Esc undo) with the grid after a toolbar click.
+                        window.focus(&this.focus, cx);
+                    }),
                 ))
                 .child(toolbar_separator(theme))
                 .child(ui::toolbar_item(
@@ -249,7 +256,10 @@ impl TableDesignView {
                     t!("design.primary_key").to_string(),
                     fields && selected,
                     theme,
-                    cx.listener(|this, _event, _window, cx| this.toggle_primary_key(cx)),
+                    cx.listener(|this, _event, window, cx| {
+                        this.toggle_primary_key(cx);
+                        window.focus(&this.focus, cx);
+                    }),
                 ))
                 .child(toolbar_separator(theme))
                 .child(ui::toolbar_item(
@@ -258,7 +268,10 @@ impl TableDesignView {
                     t!("design.move_up").to_string(),
                     fields && can_up,
                     theme,
-                    cx.listener(|this, _event, _window, cx| this.move_field(-1, cx)),
+                    cx.listener(|this, _event, window, cx| {
+                        this.move_field(-1, cx);
+                        window.focus(&this.focus, cx);
+                    }),
                 ))
                 .child(ui::toolbar_item(
                     "design-move-down",
@@ -266,7 +279,10 @@ impl TableDesignView {
                     t!("design.move_down").to_string(),
                     fields && can_down,
                     theme,
-                    cx.listener(|this, _event, _window, cx| this.move_field(1, cx)),
+                    cx.listener(|this, _event, window, cx| {
+                        this.move_field(1, cx);
+                        window.focus(&this.focus, cx);
+                    }),
                 ));
         } else if indexes {
             bar = bar
