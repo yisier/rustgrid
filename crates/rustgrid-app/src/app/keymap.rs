@@ -34,7 +34,7 @@ use super::{
     SelectAllStatusSql, SelectAllTransfers, SwapLineUp, TRANSFER_LIST_CONTEXT, TREE_CONTEXT,
     ToggleComment, TreeCollapse, TreeDown, TreeEnd, TreeExpand, TreeFocusSearch, TreeHome,
     TreeOpen, TreePageDown, TreePageUp, TreeRename, TreeSelectAll, TreeUp, USER_LIST_CONTEXT,
-    UserFocusSearch, WORKSPACE_CONTEXT,
+    UndoDesign, UserFocusSearch, WORKSPACE_CONTEXT,
 };
 
 /// Where a command lives, for grouping the 快捷键 page.
@@ -507,6 +507,15 @@ pub(super) const COMMANDS: &[Command] = &[
         defaults: &["secondary-s"],
         mac_defaults: None,
         bind: bind!(SaveDesign),
+    },
+    Command {
+        id: "designer.undo",
+        label_key: "keymap.designer.undo",
+        group: CommandGroup::Designer,
+        context: DESIGNER_CONTEXT,
+        defaults: &["secondary-z"],
+        mac_defaults: None,
+        bind: bind!(UndoDesign),
     },
     Command {
         id: "designer.select_all",

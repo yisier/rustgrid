@@ -13,6 +13,8 @@ use rustgrid_core::{
 /// A row of the field grid, shared by the header and every row.
 pub(super) const DESIGN_ROW_HEIGHT: f32 = 24.0;
 pub(super) const DESIGN_HEADER_HEIGHT: f32 = 24.0;
+/// How many design steps 撤销 keeps before the oldest one is dropped.
+const DESIGN_UNDO_LIMIT: usize = 100;
 /// The row-header strip of every designer grid: the row marker's column, as narrow as the marker
 /// needs (the same 16px the table grid's gutter uses, `GRID_GUTTER_WIDTH`).
 pub(super) const DESIGN_GUTTER_WIDTH: f32 = 16.0;
@@ -459,6 +461,8 @@ pub(super) struct FieldEdit {
     pub(super) cells: Vec<(usize, FieldColumn)>,
     /// Each cell's text before this edit, aligned with `cells`, restored by Esc.
     pub(super) originals: Vec<String>,
+    /// Whether this edit already pushed its undo step (the first change does).
+    pub(super) undo_saved: bool,
 }
 
 /// The editable text columns of the unique-key grid. Its field list is picked through the same
@@ -933,6 +937,14 @@ pub(super) struct TableDesignView {
     pub(super) loading: bool,
     pub(super) saving: bool,
     pub(super) dirty: bool,
+    /// Design snapshots for undo, oldest first — one per user step.
+    pub(super) undo_stack: Vec<TableSchema>,
+    /// The detail-panel input whose typing run already owns the top undo snapshot, so typing in
+    /// one field is one undo step instead of one per keystroke.
+    detail_undo_tag: Option<InputTag>,
+    /// The field row an insert just added: its first cell edit joins that insert's undo step, so
+    /// 添加字段 + typing the name undoes in one go.
+    undo_join_row: Option<usize>,
 
     pub(super) column_types: Vec<&'static str>,
     pub(super) edit: Option<FieldEdit>,
@@ -1021,12 +1033,27 @@ fn text_input(
     tag: InputTag,
     cx: &mut Context<'_, TableDesignView>,
 ) -> Entity<TextInput> {
+    let change = weak.clone();
+    let cancel = weak.clone();
+    let blur = weak;
+    let cancel_tag = tag.clone();
+    let blur_tag = tag.clone();
     cx.new(move |cx| {
-        TextInput::new(theme, value, TextInputOptions::default(), cx).on_change(Rc::new(
-            move |text, _window, cx| {
-                let _ = weak.update(cx, |view, cx| view.input_changed(tag.clone(), text, cx));
-            },
-        ))
+        TextInput::new(theme, value, TextInputOptions::default(), cx)
+            .on_change(Rc::new(move |text, _window, cx| {
+                let _ = change.update(cx, |view, cx| view.input_changed(tag.clone(), text, cx));
+            }))
+            // Esc undoes this field's typing run; the guard keeps a bare Esc from undoing some
+            // earlier, unrelated design step.
+            .on_cancel(Rc::new(move |_window, cx| {
+                let _ = cancel.update(cx, |view, cx| {
+                    view.cancel_detail_edit(&cancel_tag, cx);
+                });
+            }))
+            // Leaving the field ends its run, so a later Esc there does not undo an old edit.
+            .on_blur(Rc::new(move |_window, cx| {
+                let _ = blur.update(cx, |view, cx| view.end_detail_undo_run(&blur_tag, cx));
+            }))
     })
 }
 
@@ -1280,6 +1307,9 @@ impl TableDesignView {
             loading: false,
             saving: false,
             dirty: false,
+            undo_stack: Vec::new(),
+            detail_undo_tag: None,
+            undo_join_row: None,
             column_types,
             edit: None,
             edit_blur: None,
@@ -1354,6 +1384,9 @@ impl TableDesignView {
                         view.original = Some(schema);
                         view.is_new = false;
                         view.dirty = false;
+                        view.undo_stack.clear();
+                        view.detail_undo_tag = None;
+                        view.undo_join_row = None;
                         view.partition_editor = None;
                         view.rule_editor_row = None;
                         view.trigger_editor_row = None;
@@ -1390,6 +1423,11 @@ impl TableDesignView {
     }
 
     fn input_changed(&mut self, tag: InputTag, text: &str, cx: &mut Context<'_, Self>) {
+        // The detail panel's fields each own one undo step; the index field editor's search and
+        // prefix cells edit a draft, not the design, so they are not undoable on their own.
+        if !matches!(&tag, InputTag::IndexFieldSearch | InputTag::IndexPrefix(_)) {
+            self.remember_detail_undo(&tag);
+        }
         match tag {
             InputTag::Default => {
                 if let Some(index) = self.selected_field
@@ -1619,6 +1657,7 @@ impl TableDesignView {
     }
 
     fn apply_enum_draft(&mut self, cx: &mut Context<'_, Self>) {
+        self.remember_undo();
         let formatted = format_member_list(&self.enum_draft_values);
         if let Some(index) = self.selected_field
             && let Some(column) = self.schema.columns.get_mut(index)
@@ -1731,6 +1770,7 @@ impl TableDesignView {
 
     pub(super) fn set_partition_clause(&mut self, text: &str, cx: &mut Context<'_, Self>) {
         if self.schema.partitioning != text {
+            self.remember_undo();
             self.schema.partitioning = text.to_string();
             self.dirty = true;
             cx.notify();
@@ -1830,6 +1870,107 @@ impl TableDesignView {
         cx.notify();
     }
 
+    /// Remember the design before one change. Every mutating action calls this first, so 撤销 and
+    /// Esc step back through the changes in reverse order. A snapshot identical to the top of the
+    /// stack is a no-op step and is skipped.
+    fn remember_undo(&mut self) {
+        if self.loading || self.saving {
+            return;
+        }
+        // A new action ends a run of typing in one detail-panel field.
+        self.detail_undo_tag = None;
+        // …and any insert whose first cell edit was still waiting to join it.
+        self.undo_join_row = None;
+        if self
+            .undo_stack
+            .last()
+            .is_some_and(|last| *last == self.schema)
+        {
+            return;
+        }
+        self.undo_stack.push(self.schema.clone());
+        if self.undo_stack.len() > DESIGN_UNDO_LIMIT {
+            self.undo_stack.remove(0);
+        }
+    }
+
+    /// A detail-panel input's first change starts one undo step; later keystrokes in the same field
+    /// join it, so typing a default value is one step, not one per character.
+    fn remember_detail_undo(&mut self, tag: &InputTag) {
+        if self.detail_undo_tag.as_ref() != Some(tag) {
+            self.remember_undo();
+            self.detail_undo_tag = Some(tag.clone());
+        }
+    }
+
+    /// Esc in one detail-panel field: undo the typing run in that field. With no run of its own the
+    /// keystroke does nothing, so Esc never undoes an earlier, unrelated design step.
+    fn cancel_detail_edit(&mut self, tag: &InputTag, cx: &mut Context<'_, Self>) {
+        if self.detail_undo_tag.as_ref() == Some(tag) {
+            self.undo(cx);
+        }
+    }
+
+    /// The detail-panel field lost focus: its typing run is over, so a later Esc there must not
+    /// undo the old edit.
+    fn end_detail_undo_run(&mut self, tag: &InputTag, _cx: &mut Context<'_, Self>) {
+        if self.detail_undo_tag.as_ref() == Some(tag) {
+            self.detail_undo_tag = None;
+        }
+    }
+
+    /// Whether 撤销 has a step to take.
+    pub(super) fn can_undo(&self) -> bool {
+        !self.undo_stack.is_empty() && !self.loading && !self.saving
+    }
+
+    /// 撤销 (and Esc over the grid): put the design back the way it was before the last step. An
+    /// open cell editor or type list belongs to that step and is dropped without committing.
+    pub(super) fn undo(&mut self, cx: &mut Context<'_, Self>) {
+        if self.loading || self.saving {
+            return;
+        }
+        let Some(previous) = self.undo_stack.pop() else {
+            return;
+        };
+        // Drop the pending editor/type list *before* `clear_editors`, whose `finish_type_edit`
+        // would otherwise write the pending type into the design just restored.
+        self.type_combo = None;
+        self.edit = None;
+        self.clear_editors(cx);
+        self.detail_undo_tag = None;
+        self.undo_join_row = None;
+        // The partition editor only reads the clause when it is created; drop it so the restored
+        // clause is what its next render shows.
+        self.partition_editor = None;
+        self.schema = previous;
+        self.dirty = self
+            .original
+            .as_ref()
+            .is_none_or(|original| *original != self.schema);
+        let rows = self.schema.columns.len();
+        if rows == 0 {
+            self.selected_field = None;
+            self.selected_cell = None;
+            self.field_selection = None;
+            self.appended_field = None;
+            self.sync_selected_input(cx);
+        } else {
+            let row = self.selected_field.unwrap_or(0).min(rows - 1);
+            let cell = self
+                .selected_cell
+                .map(|(_, cell)| cell)
+                .filter(|cell| self.field_cell_chain().contains(cell))
+                .unwrap_or(FieldCell::Name);
+            self.select_field_cell(row, cell, cx);
+            self.reveal_design_row(row);
+        }
+        if matches!(self.tab, DesignerTab::Options | DesignerTab::Comment) {
+            self.sync_option_inputs(cx);
+        }
+        cx.notify();
+    }
+
     fn field_value(&self, row: usize, column: FieldColumn) -> String {
         let Some(column_def) = self.schema.columns.get(row) else {
             return String::new();
@@ -1876,9 +2017,25 @@ impl TableDesignView {
     /// Apply one edit's text to every cell it covers — the active cell plus the selected cells of
     /// the same column — mirroring the table grid's multi-cell edit.
     fn set_field_edit_value(&mut self, text: &str, cx: &mut Context<'_, Self>) {
-        let Some(cells) = self.edit.as_ref().map(|edit| edit.cells.clone()) else {
+        let Some((row, cells)) = self
+            .edit
+            .as_ref()
+            .map(|edit| (edit.row, edit.cells.clone()))
+        else {
             return;
         };
+        // One undo step per editor session: the first change saves the design as it was, and later
+        // keystrokes join that step. A field the toolbar just inserted joins the insert's step.
+        if !self.edit.as_ref().is_some_and(|edit| edit.undo_saved) {
+            if self.undo_join_row == Some(row) {
+                self.undo_join_row = None;
+            } else {
+                self.remember_undo();
+            }
+            if let Some(edit) = self.edit.as_mut() {
+                edit.undo_saved = true;
+            }
+        }
         for (row, column) in cells {
             self.write_field_value(row, column, text);
         }
@@ -2064,6 +2221,7 @@ impl TableDesignView {
         if copied.is_empty() {
             return;
         }
+        self.remember_undo();
         self.append_copied_fields(copied, cx);
     }
 
@@ -2096,6 +2254,7 @@ impl TableDesignView {
         let Some(first) = block.first() else {
             return;
         };
+        self.remember_undo();
         if block.len() == 1 && first.len() == 1 {
             let value = first[0].clone();
             let cells = self
@@ -2427,6 +2586,19 @@ impl TableDesignView {
         }
     }
 
+    /// Whether a designer popup is open besides the type list (whose own field has focus, so Esc
+    /// reaches it there). Esc dismisses one before it starts undoing the design.
+    fn designer_popup_open(&self) -> bool {
+        self.default_menu_open
+            || self.index_combo.is_some()
+            || self.fk_combo.is_some()
+            || self.fk_fields_open
+            || self.fk_ref_open
+            || self.index_fields_draft.is_some()
+            || self.unique_key_fields_row.is_some()
+            || self.enum_dialog_open
+    }
+
     /// Drop every in-place editor and transient popup state of the designer. Scrolling and switching
     /// tabs both end an edit this way (the text is already in the working copy). A type still being
     /// typed in the 类型 drop-down is committed first, exactly as leaving its cell would.
@@ -2542,6 +2714,7 @@ impl TableDesignView {
             input,
             cells,
             originals,
+            undo_saved: false,
         });
         window.focus(&focus, cx);
         cx.notify();
@@ -2772,6 +2945,18 @@ impl TableDesignView {
         let modifiers = keystroke.modifiers;
         let ctrl = modifiers.control || modifiers.platform;
         let key = keystroke.key.as_str();
+        // Esc over the grid undoes the last design step, like the toolbar's 撤销. An open cell
+        // editor / type list (which has focus) handles its own Esc first, above; an open popup is
+        // dismissed first, so clearing a dropdown never costs a step of the design.
+        if key == "escape" && !ctrl && !modifiers.alt {
+            if self.designer_popup_open() {
+                self.clear_editors(cx);
+            } else {
+                self.undo(cx);
+            }
+            cx.stop_propagation();
+            return;
+        }
         if self.tab != DesignerTab::Fields {
             if !ctrl && !modifiers.alt && self.designer_list_key(key, window, cx) {
                 cx.stop_propagation();
@@ -3483,6 +3668,7 @@ impl TableDesignView {
             cx.notify();
             return;
         }
+        self.remember_undo();
         self.apply_type_query(row, &query);
         self.selected_cell = Some((row, FieldCell::Type));
         self.sync_selected_input(cx);
@@ -3548,6 +3734,7 @@ impl TableDesignView {
         if text.is_empty() {
             return;
         }
+        self.remember_undo();
         self.apply_type_query(row, text);
         self.type_combo = None;
         self.selected_cell = Some((row, FieldCell::Type));
@@ -3629,6 +3816,7 @@ impl TableDesignView {
     }
 
     pub(super) fn select_type(&mut self, row: usize, data_type: &str, cx: &mut Context<'_, Self>) {
+        self.remember_undo();
         for target in self.type_target_rows(row) {
             self.apply_type(target, data_type);
         }
@@ -3642,6 +3830,10 @@ impl TableDesignView {
     }
 
     pub(super) fn toggle_not_null(&mut self, row: usize, cx: &mut Context<'_, Self>) {
+        if self.schema.columns.get(row).is_none() {
+            return;
+        }
+        self.remember_undo();
         if let Some(column) = self.schema.columns.get_mut(row) {
             column.nullable = !column.nullable;
         }
@@ -3663,6 +3855,7 @@ impl TableDesignView {
             return;
         }
         let turning_on = !self.schema.columns[index].auto_increment;
+        self.remember_undo();
         if turning_on && self.designer.auto_increment.one_per_table {
             // One identity column per table: moving it here takes it off whichever column had it.
             for (position, other) in self.schema.columns.iter_mut().enumerate() {
@@ -3705,18 +3898,24 @@ impl TableDesignView {
 
     pub(super) fn toggle_unsigned(&mut self, cx: &mut Context<'_, Self>) {
         if let Some(index) = self.selected_field
-            && let Some(column) = self.schema.columns.get_mut(index)
+            && self.schema.columns.get(index).is_some()
         {
-            column.unsigned = !column.unsigned;
+            self.remember_undo();
+            if let Some(column) = self.schema.columns.get_mut(index) {
+                column.unsigned = !column.unsigned;
+            }
         }
         self.mark_dirty(cx);
     }
 
     pub(super) fn toggle_zerofill(&mut self, cx: &mut Context<'_, Self>) {
         if let Some(index) = self.selected_field
-            && let Some(column) = self.schema.columns.get_mut(index)
+            && self.schema.columns.get(index).is_some()
         {
-            column.zerofill = !column.zerofill;
+            self.remember_undo();
+            if let Some(column) = self.schema.columns.get_mut(index) {
+                column.zerofill = !column.zerofill;
+            }
         }
         self.mark_dirty(cx);
     }
@@ -3724,9 +3923,12 @@ impl TableDesignView {
     /// Toggle the selected column's `SPARSE` flag (SQL Server).
     pub(super) fn toggle_sparse(&mut self, cx: &mut Context<'_, Self>) {
         if let Some(index) = self.selected_field
-            && let Some(column) = self.schema.columns.get_mut(index)
+            && self.schema.columns.get(index).is_some()
         {
-            column.sparse = !column.sparse;
+            self.remember_undo();
+            if let Some(column) = self.schema.columns.get_mut(index) {
+                column.sparse = !column.sparse;
+            }
         }
         self.mark_dirty(cx);
     }
@@ -3748,6 +3950,7 @@ impl TableDesignView {
     // -- Unique keys (SQL Server's 唯一键; MySQL reports a unique index as an 索引) ----------------
 
     pub(super) fn add_unique_key(&mut self, cx: &mut Context<'_, Self>) {
+        self.remember_undo();
         // A new row carries no invented name (`new_unique_key`): the name is the user's, and the
         // row that 添加唯一键 creates opens straight into its name cell for typing.
         let key = UniqueKeyDef {
@@ -3766,6 +3969,7 @@ impl TableDesignView {
     }
 
     pub(super) fn delete_unique_key(&mut self, cx: &mut Context<'_, Self>) {
+        self.remember_undo();
         // Delete every gutter-selected row, falling back to the active one.
         let mut targets: BTreeSet<usize> = self.unique_key_rows.rows.clone();
         if let Some(active) = self.selected_unique_key {
@@ -3829,6 +4033,7 @@ impl TableDesignView {
         text: &str,
         cx: &mut Context<'_, Self>,
     ) {
+        self.remember_undo();
         if let Some(key) = self.schema.unique_keys.get_mut(row) {
             match column {
                 UniqueKeyColumn::Name => key.name = text.to_string(),
@@ -3914,6 +4119,7 @@ impl TableDesignView {
         column: &str,
         cx: &mut Context<'_, Self>,
     ) {
+        self.remember_undo();
         if let Some(key) = self.schema.unique_keys.get_mut(row) {
             toggle_list(&mut key.columns, column);
         }
@@ -3935,6 +4141,7 @@ impl TableDesignView {
     // -- Check constraints (SQL Server's 检查) ---------------------------------------------------
 
     pub(super) fn add_check(&mut self, cx: &mut Context<'_, Self>) {
+        self.remember_undo();
         // Like 添加字段, a new check starts unnamed and opens its name cell for editing.
         let check = CheckDef {
             name: String::new(),
@@ -3950,6 +4157,7 @@ impl TableDesignView {
     }
 
     pub(super) fn delete_check(&mut self, cx: &mut Context<'_, Self>) {
+        self.remember_undo();
         let mut targets: BTreeSet<usize> = self.check_rows.rows.clone();
         if let Some(active) = self.selected_check {
             targets.insert(active);
@@ -4010,6 +4218,7 @@ impl TableDesignView {
         text: &str,
         cx: &mut Context<'_, Self>,
     ) {
+        self.remember_undo();
         if let Some(check) = self.schema.checks.get_mut(row) {
             match column {
                 CheckColumn::Name => check.name = text.to_string(),
@@ -4073,6 +4282,7 @@ impl TableDesignView {
     // -- PostgreSQL exclusion constraints -------------------------------------------------------
 
     pub(super) fn add_exclude(&mut self, cx: &mut Context<'_, Self>) {
+        self.remember_undo();
         self.schema.excludes.push(ExcludeDef::default());
         let row = self.schema.excludes.len() - 1;
         self.selected_exclude = Some(row);
@@ -4090,6 +4300,7 @@ impl TableDesignView {
     }
 
     pub(super) fn delete_exclude(&mut self, cx: &mut Context<'_, Self>) {
+        self.remember_undo();
         let mut targets: BTreeSet<usize> = self.exclude_rows.rows.clone();
         if let Some(active) = self.selected_exclude {
             targets.insert(active);
@@ -4149,6 +4360,7 @@ impl TableDesignView {
         text: &str,
         cx: &mut Context<'_, Self>,
     ) {
+        self.remember_undo();
         if let Some(exclude) = self.schema.excludes.get_mut(row) {
             match column {
                 ExcludeColumn::Name => exclude.name = text.to_string(),
@@ -4214,6 +4426,7 @@ impl TableDesignView {
     // -- PostgreSQL rewrite rules ---------------------------------------------------------------
 
     pub(super) fn add_rule(&mut self, cx: &mut Context<'_, Self>) {
+        self.remember_undo();
         self.schema.rules.push(RuleDef::default());
         let row = self.schema.rules.len() - 1;
         self.selected_rule = Some(row);
@@ -4229,6 +4442,7 @@ impl TableDesignView {
     }
 
     pub(super) fn delete_rule(&mut self, cx: &mut Context<'_, Self>) {
+        self.remember_undo();
         let mut targets: BTreeSet<usize> = self.rule_rows.rows.clone();
         if let Some(active) = self.selected_rule {
             targets.insert(active);
@@ -4278,9 +4492,16 @@ impl TableDesignView {
         text: &str,
         cx: &mut Context<'_, Self>,
     ) {
-        if let Some(rule) = self.schema.rules.get_mut(row)
-            && rule.definition != text
+        if self
+            .schema
+            .rules
+            .get(row)
+            .is_none_or(|rule| rule.definition == text)
         {
+            return;
+        }
+        self.remember_undo();
+        if let Some(rule) = self.schema.rules.get_mut(row) {
             rule.definition = text.to_string();
             self.dirty = true;
         }
@@ -4304,6 +4525,7 @@ impl TableDesignView {
     }
 
     pub(super) fn add_trigger(&mut self, cx: &mut Context<'_, Self>) {
+        self.remember_undo();
         self.schema.triggers.push(TriggerDef {
             timing: "BEFORE".to_string(),
             event: "INSERT".to_string(),
@@ -4320,6 +4542,7 @@ impl TableDesignView {
     }
 
     pub(super) fn delete_trigger(&mut self, cx: &mut Context<'_, Self>) {
+        self.remember_undo();
         let mut targets: BTreeSet<usize> = self.trigger_rows.rows.clone();
         if let Some(active) = self.selected_trigger {
             targets.insert(active);
@@ -4383,6 +4606,7 @@ impl TableDesignView {
         text: &str,
         cx: &mut Context<'_, Self>,
     ) {
+        self.remember_undo();
         if let Some(trigger) = self.schema.triggers.get_mut(row) {
             match column {
                 TriggerColumn::Name => trigger.name = text.to_string(),
@@ -4455,17 +4679,24 @@ impl TableDesignView {
         let Some(row) = self.selected_trigger else {
             return;
         };
-        let Some(trigger) = self.schema.triggers.get_mut(row) else {
+        if self
+            .schema
+            .triggers
+            .get(row)
+            .is_none_or(|trigger| trigger.statement == text)
+        {
             return;
-        };
-        if trigger.statement != text {
+        }
+        self.remember_undo();
+        if let Some(trigger) = self.schema.triggers.get_mut(row) {
             trigger.statement = text.to_string();
             self.dirty = true;
-            cx.notify();
         }
+        cx.notify();
     }
 
     fn insert_field_at(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        self.remember_undo();
         // Default to `int` when the engine offers it (MySQL); otherwise use the engine's first
         // type, so SQLite defaults to `INTEGER`. The name stays empty — the row is either opened
         // for editing straight away (添加字段 / 插入字段) or typed into by hand — and
@@ -4486,6 +4717,8 @@ impl TableDesignView {
         };
         let index = index.min(self.schema.columns.len());
         self.schema.columns.insert(index, column);
+        // The field's name is usually typed next: that edit joins this insert's undo step.
+        self.undo_join_row = Some(index);
         self.selected_field = Some(index);
         self.selected_cell = Some((index, FieldCell::Name));
         self.field_selection = Some(CellSelection::new(index, 0));
@@ -4517,6 +4750,7 @@ impl TableDesignView {
         if targets.is_empty() {
             return;
         }
+        self.remember_undo();
         let first = *targets.iter().next().unwrap();
         let removed: Vec<String> = targets
             .iter()
@@ -4597,6 +4831,10 @@ impl TableDesignView {
 
     /// Toggle the primary-key flag of one row (the grid's "Key" checkbox).
     pub(super) fn toggle_field_primary_key(&mut self, row: usize, cx: &mut Context<'_, Self>) {
+        if self.schema.columns.get(row).is_none() {
+            return;
+        }
+        self.remember_undo();
         if let Some(column) = self.schema.columns.get_mut(row) {
             column.primary_key = !column.primary_key;
             if column.primary_key {
@@ -4620,6 +4858,7 @@ impl TableDesignView {
         let Some(targets) = moved_field_rows(&rows, total, delta) else {
             return;
         };
+        self.remember_undo();
         move_columns(&mut self.schema.columns, &rows, delta);
         let moved: BTreeSet<usize> = targets.into_iter().collect();
 
@@ -4676,6 +4915,7 @@ impl TableDesignView {
     }
 
     pub(super) fn add_index(&mut self, cx: &mut Context<'_, Self>) {
+        self.remember_undo();
         let (unique, index_type) = default_index_kind(&self.designer);
         let index = IndexDef {
             name: String::new(),
@@ -4699,6 +4939,7 @@ impl TableDesignView {
     }
 
     pub(super) fn delete_index(&mut self, cx: &mut Context<'_, Self>) {
+        self.remember_undo();
         // Delete every gutter-selected non-primary index, falling back to the active one.
         let mut targets: BTreeSet<usize> = self.index_rows.rows.clone();
         if let Some(active) = self.selected_index {
@@ -4774,6 +5015,7 @@ impl TableDesignView {
         text: &str,
         cx: &mut Context<'_, Self>,
     ) {
+        self.remember_undo();
         if let Some(index) = self.schema.indexes.get_mut(row) {
             match column {
                 IndexColumn::Name => index.name = text.to_string(),
@@ -4876,6 +5118,7 @@ impl TableDesignView {
         value: &str,
         cx: &mut Context<'_, Self>,
     ) {
+        self.remember_undo();
         let kind = match field {
             IndexComboField::Kind => self
                 .designer
@@ -4984,6 +5227,7 @@ impl TableDesignView {
 
     /// Apply the draft: the index takes the draft's field list.
     pub(super) fn confirm_index_fields(&mut self, cx: &mut Context<'_, Self>) {
+        self.remember_undo();
         let Some(draft) = self.index_fields_draft.take() else {
             return;
         };
@@ -5127,6 +5371,7 @@ impl TableDesignView {
     }
 
     pub(super) fn add_foreign_key(&mut self, cx: &mut Context<'_, Self>) {
+        self.remember_undo();
         let foreign_key = ForeignKeyDef::default();
         self.schema.foreign_keys.push(foreign_key);
         self.selected_fk = Some(self.schema.foreign_keys.len() - 1);
@@ -5138,6 +5383,7 @@ impl TableDesignView {
     }
 
     pub(super) fn delete_foreign_key(&mut self, cx: &mut Context<'_, Self>) {
+        self.remember_undo();
         // Delete every gutter-selected foreign key, falling back to the active one.
         let mut targets: BTreeSet<usize> = self.fk_rows.rows.clone();
         if let Some(active) = self.selected_fk {
@@ -5200,6 +5446,7 @@ impl TableDesignView {
         text: &str,
         cx: &mut Context<'_, Self>,
     ) {
+        self.remember_undo();
         if let Some(foreign_key) = self.schema.foreign_keys.get_mut(row) {
             match column {
                 FkColumn::Name => foreign_key.name = text.to_string(),
@@ -5307,6 +5554,7 @@ impl TableDesignView {
         value: &str,
         cx: &mut Context<'_, Self>,
     ) {
+        self.remember_undo();
         if let Some(foreign_key) = self.schema.foreign_keys.get_mut(row) {
             match field {
                 FkComboField::OnDelete => foreign_key.on_delete = value.to_string(),
@@ -5402,6 +5650,7 @@ impl TableDesignView {
         column: &str,
         cx: &mut Context<'_, Self>,
     ) {
+        self.remember_undo();
         if let Some(foreign_key) = self.schema.foreign_keys.get_mut(row) {
             toggle_list(&mut foreign_key.columns, column);
         }
@@ -5414,6 +5663,7 @@ impl TableDesignView {
         column: &str,
         cx: &mut Context<'_, Self>,
     ) {
+        self.remember_undo();
         if let Some(foreign_key) = self.schema.foreign_keys.get_mut(row) {
             toggle_list(&mut foreign_key.referenced_columns, column);
         }

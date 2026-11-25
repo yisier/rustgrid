@@ -206,6 +206,7 @@ gpui::actions!(
     designer,
     [
         SaveDesign,
+        UndoDesign,
         NextDesignerCell,
         PrevDesignerCell,
         DesignerRowUp,

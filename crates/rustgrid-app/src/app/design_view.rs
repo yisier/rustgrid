@@ -52,6 +52,7 @@ impl TableDesignView {
             .track_focus(&self.focus)
             .key_context(DESIGNER_CONTEXT)
             .on_action(cx.listener(|this, _: &SaveDesign, _window, cx| this.save(cx)))
+            .on_action(cx.listener(|this, _: &UndoDesign, _window, cx| this.undo(cx)))
             .on_action(
                 cx.listener(|this, _: &DesignerSelectAll, _window, cx| this.select_all_fields(cx)),
             )
@@ -194,6 +195,14 @@ impl TableDesignView {
                 save_enabled,
                 theme,
                 cx.listener(|this, _event, _window, cx| this.save(cx)),
+            ))
+            .child(ui::toolbar_item(
+                "design-undo",
+                "icons/undo.svg",
+                t!("design.undo").to_string(),
+                self.can_undo(),
+                theme,
+                cx.listener(|this, _event, _window, cx| this.undo(cx)),
             ))
             .child(toolbar_separator(theme));
 

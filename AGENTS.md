@@ -475,16 +475,21 @@ touching UI code.
   cell, and a press on the left gutter selects/extend whole rows. A click only selects; a second
   click / double-click / Enter / F2 opens the cell's editor (`field_mouse_up`), exactly like the
   table grid, and a drag never opens one. Painting is per cell (`CellSelection::contains`), not
-  from `selected_cell`, so a range shows every cell it covers. 删除字段, 上移 and 下移 act on every
+  from `selected_cell`, so a range shows every cell it covers. 删除, 上移 and 下移 act on every
   row the selection touches (`selected_field_rows`); `move_field` moves those rows one slot as a
   group (`moved_field_rows`), keeping their internal order. Ctrl+C (`designer.copy`) copies the
   selected cells as TSV, using the table grid's convention: the selection's bounding rectangle,
   with unselected cells in it empty. Typing over a range writes the same value into every selected
   cell of that column (`FieldEdit::cells`), and Ctrl+V pastes clipboard text into the selection
-  (one value fills it, a block maps from its top-left cell). 复制字段 (`duplicate_fields`, the
-  fields toolbar's item after 删除字段) appends a copy of every selected field row: the copied
+  (one value fills it, a block maps from its top-left cell). 复制 (`duplicate_fields`, the
+  fields toolbar's item after 删除) appends a copy of every selected field row: the copied
   definitions drop the key, auto-increment and identity flags and take unique names
-  (`pasted_columns`), and the new rows are selected and revealed. Tab must be claimed by a key binding
+  (`pasted_columns`), and the new rows are selected and revealed. The field toolbar's labels are
+  deliberately short (添加 / 插入 / 删除 / 复制); the design has an undo stack (`undo_stack`, capped
+  at `DESIGN_UNDO_LIMIT`): every mutating action pushes the schema before its change
+  (`remember_undo`, one step per cell-editor session and per detail-panel field run), 撤销 next to
+  保存 / Ctrl+Z (`designer.undo`) and Esc over the grid (`designer_key`, after dismissing an open
+  popup) restore the previous snapshot and re-evaluate `dirty` against `original`. Tab must be claimed by a key binding
   rather than an element's `on_key_down` (`ui::TextInput::on_tab`
   never fires for it: gpui dispatches a keystroke a binding matches as an action, and `Root` binds
   `tab`). The 类型 drop-down is driven from the keyboard: `type_highlight` marks a row, Up/Down
