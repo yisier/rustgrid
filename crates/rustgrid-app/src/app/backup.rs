@@ -4712,11 +4712,30 @@ pub(super) fn object_picker_toolbar(
         )
         .to_string()
     };
-    let mut right = div().flex().flex_row().items_center().gap_3();
-    if let Some(input) = search_input {
-        right = right.child(div().w(px(210.0)).child(input));
-    }
-    let right = right
+    let counts = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .flex_none()
+        .child(
+            div()
+                .text_size(px(12.0))
+                .text_color(rgb(theme.text_muted))
+                .child(t!("backup.selected_count", selected = selected, total = total).to_string()),
+        )
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(rgb(theme.text_muted))
+                .child(shown),
+        );
+    let links = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_3()
+        .flex_none()
         .child(backup_link_button(
             select_all_id,
             t!("backup.select_all").to_string(),
@@ -4729,38 +4748,21 @@ pub(super) fn object_picker_toolbar(
             theme,
             select_none,
         ));
-    div()
+    let mut row = div()
         .flex()
         .flex_row()
         .items_center()
-        .justify_between()
         .w_full()
         .px_4()
         .pt_2()
         .pb_1()
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(rgb(theme.text_muted))
-                        .child(
-                            t!("backup.selected_count", selected = selected, total = total)
-                                .to_string(),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(rgb(theme.text_muted))
-                        .child(shown),
-                ),
-        )
-        .child(right)
+        .child(counts);
+    if let Some(input) = search_input {
+        // The search sits in the free middle of the row (right after the count), where the eye
+        // looks for it; the flexible gap keeps 全选 / 取消全选 at the right edge.
+        row = row.child(div().flex_none().w(px(220.0)).ml_3().child(input));
+    }
+    row.child(div().flex_1()).child(links)
 }
 
 pub(super) fn render_object_picker(
