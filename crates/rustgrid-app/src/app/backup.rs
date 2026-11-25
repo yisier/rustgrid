@@ -4717,15 +4717,22 @@ pub(super) fn object_picker_toolbar(
         .flex_row()
         .items_center()
         .gap_2()
-        .flex_none()
+        .flex_grow_0()
+        .flex_shrink_1()
+        .min_w(px(0.0))
+        .overflow_hidden()
         .child(
             div()
+                .min_w(px(0.0))
+                .truncate()
                 .text_size(px(12.0))
                 .text_color(rgb(theme.text_muted))
                 .child(t!("backup.selected_count", selected = selected, total = total).to_string()),
         )
         .child(
             div()
+                .min_w(px(0.0))
+                .truncate()
                 .text_size(px(11.0))
                 .text_color(rgb(theme.text_muted))
                 .child(shown),
