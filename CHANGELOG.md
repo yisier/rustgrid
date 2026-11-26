@@ -10,6 +10,41 @@ UI labels are quoted as the app shows them, so this file quotes the English stri
 [`CHANGELOG_zh.md`](CHANGELOG_zh.md) and [`CHANGELOG_ru.md`](CHANGELOG_ru.md) quote the 简体中文 and
 Russian ones.
 
+## [0.1.17] - 2026-11-26
+
+### Added
+
+- Table Designer: Undo (beside Save, Ctrl+Z or Esc) steps back through the design, one step per
+  change.
+- Table Designer: Copy appends copies of the selected fields, and the Column Name header has a field
+  search (Ctrl+F).
+- Table Designer: typing or pasting over a selected range fills every selected cell, and changed
+  fields keep the grid's edit colour until saved.
+- Backup: the object list in a new backup, restore, extract and dump is searchable, and Select All /
+  Deselect All follow the search.
+- Documentation: the website guide is reorganised by module, with bilingual screenshots.
+
+### Changed
+
+- The UI toolkit is updated to gpui-kit 0.11, with its menus, steppers and resizable panes.
+- Context and tab menus have submenus and checked rows, and close on Escape or a click outside.
+- The main panes, the query editor/result split and the user window's grants resize by dragging
+  their dividers.
+- The import and export wizards show their steps as a compact stepper with shorter labels.
+- Table Designer: the field toolbar labels are shorter, and Ctrl+C / Ctrl+V only copy and paste
+  cell text.
+
+### Fixed
+
+- Table Designer: leaving the Type cell keeps the typed type, a language change updates the field
+  search placeholder, and toolbar actions keep the grid focused.
+- Connection tree: selecting a table, view, function, query or backup in its list highlights the
+  same tree row, so two rows no longer look selected
+  ([#71](https://github.com/yisier/rustgrid/issues/71)).
+- Sync: the table filter now limits what a run writes and what the Sync button counts.
+- Backup: the object search sits beside the selected count, and the count stays readable in narrow
+  windows.
+
 ## [0.1.16] - 2026-11-22
 
 ### Added
