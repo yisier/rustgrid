@@ -39,11 +39,12 @@ Russian ones.
 - Table Designer: leaving the Type cell keeps the typed type, a language change updates the field
   search placeholder, and toolbar actions keep the grid focused.
 - Connection tree: selecting a table, view, function, query or backup in its list highlights the
-  same tree row, so two rows no longer look selected
-  ([#71](https://github.com/yisier/rustgrid/issues/71)).
+  same tree row, so two rows no longer look selected.
 - Sync: the table filter now limits what a run writes and what the Sync button counts.
 - Backup: the object search sits beside the selected count, and the count stays readable in narrow
   windows.
+- Backup: the list drops the misleading Comment column, and the details label the stored value
+  Profile Name ([#71](https://github.com/yisier/rustgrid/issues/71)).
 
 ## [0.1.16] - 2026-11-22
 
