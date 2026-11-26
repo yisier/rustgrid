@@ -383,7 +383,7 @@ impl AppView {
                         file.manifest.backup_version.clone(),
                     ),
                     (
-                        t!("backup.field.comment").to_string(),
+                        t!("backup.field.profile").to_string(),
                         if file.manifest.comment.is_empty() {
                             "--".to_string()
                         } else {
@@ -660,13 +660,12 @@ impl AppView {
         list.into_any_element()
     }
 
-    /// The content-fitted widths of the Backup 详细列表 columns (名称 / 修改日期 / 文件大小 / 备注).
+    /// The content-fitted widths of the Backup 详细列表 columns (名称 / 修改日期 / 文件大小).
     fn backup_detail_widths(&self, cx: &App) -> Vec<f32> {
         let mut longest = [
             ui::approx_text_width(&t!("common.name")) + 30.0,
             ui::approx_text_width(&t!("backup.field.modified")),
             ui::approx_text_width(&t!("backup.field.size")),
-            ui::approx_text_width(&t!("backup.field.comment")),
         ];
         for index in self.visible_backup_files(cx) {
             let file = &self.backup_files[index];
@@ -678,23 +677,19 @@ impl AppView {
                     .unwrap_or_else(|| "--".to_string()),
             ));
             longest[2] = longest[2].max(ui::approx_text_width(&format_size_only(file.size)));
-            longest[3] =
-                longest[3].max(ui::approx_text_width(&single_line(&file.manifest.comment)));
         }
         for index in self.visible_backup_configs(cx) {
             let config = &self.backup_configs[index];
             longest[0] = longest[0].max(ui::approx_text_width(&config.name) + 30.0);
-            longest[3] = longest[3].max(ui::approx_text_width(&saved_config_counts(config)));
         }
         vec![
             ui::detail_column_width(longest[0], 200.0),
             ui::detail_column_width(longest[1], 140.0),
             ui::detail_column_width(longest[2], 80.0),
-            ui::detail_column_width(longest[3], 160.0),
         ]
     }
 
-    /// The Backup 详细列表: 名称 / 修改日期 / 文件大小 / 备注.
+    /// The Backup 详细列表: 名称 / 修改日期 / 文件大小.
     fn render_backup_detail(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
         let fitted = self.backup_detail_widths(cx);
@@ -704,7 +699,6 @@ impl AppView {
             t!("common.name").to_string(),
             t!("backup.field.modified").to_string(),
             t!("backup.field.size").to_string(),
-            t!("backup.field.comment").to_string(),
         ]
         .into_iter()
         .enumerate()
@@ -865,16 +859,6 @@ impl AppView {
                     SharedString::from(format!("backup-file-cell-{index}-2")),
                     format_size_only(file.size),
                 )),
-        )
-        .child(
-            div()
-                .w(px(widths[3]))
-                .flex_none()
-                .text_color(rgb(muted))
-                .child(ui::detail_cell_text(
-                    SharedString::from(format!("backup-file-cell-{index}-3")),
-                    single_line(&file.manifest.comment),
-                )),
         );
         backup_row_with_rect(cx.weak_entity(), row, MarqueeTarget::Backups, key)
     }
@@ -964,15 +948,6 @@ impl AppView {
                 .flex_none()
                 .text_color(rgb(theme.text_muted))
                 .child(""),
-        )
-        .child(
-            div()
-                .w(px(widths[3]))
-                .flex_none()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_color(rgb(theme.text_muted))
-                .child(saved_config_counts(config)),
         );
         backup_row_with_rect(cx.weak_entity(), row, MarqueeTarget::Backups, key)
     }
@@ -5255,7 +5230,7 @@ fn backup_object_counts(manifest: &BackupManifest) -> String {
     format_counts(&counts)
 }
 
-/// The sort value of one Backup 详细列表 row: 名称 / 修改日期 / 文件大小 / 备注. A saved
+/// The sort value of one Backup 详细列表 row: 名称 / 修改日期 / 文件大小. A saved
 /// configuration has no date or size of its own, so it sorts into the empty group there.
 fn backup_sort_key(entry: &BackupEntry, app: &AppView, column: usize) -> SortKey {
     match entry {
@@ -5271,7 +5246,6 @@ fn backup_sort_key(entry: &BackupEntry, app: &AppView, column: usize) -> SortKey
                         .unwrap_or_else(|| "--".to_string()),
                 ),
                 2 => SortKey::number(Some(file.size as f64)),
-                3 => SortKey::text(&single_line(&file.manifest.comment)),
                 _ => SortKey::text(&file.name),
             }
         }
@@ -5281,7 +5255,6 @@ fn backup_sort_key(entry: &BackupEntry, app: &AppView, column: usize) -> SortKey
             };
             match column {
                 1 | 2 => SortKey::Empty,
-                3 => SortKey::text(&saved_config_counts(config)),
                 _ => SortKey::text(&config.name),
             }
         }
