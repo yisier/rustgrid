@@ -486,6 +486,50 @@ pub(super) fn popup_panel(theme: Theme) -> Div {
         .shadow(dialog_shadow())
 }
 
+/// A blocking "busy" card centered over a `relative()` pane: a spinner, a message and a
+/// translucent backdrop that also stops mouse input. Used while a long write runs (a large
+/// delete, an imported batch, emptying a table) so the pane never looks frozen. The caller adds
+/// it as an absolutely positioned child of the container it should cover.
+pub(super) fn busy_overlay(
+    id: impl Into<SharedString>,
+    message: impl Into<SharedString>,
+    theme: Theme,
+) -> impl IntoElement {
+    div()
+        .id(id.into())
+        .absolute()
+        .inset_0()
+        .occlude()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(rgba((theme.window_bg << 8) | 0xB4))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_2()
+                .px_5()
+                .py_4()
+                .rounded(px(10.0))
+                .bg(rgb(theme.dialog_bg))
+                .border_1()
+                .border_color(rgb(theme.border))
+                .shadow(soft_shadow())
+                .child(
+                    gpui_kit::component::spinner::Spinner::new()
+                        .color(rgb(theme.text_muted).into()),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(theme.text_muted))
+                        .child(message.into()),
+                ),
+        )
+}
+
 /// The soft drop shadow behind every floating surface (dialogs and popup menus).
 pub(super) fn dialog_shadow() -> Vec<BoxShadow> {
     vec![BoxShadow {

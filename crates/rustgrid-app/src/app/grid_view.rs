@@ -5,7 +5,6 @@ use gpui::HitboxBehavior;
 use gpui_kit::component::empty::{
     Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyMediaVariant, EmptyTitle,
 };
-use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{Icon, IconName};
 
 impl GridView {
@@ -102,6 +101,7 @@ impl GridView {
             cell_editor_focus_pending: false,
             auto_save: true,
             saving: false,
+            busy: None,
             new_row_columns: None,
             new_row_columns_loading: false,
             open_row_after_save: None,
@@ -253,44 +253,24 @@ impl GridView {
         GRID_ROW_HEIGHT + extra_lines as f32 * GRID_HEADER_LINE_HEIGHT
     }
 
-    /// The table's loading state: a centered card over the body while a fetch runs. It is an
-    /// overlay, not a row, so starting or finishing a fetch never shifts the table; the old rows
-    /// stay visible underneath, dimmed, until the new page replaces them.
+    /// Whether a fetch or a write is running, so the body shows the loading card.
+    fn is_busy(&self) -> bool {
+        self.state.loading || self.busy.is_some()
+    }
+
+    /// The table's loading state: a centered card over the body while a fetch or a long write
+    /// runs. It is an overlay, not a row, so starting or finishing an operation never shifts the
+    /// table; the old rows stay visible underneath, dimmed, until the new page replaces them.
     fn render_loading_overlay(&self) -> impl IntoElement {
-        let theme = self.theme;
-        div()
-            .id(SharedString::from(format!(
-                "grid-loading-overlay-{}",
-                self.state.id
-            )))
-            .absolute()
-            .inset_0()
-            .occlude()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgba((theme.window_bg << 8) | 0xB4))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap_2()
-                    .px_5()
-                    .py_4()
-                    .rounded(px(10.0))
-                    .bg(rgb(theme.dialog_bg))
-                    .border_1()
-                    .border_color(rgb(theme.border))
-                    .shadow(ui::soft_shadow())
-                    .child(Spinner::new().color(rgb(theme.text_muted).into()))
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(rgb(theme.text_muted))
-                            .child(t!("common.loading").to_string()),
-                    ),
-            )
+        let message = self
+            .busy
+            .clone()
+            .unwrap_or_else(|| t!("common.loading").to_string());
+        ui::busy_overlay(
+            format!("grid-loading-overlay-{}", self.state.id),
+            message,
+            self.theme,
+        )
     }
 }
 
@@ -1021,7 +1001,7 @@ impl Render for GridView {
         // centered in it sits off screen as soon as the columns overflow. Anchoring the card to
         // the pane keeps it centered whatever the total width or horizontal scroll is.
         let empty_state: Option<AnyElement> =
-            (empty_page && !self.state.loading && !self.state.columns.is_empty()).then(|| {
+            (empty_page && !self.is_busy() && !self.state.columns.is_empty()).then(|| {
                 div()
                     .id(SharedString::from(format!(
                         "grid-empty-state-{}",
@@ -1474,7 +1454,7 @@ impl Render for GridView {
                 // A fetch in progress is a centered table state, not a small glyph in the toolbar,
                 // so a slow query is unmistakable. The overlay floats over the body and never
                 // changes the layout.
-                .when(self.state.loading, |body| {
+                .when(self.is_busy(), |body| {
                     body.child(self.render_loading_overlay())
                 })
                 // The empty state floats over the visible pane instead of sitting inside the

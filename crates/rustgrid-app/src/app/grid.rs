@@ -368,7 +368,11 @@ impl GridView {
 
     /// Append a blank insert row (the "+" button), select its first cell and reveal it.
     pub(super) fn add_insert_row(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        if !self.state.editable || self.state.loading || self.state.columns.is_empty() {
+        if !self.state.editable
+            || self.state.loading
+            || self.busy.is_some()
+            || self.state.columns.is_empty()
+        {
             return;
         }
         // Repeatedly pressing "+" right after an untouched row should just refocus it.
@@ -405,6 +409,7 @@ impl GridView {
     pub(super) fn duplicate_row(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         if !self.state.editable
             || self.state.loading
+            || self.busy.is_some()
             || self.state.visible_columns == 0
             || self.state.key_status.is_some()
             || self.state.rows.is_empty()
@@ -480,6 +485,10 @@ impl GridView {
 
     /// Load the current page, resetting the scroll position (page navigation, sort, filter).
     pub(super) fn load_page(&mut self, cx: &mut Context<'_, Self>) {
+        // A write in flight owns the rows; its own reload replaces them when it lands.
+        if self.busy.is_some() {
+            return;
+        }
         // A page the user asked for is not the reload of a save: drop a new row that save was
         // going to open once it landed.
         self.open_row_after_save = None;
@@ -983,7 +992,7 @@ impl GridView {
     }
 
     pub(super) fn refresh(&mut self, cx: &mut Context<'_, Self>) {
-        if self.guard_pending(GridNav::Refresh, cx) {
+        if self.busy.is_some() || self.guard_pending(GridNav::Refresh, cx) {
             return;
         }
         self.refresh_now(cx);
@@ -2181,6 +2190,7 @@ impl GridView {
     pub(super) fn auto_save_row(&self) -> Option<usize> {
         if !self.auto_save
             || self.saving
+            || self.busy.is_some()
             || !self.inserts.is_empty()
             || self.state.undo.iter().any(|step| step.len() > 1)
         {
@@ -2206,8 +2216,9 @@ impl GridView {
         down: bool,
         cx: &mut Context<'_, Self>,
     ) -> bool {
-        if self.saving {
-            // The reload that follows a save replaces the rows: moving now would land on stale ones.
+        if self.saving || self.busy.is_some() {
+            // The reload that follows a save/delete replaces the rows: moving now would land on
+            // stale ones.
             return true;
         }
         let last = self.display_row_count().saturating_sub(1);

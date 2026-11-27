@@ -158,6 +158,7 @@ impl AppView {
         let main_font = self.main_font();
         let main_font_size = self.main_font_size();
         let ui_zoom = self.ui_ctrl_wheel_zoom;
+        let busy_message = self.busy.clone();
         // Whether the active page is a list (where Ctrl + wheel zooms the main panel). Grids and
         // editors own their own zoom gesture, so they are left out.
         let mut main_zoom = false;
@@ -290,7 +291,11 @@ impl AppView {
                 .inset_0(),
             );
         }
-        content.child(body_frame.child(body))
+        let mut content = content.child(body_frame.child(body));
+        if let Some(message) = busy_message {
+            content = content.child(ui::busy_overlay("app-busy-overlay", message, theme));
+        }
+        content
     }
 
     /// F5 / the Shortcuts command: refresh whatever the page is showing. A focused grid keeps its

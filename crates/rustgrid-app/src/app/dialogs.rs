@@ -612,6 +612,21 @@ impl AppView {
         cx.notify();
     }
 
+    /// Cover the content pane with a blocking loading card while a long operation runs. Callers
+    /// must pair it with [`Self::end_busy`] on every completion path.
+    pub(super) fn begin_busy(&mut self, message: impl Into<String>, cx: &mut Context<'_, Self>) {
+        self.busy = Some(message.into());
+        cx.notify();
+    }
+
+    /// Drop the content pane's busy card. A later operation's card is never cleared early
+    /// because callers keep a long operation in flight to completion before starting another.
+    pub(super) fn end_busy(&mut self, cx: &mut Context<'_, Self>) {
+        if self.busy.take().is_some() {
+            cx.notify();
+        }
+    }
+
     /// Queue refresh feedback. Unlike [`Self::toast`], these notifications share one id, so the
     /// latest refresh state replaces the one before it instead of stacking.
     pub(super) fn refresh_toast(

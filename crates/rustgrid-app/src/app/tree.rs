@@ -1956,6 +1956,13 @@ impl AppView {
             return;
         };
 
+        let label = match operation {
+            TableOperation::Empty => t!("object.emptying_tables", count = 1),
+            TableOperation::Truncate => t!("object.truncating_tables", count = 1),
+        }
+        .to_string();
+        self.begin_busy(label, cx);
+
         let runtime = self.runtime.clone();
         let close_connection = connection.clone();
         let close_database = database.clone();
@@ -1977,6 +1984,7 @@ impl AppView {
             };
 
             let _ = this.update(cx, |view, cx| {
+                view.end_busy(cx);
                 match result {
                     Ok(()) => {
                         // The table is still there but empty: re-fetch the open grids.
@@ -2013,6 +2021,13 @@ impl AppView {
             return;
         };
 
+        let label = match operation {
+            TableOperation::Empty => t!("object.emptying_tables", count = names.len()),
+            TableOperation::Truncate => t!("object.truncating_tables", count = names.len()),
+        }
+        .to_string();
+        self.begin_busy(label, cx);
+
         let runtime = self.runtime.clone();
         let close_connection = connection.clone();
         let close_database = database.clone();
@@ -2041,6 +2056,7 @@ impl AppView {
             };
 
             let _ = this.update(cx, |view, cx| {
+                view.end_busy(cx);
                 match result {
                     Ok(failures) => {
                         for name in &names {
@@ -2075,6 +2091,11 @@ impl AppView {
             return;
         };
 
+        self.begin_busy(
+            t!("object.dropping_tables", count = names.len()).to_string(),
+            cx,
+        );
+
         let runtime = self.runtime.clone();
         let close_connection = connection.clone();
         let close_database = database.clone();
@@ -2099,6 +2120,7 @@ impl AppView {
             };
 
             let _ = this.update(cx, |view, cx| {
+                view.end_busy(cx);
                 match result {
                     Ok((dropped, failures)) => {
                         for name in &dropped {

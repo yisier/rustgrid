@@ -1577,6 +1577,7 @@ impl GridView {
         // A read-only grid (a query result with no single table, a ClickHouse table, a permissive
         // key page) has no row actions at all: showing them disabled made them look like broken
         // buttons. The footer keeps 刷新 and says 只读 instead.
+        let busy = self.busy.is_some();
         let mut actions = div().flex().flex_row().items_center().gap_1();
         if self.state.editable {
             actions = actions
@@ -1587,6 +1588,7 @@ impl GridView {
                     !scalar_key
                         && !self.state.loading
                         && !self.saving
+                        && !busy
                         && self.state.visible_columns > 0,
                     t!("grid.add_row").to_string(),
                     Some(&GridInsertRow),
@@ -1599,6 +1601,7 @@ impl GridView {
                     !scalar_key
                         && !self.state.loading
                         && !self.saving
+                        && !busy
                         && self.state.visible_columns > 0
                         && self.state.selection.is_some()
                         && !self.state.rows.is_empty(),
@@ -1612,6 +1615,7 @@ impl GridView {
                     theme.danger,
                     !scalar_key
                         && !self.saving
+                        && !busy
                         && self.state.selection.is_some()
                         && !self.state.rows.is_empty(),
                     t!("grid.delete_row").to_string(),
@@ -1639,6 +1643,7 @@ impl GridView {
                         "icons/check.svg",
                         theme.icon_connection,
                         !self.saving
+                            && !busy
                             && (self
                                 .cell_editor
                                 .as_ref()
@@ -1656,6 +1661,7 @@ impl GridView {
                         "icons/cross.svg",
                         theme.danger,
                         !self.saving
+                            && !busy
                             && (self
                                 .cell_editor
                                 .as_ref()
@@ -1682,7 +1688,7 @@ impl GridView {
                 "grid-refresh",
                 "icons/refresh.svg",
                 active,
-                true,
+                !busy,
                 t!("grid.refresh").to_string(),
                 Some(&GridRefresh),
                 cx.listener(|this, _event, _window, cx| this.refresh(cx)),
@@ -1732,7 +1738,7 @@ impl GridView {
                     "grid-first",
                     "icons/first.svg",
                     active,
-                    !at_first,
+                    !at_first && !busy,
                     t!("grid.first_page").to_string(),
                     None,
                     cx.listener(|this, _event, _window, cx| this.first_page(cx)),
@@ -1741,7 +1747,7 @@ impl GridView {
                     "grid-prev",
                     "icons/prev.svg",
                     active,
-                    !at_first,
+                    !at_first && !busy,
                     t!("grid.prev_page").to_string(),
                     None,
                     cx.listener(|this, _event, _window, cx| this.prev_page(cx)),
@@ -1751,7 +1757,7 @@ impl GridView {
                     "grid-next",
                     "icons/next.svg",
                     active,
-                    !at_last,
+                    !at_last && !busy,
                     t!("grid.next_page").to_string(),
                     None,
                     cx.listener(|this, _event, _window, cx| this.next_page(cx)),
@@ -1760,7 +1766,7 @@ impl GridView {
                     "grid-last",
                     "icons/last.svg",
                     active,
-                    !at_last,
+                    !at_last && !busy,
                     t!("grid.last_page").to_string(),
                     None,
                     cx.listener(|this, _event, _window, cx| this.last_page(cx)),
@@ -2161,9 +2167,10 @@ impl GridView {
                     .gap_4()
                     .flex_none()
                     // Grids without a toolbar (SQL results) report the fetch here instead.
-                    .when(self.state.loading && !self.state.show_toolbar, |right| {
-                        right.child(self.render_loading_spinner())
-                    })
+                    .when(
+                        (self.state.loading || self.busy.is_some()) && !self.state.show_toolbar,
+                        |right| right.child(self.render_loading_spinner()),
+                    )
                     .child(info),
             )
     }

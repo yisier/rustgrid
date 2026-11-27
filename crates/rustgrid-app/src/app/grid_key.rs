@@ -121,6 +121,7 @@ impl GridView {
         let collection = add_label.is_some();
         let delete_enabled = editable
             && !self.saving
+            && self.busy.is_none()
             && collection
             && self.state.selection.is_some()
             && !self.state.rows.is_empty();
@@ -133,6 +134,7 @@ impl GridView {
             });
         let save_enabled = editable
             && !self.saving
+            && self.busy.is_none()
             && (string_dirty
                 || self.key_string_dirty
                 || self.cell_editor.is_some()
@@ -190,7 +192,7 @@ impl GridView {
                     "key-page-add",
                     "icons/add_field.svg",
                     add_label,
-                    editable && !self.saving,
+                    editable && !self.saving && self.busy.is_none(),
                     theme,
                     cx.listener(|this, _event, window, cx| this.add_insert_row(window, cx)),
                 ))
@@ -223,9 +225,10 @@ impl GridView {
                 theme,
                 cx.listener(|this, _event, _window, cx| this.refresh(cx)),
             ))
-            .when(self.state.loading || self.key_string_saving, |bar| {
-                bar.child(self.render_loading_spinner())
-            });
+            .when(
+                self.state.loading || self.key_string_saving || self.busy.is_some(),
+                |bar| bar.child(self.render_loading_spinner()),
+            );
         bar.into_any_element()
     }
 

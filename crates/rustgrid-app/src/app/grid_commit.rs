@@ -52,8 +52,8 @@ impl GridView {
     pub(super) fn save_grid(&mut self, cx: &mut Context<'_, Self>) {
         // A save already in flight still owns the staged edits and inserts: the page has not
         // reloaded yet, so writing them again would repeat its inserts (a double-click on Save
-        // inserted the same new record twice).
-        if self.saving {
+        // inserted the same new record twice). A delete owns the rows the same way.
+        if self.saving || self.busy.is_some() {
             return;
         }
         if self.cell_editor.is_some() {
@@ -61,15 +61,20 @@ impl GridView {
         }
         let inserts = self.collect_inserts();
         let updates = self.collect_updates();
-        self.flush_changes(inserts, updates, true, cx);
+        self.flush_changes(inserts, updates, true, true, cx);
     }
 
     /// Auto-commit the pending edits to existing rows (single-cell edits), without inserts.
     /// This is the save that happens when a cell editor loses focus, so it confirms itself with
-    /// the same "Changes saved" toast as the explicit Save / Ctrl+S path.
+    /// the same "Changes saved" toast as the explicit Save / Ctrl+S path. It deliberately does
+    /// not take over the grid with the large loading overlay: a one-cell autosave is quick and
+    /// an overlay would flash on every row the cursor leaves.
     pub(super) fn commit_edits(&mut self, cx: &mut Context<'_, Self>) {
+        if self.saving || self.busy.is_some() {
+            return;
+        }
         let updates = self.collect_updates();
-        self.flush_changes(Vec::new(), updates, true, cx);
+        self.flush_changes(Vec::new(), updates, true, false, cx);
     }
 
     /// Build the pending insert rows as engine-agnostic [`RowInsert`]s.
@@ -186,12 +191,14 @@ impl GridView {
         inserts: Vec<RowInsert>,
         updates: Vec<RowUpdate>,
         notify_saved: bool,
+        show_busy: bool,
         cx: &mut Context<'_, Self>,
     ) {
         if self.saving {
             return;
         }
         if inserts.is_empty() && updates.is_empty() {
+            self.busy = None;
             if notify_saved {
                 self.show_toast(ToastKind::Info, t!("grid.no_changes").to_string(), cx);
             }
@@ -203,6 +210,10 @@ impl GridView {
         let table = self.state.table.clone();
         let runtime = self.runtime.clone();
         self.saving = true;
+        if show_busy {
+            self.busy = Some(t!("grid.saving_changes").to_string());
+        }
+        cx.notify();
 
         cx.spawn(async move |this, cx| {
             let result = match runtime
@@ -223,6 +234,7 @@ impl GridView {
 
             let _ = this.update(cx, |grid, cx| {
                 grid.saving = false;
+                grid.busy = None;
                 match result {
                     Ok(()) => {
                         if notify_saved {
@@ -262,6 +274,9 @@ impl GridView {
     }
 
     pub(super) fn open_delete_confirm(&mut self, cx: &mut Context<'_, Self>) {
+        if self.busy.is_some() {
+            return;
+        }
         let Some(rows) = self.take_delete_rows(cx) else {
             return;
         };
@@ -339,6 +354,9 @@ impl GridView {
 
     /// Execute the confirmed row deletion for this grid, then reload the page.
     pub(super) fn delete_rows(&mut self, rows: Vec<usize>, cx: &mut Context<'_, Self>) {
+        if self.busy.is_some() {
+            return;
+        }
         let key_columns = self.key_columns();
         let mut keys = Vec::new();
         for row in &rows {
@@ -360,6 +378,21 @@ impl GridView {
         if keys.is_empty() {
             return;
         }
+        let delete_count = keys.len();
+
+        // A bulk delete of a remote table can take seconds (the driver issues the keys in one
+        // transaction). Take the grid over with the loading card until the reload lands: the
+        // confirmation dialog has just closed, so without this the screen looks frozen.
+        self.busy = Some(t!("grid.deleting_rows", count = delete_count).to_string());
+        self.state.loading = true;
+        self.cell_editor = None;
+        self.cell_editor_blur_subscription = None;
+        self.date_picker = None;
+        self.enum_menu = None;
+        // A page fetch already in flight must not land on top of the delete (and clear the
+        // overlay); the post-delete reload owns the rows now.
+        self.load_epoch = self.load_epoch.wrapping_add(1);
+        cx.notify();
 
         let connection = self.state.connection.clone();
         let database = self.state.database.clone();
@@ -375,16 +408,29 @@ impl GridView {
                 Err(error) => Err(Error::other(error)),
             };
 
-            let _ = this.update(cx, |grid, cx| match result {
-                Ok(()) => grid.reload_after_write(cx),
-                Err(error) => {
-                    let message = match error {
-                        Error::Query(text) => text,
-                        other => other.to_string(),
-                    };
-                    grid.state.error = Some(message.clone());
-                    grid.show_error(message, cx);
-                    cx.notify();
+            let _ = this.update(cx, |grid, cx| {
+                // Drop the write's own card first: a successful delete hands over to the page
+                // reload, which shows the ordinary "Loading..." card until the new page lands.
+                grid.busy = None;
+                match result {
+                    Ok(()) => {
+                        grid.show_toast(
+                            ToastKind::Success,
+                            t!("grid.deleted_rows", count = delete_count).to_string(),
+                            cx,
+                        );
+                        grid.reload_after_write(cx);
+                    }
+                    Err(error) => {
+                        grid.state.loading = false;
+                        let message = match error {
+                            Error::Query(text) => text,
+                            other => other.to_string(),
+                        };
+                        grid.state.error = Some(message.clone());
+                        grid.show_error(message, cx);
+                        cx.notify();
+                    }
                 }
             });
         })

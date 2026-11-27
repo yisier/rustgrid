@@ -1898,6 +1898,10 @@ struct GridView {
     /// `true` while a save is being written. The saved edits stay staged until the page reloads,
     /// so without this a second trigger (a click right after Enter) would write them again.
     saving: bool,
+    /// The message of a long write that owns the grid's loading overlay (deleting selected
+    /// records, saving a large change set). Kept apart from `state.loading` (a page fetch) so a
+    /// late fetch completion cannot take the overlay down while the write still runs.
+    busy: Option<String>,
     /// What a new row needs to know about each column (its default, whether it must be filled),
     /// from the table's schema, keyed by column name so a field layout change cannot attach one
     /// column's default or ENUM members to another. Loaded the first time a new row is opened.
@@ -2797,6 +2801,9 @@ pub struct AppView {
     backup_objects_scroll: ScrollHandle,
     delete_confirm: Option<DeleteConfirm>,
     error_dialog: Option<String>,
+    /// A long-running, confirm-free operation that blocks the content pane (dropping, emptying or
+    /// truncating tables). The message is what the card says; `None` when nothing is running.
+    busy: Option<String>,
     /// The cell clipboard every grid shares (see [`GridClipboard`]).
     grid_clipboard: Rc<RefCell<GridClipboard>>,
     /// Transient notifications queued for the next frame, which has the window needed to hand
@@ -3735,6 +3742,7 @@ impl AppView {
             },
             delete_confirm: None,
             error_dialog: None,
+            busy: None,
             grid_clipboard: Rc::new(RefCell::new(GridClipboard::default())),
             pending_toasts: Vec::new(),
             refresh_toasts: Vec::new(),

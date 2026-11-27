@@ -1547,6 +1547,7 @@ impl AppView {
                             g.state.selection.is_some(),
                             g.state.editable,
                             g.state.editable
+                                && g.busy.is_none()
                                 && g.state.selection.is_some()
                                 && !g.state.rows.is_empty(),
                             g.state.key_status.is_some(),

@@ -135,6 +135,16 @@ impl TableDesignView {
         if self.enum_dialog_open {
             root = root.child(self.render_enum_dialog(cx));
         }
+        // Saving a table's structure runs the engine's ALTER statements and then reloads the
+        // schema, which can take seconds on a large table; the disabled Save button alone looked
+        // like a dropped click.
+        if self.saving {
+            root = root.child(ui::busy_overlay(
+                format!("design-saving-{}", self.id),
+                t!("design.saving").to_string(),
+                theme,
+            ));
+        }
 
         root.on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
             this.hscroll_drag(event, cx);
