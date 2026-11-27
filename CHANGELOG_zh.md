@@ -6,6 +6,21 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.1.18] - 2026-11-27
+
+### 新增
+
+- SQL 编辑器：为 SQL Server 关键字（`DBCC`、`MERGE`、`GO`、`TRY`/`CATCH` 等）和数据类型着色。
+
+### 修复
+
+- PostgreSQL：重新支持 10 之前的服务器（9.3 起），可正常浏览和设计表，自增列以 `serial` 序列创建
+  （[#73](https://github.com/yisier/rustgrid/issues/73)）。
+- PostgreSQL：查询在编辑器或「运行 SQL 文件」中选择的模式下执行，未限定的表名可以解析。
+- 查询：关键字列表未识别的语句也会显示结果集（`DBCC`、MySQL `OPTIMIZE`、SQLite `RETURNING` 等），
+  `SET`/`DECLARE` 不再打开空结果标签。
+- Linux：所有窗口都上报应用 ID，桌面会把窗口归入 RustGrid 并显示其图标。
+
 ## [0.1.17] - 2026-11-26
 
 ### 新增

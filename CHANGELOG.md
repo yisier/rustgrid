@@ -10,6 +10,25 @@ UI labels are quoted as the app shows them, so this file quotes the English stri
 [`CHANGELOG_zh.md`](CHANGELOG_zh.md) and [`CHANGELOG_ru.md`](CHANGELOG_ru.md) quote the 简体中文 and
 Russian ones.
 
+## [0.1.18] - 2026-11-27
+
+### Added
+
+- SQL editor: SQL Server keywords (`DBCC`, `MERGE`, `GO`, `TRY`/`CATCH`, ...) and data types are
+  highlighted.
+
+### Fixed
+
+- PostgreSQL: servers before 10 (9.3 and later) connect, browse and design tables again, with
+  auto-increment columns created as `serial` sequences
+  ([#73](https://github.com/yisier/rustgrid/issues/73)).
+- PostgreSQL: a query runs in the schema selected in the editor or Run SQL File, so unqualified
+  table names resolve.
+- Query: statements the keyword list did not recognise now show their result set (`DBCC`, MySQL
+  `OPTIMIZE`, SQLite `RETURNING`, ...), and `SET`/`DECLARE` no longer open an empty result tab.
+- Linux: every window reports the application id, so the desktop groups it under RustGrid and
+  shows its icon.
+
 ## [0.1.17] - 2026-11-26
 
 ### Added
