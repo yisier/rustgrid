@@ -486,6 +486,17 @@ pub trait Connection: Send + Sync {
         Ok(None)
     }
 
+    /// Open a pinned session that resolves unqualified object names in `schema` (the query
+    /// editor's or Run SQL File's 模式 selection). Engines that have no per-session current schema
+    /// keep the plain [`Connection::script_session`] behaviour.
+    async fn script_session_for(
+        &self,
+        database: Option<&str>,
+        _schema: Option<&str>,
+    ) -> Result<Option<Box<dyn ScriptSession>>> {
+        self.script_session(database).await
+    }
+
     /// Create a database with the given engine-agnostic options. Fields the engine does not use
     /// (empty strings) are omitted, letting the engine pick its defaults.
     async fn create_database(&self, name: &str, options: &DatabaseOptions) -> Result<()>;

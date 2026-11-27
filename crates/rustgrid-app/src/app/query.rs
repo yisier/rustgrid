@@ -949,11 +949,16 @@ impl AppView {
             let started = std::time::Instant::now();
             // Pin one connection for the run (see `ScriptSessionGuard` for why it is released on
             // the runtime). A driver that cannot pin one runs each statement on the pool.
+            let session_schema = tab_schema.clone();
             let opened = {
                 let connection = connection.clone();
                 let database = database.clone();
                 runtime
-                    .spawn(async move { connection.script_session(database.as_deref()).await })
+                    .spawn(async move {
+                        connection
+                            .script_session_for(database.as_deref(), session_schema.as_deref())
+                            .await
+                    })
                     .await
             };
             let mut outcomes: Vec<(String, std::time::Duration, Result<Vec<QueryResult>, Error>)> =

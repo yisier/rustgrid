@@ -203,6 +203,11 @@ impl AppView {
             return;
         };
         let database = self.database_name(connection_index, database_index);
+        let schema = self
+            .run_sql_dialog
+            .as_ref()
+            .map(|dialog| dialog.schema.clone())
+            .filter(|schema| !schema.trim().is_empty());
 
         if let Some(dialog) = self.run_sql_dialog.as_mut() {
             dialog.running = true;
@@ -279,8 +284,13 @@ impl AppView {
             let session = {
                 let connection = connection.clone();
                 let database = database.clone();
+                let schema = schema.clone();
                 runtime
-                    .spawn(async move { connection.script_session(database.as_deref()).await })
+                    .spawn(async move {
+                        connection
+                            .script_session_for(database.as_deref(), schema.as_deref())
+                            .await
+                    })
                     .await
             };
             let mut session = ScriptSessionGuard {

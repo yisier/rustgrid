@@ -6,7 +6,7 @@ use rustgrid_core::{
     CheckDef, ColumnDef, ExcludeDef, ForeignKeyDef, IndexColumnDef, IndexDef, Result, RuleDef,
     TableOptions, TableSchema, TriggerDef, UniqueKeyDef,
 };
-use sqlx::Row;
+use sqlx::{AssertSqlSafe, Row};
 
 use crate::connection::{PostgresConnection, map_query_error};
 use crate::helpers::{qualify, quote_identifier, quote_literal};
@@ -79,18 +79,92 @@ fn identity_generation(column: &ColumnDef) -> &'static str {
     }
 }
 
-/// Render one column definition for `CREATE`/`ALTER TABLE`.
-fn column_sql(column: &ColumnDef) -> String {
+/// The statements pre-10 `ALTER TABLE ... ALTER COLUMN ... ADD GENERATED ...` cannot express:
+/// create an owned sequence and point the column's default at it, exactly what `serial` expands
+/// to. The sequence name follows PostgreSQL's own `<table>_<column>_seq` convention.
+fn legacy_serial_sql(schema_name: &str, table: &str, column: &ColumnDef) -> Vec<String> {
+    let sequence_name = format!("{table}_{}_seq", column.name);
+    let sequence = qualify(schema_name, &sequence_name);
+    let qualified = qualify(schema_name, table);
+    let column_name = quote_identifier(&column.name);
+    let mut create = format!("CREATE SEQUENCE {sequence}");
+    if let Some(start) = integer_option(&column.identity_start) {
+        create.push_str(&format!(" START WITH {start}"));
+    }
+    if let Some(increment) = integer_option(&column.identity_increment) {
+        create.push_str(&format!(" INCREMENT BY {increment}"));
+    }
+    vec![
+        create,
+        format!(
+            "ALTER TABLE {qualified} ALTER COLUMN {column_name} SET DEFAULT nextval({}::regclass)",
+            quote_literal(&sequence)
+        ),
+        format!("ALTER SEQUENCE {sequence} OWNED BY {qualified}.{column_name}"),
+    ]
+}
+
+/// Append the sequence/default statements for pre-10 nullable auto-increment columns, which
+/// cannot use `serial` (it implies `NOT NULL`).
+fn append_legacy_serial_statements(
+    statements: &mut Vec<String>,
+    schema_name: &str,
+    table: &str,
+    columns: &[ColumnDef],
+    supports_identity: bool,
+) {
+    if supports_identity {
+        return;
+    }
+    for column in columns {
+        if column.auto_increment
+            && column.nullable
+            && !is_serial_type(&column.data_type)
+            && legacy_serial_type(&column.data_type).is_some()
+        {
+            statements.extend(legacy_serial_sql(schema_name, table, column));
+        }
+    }
+}
+
+/// A `serial` type for an integer column on a server without identity columns (before
+/// PostgreSQL 10), so `CREATE TABLE`/`ADD COLUMN` still generates values with the engine's own
+/// sequence machinery.
+fn legacy_serial_type(data_type: &str) -> Option<&'static str> {
+    match data_type.trim().to_ascii_lowercase().as_str() {
+        "smallint" | "int2" | "smallserial" => Some("smallserial"),
+        "integer" | "int" | "int4" | "serial" => Some("serial"),
+        "bigint" | "int8" | "bigserial" => Some("bigserial"),
+        _ => None,
+    }
+}
+
+/// Whether the column type is already one of PostgreSQL's `serial` pseudo-types (which create
+/// their own sequence and imply `NOT NULL`).
+fn is_serial_type(data_type: &str) -> bool {
+    data_type.trim().to_ascii_lowercase().ends_with("serial")
+}
+
+/// Render one column definition for `CREATE`/`ALTER TABLE`. `supports_identity` is false before
+/// PostgreSQL 10, where an auto-increment column has to be declared `serial` instead.
+fn column_sql(column: &ColumnDef, supports_identity: bool) -> String {
     let mut sql = quote_identifier(&column.name);
-    let data_type = if column.data_type.trim().is_empty() {
+    let mut data_type = if column.data_type.trim().is_empty() {
         "text"
     } else {
         column.data_type.trim()
     };
+    if !supports_identity
+        && column.auto_increment
+        && !column.nullable
+        && let Some(serial) = legacy_serial_type(data_type)
+    {
+        data_type = serial;
+    }
     sql.push(' ');
     sql.push_str(data_type);
 
-    let serial = data_type.to_ascii_lowercase().ends_with("serial");
+    let serial = is_serial_type(data_type);
     let length = column.length.trim();
     let decimals = column.decimals.trim();
     if !length.is_empty() && length != "0" {
@@ -107,9 +181,10 @@ fn column_sql(column: &ColumnDef) -> String {
         sql.push_str(" NOT NULL");
     }
     // An identity cannot carry a `DEFAULT`, and `serial` already implies its sequence, so an
-    // auto-increment column never writes one.
+    // auto-increment column never writes one. Before PostgreSQL 10 the caller appends a sequence
+    // and default for a *nullable* auto-increment column, which `serial` would force NOT NULL.
     if column.auto_increment {
-        if !serial {
+        if supports_identity && !serial {
             sql.push(' ');
             sql.push_str(&identity_clause(column));
         }
@@ -267,32 +342,52 @@ pub(crate) async fn table_schema(
 ) -> Result<TableSchema> {
     let (schema_name, bare) = connection.resolve_object(database, table).await?;
     let pool = connection.pool_for(database).await?;
+    let features = connection.catalog_features();
 
-    let column_rows = sqlx::query(
+    // `attidentity` and `pg_sequence` arrived in PostgreSQL 10. Older servers expose serial
+    // columns only through their `nextval(...)` default, so the identity columns read as empty
+    // and the sequence start/increment stay unset (the server's own defaults apply).
+    let identity = if features.identity {
+        "a.attidentity::text"
+    } else {
+        "''::text"
+    };
+    let sequence_columns = if features.sequences {
+        "seq.seqstart, seq.seqincrement"
+    } else {
+        "NULL::bigint AS seqstart, NULL::bigint AS seqincrement"
+    };
+    let sequence_join = if features.sequences {
+        "LEFT JOIN LATERAL ( \
+             SELECT s.seqstart, s.seqincrement \
+             FROM pg_sequence s \
+             WHERE s.seqrelid = to_regclass( \
+                 pg_get_serial_sequence(format('%I.%I', n.nspname, c.relname), a.attname)) \
+         ) seq ON true"
+    } else {
+        ""
+    };
+
+    let column_rows = sqlx::query(AssertSqlSafe(format!(
         "SELECT a.attname, \
                 format_type(a.atttypid, a.atttypmod) AS data_type, \
                 NOT a.attnotnull AS nullable, \
                 pg_get_expr(d.adbin, d.adrelid) AS default_expr, \
                 col_description(a.attrelid, a.attnum) AS comment, \
-                a.attidentity::text, \
+                {identity}, \
                 EXISTS (SELECT 1 FROM pg_index i \
                         WHERE i.indrelid = a.attrelid AND i.indisprimary \
                           AND a.attnum = ANY(i.indkey)) AS primary_key, \
-                seq.seqstart, seq.seqincrement \
+                {sequence_columns} \
          FROM pg_attribute a \
          JOIN pg_class c ON c.oid = a.attrelid \
          JOIN pg_namespace n ON n.oid = c.relnamespace \
          LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
-         LEFT JOIN LATERAL ( \
-             SELECT s.seqstart, s.seqincrement \
-             FROM pg_sequence s \
-             WHERE s.seqrelid = to_regclass( \
-                 pg_get_serial_sequence(format('%I.%I', n.nspname, c.relname), a.attname)) \
-         ) seq ON true \
+         {sequence_join} \
          WHERE n.nspname = $1 AND c.relname = $2 \
            AND a.attnum > 0 AND NOT a.attisdropped \
-         ORDER BY a.attnum",
-    )
+         ORDER BY a.attnum"
+    )))
     .bind(&schema_name)
     .bind(&bare)
     .fetch_all(&pool)
@@ -369,8 +464,8 @@ pub(crate) async fn table_schema(
          JOIN pg_class t ON t.oid = ix.indrelid \
          JOIN pg_namespace n ON n.oid = t.relnamespace \
          LEFT JOIN pg_am am ON am.oid = i.relam \
-         CROSS JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, ord) \
-         JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum \
+         CROSS JOIN generate_series(1, ix.indnatts) AS k(ord) \
+         JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ix.indkey[k.ord - 1] \
          WHERE n.nspname = $1 AND t.relname = $2 \
            AND NOT EXISTS (SELECT 1 FROM pg_constraint u \
                            WHERE u.conindid = ix.indexrelid AND u.contype = 'u') \
@@ -412,12 +507,12 @@ pub(crate) async fn table_schema(
     let fk_rows = sqlx::query(
         "SELECT con.conname, \
                 (SELECT array_agg(a.attname ORDER BY k.ord) \
-                 FROM unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) \
-                 JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum) AS columns, \
+                 FROM generate_series(1, array_length(con.conkey, 1)) AS k(ord) \
+                 JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = con.conkey[k.ord]) AS columns, \
                 rn.nspname, rc.relname, \
                 (SELECT array_agg(a.attname ORDER BY k.ord) \
-                 FROM unnest(con.confkey) WITH ORDINALITY AS k(attnum, ord) \
-                 JOIN pg_attribute a ON a.attrelid = con.confrelid AND a.attnum = k.attnum) AS ref_columns, \
+                 FROM generate_series(1, array_length(con.confkey, 1)) AS k(ord) \
+                 JOIN pg_attribute a ON a.attrelid = con.confrelid AND a.attnum = con.confkey[k.ord]) AS ref_columns, \
                 con.confupdtype::text, con.confdeltype::text \
          FROM pg_constraint con \
          JOIN pg_class c ON c.oid = con.conrelid \
@@ -455,8 +550,8 @@ pub(crate) async fn table_schema(
     let unique_rows = sqlx::query(
         "SELECT con.conname, \
                 (SELECT array_agg(a.attname ORDER BY k.ord) \
-                 FROM unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) \
-                 JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum) AS columns \
+                 FROM generate_series(1, array_length(con.conkey, 1)) AS k(ord) \
+                 JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = con.conkey[k.ord]) AS columns \
          FROM pg_constraint con \
          JOIN pg_class c ON c.oid = con.conrelid \
          JOIN pg_namespace n ON n.oid = c.relnamespace \
@@ -753,11 +848,16 @@ pub(crate) fn table_schema_sql(
     table: &str,
     original: Option<&TableSchema>,
     modified: &TableSchema,
+    supports_identity: bool,
 ) -> String {
     let qualified = qualify(schema_name, table);
 
     let Some(original) = original else {
-        let mut definitions: Vec<String> = modified.columns.iter().map(column_sql).collect();
+        let mut definitions: Vec<String> = modified
+            .columns
+            .iter()
+            .map(|column| column_sql(column, supports_identity))
+            .collect();
         let primary = primary_columns(modified);
         if !primary.is_empty() {
             definitions.push(format!(
@@ -791,6 +891,13 @@ pub(crate) fn table_schema_sql(
             "CREATE TABLE {qualified} (\n    {}\n)",
             definitions.join(",\n    ")
         )];
+        append_legacy_serial_statements(
+            &mut statements,
+            schema_name,
+            table,
+            &modified.columns,
+            supports_identity,
+        );
         for index in modified.indexes.iter().filter(|index| !index.primary) {
             statements.push(index_sql(schema_name, table, index));
             if let Some(comment) = index_comment_sql(schema_name, index) {
@@ -980,10 +1087,19 @@ pub(crate) fn table_schema_sql(
 
     for column in &modified.columns {
         match original_columns.get(column.name.as_str()) {
-            None => statements.push(format!(
-                "ALTER TABLE {qualified} ADD COLUMN {}",
-                column_sql(column)
-            )),
+            None => {
+                statements.push(format!(
+                    "ALTER TABLE {qualified} ADD COLUMN {}",
+                    column_sql(column, supports_identity)
+                ));
+                append_legacy_serial_statements(
+                    &mut statements,
+                    schema_name,
+                    table,
+                    std::slice::from_ref(column),
+                    supports_identity,
+                );
+            }
             Some(previous) => {
                 let type_changed = previous.data_type != column.data_type
                     || previous.length != column.length
@@ -1016,11 +1132,23 @@ pub(crate) fn table_schema_sql(
                             quote_identifier(&column.name)
                         ));
                     }
-                    statements.push(format!(
-                        "ALTER TABLE {qualified} ALTER COLUMN {} ADD {}",
-                        quote_identifier(&column.name),
-                        identity_clause(column)
-                    ));
+                    if supports_identity {
+                        statements.push(format!(
+                            "ALTER TABLE {qualified} ALTER COLUMN {} ADD {}",
+                            quote_identifier(&column.name),
+                            identity_clause(column)
+                        ));
+                    } else if !is_serial_type(&column.data_type)
+                        && legacy_serial_type(&column.data_type).is_some()
+                    {
+                        statements.extend(legacy_serial_sql(schema_name, table, column));
+                    } else {
+                        statements.push(format!(
+                            "ALTER TABLE {qualified} ALTER COLUMN {} ADD {}",
+                            quote_identifier(&column.name),
+                            identity_clause(column)
+                        ));
+                    }
                 } else if previous.auto_increment && !column.auto_increment {
                     // A serial column keeps its `nextval(...)` default outside the model, so
                     // dropping the identity is not enough to stop it generating values.
@@ -1314,7 +1442,7 @@ mod tests {
             ..Default::default()
         };
         let mapped = map_schema(&source, DriverDialect::Mysql, DriverDialect::Postgres);
-        let sql = table_schema_sql("public", "users", None, &mapped);
+        let sql = table_schema_sql("public", "users", None, &mapped, true);
         assert!(sql.contains("\"id\" bigint"), "{sql}");
         assert!(sql.contains("\"email\" varchar(255)"), "{sql}");
         assert!(sql.contains("\"payload\" bytea"), "{sql}");
@@ -1344,7 +1472,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let sql = table_schema_sql("public", "t", None, &schema);
+        let sql = table_schema_sql("public", "t", None, &schema, true);
         assert!(
             sql.contains(
                 "CREATE UNIQUE INDEX \"idx_id\" ON \"public\".\"t\" USING \"hash\" (\"id\" DESC)"
@@ -1401,7 +1529,7 @@ mod tests {
                 .to_string(),
         });
 
-        let sql = table_schema_sql("public", "t", None, &schema);
+        let sql = table_schema_sql("public", "t", None, &schema, true);
         assert!(
             sql.contains("CONSTRAINT \"ex_room\" EXCLUDE USING gist (room WITH =)"),
             "{sql}"
@@ -1422,7 +1550,7 @@ mod tests {
         modified.excludes[0].definition =
             "EXCLUDE USING gist (room WITH =, during WITH &&)".to_string();
         modified.rules.clear();
-        let sql = table_schema_sql("public", "t", Some(&original), &modified);
+        let sql = table_schema_sql("public", "t", Some(&original), &modified, true);
         assert!(
             sql.contains("ALTER TABLE \"public\".\"t\" DROP CONSTRAINT \"ex_room\""),
             "{sql}"
@@ -1474,7 +1602,7 @@ mod tests {
             expression: "\"id\" > 0".to_string(),
         });
 
-        let sql = table_schema_sql("public", "t", None, &schema);
+        let sql = table_schema_sql("public", "t", None, &schema, true);
         assert!(
             sql.contains("CONSTRAINT \"uq_code\" UNIQUE (\"code\")"),
             "{sql}"
@@ -1487,7 +1615,7 @@ mod tests {
         let mut modified = schema.clone();
         modified.unique_keys[0].columns.push("id".to_string());
         modified.checks[0].expression = "\"id\" >= 0".to_string();
-        let sql = table_schema_sql("public", "t", Some(&schema), &modified);
+        let sql = table_schema_sql("public", "t", Some(&schema), &modified, true);
         assert!(
             sql.contains("ALTER TABLE \"public\".\"t\" DROP CONSTRAINT \"uq_code\""),
             "{sql}"
@@ -1532,7 +1660,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let sql = table_schema_sql("public", "t", None, &schema);
+        let sql = table_schema_sql("public", "t", None, &schema, true);
         assert!(sql.starts_with("CREATE TABLE \"public\".\"t\""));
         assert!(sql.contains("\"id\" integer NOT NULL GENERATED BY DEFAULT AS IDENTITY"));
         assert!(sql.contains("PRIMARY KEY (\"id\")"));
@@ -1553,7 +1681,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let sql = table_schema_sql("public", "t", None, &schema);
+        let sql = table_schema_sql("public", "t", None, &schema, true);
         assert!(sql.contains(
             "\"id\" bigint NOT NULL GENERATED ALWAYS AS IDENTITY (START WITH 1000 INCREMENT BY 2)"
         ));
@@ -1581,10 +1709,112 @@ mod tests {
             }],
             ..Default::default()
         };
-        let alter = table_schema_sql("public", "t", Some(&original), &modified);
+        let alter = table_schema_sql("public", "t", Some(&original), &modified, true);
         assert!(alter.contains("ALTER COLUMN \"id\" SET GENERATED ALWAYS"));
         assert!(alter.contains("ALTER COLUMN \"id\" SET INCREMENT BY 2"));
         assert!(alter.contains("ALTER COLUMN \"id\" SET START WITH 1000"));
         assert!(alter.contains("ALTER COLUMN \"id\" RESTART WITH 1000"));
+    }
+
+    #[test]
+    fn builds_serial_columns_before_postgresql_10() {
+        let schema = TableSchema {
+            columns: vec![
+                ColumnDef {
+                    name: "id".to_string(),
+                    data_type: "bigint".to_string(),
+                    nullable: false,
+                    primary_key: true,
+                    auto_increment: true,
+                    ..Default::default()
+                },
+                ColumnDef {
+                    name: "seq".to_string(),
+                    data_type: "integer".to_string(),
+                    nullable: true,
+                    auto_increment: true,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let sql = table_schema_sql("public", "t", None, &schema, false);
+        assert!(sql.contains("\"id\" bigserial NOT NULL"), "{sql}");
+        // `serial` implies NOT NULL, so a nullable auto-increment column gets an explicit
+        // sequence/default instead.
+        assert!(sql.contains("\"seq\" integer,"), "{sql}");
+        assert!(
+            sql.contains("CREATE SEQUENCE \"public\".\"t_seq_seq\""),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(
+                "ALTER TABLE \"public\".\"t\" ALTER COLUMN \"seq\" SET DEFAULT nextval('\"public\".\"t_seq_seq\"'::regclass)"
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(
+                "ALTER SEQUENCE \"public\".\"t_seq_seq\" OWNED BY \"public\".\"t\".\"seq\""
+            ),
+            "{sql}"
+        );
+        assert!(!sql.contains("GENERATED"), "{sql}");
+
+        // A modern server keeps identity columns.
+        let modern = table_schema_sql("public", "t", None, &schema, true);
+        assert!(modern.contains("\"id\" bigint NOT NULL GENERATED BY DEFAULT AS IDENTITY"));
+        assert!(!modern.contains("CREATE SEQUENCE"), "{modern}");
+    }
+
+    #[test]
+    fn alters_auto_increment_before_postgresql_10() {
+        let original = TableSchema {
+            columns: vec![
+                ColumnDef {
+                    name: "id".to_string(),
+                    data_type: "bigint".to_string(),
+                    nullable: false,
+                    primary_key: true,
+                    auto_increment: true,
+                    ..Default::default()
+                },
+                ColumnDef {
+                    name: "amount".to_string(),
+                    data_type: "bigint".to_string(),
+                    nullable: true,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let mut modified = original.clone();
+        modified.columns.push(ColumnDef {
+            name: "seq".to_string(),
+            data_type: "integer".to_string(),
+            nullable: true,
+            auto_increment: true,
+            ..Default::default()
+        });
+        modified.columns[1].auto_increment = true;
+
+        let sql = table_schema_sql("public", "t", Some(&original), &modified, false);
+        assert!(
+            sql.contains("ALTER TABLE \"public\".\"t\" ADD COLUMN \"seq\" integer"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("CREATE SEQUENCE \"public\".\"t_seq_seq\""),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("CREATE SEQUENCE \"public\".\"t_amount_seq\""),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("ALTER COLUMN \"amount\" SET DEFAULT nextval"),
+            "{sql}"
+        );
+        assert!(!sql.contains("GENERATED"), "{sql}");
     }
 }

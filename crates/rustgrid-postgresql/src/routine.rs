@@ -6,7 +6,7 @@
 //! the backup tree and the Functions tab agree.
 
 use rustgrid_core::{Error, Result, RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind};
-use sqlx::Row;
+use sqlx::{AssertSqlSafe, Row};
 
 use crate::connection::{PostgresConnection, map_query_error};
 use crate::helpers::{qualify, split_qualified};
@@ -53,18 +53,25 @@ async fn routine_rows(
     database: &str,
 ) -> Result<Vec<(String, RoutineKind, String, String, String, String, String)>> {
     let pool = connection.pool_for(database).await?;
-    let rows = sqlx::query(
-        "SELECT n.nspname, p.proname, p.prokind::text, \
+    // `pg_proc.prokind` arrived in PostgreSQL 11. Before that only functions exist, split from
+    // aggregates and window functions by their own flags.
+    let (kind_column, kind_filter) = if connection.catalog_features().procedure_kind {
+        ("p.prokind::text", "p.prokind IN ('f','p')")
+    } else {
+        ("'f'::text", "NOT p.proisagg AND NOT p.proiswindow")
+    };
+    let rows = sqlx::query(AssertSqlSafe(format!(
+        "SELECT n.nspname, p.proname, {kind_column}, \
                 pg_get_function_identity_arguments(p.oid), \
                 pg_get_function_result(p.oid), \
                 COALESCE(obj_description(p.oid, 'pg_proc'), ''), \
                 p.provolatile::text, p.prosecdef \
          FROM pg_proc p \
          JOIN pg_namespace n ON n.oid = p.pronamespace \
-         WHERE p.prokind IN ('f','p') \
+         WHERE {kind_filter} \
            AND n.nspname NOT LIKE 'pg\\_%' AND n.nspname <> 'information_schema' \
-         ORDER BY n.nspname, p.proname",
-    )
+         ORDER BY n.nspname, p.proname"
+    )))
     .fetch_all(&pool)
     .await
     .map_err(map_query_error)?;

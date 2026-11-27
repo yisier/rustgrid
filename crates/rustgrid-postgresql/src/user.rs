@@ -253,17 +253,27 @@ fn account_from_row(row: &sqlx::postgres::PgRow) -> UserAccount {
 }
 
 /// `rolvaliduntil` is cast to text so it can be shown and re-rendered as a `VALID UNTIL` literal.
-const ACCOUNT_COLUMNS: &str = "rolname, rolsuper, rolcreaterole, rolcreatedb, rolcanlogin, \
-     rolreplication, rolbypassrls, rolconnlimit, rolvaliduntil::text AS valid_until, \
-     rolpassword IS NOT NULL AS has_password";
+/// `rolbypassrls` arrived in PostgreSQL 9.5; older servers report it as a constant.
+fn account_columns(connection: &PostgresConnection) -> &'static str {
+    if connection.catalog_features().bypass_rls {
+        "rolname, rolsuper, rolcreaterole, rolcreatedb, rolcanlogin, \
+         rolreplication, rolbypassrls, rolconnlimit, rolvaliduntil::text AS valid_until, \
+         rolpassword IS NOT NULL AS has_password"
+    } else {
+        "rolname, rolsuper, rolcreaterole, rolcreatedb, rolcanlogin, \
+         rolreplication, false AS rolbypassrls, rolconnlimit, \
+         rolvaliduntil::text AS valid_until, rolpassword IS NOT NULL AS has_password"
+    }
+}
 
 pub(crate) async fn list_users(connection: &PostgresConnection) -> Result<Vec<UserAccount>> {
     let pool = connection
         .pool_for(connection.default_database_name())
         .await?;
     let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "SELECT {ACCOUNT_COLUMNS} FROM pg_roles \
-         WHERE rolname NOT LIKE 'pg\\_%' ORDER BY rolname"
+        "SELECT {} FROM pg_roles \
+         WHERE rolname NOT LIKE 'pg\\_%' ORDER BY rolname",
+        account_columns(connection)
     )))
     .fetch_all(&pool)
     .await
@@ -279,7 +289,8 @@ pub(crate) async fn user_details(
         .pool_for(connection.default_database_name())
         .await?;
     let row = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "SELECT {ACCOUNT_COLUMNS} FROM pg_roles WHERE rolname = $1"
+        "SELECT {} FROM pg_roles WHERE rolname = $1",
+        account_columns(connection)
     )))
     .bind(user)
     .fetch_optional(&pool)
@@ -403,7 +414,7 @@ async fn object_grants(
 /// untouched `PUBLIC` rule is never revoked on save.
 async fn default_privileges(pool: &sqlx::PgPool, user: &str) -> Result<Vec<DefaultPrivilege>> {
     let rows = sqlx::query(
-        "SELECT COALESCE(n.nspname, ''), d.defaclobjtype::text, a.grantee::regrole::text, \
+        "SELECT COALESCE(n.nspname, ''), d.defaclobjtype::text, pg_get_userbyid(a.grantee), \
                 a.privilege_type \
          FROM pg_default_acl d \
          LEFT JOIN pg_namespace n ON n.oid = d.defaclnamespace \

@@ -338,16 +338,22 @@ async fn identity_columns(
     table: &str,
 ) -> Result<Vec<(String, bool)>> {
     let pool = connection.pool_for(database).await?;
-    let rows = sqlx::query(
-        "SELECT a.attname, a.attidentity <> '' AS is_identity, \
+    // `attidentity` arrived in PostgreSQL 10; older servers only have serial defaults.
+    let identity = if connection.catalog_features().identity {
+        "a.attidentity <> ''"
+    } else {
+        "false"
+    };
+    let rows = sqlx::query(AssertSqlSafe(format!(
+        "SELECT a.attname, {identity} AS is_identity, \
                 pg_get_expr(d.adbin, d.adrelid) LIKE 'nextval(%' AS is_serial \
          FROM pg_attribute a \
          JOIN pg_class c ON c.oid = a.attrelid \
          JOIN pg_namespace n ON n.oid = c.relnamespace \
          LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
          WHERE n.nspname = $1 AND c.relname = $2 \
-           AND a.attnum > 0 AND NOT a.attisdropped",
-    )
+           AND a.attnum > 0 AND NOT a.attisdropped"
+    )))
     .bind(schema)
     .bind(table)
     .fetch_all(&pool)

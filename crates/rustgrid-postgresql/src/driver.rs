@@ -9,6 +9,7 @@ use rustgrid_core::{
     TableDesignerSpec, TlsMode, TriggerDefinition, UserEditorSpec,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
+use sqlx::{PgPool, Row};
 
 use crate::connection::PostgresConnection;
 
@@ -306,14 +307,36 @@ impl Driver for PostgresDriver {
             .await
             .map_err(map_connect_error)?;
 
+        // The catalog changed across releases (`attidentity` in 10, `prokind` in 11, `pg_sequence`
+        // in 10, ...), so the driver reads the server's numeric version once and picks queries
+        // from it. Every supported PostgreSQL reports `server_version_num`, so a failure here is
+        // a connection error rather than a guessed catalog shape.
+        let server_version_num = server_version_num(&default_pool).await?;
+
         Ok(Box::new(PostgresConnection::new(
             options,
             default_database,
             default_pool,
             pool_options,
+            server_version_num,
             tunnel,
         )))
     }
+}
+
+/// The server's `server_version_num` (e.g. 90325 for 9.3.25).
+async fn server_version_num(pool: &PgPool) -> Result<i32> {
+    let row = sqlx::query("SHOW server_version_num")
+        .fetch_one(pool)
+        .await
+        .map_err(map_connect_error)?;
+    let value: String = row
+        .try_get(0)
+        .map_err(|error| Error::Connection(error.to_string()))?;
+    value
+        .trim()
+        .parse()
+        .map_err(|_| Error::Connection(format!("unexpected server_version_num: {value}")))
 }
 
 fn map_connect_error(error: sqlx::Error) -> Error {

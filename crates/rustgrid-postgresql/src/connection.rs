@@ -23,6 +23,39 @@ use crate::helpers::{
 /// The largest number of lazily-created (non-default) per-database pools kept alive at once.
 const MAX_SHARDED_POOLS: usize = 16;
 
+/// The catalog columns that appeared in a given PostgreSQL release. The driver supports servers
+/// back to 9.3, where `attidentity`, `prokind`, `pg_sequence` and `rolbypassrls` do not exist yet,
+/// so every catalog query is chosen from these flags (and `regrole` / `WITH ORDINALITY` are
+/// avoided entirely).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CatalogFeatures {
+    /// `pg_attribute.attidentity` / `information_schema.columns.is_identity` (PostgreSQL 10).
+    pub identity: bool,
+    /// `pg_attribute.attgenerated` (PostgreSQL 12).
+    pub generated_columns: bool,
+    /// `pg_sequence` (PostgreSQL 10).
+    pub sequences: bool,
+    /// `pg_proc.prokind` (PostgreSQL 11).
+    pub procedure_kind: bool,
+    /// `pg_roles.rolbypassrls` (PostgreSQL 9.5).
+    pub bypass_rls: bool,
+    /// `pg_collation.collprovider` (PostgreSQL 10).
+    pub collation_provider: bool,
+}
+
+impl CatalogFeatures {
+    pub(crate) fn from_version_num(version_num: i32) -> Self {
+        Self {
+            identity: version_num >= 100_000,
+            generated_columns: version_num >= 120_000,
+            sequences: version_num >= 100_000,
+            procedure_kind: version_num >= 110_000,
+            bypass_rls: version_num >= 90_500,
+            collation_provider: version_num >= 100_000,
+        }
+    }
+}
+
 /// A PostgreSQL connection. PostgreSQL is connection-scoped to one database, so this type keeps a
 /// lazily-populated pool per database and routes every operation to the right one.
 pub struct PostgresConnection {
@@ -36,6 +69,8 @@ pub struct PostgresConnection {
     pool_options: PgPoolOptions,
     /// Cache of `current_schema()` per database, used to resolve unqualified names.
     schemas: Arc<tokio::sync::Mutex<HashMap<String, String>>>,
+    /// The server's catalog shape, derived once from its `server_version_num`.
+    features: CatalogFeatures,
     /// The tunnel forwarding this connection, kept alive for as long as the connection is.
     _tunnel: Option<rustgrid_tunnel::Tunnel>,
 }
@@ -46,6 +81,7 @@ impl PostgresConnection {
         default_database: String,
         default_pool: PgPool,
         pool_options: PgPoolOptions,
+        server_version_num: i32,
         tunnel: Option<rustgrid_tunnel::Tunnel>,
     ) -> Self {
         let mut pools = HashMap::new();
@@ -56,8 +92,14 @@ impl PostgresConnection {
             pools: Arc::new(tokio::sync::Mutex::new(pools)),
             pool_options,
             schemas: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            features: CatalogFeatures::from_version_num(server_version_num),
             _tunnel: tunnel,
         }
+    }
+
+    /// The catalog shape every module uses to pick a query the server understands.
+    pub(crate) fn catalog_features(&self) -> CatalogFeatures {
+        self.features
     }
 
     /// The pool for `database` (or the default database when `None`/empty), created on demand.
@@ -271,6 +313,24 @@ impl Connection for PostgresConnection {
         Ok(Some(Box::new(PostgresScriptSession { connection })))
     }
 
+    /// PostgreSQL resolves unqualified names through `search_path`, which is session state. Point
+    /// the pinned session at the query's selected schema so `SELECT * FROM orders` finds the table
+    /// the schema dropdown shows, just as Navicat does.
+    async fn script_session_for(
+        &self,
+        database: Option<&str>,
+        schema: Option<&str>,
+    ) -> Result<Option<Box<dyn ScriptSession>>> {
+        let Some(mut session) = self.script_session(database).await? else {
+            return Ok(None);
+        };
+        if let Some(schema) = schema.map(str::trim).filter(|schema| !schema.is_empty()) {
+            let sql = format!("SET search_path TO {}", quote_identifier(schema));
+            session.execute(&sql).await?;
+        }
+        Ok(Some(session))
+    }
+
     async fn list_databases(&self) -> Result<Vec<DatabaseInfo>> {
         let pool = self.pool(None).await?;
         let rows = sqlx::query(
@@ -355,48 +415,45 @@ impl Connection for PostgresConnection {
     async fn columns(&self, database: &str, table: &str) -> Result<Vec<ColumnInfo>> {
         let (schema, table) = self.resolve_object(database, table).await?;
         let pool = self.pool(Some(database)).await?;
-        let mut with_generated = true;
-        let rows = loop {
-            let generated = if with_generated {
-                "a.attgenerated <> '' AS generated"
-            } else {
-                // PostgreSQL before 12 has no `attgenerated` column (and no generated columns
-                // either), so the flag is a constant there.
-                "false AS generated"
-            };
-            let sql = format!(
-                "SELECT a.attname, \
-                        format_type(a.atttypid, a.atttypmod) AS data_type, \
-                        NOT a.attnotnull AS nullable, \
-                        col_description(a.attrelid, a.attnum) AS comment, \
-                        EXISTS (SELECT 1 FROM pg_index i \
-                                WHERE i.indrelid = a.attrelid AND i.indisprimary \
-                                  AND a.attnum = ANY(i.indkey)) AS primary_key, \
-                        (a.attidentity <> '' \
-                         OR COALESCE(pg_get_expr(d.adbin, d.adrelid) LIKE 'nextval(%', false)) \
-                            AS auto_increment, \
-                        {generated} \
-                 FROM pg_attribute a \
-                 JOIN pg_class c ON c.oid = a.attrelid \
-                 JOIN pg_namespace n ON n.oid = c.relnamespace \
-                 LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
-                 WHERE n.nspname = $1 AND c.relname = $2 \
-                   AND a.attnum > 0 AND NOT a.attisdropped \
-                 ORDER BY a.attnum"
-            );
-            match sqlx::query(AssertSqlSafe(sql))
-                .bind(&schema)
-                .bind(&table)
-                .fetch_all(&pool)
-                .await
-            {
-                Ok(rows) => break rows,
-                Err(error) if with_generated && is_undefined_column(&error) => {
-                    with_generated = false;
-                }
-                Err(error) => return Err(map_query_error(error)),
-            }
+        let features = self.catalog_features();
+        // `attidentity` arrived in PostgreSQL 10 and `attgenerated` in 12; older servers report
+        // the flags as constants instead (a serial default still marks auto-increment).
+        let identity = if features.identity {
+            "a.attidentity <> ''"
+        } else {
+            "false"
         };
+        let generated = if features.generated_columns {
+            "a.attgenerated <> ''"
+        } else {
+            "false"
+        };
+        let sql = format!(
+            "SELECT a.attname, \
+                    format_type(a.atttypid, a.atttypmod) AS data_type, \
+                    NOT a.attnotnull AS nullable, \
+                    col_description(a.attrelid, a.attnum) AS comment, \
+                    EXISTS (SELECT 1 FROM pg_index i \
+                            WHERE i.indrelid = a.attrelid AND i.indisprimary \
+                              AND a.attnum = ANY(i.indkey)) AS primary_key, \
+                    ({identity} \
+                     OR COALESCE(pg_get_expr(d.adbin, d.adrelid) LIKE 'nextval(%', false)) \
+                        AS auto_increment, \
+                    {generated} AS generated \
+             FROM pg_attribute a \
+             JOIN pg_class c ON c.oid = a.attrelid \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
+             WHERE n.nspname = $1 AND c.relname = $2 \
+               AND a.attnum > 0 AND NOT a.attisdropped \
+             ORDER BY a.attnum"
+        );
+        let rows = sqlx::query(AssertSqlSafe(sql))
+            .bind(&schema)
+            .bind(&table)
+            .fetch_all(&pool)
+            .await
+            .map_err(map_query_error)?;
 
         let mut columns = Vec::with_capacity(rows.len());
         for row in &rows {
@@ -887,12 +944,18 @@ impl Connection for PostgresConnection {
 
     async fn collations(&self) -> Result<Vec<String>> {
         // `LC_COLLATE` wants a libc locale string (`collcollate`), not `collname`. ICU entries are
-        // excluded because their locale names are not valid `LC_COLLATE` values.
+        // excluded because their locale names are not valid `LC_COLLATE` values. PostgreSQL 10
+        // added `collprovider`; older servers mark ICU entries with `collencoding = -1`.
         let pool = self.pool(None).await?;
-        let rows = sqlx::query(
+        let provider = if self.catalog_features().collation_provider {
+            "AND collprovider = 'c'"
+        } else {
+            "AND collencoding <> -1"
+        };
+        let rows = sqlx::query(AssertSqlSafe(format!(
             "SELECT DISTINCT collcollate FROM pg_collation \
-             WHERE collcollate <> '' AND collprovider = 'c' ORDER BY 1",
-        )
+             WHERE collcollate <> '' {provider} ORDER BY 1"
+        )))
         .fetch_all(&pool)
         .await
         .map_err(map_query_error)?;
@@ -1003,7 +1066,13 @@ impl Connection for PostgresConnection {
             .map(|(schema, bare)| (schema.to_string(), bare.to_string()))
             .unwrap_or_else(|| ("public".to_string(), table.to_string()));
         let _ = database;
-        crate::schema::table_schema_sql(&schema, &bare, original, modified)
+        crate::schema::table_schema_sql(
+            &schema,
+            &bare,
+            original,
+            modified,
+            self.catalog_features().identity,
+        )
     }
 
     fn table_schema_trigger_sql(
@@ -1172,6 +1241,10 @@ impl PostgresConnection {
         schema: &str,
         table: &str,
     ) -> Result<Vec<String>> {
+        // `information_schema.columns.is_identity` arrived with identity columns in PostgreSQL 10.
+        if !self.catalog_features().identity {
+            return Ok(Vec::new());
+        }
         let pool = self.pool(Some(database)).await?;
         let rows = sqlx::query(
             "SELECT column_name FROM information_schema.columns \
@@ -1351,15 +1424,6 @@ pub(crate) fn map_query_error(error: sqlx::Error) -> Error {
     Error::Query(error.to_string())
 }
 
-/// Whether the server rejected a statement because it names a column that does not exist
-/// (`42703 undefined_column`), which is how a pre-12 server answers `attgenerated`.
-fn is_undefined_column(error: &sqlx::Error) -> bool {
-    matches!(
-        error,
-        sqlx::Error::Database(database_error) if database_error.code().as_deref() == Some("42703")
-    )
-}
-
 /// The PostgreSQL types offered by the table designer's type list.
 const POSTGRES_COLUMN_TYPES: [&str; 34] = [
     "smallint",
@@ -1397,3 +1461,40 @@ const POSTGRES_COLUMN_TYPES: [&str; 34] = [
     "tsquery",
     "point",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::CatalogFeatures;
+
+    #[test]
+    fn catalog_features_follow_the_server_version() {
+        let pg93 = CatalogFeatures::from_version_num(90_325);
+        assert!(!pg93.identity);
+        assert!(!pg93.generated_columns);
+        assert!(!pg93.sequences);
+        assert!(!pg93.procedure_kind);
+        assert!(!pg93.bypass_rls);
+        assert!(!pg93.collation_provider);
+
+        // 9.5 added `rolbypassrls`.
+        let pg94 = CatalogFeatures::from_version_num(90_426);
+        assert!(!pg94.bypass_rls);
+        let pg95 = CatalogFeatures::from_version_num(90_500);
+        assert!(pg95.bypass_rls);
+
+        // 10 added identity columns, `pg_sequence` and `collprovider`.
+        let pg10 = CatalogFeatures::from_version_num(100_000);
+        assert!(pg10.identity);
+        assert!(pg10.sequences);
+        assert!(pg10.collation_provider);
+        assert!(!pg10.generated_columns);
+        assert!(!pg10.procedure_kind);
+
+        // 11 added `prokind`, 12 `attgenerated`.
+        let pg11 = CatalogFeatures::from_version_num(110_000);
+        assert!(pg11.procedure_kind);
+        assert!(!pg11.generated_columns);
+        let pg12 = CatalogFeatures::from_version_num(120_000);
+        assert!(pg12.generated_columns);
+    }
+}

@@ -573,3 +573,71 @@ async fn script_session_returns_result_sets() {
     drop(session);
     connection.close().await.unwrap();
 }
+
+/// The query editor's 模式 dropdown must point the pinned session's `search_path` at that schema,
+/// so `SELECT * FROM orders` finds the table the dropdown shows.
+#[tokio::test]
+#[ignore = "requires a live PostgreSQL (RUSTGRID_PG_*)"]
+async fn script_session_uses_the_selected_schema() {
+    let config = config();
+    let database = config
+        .database
+        .clone()
+        .unwrap_or_else(|| "postgres".to_string());
+    let connection = PostgresDriver::new()
+        .connect(&config)
+        .await
+        .expect("connect");
+
+    let schema = "rustgrid_live_search_schema";
+    let table = "rustgrid_live_search_items";
+    let _ = connection
+        .execute_query(
+            Some(&database),
+            &format!("DROP SCHEMA IF EXISTS {schema} CASCADE"),
+        )
+        .await;
+    connection
+        .execute_query(Some(&database), &format!("CREATE SCHEMA {schema}"))
+        .await
+        .expect("create the schema");
+    connection
+        .execute_query(
+            Some(&database),
+            &format!("CREATE TABLE {schema}.{table} (id integer PRIMARY KEY)"),
+        )
+        .await
+        .expect("create the table");
+
+    let mut session = connection
+        .script_session_for(Some(&database), Some(schema))
+        .await
+        .expect("open the selected schema's session")
+        .expect("pin a connection");
+    session
+        .execute(&format!("SELECT count(*) FROM {table}"))
+        .await
+        .expect("an unqualified name resolves in the selected schema");
+    drop(session);
+
+    // The same unqualified name does not resolve from another schema.
+    let mut public = connection
+        .script_session_for(Some(&database), Some("public"))
+        .await
+        .expect("open the public session")
+        .expect("pin a connection");
+    assert!(
+        public
+            .execute(&format!("SELECT count(*) FROM {table}"))
+            .await
+            .is_err(),
+        "the table must not be visible from public"
+    );
+    drop(public);
+
+    connection
+        .execute_query(Some(&database), &format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .expect("drop the schema");
+    connection.close().await.unwrap();
+}
