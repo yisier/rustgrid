@@ -532,7 +532,10 @@ touching UI code.
   draws its titlebar through `src/app/ui/titlebar.rs`, a thin app wrapper over
   `gpui_kit::component::TitleBar`: `ui::window_options(title)` sets the transparent titlebar and
   `app_owns_titlebar_drag`, `ui::title_bar(theme)` applies the app palette, `ui::bar_title` adds
-  the logo + title, and `ui::window_title_bar` is the child-window bar. The kit draws the window
+  the logo + title, and `ui::window_title_bar` is the child-window bar. Every window reports
+  `WINDOW_APP_ID` (`RustGrid`) as `WindowOptions::app_id`, which Wayland forwards to
+  `xdg_toplevel.set_app_id` (and X11 to `WM_CLASS`), so the desktop shell associates the window
+  with the app's `.desktop` entry instead of grouping it as an unknown app. The kit draws the window
   controls itself (native caption buttons on Windows, window-manager controls on Linux, native
   traffic lights on macOS), so do not add app-drawn min/max/close buttons back. The main window's
   theme/GitHub/update/settings cluster must stay inside `ui::action_cluster`: it occludes the kit

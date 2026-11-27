@@ -101,6 +101,9 @@ fn main() {
                     title: Some(t!("app.title").to_string().into()),
                     ..TitleBar::title_bar_options()
                 }),
+                // The desktop shell matches this against the app's `.desktop` file; without it
+                // the window is grouped as "Unknown" and shows the generic gear icon.
+                app_id: Some(crate::app::WINDOW_APP_ID.to_string()),
                 app_owns_titlebar_drag: true,
                 ..Default::default()
             },

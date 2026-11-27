@@ -27,6 +27,7 @@ type CloseHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 /// bar's own handling.
 pub(crate) fn window_options(title: impl Into<SharedString>) -> WindowOptions {
     let mut options = TitleBar::window_options();
+    options.app_id = Some(crate::app::WINDOW_APP_ID.to_string());
     options.titlebar = Some(TitlebarOptions {
         title: Some(title.into()),
         ..TitleBar::title_bar_options()
@@ -99,6 +100,7 @@ mod tests {
     #[test]
     fn window_options_keep_the_title_and_app_owned_drag() {
         let options = window_options("Test Window");
+        assert_eq!(options.app_id.as_deref(), Some(crate::app::WINDOW_APP_ID));
         assert!(options.app_owns_titlebar_drag);
         let titlebar = options.titlebar.expect("every window declares a titlebar");
         assert_eq!(
