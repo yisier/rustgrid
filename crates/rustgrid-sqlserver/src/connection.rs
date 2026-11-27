@@ -2166,13 +2166,17 @@ pub(crate) async fn run_statement(
                 }
             }
         }
+        // A statement classified by its leading keyword may still send no result set at all
+        // (`SET NOCOUNT ON`, `DECLARE @x INT`); only the metadata the server actually sent
+        // decides, so no empty result tab is opened for those.
+        let has_result_set = columns.is_some();
         let columns = columns.unwrap_or_default();
         Ok(QueryResult {
             statement: sql.to_string(),
             columns,
             rows,
             rows_affected: 0,
-            has_result_set: true,
+            has_result_set,
             last_insert_id: None,
         })
     } else if is_dml(sql) || !params.is_empty() {
@@ -2197,22 +2201,36 @@ pub(crate) async fn run_statement(
             .map_err(map_query_error)?;
         let mut rows = Vec::new();
         let mut columns: Option<Vec<ColumnInfo>> = None;
+        let mut later_set = false;
         while let Some(item) = stream.try_next().await.map_err(map_query_error)? {
             match item {
                 QueryItem::Metadata(metadata) => {
                     if columns.is_none() {
                         columns = Some(metadata.columns().iter().map(column_info).collect());
+                    } else {
+                        // Only the first result set is returned; the rest is drained so the
+                        // connection is not left mid-response, without mixing its rows in.
+                        later_set = true;
                     }
                 }
-                QueryItem::Row(row) => rows.push(decode_row(&row)),
+                QueryItem::Row(row) => {
+                    if columns.is_some() && !later_set {
+                        rows.push(decode_row(&row));
+                    }
+                }
             }
         }
+        // A statement the leading keyword did not recognise can still carry a result set the
+        // server sent (`DBCC USEROPTIONS`, `FETCH` from a cursor, an `EXEC` inside a comment-prefixed
+        // batch, ...). The metadata decides, so its rows reach the grid instead of being dropped
+        // with a bare "query succeeded".
+        let has_result_set = columns.is_some();
         Ok(QueryResult {
             statement: sql.to_string(),
             columns: columns.unwrap_or_default(),
             rows,
             rows_affected: 0,
-            has_result_set: false,
+            has_result_set,
             last_insert_id: None,
         })
     }

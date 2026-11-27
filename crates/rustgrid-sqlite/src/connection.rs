@@ -1205,8 +1205,9 @@ async fn describe_columns(
 }
 
 /// Whether a statement is expected to produce a result set. SQLite has no way to know this before
-/// preparing it, so the leading keyword decides which path is used. A statement with a
-/// `RETURNING` clause is the one exception this classifier misses.
+/// preparing it, so the leading keyword decides which path is used. `INSERT`/`UPDATE`/`DELETE`
+/// with a `RETURNING` clause is the one form the leading keyword alone misses, so it is detected
+/// the same way the PostgreSQL and Oracle classifiers do.
 fn returns_result_set(sql: &str) -> bool {
     let mut rest = sql;
     loop {
@@ -1231,10 +1232,16 @@ fn returns_result_set(sql: &str) -> bool {
         .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
         .collect();
 
-    matches!(
-        keyword.to_ascii_uppercase().as_str(),
+    let keyword = keyword.to_ascii_uppercase();
+
+    if matches!(
+        keyword.as_str(),
         "SELECT" | "WITH" | "VALUES" | "EXPLAIN" | "PRAGMA" | "TABLE"
-    )
+    ) {
+        return true;
+    }
+    matches!(keyword.as_str(), "INSERT" | "UPDATE" | "DELETE")
+        && sql.to_ascii_uppercase().contains("RETURNING")
 }
 
 /// Split a SQL script into statements on top-level semicolons, respecting string literals, quoted
@@ -2035,6 +2042,9 @@ mod tests {
             "-- comment\nWITH cte AS (SELECT 1) SELECT * FROM cte"
         ));
         assert!(returns_result_set("PRAGMA table_info(\"t\")"));
+        // `RETURNING` makes DML return rows like a `SELECT`.
+        assert!(returns_result_set("DELETE FROM t RETURNING id"));
+        assert!(returns_result_set("update t set a = 1 returning a, b"));
         assert!(!returns_result_set("INSERT INTO t VALUES (1)"));
         assert!(!returns_result_set("CREATE TABLE t (id INTEGER)"));
     }

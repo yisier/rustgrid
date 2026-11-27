@@ -81,6 +81,35 @@ async fn connects_with_the_login_handshake_disabled() {
 
 #[tokio::test]
 #[ignore = "requires a live SQL Server (RUSTGRID_SQLSERVER_*)"]
+async fn dbcc_and_set_report_only_the_result_sets_the_server_sent() {
+    let (connection, database) = scratch_database().await;
+
+    // `DBCC USEROPTIONS` does not start with a keyword the driver classifies as a query, but it
+    // does send a result set; the metadata the server returned must reach the grid.
+    let results = connection
+        .execute_query_many(Some(&database), "DBCC USEROPTIONS;")
+        .await
+        .expect("run DBCC USEROPTIONS");
+    assert_eq!(results.len(), 1);
+    assert!(results[0].has_result_set, "{results:?}");
+    assert_eq!(results[0].columns.len(), 2);
+    assert_eq!(results[0].columns[0].name, "Set Option");
+    assert_eq!(results[0].columns[1].name, "Value");
+    assert!(!results[0].rows.is_empty());
+
+    // A `SET` statement sends no result set, so it must not open an empty result tab.
+    let results = connection
+        .execute_query_many(Some(&database), "SET NOCOUNT ON; SELECT 1 AS a")
+        .await
+        .expect("run SET then SELECT");
+    assert_eq!(results.len(), 2);
+    assert!(!results[0].has_result_set, "{results:?}");
+    assert!(results[1].has_result_set, "{results:?}");
+    assert_eq!(results[1].rows.len(), 1);
+}
+
+#[tokio::test]
+#[ignore = "requires a live SQL Server (RUSTGRID_SQLSERVER_*)"]
 async fn round_trips_a_live_sql_server() {
     let (connection, database) = scratch_database().await;
 

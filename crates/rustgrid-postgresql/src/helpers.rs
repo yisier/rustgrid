@@ -80,7 +80,16 @@ pub(crate) fn returns_result_set(sql: &str) -> bool {
     let keyword = leading_keyword(sql);
     if matches!(
         keyword.as_str(),
-        "SELECT" | "WITH" | "VALUES" | "TABLE" | "SHOW" | "EXPLAIN" | "DESCRIBE" | "FETCH" | "CALL"
+        "SELECT"
+            | "WITH"
+            | "VALUES"
+            | "TABLE"
+            | "SHOW"
+            | "EXPLAIN"
+            | "DESCRIBE"
+            | "FETCH"
+            | "CALL"
+            | "EXECUTE"
     ) {
         return true;
     }
@@ -939,6 +948,8 @@ mod tests {
             "  -- x\n WITH c AS (SELECT 1) SELECT * FROM c"
         ));
         assert!(returns_result_set("INSERT INTO t VALUES (1) RETURNING id"));
+        // `EXECUTE name` runs a prepared statement, which can return rows.
+        assert!(returns_result_set("EXECUTE find_users(1)"));
         assert!(!returns_result_set("UPDATE t SET a = 1"));
     }
 }

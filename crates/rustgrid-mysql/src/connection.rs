@@ -3909,8 +3909,12 @@ fn returns_result_set(sql: &str) -> bool {
             | "VALUES"
             | "TABLE"
             | "CALL"
+            | "EXECUTE"
             | "ANALYZE"
             | "CHECK"
+            | "CHECKSUM"
+            | "OPTIMIZE"
+            | "REPAIR"
             | "HELP"
     )
 }
@@ -5038,6 +5042,11 @@ mod tests {
         assert!(returns_result_set(
             "WITH cte AS (SELECT 1) SELECT * FROM cte"
         ));
+        // Table maintenance and prepared statements also answer with a result set.
+        assert!(returns_result_set("OPTIMIZE TABLE t"));
+        assert!(returns_result_set("REPAIR TABLE t"));
+        assert!(returns_result_set("CHECKSUM TABLE t"));
+        assert!(returns_result_set("EXECUTE stmt"));
 
         assert!(!returns_result_set("UPDATE t SET a = 1"));
         assert!(!returns_result_set("INSERT INTO t VALUES (1)"));
