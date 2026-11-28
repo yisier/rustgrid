@@ -155,9 +155,8 @@ fn manifest_urls(source: UpdateSource) -> [&'static str; 2] {
 `fetch_repo_file(file, source)` reads the notes from plain files instead of `api.github.com`, in
 the same fallback order (the contents API stays as the last resort):
 
-- CNB: `https://cnb.cool/yisier1/rustgrid/-/releases/latest/download/CHANGELOG.md` (and
-  `CHANGELOG_zh.md`, `CHANGELOG_ru.md`, uploaded with the release — no repo mirror needed), or
-  `https://cnb.cool/yisier1/rustgrid/-/git/raw/main/CHANGELOG.md` when the repo is mirrored.
+- CNB: `https://cnb.cool/yisier1/rustgrid/-/git/raw/main/CHANGELOG.md` (and `CHANGELOG_zh.md`,
+  `CHANGELOG_ru.md`; `Sync to CNB` mirrors the branches, so no extra release assets are needed).
 - GitHub: `https://raw.githubusercontent.com/yisier1/rustgrid/main/CHANGELOG.md`.
 
 `changelog::version_notes(version, language, fetch)` stays as it is; only the reader changes. This
@@ -200,7 +199,7 @@ Implemented as described below.
    ```
    then `install_github_api` as the last resort. A download failure happens before the running
    binary is replaced, so trying the next source is safe.
-4. `fetch_repo_file(file, source)` reads the raw/changelog-asset URLs above, then the other source,
+4. `fetch_repo_file(file, source)` reads the raw repository files above, then the other source,
    then the contents API.
 5. `UpdateStatus`, the progress channel, the titlebar button and the 关于 layout are unchanged.
 
@@ -226,14 +225,17 @@ Implemented in this repository:
 
 - `tools/release/make-manifest.mjs` — writes the schema-1 manifest from an asset directory
   (sha256 per archive, GitHub or CNB URLs via `--base-url`). Node only, no extra action.
-- `.github/workflows/release.yml` — the `release` job runs it into `dist/latest.json` and copies
-  `CHANGELOG.md`, `CHANGELOG_zh.md` and `CHANGELOG_ru.md` into `dist/`, so the GitHub release carries
-  the manifest and the notes; then `softprops/action-gh-release` uploads `dist/*` as before.
+- `.github/workflows/release.yml` — the `release` job runs it into `dist/latest.json`, the **only**
+  extra asset beside the six archives (the changelogs stay in the repository, so the release page
+  remains a download list); then `softprops/action-gh-release` uploads `dist/*` as before.
 - `.github/workflows/sync-cnb.yml` — a reusable workflow (also `workflow_dispatch`-able with a tag)
   doing the mirror:
   1. mirror branches and tags (`git push cnb` with a token URL, branches fetched into
      `refs/mirror/branches/*` first so a detached tag checkout still pushes them);
-  2. `gh release download "$TAG"` for exactly the published assets;
+  2. `gh release download "$TAG"` for exactly the published assets, then copies the three changelogs
+     into the upload directory — CNB-only assets kept for builds from before the raw-file reader
+     (0.1.19 and older), whose CNB source looks for `CHANGELOG*.md` at the release's download
+     prefix; the GitHub release never carries them;
   3. re-mint the manifest with
      `--base-url https://cnb.cool/yisier1/rustgrid/-/releases/download/<tag>/` (same digests);
   4. `node .github/scripts/sync-cnb-release.mjs` creates/updates the CNB release with
@@ -297,7 +299,8 @@ the same token is the `Bearer` value for the Open API.
   other source still answers; install once from each source; macOS bundle and bare installs both
   stay intact.
 - CI: `workflow_dispatch` the mirror job with an existing tag, then `curl` the stable CNB
-  `latest.json`, `CHANGELOG.md` and one archive; verify `Content-Length` and digest.
+  `latest.json`, the mirrored `CHANGELOG.md` raw file and one archive; verify `Content-Length` and
+  digest.
 - `cargo fmt --all`, `cargo build`, `cargo test --workspace`, `cargo clippy --workspace --all-targets
   -- -D warnings` before landing (per AGENTS.md).
 

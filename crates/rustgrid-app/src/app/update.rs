@@ -48,12 +48,12 @@ fn manifest_urls(source: UpdateSource) -> [&'static str; 2] {
     }
 }
 
-/// The changelog URLs for one file, in the same order as [`manifest_urls`]. The release workflow
-/// attaches every `CHANGELOG*.md` to the release, so the mirror serves the notes at the same stable
-/// prefix as the manifest instead of needing the mirrored repository.
+/// The changelog URLs for one file, in the same order as [`manifest_urls`]. Both are plain file
+/// reads of the repository's default branch (`Sync to CNB` mirrors the branches and tags), so the
+/// notes need no extra release assets.
 fn changelog_urls(source: UpdateSource, file: &str) -> [String; 2] {
     let github = format!("https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/main/{file}");
-    let cnb = format!("https://cnb.cool/{CNB_REPO}/-/releases/latest/download/{file}");
+    let cnb = format!("https://cnb.cool/{CNB_REPO}/-/git/raw/main/{file}");
     match source {
         UpdateSource::Github => [github, cnb],
         UpdateSource::Cnb => [cnb, github],
@@ -286,9 +286,9 @@ fn release_notes_with(
 /// Blocking: a file's text from the chosen source, then the other source, then GitHub's contents
 /// API as a last resort.
 ///
-/// The changelogs travel with every release (the release workflow copies them into the assets) and
-/// are also in the repository, so the normal paths are plain file fetches that consume no API
-/// quota. Only failures that leave the panel without notes return `None`.
+/// Both sources serve the changelogs as plain repository files, so the normal paths consume no API
+/// quota and need no release assets. Only failures that leave the panel without notes return
+/// `None`.
 pub(super) fn fetch_repo_file(file: &str, source: UpdateSource) -> Option<String> {
     fetch_repo_file_for(file, source, None)
 }

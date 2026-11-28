@@ -110,6 +110,13 @@ jobs:
           TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
+          # Builds from before the raw-file reader (0.1.19 and older) look for the changelogs at the
+          # release's download prefix when CNB is their source. Attach them to the CNB release only:
+          # the GitHub release stays a clean download list, and newer builds read the repository
+          # files directly.
+          for file in CHANGELOG.md CHANGELOG_zh.md CHANGELOG_ru.md; do
+            if [ -f "$file" ]; then cp "$file" dist/; fi
+          done
           node .github/scripts/sync-cnb-release.mjs \
             --tag "$TAG" \
             --name "$(cat release-name.txt)" \

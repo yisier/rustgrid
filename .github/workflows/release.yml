@@ -312,16 +312,14 @@ jobs:
           merge-multiple: true
 
       # The updater reads this static manifest instead of GitHub's rate-limited REST API (see
-      # `docs/update-sources.md` and `crates/rustgrid-app/src/app/update.rs`). It is attached to the
-      # release beside the archives; the per-language changelogs are attached too, so the CNB mirror
-      # can serve 关于's 更新日志 without the repository. `sync-cnb.yml` re-mints the same manifest
-      # with CNB asset URLs for the mirror.
+      # `docs/update-sources.md` and `crates/rustgrid-app/src/app/update.rs`). It is the only extra
+      # asset beside the six archives: 关于's 更新日志 is read from the changelogs in the repository
+      # (both sources serve them as plain files), so the release page stays a download list.
+      # `sync-cnb.yml` re-mints the same manifest with CNB asset URLs for the mirror.
       - name: Build the updater manifest
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          cp CHANGELOG.md CHANGELOG_zh.md dist/
-          if [ -f CHANGELOG_ru.md ]; then cp CHANGELOG_ru.md dist/; fi
           node tools/release/make-manifest.mjs \
             --dir dist \
             --tag "${GITHUB_REF_NAME}" \
