@@ -1,0 +1,127 @@
+# Mirror RustGrid to CNB (https://cnb.cool/yisier1/rustgrid): the Git branches and tags, then the
+# published release with all of its assets, including a CNB-flavoured `latest.json`.
+#
+# Called automatically by `release.yml` once a GitHub release is published, and runnable by hand
+# (`workflow_dispatch`) to back-fill an existing tag or to retry a mirror that failed. The GitHub
+# release stays canonical: a failure here only leaves the CNB mirror behind, and the app's updater
+# falls back to the GitHub manifest (see `docs/update-sources.md`).
+#
+# Required repository secret: `CNB_TOKEN` — a CNB access token (https://cnb.cool/profile/token)
+# that can write the repository and its releases. Without it the job skips with a warning, so a
+# release still succeeds before the mirror is configured. Optional repository variable:
+# `CNB_REPOSITORY` (default `yisier1/rustgrid`).
+name: Sync to CNB
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag to mirror (e.g. v0.1.19)
+        required: true
+        type: string
+    secrets:
+      CNB_TOKEN:
+        required: false
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to mirror (e.g. v0.1.18)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CNB_REPOSITORY: ${{ vars.CNB_REPOSITORY || 'yisier1/rustgrid' }}
+
+jobs:
+  sync:
+    name: Mirror ${{ inputs.tag }} to CNB
+    runs-on: ubuntu-latest
+    # Tags and releases are mirrored per tag; overlapping runs would race each other's uploads.
+    concurrency:
+      group: sync-cnb-${{ inputs.tag }}
+      cancel-in-progress: false
+    steps:
+      - name: Check the CNB token
+        id: token
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          if [ -z "${CNB_TOKEN:-}" ]; then
+            echo "::warning::CNB_TOKEN is not configured; skipping the CNB mirror (see docs/update-sources.md)."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.token.outputs.enabled == 'true'
+        with:
+          # All branches and tags, so the mirror below can push them even when this runs on a tag.
+          fetch-depth: 0
+
+      - name: Mirror branches and tags
+        if: steps.token.outputs.enabled == 'true'
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git remote add cnb "https://cnb:${CNB_TOKEN}@cnb.cool/${CNB_REPOSITORY}.git"
+          # Fetch into a private ref namespace first: a direct `--all` push would send nothing when
+          # the run is on a detached tag checkout, and fetching into refs/heads can be rejected for
+          # the branch that is checked out. `--force` keeps the mirror identical to GitHub.
+          git fetch --no-tags origin '+refs/heads/*:refs/mirror/branches/*'
+          git push cnb 'refs/mirror/branches/*:refs/heads/*' --force
+          git push cnb --tags --force
+
+      - name: Download the published release
+        if: steps.token.outputs.enabled == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download "$TAG" --repo "${GITHUB_REPOSITORY}" --dir dist --clobber
+          gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" --json name --jq '.name // ""' > release-name.txt
+          gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" --json body --jq '.body // ""' > release-body.md
+
+      # Rewrite the manifest's asset URLs from GitHub to CNB. The digests stay identical because the
+      # files are the very assets just downloaded.
+      - name: Mint the CNB updater manifest
+        if: steps.token.outputs.enabled == 'true'
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          node tools/release/make-manifest.mjs \
+            --dir dist \
+            --tag "$TAG" \
+            --version "${TAG#v}" \
+            --base-url "https://cnb.cool/${CNB_REPOSITORY}/-/releases/download/${TAG}/" \
+            --out dist/latest.json
+
+      - name: Upload the release and its assets
+        if: steps.token.outputs.enabled == 'true'
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          node .github/scripts/sync-cnb-release.mjs \
+            --tag "$TAG" \
+            --name "$(cat release-name.txt)" \
+            --body-file release-body.md \
+            --assets-dir dist
+
+      - name: Verify the mirrored manifest
+        if: steps.token.outputs.enabled == 'true'
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          url="https://cnb.cool/${CNB_REPOSITORY}/-/releases/download/${TAG}/latest.json"
+          curl -fsS --retry 3 --retry-all-errors "$url" -o mirrored.json
+          node -e "const m=require('./mirrored.json'); console.log('CNB manifest', m.releases[0].version, m.releases[0].assets.length + ' assets');"

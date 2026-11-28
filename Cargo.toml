@@ -146,6 +146,8 @@ hex = "0.4"
 # client to keep the dependency tree small.
 self_update = { version = "1.3", default-features = false, features = [
     "github",
+    "manifest",
+    "checksums",
     "ureq",
     "rustls",
     "native-certs",

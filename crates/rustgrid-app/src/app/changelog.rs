@@ -350,8 +350,8 @@ First release.
         // comes back in every UI language, English standing in where a translation is missing. The
         // version is taken from the fetched file rather than from this build, which may carry a bump
         // the repository has not seen yet.
-        let english =
-            update::fetch_repo_file(ENGLISH_CHANGELOG).expect("CHANGELOG.md is fetchable");
+        let english = update::fetch_repo_file(ENGLISH_CHANGELOG, UpdateSource::Github)
+            .expect("CHANGELOG.md is fetchable");
         let newest = version_blocks(&english)
             .into_iter()
             .filter_map(version_heading)
@@ -364,8 +364,10 @@ First release.
             LanguageSetting::ZhCn,
             LanguageSetting::Ru,
         ] {
-            let section = version_notes(&newest, language, update::fetch_repo_file)
-                .unwrap_or_else(|| panic!("{language:?}: no changelog documents {newest}"));
+            let section = version_notes(&newest, language, |file| {
+                update::fetch_repo_file(file, UpdateSource::Github)
+            })
+            .unwrap_or_else(|| panic!("{language:?}: no changelog documents {newest}"));
             assert!(
                 section.starts_with(&format!("## [{newest}]")),
                 "{language:?}: 关于 must show {newest}'s entry, got {section}"

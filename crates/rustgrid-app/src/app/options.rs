@@ -69,6 +69,15 @@ fn language_from_locale(locale: &str) -> LanguageSetting {
         .unwrap_or_default()
 }
 
+/// The 关于 page's update sources: the GitHub release page and its CNB mirror. Both serve the same
+/// manifest (see `docs/update-sources.md`).
+fn update_source_options() -> Vec<ComboOption> {
+    vec![
+        ComboOption::new(UpdateSource::Github.value(), "GitHub"),
+        ComboOption::new(UpdateSource::Cnb.value(), "CNB"),
+    ]
+}
+
 /// The editor font families, the built-in default first.
 fn editor_font_options() -> Vec<ComboOption> {
     let mut options = vec![ComboOption::new(
@@ -383,11 +392,14 @@ impl AppView {
         self.options_restore_session = self.restore_session;
         self.options_single_click_open = self.single_click_open;
         self.options_stop_on_error = self.stop_on_error;
+        self.options_update_source = self.update_source;
         self.set_options_max_statements(self.max_statements_per_run.to_string(), cx);
         self.recording_shortcut = None;
         self.ensure_shortcut_search(cx);
         self.ensure_language_combo(cx);
         self.ensure_editor_combos(cx);
+        self.ensure_update_source_combo(cx);
+        self.sync_update_source_combo(cx);
         let weak = cx.weak_entity();
         let app_entity = cx.entity();
         let focus = self.options_focus.clone();
@@ -471,6 +483,41 @@ impl AppView {
                 }))
         });
         self.language_combo = Some(combo);
+    }
+
+    /// Build the 关于 page's 更新源 dropdown on the first Options open, mirroring
+    /// `ensure_language_combo`. The choice is staged like every other Options setting and only
+    /// applied on 确定.
+    fn ensure_update_source_combo(&mut self, cx: &mut Context<'_, Self>) {
+        if self.update_source_combo.is_some() {
+            return;
+        }
+        let theme = self.theme;
+        let weak = cx.weak_entity();
+        let selected = self.options_update_source.value();
+        let combo = cx.new(|cx| {
+            ComboBox::new(theme, update_source_options(), selected, 160.0, cx)
+                .field_width(120.0)
+                .height(28.0)
+                .text_size(12.5)
+                .on_select(Rc::new(move |value, _window, cx| {
+                    let _ = weak.update(cx, |app, cx| {
+                        app.options_update_source = UpdateSource::from_value(value);
+                        cx.notify();
+                    });
+                }))
+        });
+        self.update_source_combo = Some(combo);
+    }
+
+    /// Point the 更新源 dropdown at the staged value; the entity outlives 取消, so a reopened
+    /// Options window must not show the discarded choice.
+    pub(super) fn sync_update_source_combo(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(combo) = self.update_source_combo.clone() else {
+            return;
+        };
+        let selected = self.options_update_source.value().to_string();
+        combo.update(cx, |combo, cx| combo.set_selected(selected, cx));
     }
 
     /// Build the 快捷键 page's search box on the first open; its text filters the command list by
@@ -686,6 +733,7 @@ impl AppView {
         self.restore_session = self.options_restore_session;
         self.single_click_open = self.options_single_click_open;
         self.stop_on_error = self.options_stop_on_error;
+        self.update_source = self.options_update_source;
         // The 编辑器 settings reach the editors that are already open, not only the next one: the
         // font is rendered from the wrapper's options every frame, and 显示行号 / 自动换行 are
         // pushed into each editor's state here.
@@ -1861,6 +1909,7 @@ impl AppView {
                     this.options_restore_session = true;
                     this.options_single_click_open = false;
                     this.options_stop_on_error = false;
+                    this.options_update_source = UpdateSource::default();
                     this.set_options_max_statements(
                         rustgrid_config::DEFAULT_MAX_STATEMENTS.to_string(),
                         cx,
@@ -1868,6 +1917,7 @@ impl AppView {
                     this.recording_shortcut = None;
                     this.sync_language_combo(cx);
                     this.sync_editor_combos(cx);
+                    this.sync_update_source_combo(cx);
                     cx.notify();
                 }),
             ))

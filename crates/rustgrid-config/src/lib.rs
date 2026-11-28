@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 const CURRENT_VERSION: u32 = 2;
 const PROFILES_FILE: &str = "connections.json";
-const SETTINGS_VERSION: u32 = 18;
+const SETTINGS_VERSION: u32 = 19;
 const SETTINGS_FILE: &str = "settings.json";
 /// The settings version that introduced 保留对象搜索 as a deliberate choice. Files written before
 /// it kept the old `false` default, so loading turns the switch on once; a file that version or
@@ -183,6 +183,38 @@ impl LanguageSetting {
     }
 }
 
+/// Where the updater reads its release manifest and downloads the archive from.
+///
+/// Both sources serve the same `latest.json` manifest (see `docs/update-sources.md`); GitHub is the
+/// canonical release host, CNB (`cnb.cool`) its mirror for networks that cannot reach GitHub
+/// reliably. Stored in `settings.json` (`"github"` / `"cnb"`), chosen on 选项 → 关于.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum UpdateSource {
+    #[default]
+    #[serde(rename = "github")]
+    Github,
+    #[serde(rename = "cnb")]
+    Cnb,
+}
+
+impl UpdateSource {
+    /// The stored `settings.json` spelling.
+    pub fn value(self) -> &'static str {
+        match self {
+            UpdateSource::Github => "github",
+            UpdateSource::Cnb => "cnb",
+        }
+    }
+
+    /// The source for a stored `settings.json` value (anything unknown means GitHub).
+    pub fn from_value(value: &str) -> Self {
+        match value {
+            "cnb" => UpdateSource::Cnb,
+            _ => UpdateSource::Github,
+        }
+    }
+}
+
 /// A table grid's remembered field layout (the 字段筛选 popup): the order its fields are shown in and
 /// which of them are hidden. Persisted per connection/database/table, so a table opens with the
 /// field set the user last chose.
@@ -319,6 +351,9 @@ struct SettingsFile {
     /// Stop a script at its first failing statement (off: run the rest and report each).
     #[serde(default)]
     stop_on_error: bool,
+    /// Where the updater checks and downloads from (`"github"` or `"cnb"`).
+    #[serde(default)]
+    update_source: UpdateSource,
     /// Version 11's 运行 keystroke. Read so an upgrade keeps it (folded into `shortcuts`), never
     /// written.
     #[serde(default, skip_serializing)]
@@ -464,6 +499,9 @@ pub struct AppSettings {
     pub max_statements_per_run: u32,
     /// Stop a script at its first failing statement (off: run the rest and report each).
     pub stop_on_error: bool,
+    /// Where the updater checks for and downloads a new release: GitHub (canonical) or CNB (the
+    /// mirror for networks that cannot reach GitHub reliably).
+    pub update_source: UpdateSource,
 }
 
 impl Default for AppSettings {
@@ -500,6 +538,7 @@ impl Default for AppSettings {
             single_click_open: false,
             max_statements_per_run: DEFAULT_MAX_STATEMENTS,
             stop_on_error: false,
+            update_source: UpdateSource::default(),
         }
     }
 }
@@ -793,6 +832,7 @@ impl ConfigStore {
             single_click_open: file.single_click_open,
             max_statements_per_run: file.max_statements_per_run,
             stop_on_error: file.stop_on_error,
+            update_source: file.update_source,
         })
     }
 
@@ -831,6 +871,7 @@ impl ConfigStore {
             single_click_open: settings.single_click_open,
             max_statements_per_run: settings.max_statements_per_run,
             stop_on_error: settings.stop_on_error,
+            update_source: settings.update_source,
             run_shortcut: None,
             run_selected_shortcut: None,
         };
@@ -1103,5 +1144,21 @@ mod tests {
             serde_json::from_str(r#"{ "version": 16, "single_click_open": true }"#)
                 .expect("parse v16");
         assert!(chosen.single_click_open);
+    }
+
+    #[test]
+    fn update_source_defaults_to_github_and_keeps_a_saved_cnb_choice() {
+        // 关于's 更新源 is remembered in settings.json; a file written before the field loads as the
+        // canonical GitHub source instead of failing.
+        let older: SettingsFile = serde_json::from_str(r#"{ "version": 18 }"#).expect("parse v18");
+        assert_eq!(older.update_source, UpdateSource::Github);
+
+        let chosen: SettingsFile =
+            serde_json::from_str(r#"{ "version": 19, "update_source": "cnb" }"#)
+                .expect("parse v19");
+        assert_eq!(chosen.update_source, UpdateSource::Cnb);
+        assert_eq!(chosen.update_source.value(), "cnb");
+        assert_eq!(UpdateSource::from_value("cnb"), UpdateSource::Cnb);
+        assert_eq!(UpdateSource::from_value("nonsense"), UpdateSource::Github);
     }
 }

@@ -1,10 +1,14 @@
-//! Update detection and self-upgrade from GitHub Releases (see `.github/workflows/release.yml`).
+//! Update detection and self-upgrade from a static release manifest served by GitHub Releases or
+//! its CNB mirror (see `docs/update-sources.md` and `.github/workflows/release.yml`).
 //!
-//! [`self_update`] (GitHub backend, ureq) drives the whole flow: list the repository's releases,
-//! compare their semver against this build's `CARGO_PKG_VERSION`, download the portable archive for
-//! the running target, extract the executable and replace the running one in place. Detection runs
-//! once shortly after launch; a newer release surfaces an update button in the titlebar, and
-//! 选项 → 关于 offers the same check plus a manual install.
+//! [`self_update`]'s **manifest** backend drives the whole flow: read `latest.json`, compare its
+//! semver against this build's `CARGO_PKG_VERSION`, download the portable archive for the running
+//! target, verify its sha256 and replace the running executable in place. 选项 → 关于 picks the
+//! source (更新源: GitHub / CNB); the chosen host is tried first and the other one second, so a
+//! mirror outage never hides an update. GitHub's rate-limited REST API is only a fallback for
+//! releases published before the manifest existed. Detection runs once shortly after launch; a newer
+//! release surfaces an update button in the titlebar, and 关于 offers the same check plus a manual
+//! install.
 //!
 //! The asset names produced by the release workflow must contain the running platform tag (see
 //! [`PLATFORM`]), otherwise `self_update` cannot pick the right download. The macOS archives carry an
@@ -20,6 +24,41 @@ use std::time::Duration;
 /// The GitHub repository whose Releases are checked.
 const REPO_OWNER: &str = "yisier";
 const REPO_NAME: &str = "rustgrid";
+
+/// The CNB mirror of the release page (see `docs/update-sources.md`).
+const CNB_REPO: &str = "yisier1/rustgrid";
+
+/// Stable manifest URLs. `releases/latest/download/<file>` is a plain redirect to the newest
+/// release's asset — not the REST API, so checking never consumes GitHub's 60/hour quota and both
+/// sources can be tried in any order.
+const GITHUB_MANIFEST: &str =
+    "https://github.com/yisier/rustgrid/releases/latest/download/latest.json";
+const CNB_MANIFEST: &str =
+    "https://cnb.cool/yisier1/rustgrid/-/releases/latest/download/latest.json";
+
+/// How long a manifest fetch may take before the next source is tried.
+const UPDATE_SOURCE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The manifest URLs to try: the chosen source first, the other one as a fallback, so a mirror
+/// outage or a missed upload never hides an update.
+fn manifest_urls(source: UpdateSource) -> [&'static str; 2] {
+    match source {
+        UpdateSource::Github => [GITHUB_MANIFEST, CNB_MANIFEST],
+        UpdateSource::Cnb => [CNB_MANIFEST, GITHUB_MANIFEST],
+    }
+}
+
+/// The changelog URLs for one file, in the same order as [`manifest_urls`]. The release workflow
+/// attaches every `CHANGELOG*.md` to the release, so the mirror serves the notes at the same stable
+/// prefix as the manifest instead of needing the mirrored repository.
+fn changelog_urls(source: UpdateSource, file: &str) -> [String; 2] {
+    let github = format!("https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/main/{file}");
+    let cnb = format!("https://cnb.cool/{CNB_REPO}/-/releases/latest/download/{file}");
+    match source {
+        UpdateSource::Github => [github, cnb],
+        UpdateSource::Cnb => [cnb, github],
+    }
+}
 
 /// The executable's base name. `self_update` appends the platform suffix (`.exe` on Windows) and
 /// uses the result both to select the asset and to find the binary inside the archive.
@@ -72,6 +111,16 @@ fn configure_macos_layout(builder: &mut self_update::backends::github::UpdateBui
     }
 }
 
+/// [`configure_macos_layout`] for the manifest backend, which installs the same way.
+#[cfg(target_os = "macos")]
+fn configure_macos_layout_manifest(builder: &mut self_update::backends::manifest::UpdateBuilder) {
+    if running_from_app_bundle() {
+        builder.bundle_path_in_archive(APP_BUNDLE);
+    } else {
+        builder.bin_path_in_archive(format!("{APP_BUNDLE}/Contents/MacOS/{BIN_NAME}"));
+    }
+}
+
 /// Whether this executable lives inside a `.app` bundle. Bundle mode resolves its install path from
 /// the nearest `.app` ancestor of `current_exe()`, so this is exactly the condition under which it
 /// can be used.
@@ -117,9 +166,70 @@ impl UpdateStatus {
     }
 }
 
-/// Blocking: ask GitHub for the newest release and return its version and notes when it is strictly
-/// newer than the running build. Runs on the tokio blocking pool via `Runtime::spawn_blocking`.
-fn check_latest(language: LanguageSetting) -> Result<Option<(String, Option<String>)>, String> {
+/// Blocking: ask the chosen source for the newest release and return its version and notes when it
+/// is strictly newer than the running build. Runs on the tokio blocking pool via
+/// `Runtime::spawn_blocking`.
+///
+/// The sources serve the same static `latest.json` manifest (see [`manifest_urls`]); the REST API
+/// path only covers releases published before the manifest existed, because it is rate limited.
+fn check_latest(
+    source: UpdateSource,
+    language: LanguageSetting,
+) -> Result<Option<(String, Option<String>)>, String> {
+    let mut errors = Vec::new();
+    for url in manifest_urls(source) {
+        match check_manifest(url, source, language) {
+            Ok(found) => return Ok(found),
+            Err(error) => errors.push(error),
+        }
+    }
+    match check_github_api(language) {
+        Ok(found) => Ok(found),
+        Err(error) => {
+            errors.push(error);
+            Err(errors.join("; "))
+        }
+    }
+}
+
+/// One source's manifest: the newest release as it should be shown, or `None` when this build is
+/// current.
+fn check_manifest(
+    url: &str,
+    source: UpdateSource,
+    language: LanguageSetting,
+) -> Result<Option<(String, Option<String>)>, String> {
+    let updater = self_update::backends::manifest::Update::configure()
+        .manifest_url(url)
+        .bin_name(BIN_NAME)
+        .target(PLATFORM)
+        .current_version(APP_VERSION)
+        .timeout(UPDATE_SOURCE_TIMEOUT)
+        .build()
+        .map_err(|error| format!("{url}: {error}"))?;
+    let releases = updater
+        .get_latest_release()
+        .map_err(|error| format!("{url}: {error}"))?;
+    if !releases
+        .is_update_available()
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(None);
+    }
+    let release = releases
+        .latest()
+        .cloned()
+        .ok_or_else(|| format!("{url}: the manifest lists no newer release"))?;
+    let version = release.version().to_string();
+    // The notes are read from the changelog for the UI's language (see `release_notes`), so 关于 can
+    // show what installing would bring without a second check.
+    let notes = release_notes(&release, language, source);
+    Ok(Some((version, notes)))
+}
+
+/// The REST fallback for releases published before `latest.json` existed. Unauthenticated GitHub
+/// allows ~60 requests/hour per egress IP, so this is only reached when both manifests are missing.
+fn check_github_api(language: LanguageSetting) -> Result<Option<(String, Option<String>)>, String> {
     let updater = self_update::backends::github::Update::configure()
         .repo_owner(REPO_OWNER)
         .repo_name(REPO_NAME)
@@ -131,11 +241,9 @@ fn check_latest(language: LanguageSetting) -> Result<Option<(String, Option<Stri
     let release = updater
         .is_update_available()
         .map_err(|error| error.to_string())?;
-    // The notes are read from the repository's changelog for the UI's language (see
-    // `release_notes`), so 关于 can show what installing would bring without a second check.
     Ok(release.map(|release| {
         let version = release.version().to_string();
-        let notes = release_notes(&release, language);
+        let notes = release_notes(&release, language, UpdateSource::Github);
         (version, notes)
     }))
 }
@@ -148,8 +256,16 @@ fn check_latest(language: LanguageSetting) -> Result<Option<(String, Option<Stri
 /// the per-language files (see `.github/workflows/release.yml`), which keeps the body small as
 /// languages are added. A hand-written release body (an older release, or a repository fetch that
 /// failed) is still shown; the workflow's link-only body is not.
-fn release_notes(release: &self_update::Release, language: LanguageSetting) -> Option<String> {
-    release_notes_with(release, language, fetch_repo_file)
+fn release_notes(
+    release: &self_update::Release,
+    language: LanguageSetting,
+    source: UpdateSource,
+) -> Option<String> {
+    release_notes_with(release, language, |file| {
+        // A lagging mirror serves its previous release's changelog, which does not document this
+        // version yet; require the section so the reader falls through to the other source instead.
+        fetch_repo_file_for(file, source, Some(release.version()))
+    })
 }
 
 /// [`release_notes`] with the file reader injected, so the body fallback can be tested offline.
@@ -167,13 +283,55 @@ fn release_notes_with(
     })
 }
 
-/// Blocking: a file's text from the repository through GitHub's contents API.
+/// Blocking: a file's text from the chosen source, then the other source, then GitHub's contents
+/// API as a last resort.
+///
+/// The changelogs travel with every release (the release workflow copies them into the assets) and
+/// are also in the repository, so the normal paths are plain file fetches that consume no API
+/// quota. Only failures that leave the panel without notes return `None`.
+pub(super) fn fetch_repo_file(file: &str, source: UpdateSource) -> Option<String> {
+    fetch_repo_file_for(file, source, None)
+}
+
+/// [`fetch_repo_file`] with an optional version the file must document; a mirror that lags one
+/// release still serves the previous changelog, so the version check moves on to the next source.
+fn fetch_repo_file_for(file: &str, source: UpdateSource, version: Option<&str>) -> Option<String> {
+    for url in changelog_urls(source, file) {
+        let Some(text) = fetch_text(&url).filter(|text| !text.trim().is_empty()) else {
+            continue;
+        };
+        if version.is_some_and(|version| changelog::version_section(&text, version).is_none()) {
+            continue;
+        }
+        return Some(text);
+    }
+    fetch_contents_api(file)
+}
+
+/// A plain text file over HTTPS, with the User-Agent GitHub requires.
+fn fetch_text(url: &str) -> Option<String> {
+    use self_update::http_client::{HttpClient, UreqClient, header};
+    let mut headers = self_update::http_client::HeaderMap::new();
+    headers.insert(
+        header::USER_AGENT,
+        format!("{BIN_NAME}/{APP_VERSION}").parse().ok()?,
+    );
+    let client = UreqClient::default();
+    let response = client
+        .get(url, &headers, Some(Duration::from_secs(20)))
+        .ok()?;
+    let mut text = String::new();
+    response.body().read_to_string(&mut text).ok()?;
+    Some(text)
+}
+
+/// The pre-manifest release path: a file's text through GitHub's contents API.
 ///
 /// `Accept: application/vnd.github.raw` makes the endpoint answer with the file itself rather than
 /// its base64 JSON envelope, and leaving `?ref` off resolves to the repository's default branch,
 /// whose changelog documents every released version — including one released before the tag carried
-/// a changelog at all. Only failures that leave the panel without notes return `None`.
-pub(super) fn fetch_repo_file(file: &str) -> Option<String> {
+/// a changelog at all. Unauthenticated requests share a ~60/hour quota, so this is only a fallback.
+fn fetch_contents_api(file: &str) -> Option<String> {
     use self_update::http_client::{HttpClient, UreqClient, header};
     let url = format!("https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{file}");
     // GitHub rejects a request without a User-Agent, and the media type must be asked for by name.
@@ -200,15 +358,42 @@ pub(super) fn fetch_repo_file(file: &str) -> Option<String> {
 /// is `None` when the server sends no `Content-Length` (the bar then runs indeterminate). The
 /// callback is `Fn` and the sender is `Send + Sync`, so it can be moved into `self_update`.
 fn install_latest(
+    source: UpdateSource,
     progress: tokio::sync::mpsc::UnboundedSender<(u64, Option<u64>)>,
 ) -> Result<String, String> {
-    let mut builder = self_update::backends::github::Update::configure();
+    let mut errors = Vec::new();
+    for url in manifest_urls(source) {
+        match install_manifest(url, progress.clone()) {
+            Ok(version) => return Ok(version),
+            // A failed attempt stops before the running binary is replaced, so the next source is
+            // safe to try: this is how a mirror with a missing or half-uploaded asset falls back to
+            // the canonical GitHub release.
+            Err(error) => errors.push(format!("{url}: {error}")),
+        }
+    }
+    match install_github_api(progress) {
+        Ok(version) => Ok(version),
+        Err(error) => {
+            errors.push(error);
+            Err(errors.join("; "))
+        }
+    }
+}
+
+/// Install the newest release from one static manifest.
+fn install_manifest(
+    url: &str,
+    progress: tokio::sync::mpsc::UnboundedSender<(u64, Option<u64>)>,
+) -> Result<String, String> {
+    let mut builder = self_update::backends::manifest::Update::configure();
     builder
-        .repo_owner(REPO_OWNER)
-        .repo_name(REPO_NAME)
+        .manifest_url(url)
         .bin_name(BIN_NAME)
         .target(PLATFORM)
         .current_version(APP_VERSION)
+        // The manifest carries a sha256 per archive: a truncated mirror download fails here instead
+        // of being installed.
+        .verify_release_digest(true)
         // Non-interactive: never print to stdio or block on stdin (this is a GUI process).
         .no_confirm(true)
         .show_output(false)
@@ -218,6 +403,32 @@ fn install_latest(
             let _ = progress.send((downloaded, total));
         });
     // Only the install path cares about the archive's shape: detection just matches the asset name.
+    #[cfg(target_os = "macos")]
+    configure_macos_layout_manifest(&mut builder);
+
+    let updater = builder.build().map_err(|error| error.to_string())?;
+    let status = updater.update().map_err(|error| error.to_string())?;
+    Ok(status.version().to_string())
+}
+
+/// The pre-manifest install path: GitHub Releases through the REST API. Only reached when neither
+/// manifest exists, because the API is rate limited (~60 requests/hour per egress IP).
+fn install_github_api(
+    progress: tokio::sync::mpsc::UnboundedSender<(u64, Option<u64>)>,
+) -> Result<String, String> {
+    let mut builder = self_update::backends::github::Update::configure();
+    builder
+        .repo_owner(REPO_OWNER)
+        .repo_name(REPO_NAME)
+        .bin_name(BIN_NAME)
+        .target(PLATFORM)
+        .current_version(APP_VERSION)
+        .no_confirm(true)
+        .show_output(false)
+        .show_download_progress(false)
+        .progress_callback(move |downloaded, total| {
+            let _ = progress.send((downloaded, total));
+        });
     #[cfg(target_os = "macos")]
     configure_macos_layout(&mut builder);
 
@@ -277,8 +488,11 @@ impl AppView {
         self.update_status = UpdateStatus::Checking;
         let runtime = self.runtime.clone();
         let language = self.language;
+        let source = self.update_source;
         cx.spawn(async move |this, cx| {
-            let result = runtime.spawn_blocking(move || check_latest(language)).await;
+            let result = runtime
+                .spawn_blocking(move || check_latest(source, language))
+                .await;
             let _ = this.update(cx, move |app, cx| {
                 match result {
                     Ok(Ok(Some((version, notes)))) => {
@@ -315,12 +529,15 @@ impl AppView {
             return;
         };
         let language = self.language;
+        let source = self.update_source;
         let runtime = self.runtime.clone();
         let fetch_version = version.clone();
         cx.spawn(async move |this, cx| {
             let fetched = runtime
                 .spawn_blocking(move || {
-                    changelog::version_notes(&fetch_version, language, fetch_repo_file)
+                    changelog::version_notes(&fetch_version, language, |file| {
+                        fetch_repo_file(file, source)
+                    })
                 })
                 .await;
             let _ = this.update(cx, move |app, cx| {
@@ -361,6 +578,7 @@ impl AppView {
         self.update_progress = None;
         cx.notify();
         let runtime = self.runtime.clone();
+        let source = self.update_source;
         let (progress_tx, mut progress_rx) =
             tokio::sync::mpsc::unbounded_channel::<(u64, Option<u64>)>();
 
@@ -377,7 +595,7 @@ impl AppView {
 
         cx.spawn(async move |this, cx| {
             let result = runtime
-                .spawn_blocking(move || install_latest(progress_tx))
+                .spawn_blocking(move || install_latest(source, progress_tx))
                 .await;
             match result {
                 Ok(Ok(version)) => {
@@ -551,6 +769,23 @@ impl AppView {
             .gap_2()
             .mt(px(16.0))
             .child(row)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(theme.text_muted))
+                            .child(t!("about.update_source").to_string()),
+                    )
+                    .child(match self.update_source_combo.clone() {
+                        Some(combo) => combo.into_any_element(),
+                        None => div().into_any_element(),
+                    }),
+            )
             .child(
                 div()
                     .text_size(px(12.0))
@@ -809,6 +1044,71 @@ mod tests {
     }
 
     #[test]
+    fn an_update_source_tries_the_chosen_host_first() {
+        // The 关于 choice only reorders the two hosts: whichever one is unreachable or still
+        // uploading, the other still answers, so a mirror problem never hides an update.
+        assert_eq!(
+            manifest_urls(UpdateSource::Cnb),
+            [CNB_MANIFEST, GITHUB_MANIFEST]
+        );
+        assert_eq!(
+            manifest_urls(UpdateSource::Github),
+            [GITHUB_MANIFEST, CNB_MANIFEST]
+        );
+        let cnb = changelog_urls(UpdateSource::Cnb, "CHANGELOG_zh.md");
+        assert!(
+            cnb[0].starts_with("https://cnb.cool/yisier1/rustgrid/-/releases/latest/download/")
+        );
+        assert!(cnb[1].starts_with("https://raw.githubusercontent.com/yisier/rustgrid/main/"));
+    }
+
+    #[test]
+    #[ignore = "network: asks the live GitHub and CNB release pages"]
+    fn the_live_check_falls_back_before_the_first_manifest_release() {
+        // 0.1.18 (the newest release) predates `latest.json`, so both manifests answer 404 and the
+        // REST fallback must still complete without an error — the path existing builds rely on
+        // while they update once into a manifest release.
+        let found = check_latest(UpdateSource::Github, LanguageSetting::En)
+            .unwrap_or_else(|error| panic!("the GitHub check must not fail: {error}"));
+        if let Some((version, _)) = found {
+            assert_ne!(
+                version, APP_VERSION,
+                "an offered release must be newer than this build"
+            );
+        }
+    }
+
+    #[test]
+    fn the_release_manifest_parses_like_the_ci_script_writes_it() {
+        // `tools/release/make-manifest.mjs` writes this schema-1 document; both sources only differ
+        // in the asset URL prefix. Parsing it here keeps the script and the app from drifting.
+        let manifest = r#"{
+          "schema": 1,
+          "releases": [{
+            "version": "0.1.19",
+            "date": "2026-11-28T00:00:00Z",
+            "assets": [
+              {"name": "RustGrid-0.1.19-windows-x64.zip",
+               "url": "https://cnb.cool/yisier1/rustgrid/-/releases/download/v0.1.19/RustGrid-0.1.19-windows-x64.zip",
+               "digest": "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"},
+              {"name": "RustGrid-0.1.19-linux-x64.tar.gz",
+               "url": "https://cnb.cool/yisier1/rustgrid/-/releases/download/v0.1.19/RustGrid-0.1.19-linux-x64.tar.gz",
+               "digest": "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}
+            ]
+          }]
+        }"#;
+        let releases = self_update::backends::manifest::parse_manifest(
+            manifest,
+            "https://example.net/latest.json",
+        )
+        .expect("the CI manifest parses");
+        assert_eq!(releases.len(), 1);
+        assert_eq!(releases[0].version(), "0.1.19");
+        assert_eq!(releases[0].assets().len(), 2);
+        assert!(releases[0].assets()[0].digest().is_some());
+    }
+
+    #[test]
     #[ignore = "network: fetches the repository's changelogs from the GitHub API"]
     fn a_release_reads_its_notes_from_the_repository_changelog() {
         // Every release reads the version's section from the changelog in the UI language, English
@@ -823,7 +1123,7 @@ mod tests {
             LanguageSetting::ZhCn,
             LanguageSetting::Ru,
         ] {
-            let notes = release_notes(&release, language)
+            let notes = release_notes(&release, language, UpdateSource::Github)
                 .unwrap_or_else(|| panic!("{language:?}: the repository documents 0.0.11"));
             assert!(
                 notes.starts_with("## [0.0.11]"),

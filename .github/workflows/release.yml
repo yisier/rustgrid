@@ -311,6 +311,24 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # The updater reads this static manifest instead of GitHub's rate-limited REST API (see
+      # `docs/update-sources.md` and `crates/rustgrid-app/src/app/update.rs`). It is attached to the
+      # release beside the archives; the per-language changelogs are attached too, so the CNB mirror
+      # can serve 关于's 更新日志 without the repository. `sync-cnb.yml` re-mints the same manifest
+      # with CNB asset URLs for the mirror.
+      - name: Build the updater manifest
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          cp CHANGELOG.md CHANGELOG_zh.md dist/
+          if [ -f CHANGELOG_ru.md ]; then cp CHANGELOG_ru.md dist/; fi
+          node tools/release/make-manifest.mjs \
+            --dir dist \
+            --tag "${GITHUB_REF_NAME}" \
+            --version "$version" \
+            --base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/" \
+            --out dist/latest.json
+
       # The release body only links to the per-language changelogs: the app reads the notes from the
       # file matching the UI language (see `crates/rustgrid-app/src/app/changelog.rs`), so adding a
       # language never grows the body. The English and Chinese files must still document this
@@ -357,3 +375,18 @@ jobs:
           body_path: release-notes.md
           draft: false
           prerelease: false
+
+  # Mirror the release (and the Git branches/tags) to CNB, which is the update source for users who
+  # cannot reach GitHub reliably. A failure here leaves the CNB mirror behind but never unpublishes
+  # the GitHub release — clients fall back to the GitHub manifest — and `Sync to CNB` can be
+  # dispatched again for the same tag.
+  mirror-cnb:
+    name: Mirror to CNB
+    needs: release
+    if: startsWith(github.ref, 'refs/tags/v') && github.repository == 'yisier/rustgrid'
+    uses: ./.github/workflows/sync-cnb.yml
+    with:
+      tag: ${{ github.ref_name }}
+    secrets:
+      CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+

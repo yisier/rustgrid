@@ -19,7 +19,7 @@ use gpui::{
 };
 use rustgrid_config::{
     AppSettings, ConfigStore, ConnectionGroup, DEFAULT_EDITOR_FONT_SIZE, FieldLayout, GroupEntry,
-    LanguageSetting, ThemeSetting,
+    LanguageSetting, ThemeSetting, UpdateSource,
 };
 use rustgrid_core::{
     AccountKind, BackupObjectKind, CellValue, CollectionDefinition, ColumnInfo, Connection,
@@ -2851,6 +2851,12 @@ pub struct AppView {
     language: LanguageSetting,
     options_language: LanguageSetting,
     language_combo: Option<Entity<ComboBox>>,
+    /// Where the updater checks for and downloads a new release (选项 → 关于).
+    update_source: UpdateSource,
+    /// The staged 关于 page 更新源, applied on 确定 like every other Options setting.
+    options_update_source: UpdateSource,
+    /// The 关于 page's 更新源 dropdown, built on the first Options open.
+    update_source_combo: Option<Entity<ComboBox>>,
     /// The SQL editor font family; empty means the built-in default.
     editor_font_family: String,
     editor_font_size: u32,
@@ -3650,6 +3656,7 @@ impl AppView {
             single_click_open: settings.single_click_open,
             max_statements_per_run: settings.max_statements_per_run,
             stop_on_error: settings.stop_on_error,
+            update_source: settings.update_source,
             query_info_editors: std::collections::HashMap::new(),
             batch_error_editors: std::collections::HashMap::new(),
             last_shown_tab: None,
@@ -3762,6 +3769,7 @@ impl AppView {
             language,
             options_language: language,
             language_combo: None,
+            update_source_combo: None,
             editor_font_family: settings.editor_font_family.clone(),
             editor_font_size: settings.editor_font_size,
             nav_font_family: settings.nav_font_family.clone(),
@@ -3798,6 +3806,7 @@ impl AppView {
             options_max_statements: settings.max_statements_per_run.to_string(),
             options_max_statements_input: None,
             options_stop_on_error: settings.stop_on_error,
+            options_update_source: settings.update_source,
             options_copy_menu: None,
             options_highlight: None,
             options_shortcuts: settings.shortcuts.clone(),
@@ -4208,6 +4217,7 @@ impl AppView {
             single_click_open: self.single_click_open,
             max_statements_per_run: self.max_statements_per_run,
             stop_on_error: self.stop_on_error,
+            update_source: self.update_source,
         }) {
             // Preferences failing to persist is not worth a modal; note it in the log line only.
             let _ = error;
