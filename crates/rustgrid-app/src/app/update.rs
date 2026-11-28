@@ -15,7 +15,7 @@
 //! app bundle rather than a bare executable, so installing one picks between `self_update`'s two
 //! layouts — see [`configure_macos_layout`].
 
-use super::options::{section_label, settings_card};
+use super::options::{section_label, setting_row, settings_card};
 use super::*;
 use gpui_kit::base::SelectableText;
 use std::io::Read as _;
@@ -739,11 +739,12 @@ impl AppView {
             theme.text_muted
         };
 
-        let mut row = div()
+        let mut actions = div()
             .flex()
             .flex_row()
             .items_center()
             .gap_2()
+            .flex_none()
             .child(self.dialog_button(
                 "about-check",
                 t!("about.check").to_string(),
@@ -754,7 +755,7 @@ impl AppView {
                 }),
             ));
         if self.update_status.is_available() {
-            row = row.child(self.dialog_button(
+            actions = actions.child(self.dialog_button(
                 "about-install",
                 t!("about.install").to_string(),
                 true,
@@ -762,30 +763,14 @@ impl AppView {
             ));
         }
 
-        let mut update_box = div()
+        // The status doubles as the row's description: error text wraps here instead of pushing the
+        // buttons out, and a running download's progress bar sits under it.
+        let mut status = div()
             .flex()
             .flex_col()
-            .items_center()
-            .gap_2()
-            .mt(px(16.0))
-            .child(row)
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(rgb(theme.text_muted))
-                            .child(t!("about.update_source").to_string()),
-                    )
-                    .child(match self.update_source_combo.clone() {
-                        Some(combo) => combo.into_any_element(),
-                        None => div().into_any_element(),
-                    }),
-            )
+            .gap_1()
+            .flex_1()
+            .min_w(px(0.0))
             .child(
                 div()
                     .text_size(px(12.0))
@@ -793,53 +778,102 @@ impl AppView {
                     .child(self.update_status_text()),
             );
         if let Some(progress) = self.download_progress_element(theme) {
-            update_box = update_box.child(div().w_full().max_w(px(320.0)).child(progress));
+            status = status.child(div().w_full().max_w(px(360.0)).child(progress));
         }
+
+        let source = match self.update_source_combo.clone() {
+            Some(combo) => combo.into_any_element(),
+            None => div().into_any_element(),
+        };
 
         div()
             .flex()
             .flex_col()
             .gap_3()
             .w_full()
+            // Identity: the logo beside the name, version and one-line description, so the page does
+            // not open with a tall centred column and two empty halves.
+            .child(
+                settings_card(theme).child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_4()
+                        .w_full()
+                        .px(px(20.0))
+                        .py(px(18.0))
+                        .child(
+                            img(ImageSource::Resource(Resource::Embedded("logo.png".into())))
+                                .w(px(48.0))
+                                .h(px(48.0))
+                                .rounded(px(12.0))
+                                .flex_none(),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(5.0))
+                                .min_w(px(0.0))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .text_size(px(17.0))
+                                                .font_weight(FontWeight::BOLD)
+                                                .child(t!("app.title").to_string()),
+                                        )
+                                        .child(
+                                            div()
+                                                .px(px(7.0))
+                                                .py(px(1.0))
+                                                .rounded_full()
+                                                .bg(rgb(theme.header_bg))
+                                                .text_size(px(11.0))
+                                                .text_color(rgb(theme.text_muted))
+                                                .child(
+                                                    t!("about.version", version = APP_VERSION)
+                                                        .to_string(),
+                                                ),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.5))
+                                        .text_color(rgb(theme.text_muted))
+                                        .child(t!("about.description").to_string()),
+                                ),
+                        ),
+                ),
+            )
+            .child(section_label(theme, t!("about.update").to_string()))
             .child(
                 settings_card(theme)
-                    .items_center()
-                    .px(px(24.0))
-                    .py(px(28.0))
-                    .child(
-                        img(ImageSource::Resource(Resource::Embedded("logo.png".into())))
-                            .w(px(56.0))
-                            .h(px(56.0))
-                            .rounded(px(14.0))
-                            .flex_none(),
-                    )
+                    .child(setting_row(
+                        "about-source",
+                        theme,
+                        t!("about.update_source").to_string(),
+                        None,
+                        source,
+                        true,
+                    ))
                     .child(
                         div()
-                            .mt(px(14.0))
-                            .text_size(px(18.0))
-                            .font_weight(FontWeight::BOLD)
-                            .child(t!("app.title").to_string()),
-                    )
-                    .child(
-                        div()
-                            .mt(px(4.0))
-                            .px(px(8.0))
-                            .py(px(2.0))
-                            .rounded_full()
-                            .bg(rgb(theme.header_bg))
-                            .text_size(px(11.5))
-                            .text_color(rgb(theme.text_muted))
-                            .child(t!("about.version", version = APP_VERSION).to_string()),
-                    )
-                    .child(
-                        div()
-                            .mt(px(12.0))
-                            .max_w(px(420.0))
-                            .text_size(px(12.5))
-                            .text_color(rgb(theme.text_muted))
-                            .child(t!("about.description").to_string()),
-                    )
-                    .child(update_box),
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_3()
+                            .w_full()
+                            .px(px(14.0))
+                            .py(px(11.0))
+                            .child(status)
+                            .child(actions),
+                    ),
             )
             // The newer release's changelog — and only while there is one to describe (see
             // `changelog_panel`).
