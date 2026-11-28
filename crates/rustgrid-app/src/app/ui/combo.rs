@@ -1,4 +1,6 @@
-//! A searchable drop-down (combo box), backed by gpui-kit's shadcn components.
+//! A drop-down (combo box), backed by gpui-kit's shadcn components. Long option lists are
+//! searchable; a short fixed list can hide the popup's search field with
+//! [`ComboBox::searchable`].
 //!
 //! A single-select dropdown uses gpui-kit's `Select`, a multi-select one its `Combobox`. The two
 //! render the same shadcn trigger and popup (a search field over a row list with a check mark),
@@ -132,6 +134,9 @@ pub(crate) struct ComboBox {
     enabled: bool,
     placeholder: SharedString,
     icon: Option<(&'static str, u32)>,
+    /// Whether the popup carries a search field. Short fixed lists (the 更新源's two sources)
+    /// turn it off, since filtering two rows only adds a step.
+    searchable: bool,
     /// Whether the dropdown keeps the popup open and toggles items (used by the query-result
     /// export picker) instead of replacing the selection.
     multiple: bool,
@@ -172,6 +177,7 @@ impl ComboBox {
             enabled: true,
             placeholder: SharedString::default(),
             icon: None,
+            searchable: true,
             multiple: false,
             selected: selected.into(),
             selected_values: Vec::new(),
@@ -190,6 +196,12 @@ impl ComboBox {
     /// Makes the dropdown a multi-select: clicking an item toggles it and the popup stays open.
     pub(crate) fn multiple(mut self, multiple: bool) -> Self {
         self.multiple = multiple;
+        self
+    }
+
+    /// Hides the popup's search field for a short fixed list, where filtering cannot help.
+    pub(crate) fn searchable(mut self, searchable: bool) -> Self {
+        self.searchable = searchable;
         self
     }
 
@@ -340,7 +352,7 @@ impl ComboBox {
             let state = cx.new(|cx| {
                 ComboboxState::new(items, vec![], window, cx)
                     .multiple(true)
-                    .searchable(true)
+                    .searchable(self.searchable)
             });
             self.subscriptions.push(cx.subscribe_in(
                 &state,
@@ -366,8 +378,9 @@ impl ComboBox {
                 .position(|option| option.value == self.selected)
                 .map(IndexPath::new);
             let items = SearchableVec::new(self.options.clone());
-            let state =
-                cx.new(|cx| SelectState::new(items, selected_index, window, cx).searchable(true));
+            let state = cx.new(|cx| {
+                SelectState::new(items, selected_index, window, cx).searchable(self.searchable)
+            });
             self.subscriptions.push(cx.subscribe_in(
                 &state,
                 window,

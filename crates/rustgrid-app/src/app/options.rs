@@ -500,6 +500,8 @@ impl AppView {
                 .field_width(120.0)
                 .height(28.0)
                 .text_size(12.5)
+                // Only GitHub and CNB: a search box over two rows is one click of friction.
+                .searchable(false)
                 .on_select(Rc::new(move |value, _window, cx| {
                     let _ = weak.update(cx, |app, cx| {
                         app.options_update_source = UpdateSource::from_value(value);
@@ -1874,6 +1876,40 @@ impl AppView {
             .into_any_element()
     }
 
+    /// Whether a staged Options value differs from the applied settings: 应用 is only clickable
+    /// while there is something to apply. Every edit is staged, so this compares the staged fields
+    /// with the ones `apply_options` would overwrite; the statement limit counts only when the
+    /// typed text parses to a different number, because an empty or invalid entry applies nothing.
+    fn options_changed(&self) -> bool {
+        self.options_language != self.language
+            || self.options_update_source != self.update_source
+            || self.options_editor_font_family != self.editor_font_family
+            || self.options_editor_font_size != self.editor_font_size
+            || self.options_nav_font_family != self.nav_font_family
+            || self.options_nav_font_size != self.nav_font_size
+            || self.options_main_font_family != self.main_font_family
+            || self.options_main_font_size != self.main_font_size
+            || self.options_grid_font_family != self.grid_font_family
+            || self.options_grid_font_size != self.grid_font_size
+            || self.options_ui_ctrl_wheel_zoom != self.ui_ctrl_wheel_zoom
+            || self.options_editor_line_numbers != self.editor_line_numbers
+            || self.options_editor_word_wrap != self.editor_word_wrap
+            || self.options_editor_ctrl_wheel_zoom != self.editor_ctrl_wheel_zoom
+            || self.options_grid_show_comments != self.grid_show_comments
+            || self.options_grid_show_types != self.grid_show_types
+            || self.options_grid_auto_save != self.grid_auto_save
+            || self.options_shortcuts != self.shortcuts
+            || self.options_preserve_object_search != self.preserve_object_search
+            || self.options_restore_session != self.restore_session
+            || self.options_single_click_open != self.single_click_open
+            || self.options_stop_on_error != self.stop_on_error
+            || self
+                .options_max_statements
+                .trim()
+                .parse::<u32>()
+                .is_ok_and(|limit| limit != self.max_statements_per_run)
+    }
+
     /// The footer: reset-to-default on the left, OK/Cancel on the right.
     fn options_footer(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
@@ -1941,10 +1977,14 @@ impl AppView {
                         false,
                         cx.listener(|this, _event, window, cx| this.close_options(window, cx)),
                     ))
-                    .child(self.dialog_button(
+                    .child(self.win_button(
                         "options-apply",
                         t!("form.apply").to_string(),
-                        false,
+                        if self.options_changed() {
+                            ButtonKind::Normal
+                        } else {
+                            ButtonKind::Disabled
+                        },
                         cx.listener(|this, _event, window, cx| {
                             this.apply_options(window, cx);
                         }),
