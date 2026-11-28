@@ -25,7 +25,9 @@ const CREATE_LABEL_GAP: f32 = 16.0;
 const CREATE_FIELD_WIDTH: f32 = 300.0;
 /// Width of the narrower resource-limit fields.
 const CREATE_LIMIT_WIDTH: f32 = 120.0;
-/// Width of the left section navigation.
+/// Width of the left section navigation. The item labels wrap inside this column, so a long
+/// translation ("Database Privileges", "Привилегии базы данных") cannot run into the form beside
+/// it; the width itself stays compact so the content pane (and its fixed-width grids) keep room.
 const CREATE_NAV_WIDTH: f32 = 150.0;
 /// Width of the SQL preview's monospace box.
 const CREATE_PREVIEW_HEIGHT: f32 = 260.0;
@@ -45,6 +47,9 @@ const SECURABLE_NAME_WIDTH: f32 = 180.0;
 const SECURABLE_COL_WIDTH: f32 = 104.0;
 /// Width of one checkbox column of the server-privilege table (授予 / 含授予选项 / 拒绝).
 const SERVER_PRIV_CHECK_WIDTH: f32 = 96.0;
+/// Width of each 角色 list's checkbox column (授予 / 管理员). Wide enough for Russian's
+/// "Предоставлено" / "Администратор" headers on one line.
+const ROLE_CHECK_COLUMN_WIDTH: f32 = 104.0;
 
 /// The 密码过期策略 choice, mapped to [`UserAccount::password_lifetime`].
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1013,6 +1018,10 @@ pub(super) fn section(
 }
 
 /// One labeled identity-form row: a fixed-width label then its control.
+///
+/// The control column is the row's flexible part: a long status label (Russian's
+/// "Заблокировать учётную запись (ACCOUNT LOCK)") wraps onto the next line instead of pushing
+/// the row — and the whole pane — wider than the window.
 fn create_row(label: String, control: AnyElement, theme: Theme) -> Div {
     div()
         .flex()
@@ -1028,7 +1037,15 @@ fn create_row(label: String, control: AnyElement, theme: Theme) -> Div {
                 .text_color(rgb(theme.text))
                 .child(label),
         )
-        .child(control)
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .flex_1()
+                .min_w(px(0.0))
+                .child(control),
+        )
 }
 
 /// A text field of the given width (or its empty placeholder while the entity is missing).
@@ -1077,6 +1094,9 @@ fn sized_combo(combo: Option<&Entity<ComboBox>>, theme: Theme) -> AnyElement {
 }
 
 /// A clickable checkbox row: a box then its label.
+///
+/// `min_h` (not `h`) and a shrinkable label let a long label wrap inside a narrow row instead of
+/// overflowing it; a one-line label looks exactly the same as before.
 fn check_row(
     id: &'static str,
     label: String,
@@ -1090,12 +1110,13 @@ fn check_row(
         .flex_row()
         .items_center()
         .gap_2()
-        .h(px(CREATE_ROW_HEIGHT))
+        .min_h(px(CREATE_ROW_HEIGHT))
         .cursor_pointer()
         .on_click(on_click)
         .child(checkbox_box(checked, theme))
         .child(
             div()
+                .min_w(px(0.0))
                 .text_size(px(12.0))
                 .text_color(rgb(theme.text))
                 .child(label),
@@ -1110,10 +1131,11 @@ fn disabled_check_row(id: &'static str, label: String, checked: bool, theme: The
         .flex_row()
         .items_center()
         .gap_2()
-        .h(px(CREATE_ROW_HEIGHT))
+        .min_h(px(CREATE_ROW_HEIGHT))
         .child(checkbox_box(checked, theme))
         .child(
             div()
+                .min_w(px(0.0))
                 .text_size(px(12.0))
                 .text_color(rgb(theme.text_muted))
                 .child(label),
@@ -1131,6 +1153,8 @@ fn create_hint_row(hint: String, theme: Theme) -> Div {
         .child(div().w(px(CREATE_LABEL_WIDTH)).flex_none())
         .child(
             div()
+                .flex_1()
+                .min_w(px(0.0))
                 .text_size(px(11.0))
                 .text_color(rgb(theme.text_muted))
                 .child(hint),
@@ -3739,8 +3763,10 @@ impl AppView {
                     .flex_row()
                     .items_center()
                     .gap_2()
-                    .h(px(30.0))
+                    .min_h(px(30.0))
+                    .py_1()
                     .px_3()
+                    .w_full()
                     .flex_none()
                     .text_size(px(12.0))
                     .text_color(rgb(if active {
@@ -3758,7 +3784,15 @@ impl AppView {
                         this.set_create_section(section, cx)
                     }))
                     .child(tree_icon(section.icon(), icon_color))
-                    .child(t!(section.label_key()).to_string()),
+                    // A flex-row text child would overflow instead of wrapping; the wrapper gives
+                    // the label the row's remaining width so a long translation breaks inside it.
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .line_height(px(15.0))
+                            .child(t!(section.label_key()).to_string()),
+                    ),
             );
         }
         nav.into_any_element()
@@ -3965,8 +3999,9 @@ impl AppView {
                 || dialog.spec.account_lock);
         let mut status = div().flex().flex_col().gap_2().w_full();
         if show_status {
-            // 锁定该账号 sits beside the expiry dropdown, like the prototype.
-            let mut controls = div().flex().flex_row().items_center().gap_4();
+            // 锁定该账号 sits beside the expiry dropdown, like the prototype. The row wraps, so a
+            // long localized label moves under the dropdown instead of leaving the pane.
+            let mut controls = div().flex().flex_row().flex_wrap().items_center().gap_4();
             if dialog.spec.password_expiry {
                 controls =
                     controls.child(sized_combo(self.create_user_expiry_combo.as_ref(), theme));
@@ -4050,6 +4085,7 @@ impl AppView {
                     div()
                         .flex()
                         .flex_row()
+                        .flex_wrap()
                         .items_center()
                         .gap_4()
                         .child(
@@ -4269,7 +4305,14 @@ impl AppView {
             .filter(|privilege| dialog.catalog.is_server(privilege))
             .count();
 
-        let mut templates = div().flex().flex_row().items_center().gap_2().w_full();
+        // Preset buttons wrap: the row is as wide as the pane, and localized labels can outgrow it.
+        let mut templates = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .w_full();
         for (index, preset) in dialog.catalog.server_presets.iter().enumerate() {
             let active = dialog.editor.server_privileges
                 == preset_privileges(&dialog.catalog.server_presets, index);
@@ -4784,10 +4827,14 @@ impl AppView {
                         div()
                             .flex()
                             .flex_col()
+                            .min_w(px(0.0))
                             .child(
                                 div()
+                                    .id("user-create-db-title")
+                                    .truncate()
                                     .text_size(px(13.0))
                                     .font_weight(FontWeight::SEMIBOLD)
+                                    .tooltip(ui::text_tooltip(name.clone()))
                                     .child(name.clone()),
                             )
                             .child(
@@ -4804,8 +4851,15 @@ impl AppView {
             .text_color(rgb(theme.text_muted))
             .child(format!("{} {}.*", t!("user.create.grant_applies_to"), name));
 
-        // The quick presets, matched against the active target's own set.
-        let mut presets = div().flex().flex_row().items_center().gap_2().w_full();
+        // The quick presets, matched against the active target's own set. The detail pane is
+        // narrower than the page once the database list is beside it, so the buttons wrap.
+        let mut presets = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .w_full();
         for (index, preset) in dialog.catalog.object_presets.iter().enumerate() {
             let preset_set = preset_privileges(&dialog.catalog.object_presets, index);
             let active = if preset_set.is_empty() {
@@ -4991,8 +5045,12 @@ impl AppView {
                 div()
                     .flex()
                     .flex_row()
+                    // A long hint and the count each take their own line when the detail pane is
+                    // narrow, instead of the count being pushed out of the pane.
+                    .flex_wrap()
                     .items_center()
                     .justify_between()
+                    .gap_2()
                     .w_full()
                     .text_size(px(11.0))
                     .text_color(rgb(theme.text_muted))
@@ -5997,7 +6055,9 @@ impl AppView {
             .flex()
             .flex_row()
             .items_center()
-            .h(px(24.0))
+            // `min_h`, so a header that still wraps in some locale grows instead of clipping its
+            // second line under a fixed 24px row.
+            .min_h(px(24.0))
             .px_2()
             .flex_none()
             .bg(rgb(theme.header_bg))
@@ -6007,10 +6067,14 @@ impl AppView {
             .child(div().flex_1().child(t!("user.member.username").to_string()))
             .child(
                 div()
-                    .w(px(70.0))
+                    .w(px(ROLE_CHECK_COLUMN_WIDTH))
                     .child(t!("user.member.granted").to_string()),
             )
-            .child(div().w(px(70.0)).child(t!("user.member.admin").to_string()));
+            .child(
+                div()
+                    .w(px(ROLE_CHECK_COLUMN_WIDTH))
+                    .child(t!("user.member.admin").to_string()),
+            );
 
         let mut rows = div().flex().flex_col();
         let mut shown = 0usize;
@@ -6047,16 +6111,25 @@ impl AppView {
                                 if member_of { "of" } else { "member" }
                             )))
                             .flex_1()
+                            .min_w(px(0.0))
                             .flex()
                             .flex_row()
                             .items_center()
                             .gap_2()
                             .cursor_pointer()
+                            .tooltip(ui::text_tooltip(label.clone()))
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.toggle_create_membership(member_of, grant_key.clone(), cx)
                             }))
                             .child(tree_icon("icons/user.svg", theme.icon_users))
-                            .child(div().text_size(px(12.0)).child(label)),
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .truncate()
+                                    .text_size(px(12.0))
+                                    .child(label),
+                            ),
                     )
                     .child(
                         div()
@@ -6064,7 +6137,7 @@ impl AppView {
                                 "user-create-role-granted-{}-{row}",
                                 if member_of { "of" } else { "member" }
                             )))
-                            .w(px(70.0))
+                            .w(px(ROLE_CHECK_COLUMN_WIDTH))
                             .flex()
                             .justify_center()
                             .cursor_pointer()
@@ -6079,7 +6152,7 @@ impl AppView {
                                 "user-create-role-admin-{}-{row}",
                                 if member_of { "of" } else { "member" }
                             )))
-                            .w(px(70.0))
+                            .w(px(ROLE_CHECK_COLUMN_WIDTH))
                             .flex()
                             .justify_center()
                             .cursor_pointer()
@@ -6171,11 +6244,17 @@ impl AppView {
         let Some(editor) = editor else {
             return div().into_any_element();
         };
-        editor.update(cx, |editor, cx| editor.set_text(sql, cx));
+        // Only replace the document when it actually changed. `set_value` resets the selection and
+        // the scroll to the start, so doing it every frame fights the editor's own scrolling (and
+        // threw its viewport off once the preview grew from 260px to the height of the pane).
+        if editor.read(cx).text() != sql.as_str() {
+            editor.update(cx, |editor, cx| editor.set_text(sql, cx));
+        }
         div()
             .id("user-create-sql")
             .flex()
             .flex_col()
+            .flex_1()
             .gap_2()
             .w_full()
             .child(
@@ -6211,8 +6290,16 @@ impl AppView {
             .child(
                 div()
                     .id("user-create-sql-scroll")
-                    .h(px(CREATE_PREVIEW_HEIGHT))
-                    .flex_none()
+                    // The preview takes the rest of the page: the pane is usually much taller than
+                    // the script, so a fixed-height box left most of it empty. `CREATE_PREVIEW_HEIGHT`
+                    // is now only the floor for a window shrunk to its smallest.
+                    // A flex column, like every other preview surface: the editor's root is
+                    // `flex_1`, and in a block container it measured its own scroll viewport
+                    // wrongly (the first line was painted above the box's top edge).
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(CREATE_PREVIEW_HEIGHT))
                     .overflow_hidden()
                     .border_1()
                     .border_color(rgb(theme.border))

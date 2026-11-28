@@ -704,6 +704,9 @@ impl AppView {
         let mut target = div()
             .flex()
             .flex_row()
+            // A long server/database/schema name wraps its field to the next line instead of
+            // pushing the last field past the 560px dialog's edge.
+            .flex_wrap()
             .items_center()
             .gap_4()
             .w_full()
@@ -980,9 +983,9 @@ fn dump_scope_field(label: String, value: String, theme: Theme) -> impl IntoElem
         )
         .child(
             div()
+                .flex_1()
                 .min_w(px(0.0))
-                .overflow_hidden()
-                .whitespace_nowrap()
+                .truncate()
                 .text_size(px(12.0))
                 .text_color(rgb(theme.text))
                 .child(value),

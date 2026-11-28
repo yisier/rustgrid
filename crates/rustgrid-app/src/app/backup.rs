@@ -4414,6 +4414,9 @@ pub(super) fn backup_target_line(
     let mut line = div()
         .flex()
         .flex_row()
+        // Long connection/database/schema names wrap the later parts onto the next line instead
+        // of running past a 560px dialog's edge.
+        .flex_wrap()
         .items_center()
         .gap_2()
         .w_full()

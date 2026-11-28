@@ -116,6 +116,10 @@ impl AppView {
             let opened = cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    // Below this the one-column form and the 高级 page's side-by-side cards no
+                    // longer fit, and their right-hand content is clipped (the form fields are
+                    // full width, so there is nothing to wrap around).
+                    window_min_size: Some(size(px(560.0), px(440.0))),
                     ..ui::window_options(title)
                 },
                 move |window, cx| {
@@ -2359,7 +2363,16 @@ fn form_field(
                 }),
         );
     if let Some(hint) = hint {
-        label_row = label_row.child(hint);
+        // The hint takes the label's remaining width; a long localized note (MySQL's
+        // compatibility hint, SQL Server's encryption hint) wraps inside that column instead of
+        // running past the window edge. Short hints stay right-aligned.
+        label_row = label_row.child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .text_align(gpui::TextAlign::Right)
+                .child(hint),
+        );
     }
 
     div()
