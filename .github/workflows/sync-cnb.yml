@@ -128,7 +128,9 @@ jobs:
           set -euo pipefail
           url="https://cnb.cool/${CNB_REPOSITORY}/-/releases/download/${TAG}/latest.json"
           for attempt in $(seq 1 12); do
-            if curl -fsS "$url" -o mirrored.json; then
+            # `-L` matters: cnb.cool answers the asset URL with a redirect to its object storage, and
+            # without it curl writes the redirect body ("<a href=...") instead of the manifest.
+            if curl -fsSL "$url" -o mirrored.json; then
               node -e "const m=require('./mirrored.json'); console.log('CNB manifest', m.releases[0].version, m.releases[0].assets.length + ' assets');"
               exit 0
             fi
