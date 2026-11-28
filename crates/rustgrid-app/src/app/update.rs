@@ -1097,19 +1097,36 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "network: asks the live GitHub and CNB release pages"]
-    fn the_live_check_falls_back_before_the_first_manifest_release() {
-        // 0.1.18 (the newest release) predates `latest.json`, so both manifests answer 404 and the
-        // REST fallback must still complete without an error — the path existing builds rely on
-        // while they update once into a manifest release.
-        let found = check_latest(UpdateSource::Github, LanguageSetting::En)
-            .unwrap_or_else(|error| panic!("the GitHub check must not fail: {error}"));
-        if let Some((version, _)) = found {
-            assert_ne!(
-                version, APP_VERSION,
-                "an offered release must be newer than this build"
-            );
+    #[ignore = "network: reads the live GitHub and CNB release manifests"]
+    fn the_live_manifests_are_readable() {
+        // Both sources serve the same schema-1 manifest, which is the path every new release goes
+        // through (see `docs/update-sources.md`). One host being unreachable is exactly what the
+        // fallback is for, so at least one must answer; a fetched release must be newer than this
+        // build (`None` just means it already is the newest).
+        let mut answered = 0;
+        let mut errors = Vec::new();
+        for (name, url, source) in [
+            ("GitHub", GITHUB_MANIFEST, UpdateSource::Github),
+            ("CNB", CNB_MANIFEST, UpdateSource::Cnb),
+        ] {
+            match check_manifest(url, source, LanguageSetting::En) {
+                Ok(found) => {
+                    answered += 1;
+                    if let Some((version, _)) = found {
+                        assert_ne!(
+                            version, APP_VERSION,
+                            "{name}: an offered release must be newer than this build"
+                        );
+                    }
+                }
+                Err(error) => errors.push(format!("{name}: {error}")),
+            }
         }
+        assert!(
+            answered > 0,
+            "no update manifest was readable: {}",
+            errors.join("; ")
+        );
     }
 
     #[test]
