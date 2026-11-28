@@ -10,6 +10,29 @@ UI labels are quoted as the app shows them, so this file quotes the English stri
 [`CHANGELOG_zh.md`](CHANGELOG_zh.md) and [`CHANGELOG_ru.md`](CHANGELOG_ru.md) quote the 简体中文 and
 Russian ones.
 
+## [0.1.19] - 2026-11-28
+
+### Added
+
+- Grid: saving or deleting records shows a loading card.
+- Tables: emptying, truncating or dropping tables shows a loading card.
+- Table Designer: saving the design shows a loading card.
+
+### Changed
+
+- Software Update: Options → About follows the Options layout and gains an Update source choice
+  (GitHub / CNB); checks and installs use the release manifest with SHA-256 verification, avoiding
+  GitHub's rate limit ([#61](https://github.com/yisier/rustgrid/issues/61)); versions before 0.1.19
+  update manually.
+
+### Fixed
+
+- Options: Apply is disabled until a staged setting changes.
+- Users: long labels wrap in the edit window, role columns widen, and the SQL preview no longer
+  clips its first line ([#74](https://github.com/yisier/rustgrid/issues/74)).
+- Connections: the New/Edit window keeps a minimum size and long field hints wrap.
+- Backup: target lines wrap and long dump scope names truncate.
+
 ## [0.1.18] - 2026-11-27
 
 ### Added
