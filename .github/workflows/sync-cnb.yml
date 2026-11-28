@@ -116,6 +116,10 @@ jobs:
             --body-file release-body.md \
             --assets-dir dist
 
+      # CNB's CDN can take a little while to serve a freshly uploaded asset: the 0.1.19 mirror
+      # uploaded every file and this URL still answered 404 seconds later, so a few fast retries
+      # were not enough. Retry for a couple of minutes and warn instead of failing — the GitHub
+      # release stays authoritative and the app falls back to it.
       - name: Verify the mirrored manifest
         if: steps.token.outputs.enabled == 'true'
         env:
@@ -123,5 +127,12 @@ jobs:
         run: |
           set -euo pipefail
           url="https://cnb.cool/${CNB_REPOSITORY}/-/releases/download/${TAG}/latest.json"
-          curl -fsS --retry 3 --retry-all-errors "$url" -o mirrored.json
-          node -e "const m=require('./mirrored.json'); console.log('CNB manifest', m.releases[0].version, m.releases[0].assets.length + ' assets');"
+          for attempt in $(seq 1 12); do
+            if curl -fsS "$url" -o mirrored.json; then
+              node -e "const m=require('./mirrored.json'); console.log('CNB manifest', m.releases[0].version, m.releases[0].assets.length + ' assets');"
+              exit 0
+            fi
+            echo "CNB has not served the manifest yet (attempt ${attempt}/12); waiting 10s."
+            sleep 10
+          done
+          echo "::warning::CNB did not serve $url within 2 minutes; the GitHub release stays authoritative."
